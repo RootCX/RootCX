@@ -6,6 +6,8 @@ use tracing::info;
 use crate::KernelError;
 use rootcx_shared_types::{AppManifest, EntityContract, FieldContract};
 
+// ── Public API ──────────────────────────────────────────────────────
+
 /// Install an app by creating real SQL tables from its manifest dataContract.
 ///
 /// For each entity: creates a schema per app, a table per entity, with proper
@@ -21,7 +23,6 @@ pub async fn install_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), Ke
         return Ok(());
     }
 
-    // Build a map of entity_name → PK SQL type (used to resolve entity_link column types)
     let pk_types = build_pk_type_map(&manifest.data_contract);
 
     // 1. Create schema for this app
@@ -35,12 +36,31 @@ pub async fn install_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), Ke
 
     // 2. First pass: create all tables (without FK constraints)
     for entity in &manifest.data_contract {
-        create_entity_table(pool, app_id, entity, &pk_types).await?;
+        let ddl = generate_create_table(app_id, entity, &pk_types);
+        sqlx::query(&ddl)
+            .execute(pool)
+            .await
+            .map_err(KernelError::Schema)?;
+
+        // Index on organization_id
+        let idx = generate_org_index(app_id, entity);
+        sqlx::query(&idx)
+            .execute(pool)
+            .await
+            .map_err(KernelError::Schema)?;
+
+        info!(table = %format!("{}.{}", app_id, entity.entity_name), "table created");
     }
 
     // 3. Second pass: add intra-app foreign keys
     for entity in &manifest.data_contract {
-        add_foreign_keys(pool, app_id, entity, &manifest.data_contract).await?;
+        let fk_statements = generate_foreign_keys(app_id, entity, &manifest.data_contract);
+        for stmt in &fk_statements {
+            sqlx::query(stmt)
+                .execute(pool)
+                .await
+                .map_err(KernelError::Schema)?;
+        }
     }
 
     // 4. Register in rootcx_system.apps
@@ -55,98 +75,88 @@ pub async fn install_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), Ke
     Ok(())
 }
 
-/// Build a map of entity_name → PG type of its primary key.
-///
-/// If an entity explicitly defines an `id` field with `isPrimaryKey: true`,
-/// we use its manifest type (e.g. "text" → TEXT). Otherwise the PK is UUID.
-fn build_pk_type_map(entities: &[EntityContract]) -> HashMap<String, &'static str> {
-    let mut map = HashMap::new();
-    for entity in entities {
-        let pk_field = entity.fields.iter().find(|f| {
-            f.is_primary_key.unwrap_or(false) || f.name == "id"
-        });
+/// Uninstall an app: drop its schema (CASCADE) and remove from rootcx_system.apps.
+pub async fn uninstall_app(pool: &PgPool, app_id: &str) -> Result<(), KernelError> {
+    let drop_schema = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(app_id));
+    sqlx::query(&drop_schema)
+        .execute(pool)
+        .await
+        .map_err(KernelError::Schema)?;
 
-        let pg_type = match pk_field {
-            Some(f) => map_field_type(&f.field_type),
-            None => "UUID",
-        };
-        map.insert(entity.entity_name.clone(), pg_type);
-    }
-    map
+    sqlx::query("DELETE FROM rootcx_system.apps WHERE id = $1")
+        .bind(app_id)
+        .execute(pool)
+        .await
+        .map_err(KernelError::Schema)?;
+
+    info!(app = %app_id, "app uninstalled");
+    Ok(())
 }
 
-/// Create a single entity table with columns, types, defaults, and CHECK constraints.
-async fn create_entity_table(
-    pool: &PgPool,
+// ── Pure SQL Generation (no DB, fully testable) ─────────────────────
+
+/// Generate a `CREATE TABLE IF NOT EXISTS` statement from an entity contract.
+pub fn generate_create_table(
     app_id: &str,
     entity: &EntityContract,
     pk_types: &HashMap<String, &'static str>,
-) -> Result<(), KernelError> {
+) -> String {
     let table_name = format!("{}.{}", quote_ident(app_id), quote_ident(&entity.entity_name));
 
     let mut columns: Vec<String> = Vec::new();
 
-    // Check if the entity defines its own 'id' field
-    let has_id_field = entity.fields.iter().any(|f| f.name == "id");
-    if !has_id_field {
+    // Auto-add id if not defined
+    let has_id = entity.fields.iter().any(|f| f.name == "id");
+    if !has_id {
         columns.push("\"id\" UUID PRIMARY KEY DEFAULT gen_random_uuid()".to_string());
     }
 
-    // Check if entity defines its own organization_id
+    // Auto-add organization_id if not defined
     let has_org_id = entity.fields.iter().any(|f| f.name == "organization_id");
     if !has_org_id {
         columns.push("\"organization_id\" UUID NOT NULL".to_string());
     }
 
     for field in &entity.fields {
-        // Skip system timestamp columns — we always add them at the end
         if field.name == "created_at" || field.name == "updated_at" {
             continue;
         }
-
-        let col_def = field_to_column(field, pk_types);
-        columns.push(col_def);
+        columns.push(field_to_column(field, pk_types));
     }
 
     // Always add system timestamps
     columns.push("\"created_at\" TIMESTAMPTZ NOT NULL DEFAULT now()".to_string());
     columns.push("\"updated_at\" TIMESTAMPTZ NOT NULL DEFAULT now()".to_string());
 
-    let create_table = format!(
+    format!(
         "CREATE TABLE IF NOT EXISTS {} (\n  {}\n)",
         table_name,
         columns.join(",\n  ")
-    );
+    )
+}
 
-    sqlx::query(&create_table)
-        .execute(pool)
-        .await
-        .map_err(KernelError::Schema)?;
-
-    // Create index on organization_id
+/// Generate an index on organization_id for an entity table.
+pub fn generate_org_index(app_id: &str, entity: &EntityContract) -> String {
+    let table_name = format!("{}.{}", quote_ident(app_id), quote_ident(&entity.entity_name));
     let idx_name = format!("idx_{}_{}_org", app_id, entity.entity_name);
-    let create_idx = format!(
+    format!(
         "CREATE INDEX IF NOT EXISTS {} ON {} (\"organization_id\")",
         quote_ident(&idx_name),
         table_name
-    );
-    sqlx::query(&create_idx)
-        .execute(pool)
-        .await
-        .map_err(KernelError::Schema)?;
-
-    info!(table = %table_name, "table created");
-    Ok(())
+    )
 }
 
-/// Add foreign key constraints for entity_link fields that reference entities within the same app.
-async fn add_foreign_keys(
-    pool: &PgPool,
+/// Generate FK constraint + index statements for entity_link fields referencing
+/// entities within the same app.
+///
+/// Returns pairs of (ALTER TABLE + DO block, CREATE INDEX) statements.
+pub fn generate_foreign_keys(
     app_id: &str,
     entity: &EntityContract,
     all_entities: &[EntityContract],
-) -> Result<(), KernelError> {
+) -> Vec<String> {
     let table_name = format!("{}.{}", quote_ident(app_id), quote_ident(&entity.entity_name));
+    let mut stmts = Vec::new();
 
     for field in &entity.fields {
         if field.field_type != "entity_link" {
@@ -158,26 +168,23 @@ async fn add_foreign_keys(
             None => continue,
         };
 
-        // Skip system references (e.g. "system.organization_members")
+        // Skip system / cross-app references
         if refs.entity.starts_with("system.") {
             continue;
         }
-
-        // Only create FK for entities that exist in this app's dataContract
-        let target_entity = &refs.entity;
-        let is_local = all_entities.iter().any(|e| e.entity_name == *target_entity);
-
+        let is_local = all_entities.iter().any(|e| e.entity_name == refs.entity);
         if !is_local {
             continue;
         }
 
+        let target_table = format!("{}.{}", quote_ident(app_id), quote_ident(&refs.entity));
         let fk_name = format!(
             "fk_{}_{}_{}_{}",
-            app_id, entity.entity_name, field.name, target_entity
+            app_id, entity.entity_name, field.name, refs.entity
         );
-        let target_table = format!("{}.{}", quote_ident(app_id), quote_ident(target_entity));
 
-        let add_fk = format!(
+        // FK via DO block (idempotent)
+        stmts.push(format!(
             "DO $$ BEGIN \
                ALTER TABLE {} ADD CONSTRAINT {} \
                FOREIGN KEY ({}) REFERENCES {}(\"id\") ON DELETE SET NULL; \
@@ -187,38 +194,146 @@ async fn add_foreign_keys(
             quote_ident(&fk_name),
             quote_ident(&field.name),
             target_table
-        );
+        ));
 
-        sqlx::query(&add_fk)
-            .execute(pool)
-            .await
-            .map_err(KernelError::Schema)?;
-
-        // Index on FK column for join performance
+        // Index on FK column
         let idx_name = format!("idx_{}_{}_{}", app_id, entity.entity_name, field.name);
-        let create_idx = format!(
+        stmts.push(format!(
             "CREATE INDEX IF NOT EXISTS {} ON {} ({})",
             quote_ident(&idx_name),
             table_name,
             quote_ident(&field.name)
-        );
-        sqlx::query(&create_idx)
-            .execute(pool)
-            .await
-            .map_err(KernelError::Schema)?;
+        ));
     }
 
-    Ok(())
+    stmts
 }
 
-/// Register the app in the rootcx_system.apps table.
+/// Build a map of entity_name → PG type of its primary key.
+///
+/// If an entity explicitly defines an `id` field with `isPrimaryKey: true`,
+/// we use its manifest type. Otherwise the PK is UUID.
+pub fn build_pk_type_map(entities: &[EntityContract]) -> HashMap<String, &'static str> {
+    let mut map = HashMap::new();
+    for entity in entities {
+        let pk_field = entity.fields.iter().find(|f| {
+            f.is_primary_key.unwrap_or(false) || f.name == "id"
+        });
+        let pg_type = match pk_field {
+            Some(f) => map_field_type(&f.field_type),
+            None => "UUID",
+        };
+        map.insert(entity.entity_name.clone(), pg_type);
+    }
+    map
+}
+
+/// Convert a manifest FieldContract to a SQL column definition string.
+///
+/// `pk_types` maps entity names to their PK SQL type, so entity_link columns
+/// match the type of the referenced entity's primary key.
+pub fn field_to_column(field: &FieldContract, pk_types: &HashMap<String, &'static str>) -> String {
+    let col_name = quote_ident(&field.name);
+    let is_pk = field.is_primary_key.unwrap_or(false) || field.name == "id";
+
+    let pg_type = if field.field_type == "entity_link" {
+        if let Some(refs) = &field.references {
+            pk_types.get(&refs.entity).copied().unwrap_or("UUID")
+        } else {
+            "UUID"
+        }
+    } else {
+        map_field_type(&field.field_type)
+    };
+
+    let mut parts = vec![format!("{col_name} {pg_type}")];
+
+    if is_pk {
+        parts.push("PRIMARY KEY".to_string());
+        if pg_type == "UUID" {
+            parts.push("DEFAULT gen_random_uuid()".to_string());
+        }
+    }
+
+    if field.required && !is_pk {
+        parts.push("NOT NULL".to_string());
+    }
+
+    if let Some(ref default_val) = field.default_value {
+        if !is_pk {
+            if let Some(default_sql) = json_to_sql_default(default_val, pg_type) {
+                parts.push(format!("DEFAULT {default_sql}"));
+            }
+        }
+    }
+
+    let col_def = parts.join(" ");
+
+    if let Some(ref validation) = field.validation {
+        if let Some(ref enum_values) = validation.enum_values {
+            if !enum_values.is_empty() {
+                let values_list: Vec<String> = enum_values
+                    .iter()
+                    .map(|v| format!("'{}'", v.replace('\'', "''")))
+                    .collect();
+                return format!(
+                    "{col_def} CHECK ({col_name} IN ({}))",
+                    values_list.join(", ")
+                );
+            }
+        }
+    }
+
+    col_def
+}
+
+/// Map manifest field type strings to PostgreSQL types.
+pub fn map_field_type(field_type: &str) -> &'static str {
+    match field_type {
+        "text" => "TEXT",
+        "number" => "DOUBLE PRECISION",
+        "boolean" => "BOOLEAN",
+        "date" => "DATE",
+        "timestamp" => "TIMESTAMPTZ",
+        "json" => "JSONB",
+        "file" => "TEXT",
+        "entity_link" => "UUID",
+        "[text]" => "TEXT[]",
+        "[number]" => "DOUBLE PRECISION[]",
+        _ => "TEXT",
+    }
+}
+
+/// Convert a serde_json Value to a SQL DEFAULT literal.
+pub fn json_to_sql_default(val: &serde_json::Value, pg_type: &str) -> Option<String> {
+    match val {
+        serde_json::Value::Null => None,
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::String(s) => Some(format!("'{}'", s.replace('\'', "''"))),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            if pg_type == "JSONB" {
+                Some(format!("'{}'::jsonb", val.to_string().replace('\'', "''")))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Quote a SQL identifier. Only allows alphanumeric and underscore.
+pub fn quote_ident(ident: &str) -> String {
+    let sanitized: String = ident
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    format!("\"{}\"", sanitized)
+}
+
+// ── Private: DB-only helpers ────────────────────────────────────────
+
 async fn register_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), KernelError> {
     let manifest_json = serde_json::to_value(manifest).unwrap_or_default();
-    let entities: Vec<String> = manifest
-        .data_contract
-        .iter()
-        .map(|e| e.entity_name.clone())
-        .collect();
 
     sqlx::query(
         r#"
@@ -239,123 +354,7 @@ async fn register_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), Kerne
     .await
     .map_err(KernelError::Schema)?;
 
-    info!(
-        app = %manifest.app_id,
-        entities = ?entities,
-        "app registered in rootcx_system.apps"
-    );
-
+    info!(app = %manifest.app_id, "app registered");
     Ok(())
 }
 
-// ── Field → Column Mapping ──────────────────────────────────────────
-
-/// Convert a manifest FieldContract to a SQL column definition.
-///
-/// `pk_types` maps entity names to their PK SQL type, so entity_link columns
-/// match the type of the referenced entity's primary key.
-fn field_to_column(field: &FieldContract, pk_types: &HashMap<String, &'static str>) -> String {
-    let col_name = quote_ident(&field.name);
-    let is_pk = field.is_primary_key.unwrap_or(false) || field.name == "id";
-
-    // For entity_link, resolve the PG type from the referenced entity's PK type
-    let pg_type = if field.field_type == "entity_link" {
-        if let Some(refs) = &field.references {
-            pk_types.get(&refs.entity).copied().unwrap_or("UUID")
-        } else {
-            "UUID"
-        }
-    } else {
-        map_field_type(&field.field_type)
-    };
-
-    let mut parts = vec![format!("{col_name} {pg_type}")];
-
-    // Primary key
-    if is_pk {
-        parts.push("PRIMARY KEY".to_string());
-        if pg_type == "UUID" {
-            parts.push("DEFAULT gen_random_uuid()".to_string());
-        }
-    }
-
-    // NOT NULL for required fields (unless it's a PK which is always NOT NULL)
-    if field.required && !is_pk {
-        parts.push("NOT NULL".to_string());
-    }
-
-    // DEFAULT value
-    if let Some(ref default_val) = field.default_value {
-        if !is_pk {
-            if let Some(default_sql) = json_to_sql_default(default_val, pg_type) {
-                parts.push(format!("DEFAULT {default_sql}"));
-            }
-        }
-    }
-
-    let col_def = parts.join(" ");
-
-    // CHECK constraint for enum values
-    if let Some(ref validation) = field.validation {
-        if let Some(ref enum_values) = validation.enum_values {
-            if !enum_values.is_empty() {
-                let values_list: Vec<String> = enum_values
-                    .iter()
-                    .map(|v| format!("'{}'", v.replace('\'', "''")))
-                    .collect();
-                return format!(
-                    "{col_def} CHECK ({col_name} IN ({}))",
-                    values_list.join(", ")
-                );
-            }
-        }
-    }
-
-    col_def
-}
-
-/// Map manifest field type strings to PostgreSQL types.
-fn map_field_type(field_type: &str) -> &'static str {
-    match field_type {
-        "text" => "TEXT",
-        "number" => "DOUBLE PRECISION",
-        "boolean" => "BOOLEAN",
-        "date" => "DATE",
-        "timestamp" => "TIMESTAMPTZ",
-        "json" => "JSONB",
-        "file" => "TEXT",
-        "entity_link" => "UUID",
-        "[text]" => "TEXT[]",
-        "[number]" => "DOUBLE PRECISION[]",
-        _ => "TEXT", // fallback
-    }
-}
-
-/// Convert a serde_json Value to a SQL DEFAULT literal.
-fn json_to_sql_default(val: &serde_json::Value, pg_type: &str) -> Option<String> {
-    match val {
-        serde_json::Value::Null => None,
-        serde_json::Value::Bool(b) => Some(b.to_string()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::String(s) => Some(format!("'{}'", s.replace('\'', "''"))),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            if pg_type == "JSONB" {
-                Some(format!("'{}'::jsonb", val.to_string().replace('\'', "''")))
-            } else {
-                None
-            }
-        }
-    }
-}
-
-// ── SQL Safety ──────────────────────────────────────────────────────
-
-/// Quote a SQL identifier to prevent injection.
-/// Only allows alphanumeric and underscore characters.
-fn quote_ident(ident: &str) -> String {
-    let sanitized: String = ident
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
-    format!("\"{}\"", sanitized)
-}
