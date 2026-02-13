@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/kernel",
+    "crates/postgres-mgmt",
+    "crates/shared-types",
+    "apps/studio-desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Proprietary"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres"] }
+
+# Error handling
+thiserror = "2"
+
+# Logging / Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Internal crates
+rootcx-kernel = { path = "crates/kernel" }
+rootcx-postgres-mgmt = { path = "crates/postgres-mgmt" }
+rootcx-shared-types = { path = "crates/shared-types" }

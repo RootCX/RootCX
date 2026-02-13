@@ -1,0 +1,29 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Node / Frontend
+node_modules/
+dist/
+
+# PostgreSQL bundled binaries (downloaded by scripts/bundle-postgres.sh)
+apps/studio-desktop/src-tauri/resources/pg/
+
+# Old PG sidecar layout (deprecated, to be removed)
+apps/studio-desktop/src-tauri/bin/
+apps/studio-desktop/src-tauri/lib/
+apps/studio-desktop/src-tauri/share/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Env
+.env
+.env.*
