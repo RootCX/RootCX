@@ -1,5 +1,8 @@
+import { useState, useCallback, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useOsStatus } from "./hooks/useOsStatus";
-import type { ServiceState } from "./types";
+import { helloManifest } from "./manifests/hello";
+import type { ServiceState, InstalledApp } from "./types";
 import "./App.css";
 
 function stateColor(state: ServiceState): string {
@@ -29,6 +32,46 @@ function Badge({ label, state }: { label: string; state: ServiceState }) {
 
 export default function App() {
   const { status, loading, error } = useOsStatus();
+  const [apps, setApps] = useState<InstalledApp[]>([]);
+  const [installing, setInstalling] = useState(false);
+  const [message, setMessage] = useState<{
+    text: string;
+    type: "success" | "error";
+  } | null>(null);
+
+  const isOnline = status?.kernel.state === "online";
+
+  const refreshApps = useCallback(async () => {
+    try {
+      const result = await invoke<InstalledApp[]>("list_apps");
+      setApps(result);
+    } catch {
+      // Kernel might not be ready yet
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isOnline) refreshApps();
+  }, [isOnline, refreshApps]);
+
+  const handleInstallHello = async () => {
+    setInstalling(true);
+    setMessage(null);
+    try {
+      const result = await invoke<string>("install_app", {
+        manifestJson: JSON.stringify(helloManifest),
+      });
+      setMessage({ text: result, type: "success" });
+      await refreshApps();
+    } catch (err) {
+      setMessage({
+        text: err instanceof Error ? err.message : String(err),
+        type: "error",
+      });
+    } finally {
+      setInstalling(false);
+    }
+  };
 
   return (
     <div className="container">
@@ -71,6 +114,47 @@ export default function App() {
             </div>
           </div>
         </div>
+      )}
+
+      {isOnline && (
+        <section className="apps-section">
+          <div className="section-header">
+            <h2>Apps</h2>
+            <button
+              className="btn btn-primary"
+              onClick={handleInstallHello}
+              disabled={installing}
+            >
+              {installing ? "Installing..." : "Install Hello App"}
+            </button>
+          </div>
+
+          {message && (
+            <div className={`msg msg-${message.type}`}>{message.text}</div>
+          )}
+
+          {apps.length > 0 ? (
+            <div className="app-list">
+              {apps.map((app) => (
+                <div key={app.id} className="app-card">
+                  <div className="app-header">
+                    <span className="app-name">{app.name}</span>
+                    <code className="app-version">v{app.version}</code>
+                  </div>
+                  <div className="app-entities">
+                    {app.entities.map((e) => (
+                      <span key={e} className="entity-tag">
+                        {e}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="no-apps">No apps installed</p>
+          )}
+        </section>
       )}
     </div>
   );
