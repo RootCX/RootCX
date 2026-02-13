@@ -1,0 +1,117 @@
+{
+  "appId": "chat",
+  "name": "Chat",
+  "version": "0.0.1",
+  "description": "RootCX Chat is the space where teammates hold fast and clear conversations. It is natively connected to all your customer data and applications, which means every exchange can include full context such as a contract, a ticket, a sales timeline or a report instantly accessible as you talk. Teams no longer waste time searching or switching tools. Collaboration flows naturally, decisions become sharper and alignment happens without effort. This is enterprise chat reimagined, fully connected and built for work that moves faster.",
+  "permissions": [
+    { "name": "chat.room.create", "description": "Create chat rooms", "category": "write" },
+    { "name": "chat.room.read", "description": "View chat rooms", "category": "read" },
+    { "name": "chat.room.update", "description": "Edit chat rooms", "category": "write" },
+    { "name": "chat.room.delete", "description": "Delete chat rooms", "category": "delete" },
+    
+    { "name": "chat.message.create", "description": "Send messages", "category": "write" },
+    { "name": "chat.message.read", "description": "Read messages", "category": "read" },
+    { "name": "chat.message.update", "description": "Edit messages", "category": "write" },
+    { "name": "chat.message.delete", "description": "Delete messages", "category": "delete" },
+
+    { "name": "chat.reaction.create", "description": "Add reactions", "category": "write" },
+    { "name": "chat.reaction.delete", "description": "Remove reactions", "category": "delete" },
+
+    { "name": "chat.thread.create", "description": "Create threads", "category": "write" },
+    { "name": "chat.thread.read", "description": "View threads", "category": "read" },
+    { "name": "chat.thread_message.create", "description": "Send thread replies", "category": "write" },
+    { "name": "chat.thread_message.read", "description": "Read thread replies", "category": "read" },
+    { "name": "chat.thread_message_reaction.create", "description": "Add reactions to thread messages", "category": "write" },
+    { "name": "chat.thread_message_reaction.delete", "description": "Remove reactions from thread messages", "category": "delete" },
+
+    { "name": "chat.members.manage", "description": "Manage room members", "category": "admin" },
+    { "name": "chat.settings.manage", "description": "Manage Chat settings", "category": "admin" }
+  ],
+  "dataContract": [
+    {
+      "entityName": "room",
+      "fields": [
+        { "id": "room_name", "name": "name", "label": "Name", "type": "text", "required": true, "description": "Name of the chat room" },
+        { "id": "room_description", "name": "description", "label": "Description", "type": "text", "required": false, "description": "Room description or purpose" },
+        { "id": "room_is_private", "name": "is_private", "label": "Is Private", "type": "boolean", "required": false, "description": "Whether the room is private or public", "defaultValue": false },
+        { "id": "room_created_by", "name": "created_by", "label": "Created By", "type": "entity_link", "required": true, "description": "User who created the room", "references": { "entity": "system.organization_members", "field": "user_id" } },
+        { "id": "room_created_at", "name": "created_at", "label": "Created At", "type": "timestamp", "required": true, "description": "When the room was created" },
+        { "id": "room_updated_at", "name": "updated_at", "label": "Updated At", "type": "timestamp", "required": true, "description": "When the room was last updated" }
+      ]
+    },
+    {
+      "entityName": "message",
+      "fields": [
+        { "id": "message_content", "name": "content", "label": "Content", "type": "text", "required": true, "description": "The message content" },
+        { "id": "message_type", "name": "message_type", "label": "Message Type", "type": "text", "required": false, "description": "Type of message (text, image, file, etc.)", "validation": { "enum": ["text", "image", "file", "link"] }, "defaultValue": "text" },
+        { "id": "message_attachment", "name": "attachment", "label": "Image Attachment", "type": "file", "required": false, "description": "Image or file attachment for the message" },
+        { "id": "message_room_id", "name": "room_id", "label": "Room", "type": "entity_link", "required": true, "description": "Room where the message was sent", "references": { "entity": "room", "field": "id" } },
+        { "id": "message_user_id", "name": "user_id", "label": "User", "type": "entity_link", "required": true, "description": "User who sent the message", "references": { "entity": "system.organization_members", "field": "user_id" } },
+        { "id": "message_created_at", "name": "created_at", "label": "Created At", "type": "timestamp", "required": true, "description": "When the message was sent" },
+        { "id": "message_updated_at", "name": "updated_at", "label": "Updated At", "type": "timestamp", "required": true, "description": "When the message was last updated" }
+      ]
+    },
+    {
+      "entityName": "room_member",
+      "fields": [
+        { "id": "membership_room_id", "name": "room_id", "label": "Room", "type": "entity_link", "required": true, "description": "Chat room the user is a member of", "references": { "entity": "room", "field": "id" } },
+        { "id": "membership_user_id", "name": "user_id", "label": "User", "type": "entity_link", "required": true, "description": "User who is a member", "references": { "entity": "system.organization_members", "field": "user_id" } },
+        { "id": "membership_role", "name": "role", "label": "Role", "type": "text", "required": false, "description": "Role in the room (member, admin, moderator)", "validation": { "enum": ["member", "admin", "moderator"] }, "defaultValue": "member" },
+        { "id": "membership_joined_at", "name": "joined_at", "label": "Joined At", "type": "timestamp", "required": true, "description": "When the user joined the room" }
+      ]
+    },
+    {
+      "entityName": "message_read",
+      "fields": [
+        { "id": "read_user_id", "name": "user_id", "label": "User", "type": "entity_link", "required": true, "description": "User who read the message", "references": { "entity": "system.organization_members", "field": "user_id" } },
+        { "id": "read_message_id", "name": "message_id", "label": "Message", "type": "entity_link", "required": true, "description": "Message that was read", "references": { "entity": "message", "field": "id" } },
+        { "id": "read_room_id", "name": "room_id", "label": "Room", "type": "entity_link", "required": true, "description": "Room where the message was read", "references": { "entity": "room", "field": "id" } },
+        { "id": "read_at", "name": "read_at", "label": "Read At", "type": "timestamp", "required": true, "description": "When the message was read" }
+      ]
+    },
+    {
+      "entityName": "message_reaction",
+      "fields": [
+        { "id": "reaction_message_id", "name": "message_id", "label": "Message", "type": "entity_link", "required": true, "description": "Message being reacted to", "references": { "entity": "message", "field": "id" } },
+        { "id": "reaction_room_id", "name": "room_id", "label": "Room", "type": "entity_link", "required": true, "description": "Room containing the message", "references": { "entity": "room", "field": "id" } },
+        { "id": "reaction_user_id", "name": "user_id", "label": "User", "type": "entity_link", "required": true, "description": "User who reacted", "references": { "entity": "system.organization_members", "field": "user_id" } },
+        { "id": "reaction_emoji", "name": "emoji", "label": "Emoji", "type": "text", "required": true, "description": "Emoji reaction value (e.g., 😀, 👍, 🎉)" },
+        { "id": "reaction_created_at", "name": "created_at", "label": "Created At", "type": "timestamp", "required": true, "description": "When the reaction was added" }
+      ]
+    },
+    {
+      "entityName": "thread",
+      "fields": [
+        { "id": "thread_parent_message_id", "name": "parent_message_id", "label": "Parent Message", "type": "entity_link", "required": true, "description": "The main channel message this thread replies to", "references": { "entity": "message", "field": "id" } },
+        { "id": "thread_room_id", "name": "room_id", "label": "Room", "type": "entity_link", "required": true, "description": "Room containing the parent message", "references": { "entity": "room", "field": "id" } },
+        { "id": "thread_created_at", "name": "created_at", "label": "Created At", "type": "timestamp", "required": true, "description": "When the thread was created" },
+        { "id": "thread_updated_at", "name": "updated_at", "label": "Updated At", "type": "timestamp", "required": true, "description": "When the thread was last updated" }
+      ]
+    },
+    {
+      "entityName": "thread_message", 
+      "fields": [
+        { "id": "thread_message_content", "name": "content", "label": "Content", "type": "text", "required": true, "description": "The thread reply content" },
+        { "id": "thread_message_type", "name": "message_type", "label": "Message Type", "type": "text", "required": false, "description": "Type of thread message (text, file)", "validation": { "enum": ["text", "file"] }, "defaultValue": "text" },
+        { "id": "thread_message_attachment", "name": "attachment", "label": "Attachment", "type": "file", "required": false, "description": "File attachment for thread reply" },
+        { "id": "thread_message_thread_id", "name": "thread_id", "label": "Thread", "type": "entity_link", "required": true, "description": "Thread this message belongs to", "references": { "entity": "thread", "field": "id" } },
+        { "id": "thread_message_parent_message_id", "name": "parent_message_id", "label": "Parent Message", "type": "entity_link", "required": true, "description": "Original channel message being replied to", "references": { "entity": "message", "field": "id" } },
+        { "id": "thread_message_room_id", "name": "room_id", "label": "Room", "type": "entity_link", "required": true, "description": "Room containing the thread", "references": { "entity": "room", "field": "id" } },
+        { "id": "thread_message_user_id", "name": "user_id", "label": "User", "type": "entity_link", "required": true, "description": "User who sent the thread reply", "references": { "entity": "system.organization_members", "field": "user_id" } },
+        { "id": "thread_message_created_at", "name": "created_at", "label": "Created At", "type": "timestamp", "required": true, "description": "When the thread reply was sent" },
+        { "id": "thread_message_updated_at", "name": "updated_at", "label": "Updated At", "type": "timestamp", "required": true, "description": "When the thread reply was last updated" }
+      ]
+    },
+    {
+      "entityName": "thread_message_reaction",
+      "fields": [
+        { "id": "thread_reaction_thread_message_id", "name": "thread_message_id", "label": "Thread Message", "type": "entity_link", "required": true, "description": "Thread message being reacted to", "references": { "entity": "thread_message", "field": "id" } },
+        { "id": "thread_reaction_thread_id", "name": "thread_id", "label": "Thread", "type": "entity_link", "required": true, "description": "Thread containing the message", "references": { "entity": "thread", "field": "id" } },
+        { "id": "thread_reaction_room_id", "name": "room_id", "label": "Room", "type": "entity_link", "required": true, "description": "Room containing the thread", "references": { "entity": "room", "field": "id" } },
+        { "id": "thread_reaction_user_id", "name": "user_id", "label": "User", "type": "entity_link", "required": true, "description": "User who reacted to thread message", "references": { "entity": "system.organization_members", "field": "user_id" } },
+        { "id": "thread_reaction_emoji", "name": "emoji", "label": "Emoji", "type": "text", "required": true, "description": "Emoji reaction value (e.g., 😀, 👍, 🎉)" },
+        { "id": "thread_reaction_created_at", "name": "created_at", "label": "Created At", "type": "timestamp", "required": true, "description": "When the thread reaction was added" }
+      ]
+    }
+  ]
+}

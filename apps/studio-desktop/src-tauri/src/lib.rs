@@ -29,6 +29,8 @@ pub fn run() {
             commands::get_os_status,
             commands::boot_kernel,
             commands::shutdown_kernel,
+            commands::install_app,
+            commands::list_apps,
         ])
         .setup(|app| {
             // Create state inside setup() where the app handle is available,

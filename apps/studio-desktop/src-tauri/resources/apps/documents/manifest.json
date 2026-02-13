@@ -1,0 +1,466 @@
+{
+  "appId": "documents",
+  "name": "Document",
+  "version": "0.0.1",
+  "description": "RootCX Documents is the place where knowledge lives. Teams can capture notes, write procedures and store important information in a way that stays clear and easy to access. Nothing gets lost, everything is structured and knowledge remains reliable over time. With Documents, your company builds a single source of truth that makes information simple to find and effortless to use.",
+  "permissions": [
+    {
+      "name": "documents.document.create",
+      "description": "Create documents",
+      "category": "write"
+    },
+    {
+      "name": "documents.document.read",
+      "description": "View documents",
+      "category": "read"
+    },
+    {
+      "name": "documents.document.update",
+      "description": "Edit documents",
+      "category": "write"
+    },
+    {
+      "name": "documents.document.delete",
+      "description": "Delete documents",
+      "category": "delete"
+    },
+    {
+      "name": "documents.page.create",
+      "description": "Create pages",
+      "category": "write"
+    },
+    {
+      "name": "documents.page.read",
+      "description": "View pages",
+      "category": "read"
+    },
+    {
+      "name": "documents.page.update",
+      "description": "Edit pages",
+      "category": "write"
+    },
+    {
+      "name": "documents.page.delete",
+      "description": "Delete pages",
+      "category": "delete"
+    },
+    {
+      "name": "documents.block.create",
+      "description": "Create blocks",
+      "category": "write"
+    },
+    {
+      "name": "documents.block.read",
+      "description": "View blocks",
+      "category": "read"
+    },
+    {
+      "name": "documents.block.update",
+      "description": "Edit blocks",
+      "category": "write"
+    },
+    {
+      "name": "documents.block.delete",
+      "description": "Delete blocks",
+      "category": "delete"
+    },
+    {
+      "name": "documents.template.create",
+      "description": "Create templates",
+      "category": "write"
+    },
+    {
+      "name": "documents.template.read",
+      "description": "View templates",
+      "category": "read"
+    },
+    {
+      "name": "documents.template.update",
+      "description": "Edit templates",
+      "category": "write"
+    },
+    {
+      "name": "documents.template.delete",
+      "description": "Delete templates",
+      "category": "delete"
+    },
+    {
+      "name": "documents.comment.create",
+      "description": "Create comments",
+      "category": "write"
+    },
+    {
+      "name": "documents.comment.read",
+      "description": "View comments",
+      "category": "read"
+    },
+    {
+      "name": "documents.comment.update",
+      "description": "Edit comments",
+      "category": "write"
+    },
+    {
+      "name": "documents.comment.delete",
+      "description": "Delete comments",
+      "category": "delete"
+    },
+    {
+      "name": "documents.settings.manage",
+      "description": "Manage Documents settings",
+      "category": "admin"
+    }
+  ],
+  "dataContract": [
+    {
+      "entityName": "document",
+      "fields": [
+        {
+          "id": "document_title",
+          "name": "title",
+          "label": "Title",
+          "type": "text",
+          "required": true,
+          "description": "Document title"
+        },
+        {
+          "id": "document_content",
+          "name": "content",
+          "label": "Content",
+          "type": "json",
+          "required": false,
+          "description": "Rich text content blocks",
+          "defaultValue": {
+            "blocks": []
+          }
+        },
+        {
+          "id": "document_icon",
+          "name": "icon",
+          "label": "Icon",
+          "type": "text",
+          "required": false,
+          "description": "Document icon (emoji or icon name)"
+        },
+        {
+          "id": "document_cover_image_url",
+          "name": "cover_image_url",
+          "label": "Cover Image",
+          "type": "file",
+          "required": false,
+          "description": "Cover image URL"
+        },
+        {
+          "id": "document_status",
+          "name": "status",
+          "label": "Status",
+          "type": "text",
+          "required": true,
+          "description": "Document status",
+          "validation": {
+            "enum": [
+              "draft",
+              "published",
+              "archived"
+            ]
+          },
+          "defaultValue": "draft"
+        },
+        {
+          "id": "document_parent_id",
+          "name": "parent_id",
+          "label": "Parent Document",
+          "type": "entity_link",
+          "required": false,
+          "description": "Parent document for nested structure",
+          "references": {
+            "entity": "document",
+            "field": "id"
+          }
+        },
+        {
+          "id": "document_sort_order",
+          "name": "sort_order",
+          "label": "Sort Order",
+          "type": "number",
+          "required": false,
+          "description": "Order within parent",
+          "defaultValue": 0
+        }
+      ]
+    },
+    {
+      "entityName": "page",
+      "fields": [
+        {
+          "id": "page_document_id",
+          "name": "document_id",
+          "label": "Document",
+          "type": "entity_link",
+          "required": true,
+          "description": "Parent document",
+          "references": {
+            "entity": "document",
+            "field": "id"
+          }
+        },
+        {
+          "id": "page_title",
+          "name": "title",
+          "label": "Page Title",
+          "type": "text",
+          "required": true,
+          "description": "Page title"
+        },
+        {
+          "id": "page_content",
+          "name": "content",
+          "label": "Content Blocks",
+          "type": "json",
+          "required": false,
+          "description": "Page content as blocks",
+          "defaultValue": {
+            "blocks": []
+          }
+        },
+        {
+          "id": "page_level",
+          "name": "level",
+          "label": "Nesting Level",
+          "type": "number",
+          "required": false,
+          "description": "Page nesting depth",
+          "validation": {
+            "min": 0,
+            "max": 10
+          },
+          "defaultValue": 0
+        },
+        {
+          "id": "page_sort_order",
+          "name": "sort_order",
+          "label": "Sort Order",
+          "type": "number",
+          "required": false,
+          "description": "Page order",
+          "defaultValue": 0
+        },
+        {
+          "id": "page_parent_page_id",
+          "name": "parent_page_id",
+          "label": "Parent Page",
+          "type": "entity_link",
+          "required": false,
+          "description": "Parent page for nesting",
+          "references": {
+            "entity": "page",
+            "field": "id"
+          }
+        }
+      ]
+    },
+    {
+      "entityName": "block",
+      "fields": [
+        {
+          "id": "block_page_id",
+          "name": "page_id",
+          "label": "Page",
+          "type": "entity_link",
+          "required": true,
+          "description": "Page containing this block",
+          "references": {
+            "entity": "page",
+            "field": "id"
+          }
+        },
+        {
+          "id": "block_type",
+          "name": "type",
+          "label": "Block Type",
+          "type": "text",
+          "required": true,
+          "description": "Type of content block",
+          "validation": {
+            "enum": [
+              "paragraph",
+              "heading1",
+              "heading2",
+              "heading3",
+              "bullet_list",
+              "numbered_list",
+              "code",
+              "quote",
+              "divider",
+              "image",
+              "embed",
+              "table",
+              "callout"
+            ]
+          },
+          "defaultValue": "paragraph"
+        },
+        {
+          "id": "block_content",
+          "name": "content",
+          "label": "Block Content",
+          "type": "json",
+          "required": false,
+          "description": "Block data and formatting",
+          "defaultValue": {}
+        },
+        {
+          "id": "block_sort_order",
+          "name": "sort_order",
+          "label": "Sort Order",
+          "type": "number",
+          "required": false,
+          "description": "Block order within page",
+          "defaultValue": 0
+        },
+        {
+          "id": "block_parent_block_id",
+          "name": "parent_block_id",
+          "label": "Parent Block",
+          "type": "entity_link",
+          "required": false,
+          "description": "Parent block for nesting",
+          "references": {
+            "entity": "block",
+            "field": "id"
+          }
+        }
+      ]
+    },
+    {
+      "entityName": "template",
+      "fields": [
+        {
+          "id": "template_name",
+          "name": "name",
+          "label": "Template Name",
+          "type": "text",
+          "required": true,
+          "description": "Template name"
+        },
+        {
+          "id": "template_description",
+          "name": "description",
+          "label": "Description",
+          "type": "text",
+          "required": false,
+          "description": "Template description"
+        },
+        {
+          "id": "template_data",
+          "name": "template_data",
+          "label": "Template Structure",
+          "type": "json",
+          "required": true,
+          "description": "Template content structure",
+          "defaultValue": {}
+        },
+        {
+          "id": "template_category",
+          "name": "category",
+          "label": "Category",
+          "type": "text",
+          "required": true,
+          "description": "Template category",
+          "validation": {
+            "enum": [
+              "meeting_notes",
+              "project_plan",
+              "wiki_page",
+              "task_list",
+              "knowledge_base",
+              "report",
+              "other"
+            ]
+          },
+          "defaultValue": "other"
+        },
+        {
+          "id": "template_preview_image_url",
+          "name": "preview_image_url",
+          "label": "Preview Image",
+          "type": "text",
+          "required": false,
+          "description": "Template preview image"
+        }
+      ]
+    },
+    {
+      "entityName": "comment",
+      "fields": [
+        {
+          "id": "comment_document_id",
+          "name": "document_id",
+          "label": "Document",
+          "type": "entity_link",
+          "required": true,
+          "description": "Document the comment belongs to",
+          "references": {
+            "entity": "document",
+            "field": "id"
+          }
+        },
+        {
+          "id": "comment_page_id",
+          "name": "page_id",
+          "label": "Page",
+          "type": "entity_link",
+          "required": false,
+          "description": "Optional page reference",
+          "references": {
+            "entity": "page",
+            "field": "id"
+          }
+        },
+        {
+          "id": "comment_content",
+          "name": "content",
+          "label": "Comment Content",
+          "type": "text",
+          "required": true,
+          "description": "Comment text"
+        },
+        {
+          "id": "comment_position_data",
+          "name": "position_data",
+          "label": "Position",
+          "type": "json",
+          "required": false,
+          "description": "Comment position and context",
+          "defaultValue": {}
+        },
+        {
+          "id": "comment_status",
+          "name": "status",
+          "label": "Status",
+          "type": "text",
+          "required": true,
+          "description": "Comment status",
+          "validation": {
+            "enum": [
+              "open",
+              "resolved"
+            ]
+          },
+          "defaultValue": "open"
+        },
+        {
+          "id": "comment_reply_to_id",
+          "name": "reply_to_id",
+          "label": "Reply To",
+          "type": "entity_link",
+          "required": false,
+          "description": "Parent comment for replies",
+          "references": {
+            "entity": "comment",
+            "field": "id"
+          }
+        }
+      ]
+    }
+  ]
+}

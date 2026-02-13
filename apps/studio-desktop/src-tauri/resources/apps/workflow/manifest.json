@@ -1,0 +1,65 @@
+{
+  "appId": "workflow",
+  "name": "Workflow",
+  "version": "0.0.1",
+  "description": "RootCX Workflows is the tool that lets you automate your company's processes across all your business tools. Instead of repeating the same manual steps, you create visual flows that connect actions together. A trigger such as a new lead, a signed contract or an updated record can launch a sequence of tasks like sending messages, updating fields or creating reminders in any connected application. Every routine becomes automatic, which saves time, prevents mistakes and keeps operations consistent. With Workflows, your business runs smoothly and scales without extra effort.",
+  "permissions": [],
+  "apiEndpoints": [
+    "/api/workflow/webhook/:token",
+    "/api/workflow/webhooks"
+  ],
+  "dataContract": [
+    {
+      "entityName": "saved_workflow",
+      "fields": [
+        { "id": "workflow_id", "name": "id", "label": "Workflow ID", "type": "text", "required": true, "description": "Unique workflow identifier", "isPrimaryKey": true },
+        { "id": "workflow_name", "name": "name", "label": "Name", "type": "text", "required": true, "description": "Workflow name", "validation": { "maxLength": 255, "minLength": 1 } },
+        { "id": "workflow_description", "name": "description", "label": "Description", "type": "text", "required": false, "description": "Workflow description" },
+        { "id": "workflow_data", "name": "workflow_data", "label": "Workflow Data", "type": "json", "required": true, "description": "Workflow definition and node data" },
+        { "id": "workflow_created_by", "name": "created_by", "label": "Created By", "type": "entity_link", "required": false, "description": "User who created the workflow", "references": { "entity": "user", "field": "id" } },
+        { "id": "workflow_created_at", "name": "created_at", "label": "Created At", "type": "timestamp", "required": true, "description": "Workflow creation timestamp" },
+        { "id": "workflow_updated_at", "name": "updated_at", "label": "Updated At", "type": "timestamp", "required": true, "description": "Last update timestamp" }
+      ]
+    },
+    {
+      "entityName": "webhook",
+      "fields": [
+        { "id": "webhook_id", "name": "id", "label": "Webhook ID", "type": "text", "required": true, "description": "Unique webhook identifier", "isPrimaryKey": true },
+        { "id": "workflow_id", "name": "workflow_id", "label": "Workflow ID", "type": "entity_link", "required": true, "description": "Associated workflow", "references": { "entity": "saved_workflow", "field": "id" } },
+        { "id": "webhook_token", "name": "webhook_token", "label": "Webhook Token", "type": "text", "required": true, "description": "Unique security token for webhook URL" },
+        { "id": "webhook_url", "name": "webhook_url", "label": "Webhook URL", "type": "text", "required": true, "description": "Complete webhook URL with token" },
+        { "id": "webhook_is_active", "name": "is_active", "label": "Is Active", "type": "boolean", "required": true, "description": "Whether webhook is active", "defaultValue": true },
+        { "id": "webhook_created_at", "name": "created_at", "label": "Created At", "type": "timestamp", "required": true, "description": "Webhook creation timestamp" },
+        { "id": "webhook_updated_at", "name": "updated_at", "label": "Updated At", "type": "timestamp", "required": true, "description": "Last update timestamp" }
+      ]
+    },
+    {
+      "entityName": "execution",
+      "fields": [
+        { "id": "execution_id", "name": "id", "label": "Execution ID", "type": "text", "required": true, "description": "Unique execution identifier", "isPrimaryKey": true },
+        { "id": "workflow_id", "name": "workflow_id", "label": "Workflow ID", "type": "entity_link", "required": true, "description": "Associated workflow", "references": { "entity": "saved_workflow", "field": "id" } },
+        { "id": "execution_trigger_type", "name": "trigger_type", "label": "Trigger Type", "type": "text", "required": true, "description": "How the execution was triggered (webhook, manual, scheduled, etc.)" },
+        { "id": "execution_trigger_data", "name": "trigger_data", "label": "Trigger Data", "type": "json", "required": false, "description": "Data that triggered the execution (webhook payload, etc.)" },
+        { "id": "execution_status", "name": "status", "label": "Status", "type": "text", "required": true, "description": "Execution status (running, success, error, cancelled)" },
+        { "id": "execution_started_at", "name": "started_at", "label": "Started At", "type": "timestamp", "required": true, "description": "When execution started" },
+        { "id": "execution_completed_at", "name": "completed_at", "label": "Completed At", "type": "timestamp", "required": false, "description": "When execution completed" },
+        { "id": "execution_duration_ms", "name": "duration_ms", "label": "Duration (ms)", "type": "number", "required": false, "description": "Execution duration in milliseconds" },
+        { "id": "execution_nodes_executed", "name": "nodes_executed", "label": "Nodes Executed", "type": "json", "required": false, "description": "Array of nodes that were executed with their results" },
+        { "id": "execution_error_message", "name": "error_message", "label": "Error Message", "type": "text", "required": false, "description": "Error message if execution failed" },
+        { "id": "execution_error_stack", "name": "error_stack", "label": "Error Stack", "type": "text", "required": false, "description": "Full error stack trace for debugging" },
+        { "id": "execution_result", "name": "result", "label": "Result", "type": "json", "required": false, "description": "Final execution result" },
+        { "id": "execution_created_at", "name": "created_at", "label": "Created At", "type": "timestamp", "required": true, "description": "Record creation timestamp" }
+      ]
+    },
+    {
+      "entityName": "file",
+      "fields": [
+        { "id": "file_id", "name": "id", "label": "File ID", "type": "text", "required": true, "description": "Unique file identifier", "isPrimaryKey": true },
+        { "id": "file_workflow_id", "name": "workflow_id", "label": "Workflow ID", "type": "entity_link", "required": true, "description": "Associated workflow", "references": { "entity": "saved_workflow", "field": "id" } },
+        { "id": "file_name", "name": "name", "label": "Name", "type": "text", "required": true, "description": "File name" },
+        { "id": "file_file", "name": "file", "label": "File", "type": "file", "required": true, "description": "File attachment" },
+        { "id": "file_created_at", "name": "created_at", "label": "Created At", "type": "timestamp", "required": true, "description": "File upload timestamp" }
+      ]
+    }
+  ]
+}

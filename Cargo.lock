@@ -2997,6 +2997,7 @@ dependencies = [
  "rootcx-shared-types",
  "serde",
  "serde_json",
+ "sqlx",
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",

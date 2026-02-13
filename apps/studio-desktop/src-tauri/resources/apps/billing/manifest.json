@@ -1,0 +1,1225 @@
+{
+  "appId": "billing",
+  "name": "Billing",
+  "version": "0.0.1",
+  "description": "Create professional quotes with automatic numbering, client management, and PDF generation. Manage quote line items with automatic calculations for subtotals, taxes, and totals. Track quote status from Draft to Confirmed with integrated client data from core User entity.",
+  "permissions": [
+    {
+      "name": "billing.quote.create",
+      "description": "Create quotes",
+      "category": "write"
+    },
+    {
+      "name": "billing.quote.read",
+      "description": "View quotes",
+      "category": "read"
+    },
+    {
+      "name": "billing.quote.update",
+      "description": "Edit quotes",
+      "category": "write"
+    },
+    {
+      "name": "billing.quote.delete",
+      "description": "Delete quotes",
+      "category": "delete"
+    },
+    {
+      "name": "billing.lineitem.create",
+      "description": "Create quote line items",
+      "category": "write"
+    },
+    {
+      "name": "billing.lineitem.read",
+      "description": "View quote line items",
+      "category": "read"
+    },
+    {
+      "name": "billing.lineitem.update",
+      "description": "Edit quote line items",
+      "category": "write"
+    },
+    {
+      "name": "billing.lineitem.delete",
+      "description": "Delete quote line items",
+      "category": "delete"
+    },
+    {
+      "name": "billing.settings.manage",
+      "description": "Manage Billing settings",
+      "category": "admin"
+    }
+  ],
+  "dataContract": [
+    {
+      "entityName": "quote",
+      "fields": [
+        {
+          "id": "quote_number",
+          "name": "quote_number",
+          "label": "Quote Number",
+          "type": "text",
+          "required": true,
+          "description": "Sequential quote number (QUO-YYYYMMDD-NNNN format)"
+        },
+        {
+          "id": "quote_title",
+          "name": "title",
+          "label": "Title",
+          "type": "text",
+          "required": true,
+          "description": "Quote title or description"
+        },
+        {
+          "id": "quote_client_id",
+          "name": "client_id",
+          "label": "Client",
+          "type": "entity_link",
+          "required": true,
+          "description": "Client from core User entity",
+          "references": {
+            "entity": "User",
+            "field": "id"
+          }
+        },
+        {
+          "id": "quote_contact_name",
+          "name": "contact_name",
+          "label": "Contact Name",
+          "type": "text",
+          "required": false,
+          "description": "Primary contact person name"
+        },
+        {
+          "id": "quote_contact_email",
+          "name": "contact_email",
+          "label": "Contact Email",
+          "type": "text",
+          "required": false,
+          "description": "Primary contact email"
+        },
+        {
+          "id": "quote_client_vat_number",
+          "name": "client_vat_number",
+          "label": "Client VAT Number",
+          "type": "text",
+          "required": true,
+          "description": "Client VAT number for invoicing purposes (e.g., BE0123456789)"
+        },
+        {
+          "id": "quote_client_company_name",
+          "name": "client_company_name",
+          "label": "Client Company Name",
+          "type": "text",
+          "required": true,
+          "description": "Client company or business name"
+        },
+        {
+          "id": "quote_client_street",
+          "name": "client_street",
+          "label": "Client Street Address",
+          "type": "text",
+          "required": true,
+          "description": "Client street address"
+        },
+        {
+          "id": "quote_client_city",
+          "name": "client_city",
+          "label": "Client City",
+          "type": "text",
+          "required": true,
+          "description": "Client city"
+        },
+        {
+          "id": "quote_client_postal_code",
+          "name": "client_postal_code",
+          "label": "Client Postal Code",
+          "type": "text",
+          "required": true,
+          "description": "Client postal/zip code"
+        },
+        {
+          "id": "quote_client_country_code",
+          "name": "client_country_code",
+          "label": "Client Country",
+          "type": "text",
+          "required": true,
+          "description": "Client country code (e.g., BE, FR, DE)",
+          "defaultValue": "BE"
+        },
+        {
+          "id": "quote_client_state",
+          "name": "client_state",
+          "label": "Client State/Province",
+          "type": "text",
+          "required": false,
+          "description": "Client state, province, or region"
+        },
+        {
+          "id": "quote_client_registration_numbers",
+          "name": "client_registration_numbers",
+          "label": "Client Registration Numbers",
+          "type": "json",
+          "required": false,
+          "description": "Client country-specific identifiers as key-value pairs"
+        },
+        {
+          "id": "quote_validity_date",
+          "name": "validity_date",
+          "label": "Valid Until",
+          "type": "date",
+          "required": true,
+          "description": "Quote validity expiration date"
+        },
+        {
+          "id": "quote_currency",
+          "name": "currency",
+          "label": "Currency",
+          "type": "text",
+          "required": true,
+          "description": "Quote currency code",
+          "defaultValue": "USD",
+          "validation": {
+            "enum": [
+              "USD",
+              "EUR",
+              "GBP",
+              "CAD",
+              "AUD"
+            ]
+          }
+        },
+        {
+          "id": "quote_terms",
+          "name": "terms",
+          "label": "Terms & Conditions",
+          "type": "text",
+          "required": false,
+          "description": "General terms and conditions"
+        },
+        {
+          "id": "quote_subtotal",
+          "name": "subtotal",
+          "label": "Subtotal",
+          "type": "number",
+          "required": true,
+          "description": "Quote subtotal before taxes",
+          "defaultValue": 0
+        },
+        {
+          "id": "quote_tax_rate",
+          "name": "tax_rate",
+          "label": "Tax Rate (%)",
+          "type": "number",
+          "required": false,
+          "description": "Tax rate percentage",
+          "defaultValue": 0,
+          "validation": {
+            "min": 0,
+            "max": 100
+          }
+        },
+        {
+          "id": "quote_tax_amount",
+          "name": "tax_amount",
+          "label": "Tax Amount",
+          "type": "number",
+          "required": true,
+          "description": "Calculated tax amount",
+          "defaultValue": 0
+        },
+        {
+          "id": "quote_total",
+          "name": "total",
+          "label": "Total",
+          "type": "number",
+          "required": true,
+          "description": "Quote total including taxes",
+          "defaultValue": 0
+        },
+        {
+          "id": "quote_status",
+          "name": "status",
+          "label": "Status",
+          "type": "text",
+          "required": true,
+          "description": "Quote status",
+          "validation": {
+            "enum": [
+              "draft",
+              "confirmed"
+            ]
+          },
+          "defaultValue": "draft"
+        },
+        {
+          "id": "quote_invoice_status",
+          "name": "invoice_status",
+          "label": "Invoice Status",
+          "type": "text",
+          "required": false,
+          "description": "Invoicing status",
+          "validation": {
+            "enum": [
+              "to_invoice",
+              "partially_invoiced",
+              "invoiced"
+            ]
+          },
+          "defaultValue": "to_invoice"
+        },
+        {
+          "id": "quote_einvoice_status",
+          "name": "einvoice_status",
+          "label": "E-Invoice Status",
+          "type": "text",
+          "required": false,
+          "description": "Current status of Peppol e-invoice",
+          "validation": {
+            "enum": [
+              "pending",
+              "sent",
+              "failed"
+            ]
+          }
+        },
+        {
+          "id": "quote_einvoice_document_id",
+          "name": "einvoice_document_id",
+          "label": "E-Invoice Document ID",
+          "type": "text",
+          "required": false,
+          "description": "Dokapi document ID for tracking"
+        },
+        {
+          "id": "quote_einvoice_sent_at",
+          "name": "einvoice_sent_at",
+          "label": "E-Invoice Sent At",
+          "type": "timestamp",
+          "required": false,
+          "description": "Timestamp when e-invoice was successfully sent"
+        },
+        {
+          "id": "quote_notes",
+          "name": "notes",
+          "label": "Internal Notes",
+          "type": "text",
+          "required": false,
+          "description": "Internal notes (not shown on quote)"
+        },
+        {
+          "id": "quote_confirmed_at",
+          "name": "confirmed_at",
+          "label": "Confirmed At",
+          "type": "timestamp",
+          "required": false,
+          "description": "Timestamp when the quote was confirmed (locked)"
+        },
+        {
+          "id": "quote_document_snapshot",
+          "name": "document_snapshot",
+          "label": "Quote Document Snapshot",
+          "type": "json",
+          "required": false,
+          "description": "Full JSON snapshot of the quote at confirmation"
+        },
+        {
+          "id": "quote_created_by",
+          "name": "created_by",
+          "label": "Created By",
+          "type": "entity_link",
+          "required": false,
+          "description": "Organization member who created this quote",
+          "references": {
+            "entity": "system.organization_members",
+            "field": "user_id"
+          }
+        },
+        {
+          "id": "quote_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Quote creation timestamp"
+        },
+        {
+          "id": "quote_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Last update timestamp"
+        }
+      ]
+    },
+    {
+      "entityName": "quote_line_item",
+      "fields": [
+        {
+          "id": "line_item_quote_id",
+          "name": "quote_id",
+          "label": "Quote",
+          "type": "entity_link",
+          "required": true,
+          "description": "Associated quote",
+          "references": {
+            "entity": "quote",
+            "field": "id"
+          }
+        },
+        {
+          "id": "line_item_product_service",
+          "name": "product_service",
+          "label": "Product/Service",
+          "type": "text",
+          "required": true,
+          "description": "Product or service name/description"
+        },
+        {
+          "id": "line_item_description",
+          "name": "description",
+          "label": "Description",
+          "type": "text",
+          "required": false,
+          "description": "Detailed item description"
+        },
+        {
+          "id": "line_item_quantity",
+          "name": "quantity",
+          "label": "Quantity",
+          "type": "number",
+          "required": true,
+          "description": "Item quantity",
+          "defaultValue": 1,
+          "validation": {
+            "min": 0.01
+          }
+        },
+        {
+          "id": "line_item_unit",
+          "name": "unit",
+          "label": "Unit",
+          "type": "text",
+          "required": false,
+          "description": "Unit of measurement (e.g., hours, pieces, kg)",
+          "defaultValue": "each"
+        },
+        {
+          "id": "line_item_unit_price",
+          "name": "unit_price",
+          "label": "Unit Price",
+          "type": "number",
+          "required": true,
+          "description": "Price per unit",
+          "defaultValue": 0,
+          "validation": {
+            "min": 0
+          }
+        },
+        {
+          "id": "line_item_discount_percent",
+          "name": "discount_percent",
+          "label": "Discount (%)",
+          "type": "number",
+          "required": false,
+          "description": "Discount percentage",
+          "defaultValue": 0,
+          "validation": {
+            "min": 0,
+            "max": 100
+          }
+        },
+        {
+          "id": "line_item_tax_rate",
+          "name": "tax_rate",
+          "label": "Tax Rate (%)",
+          "type": "number",
+          "required": false,
+          "description": "Tax rate for this line item",
+          "defaultValue": 0,
+          "validation": {
+            "min": 0,
+            "max": 100
+          }
+        },
+        {
+          "id": "line_item_subtotal",
+          "name": "subtotal",
+          "label": "Subtotal",
+          "type": "number",
+          "required": true,
+          "description": "Line item subtotal (quantity \u00d7 unit_price \u00d7 (1 - discount_percent/100))",
+          "defaultValue": 0
+        },
+        {
+          "id": "line_item_tax_amount",
+          "name": "tax_amount",
+          "label": "Tax Amount",
+          "type": "number",
+          "required": true,
+          "description": "Tax amount for this line item",
+          "defaultValue": 0
+        },
+        {
+          "id": "line_item_total",
+          "name": "total",
+          "label": "Total",
+          "type": "number",
+          "required": true,
+          "description": "Line item total including tax",
+          "defaultValue": 0
+        },
+        {
+          "id": "line_item_order",
+          "name": "order_position",
+          "label": "Order Position",
+          "type": "number",
+          "required": false,
+          "description": "Position for ordering line items"
+        },
+        {
+          "id": "line_item_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Line item creation timestamp"
+        },
+        {
+          "id": "line_item_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Last update timestamp"
+        }
+      ]
+    },
+    {
+      "entityName": "settings",
+      "fields": [
+        {
+          "id": "settings_default_currency",
+          "name": "default_currency",
+          "label": "Default Currency",
+          "type": "text",
+          "required": true,
+          "description": "Default currency for new quotes",
+          "defaultValue": "USD",
+          "validation": {
+            "enum": [
+              "USD",
+              "EUR",
+              "GBP",
+              "CAD",
+              "AUD"
+            ]
+          }
+        },
+        {
+          "id": "settings_default_tax_rate",
+          "name": "default_tax_rate",
+          "label": "Default Tax Rate (%)",
+          "type": "number",
+          "required": false,
+          "description": "Default tax rate percentage for new quotes",
+          "defaultValue": 0,
+          "validation": {
+            "min": 0,
+            "max": 100
+          }
+        },
+        {
+          "id": "settings_default_terms",
+          "name": "default_terms",
+          "label": "Default Terms & Conditions",
+          "type": "text",
+          "required": false,
+          "description": "Default terms for new quotes"
+        },
+        {
+          "id": "settings_quote_validity_days",
+          "name": "quote_validity_days",
+          "label": "Default Quote Validity (days)",
+          "type": "number",
+          "required": false,
+          "description": "Default number of days quotes are valid",
+          "defaultValue": 30
+        },
+        {
+          "id": "settings_company_name",
+          "name": "company_name",
+          "label": "Company Name",
+          "type": "text",
+          "required": false,
+          "description": "Company display name on quotes"
+        },
+        {
+          "id": "settings_company_email",
+          "name": "company_email",
+          "label": "Company Email",
+          "type": "text",
+          "required": false,
+          "description": "Company contact email"
+        },
+        {
+          "id": "settings_company_phone",
+          "name": "company_phone",
+          "label": "Company Phone",
+          "type": "text",
+          "required": false,
+          "description": "Company phone number"
+        },
+        {
+          "id": "settings_company_website",
+          "name": "company_website",
+          "label": "Company Website",
+          "type": "text",
+          "required": false,
+          "description": "Company website URL"
+        },
+        {
+          "id": "settings_company_address",
+          "name": "company_address",
+          "label": "Company Address",
+          "type": "text",
+          "required": false,
+          "description": "Company postal address"
+        },
+        {
+          "id": "settings_company_city",
+          "name": "company_city",
+          "label": "Company City",
+          "type": "text",
+          "required": false,
+          "description": "Company city"
+        },
+        {
+          "id": "settings_company_postal_code",
+          "name": "company_postal_code",
+          "label": "Company Postal Code",
+          "type": "text",
+          "required": false,
+          "description": "Company postal/zip code"
+        },
+        {
+          "id": "settings_company_country_code",
+          "name": "company_country_code",
+          "label": "Company Country Code",
+          "type": "text",
+          "required": false,
+          "description": "ISO 3166-1 alpha-2 country code (e.g., BE, FR, DE)",
+          "defaultValue": "BE"
+        },
+        {
+          "id": "settings_company_vat_number",
+          "name": "company_vat_number",
+          "label": "Company VAT Number",
+          "type": "text",
+          "required": false,
+          "description": "Company VAT Number (e.g., BE0123456789)"
+        },
+        {
+          "id": "settings_company_state",
+          "name": "company_state",
+          "label": "State/Province/Region",
+          "type": "text",
+          "required": false,
+          "description": "State, province, or region (required for US, Canada, Australia, etc.)"
+        },
+        {
+          "id": "settings_company_registration_numbers",
+          "name": "company_registration_numbers",
+          "label": "Registration Numbers",
+          "type": "json",
+          "required": false,
+          "description": "Country-specific registration numbers as key-value pairs (e.g., BCE/KBO, SIREN/SIRET, KVK)"
+        },
+        {
+          "id": "settings_bank_details",
+          "name": "bank_details",
+          "label": "Bank Details",
+          "type": "json",
+          "required": false,
+          "description": "Flexible bank details for any country (IBAN/BIC for SEPA, routing/account for US, sort code for UK)"
+        },
+        {
+          "id": "settings_default_payment_days",
+          "name": "default_payment_days",
+          "label": "Default Payment Terms (days)",
+          "type": "number",
+          "required": false,
+          "description": "Default number of days for invoice payment terms",
+          "defaultValue": 30
+        },
+        {
+          "id": "settings_company_logo",
+          "name": "company_logo",
+          "label": "Company Logo",
+          "type": "file",
+          "required": false,
+          "description": "Company logo image for quotes"
+        },
+        {
+          "id": "settings_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Settings creation timestamp"
+        },
+        {
+          "id": "settings_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Last update timestamp"
+        }
+      ]
+    },
+    {
+      "entityName": "invoice",
+      "fields": [
+        {
+          "id": "invoice_number",
+          "name": "invoice_number",
+          "label": "Invoice Number",
+          "type": "text",
+          "required": true,
+          "description": "Sequential invoice number (INV-YYYYMMDD-NNNN format)"
+        },
+        {
+          "id": "invoice_quote_id",
+          "name": "quote_id",
+          "label": "Source Quote",
+          "type": "entity_link",
+          "required": false,
+          "description": "Original quote this invoice was generated from",
+          "references": {
+            "entity": "quote",
+            "field": "id"
+          }
+        },
+        {
+          "id": "invoice_date",
+          "name": "invoice_date",
+          "label": "Invoice Date",
+          "type": "date",
+          "required": true,
+          "description": "Date the invoice was issued"
+        },
+        {
+          "id": "invoice_due_date",
+          "name": "due_date",
+          "label": "Due Date",
+          "type": "date",
+          "required": true,
+          "description": "Payment due date"
+        },
+        {
+          "id": "invoice_client_id",
+          "name": "client_id",
+          "label": "Client",
+          "type": "entity_link",
+          "required": true,
+          "description": "Client from core User entity",
+          "references": {
+            "entity": "User",
+            "field": "id"
+          }
+        },
+        {
+          "id": "invoice_client_vat_number",
+          "name": "client_vat_number",
+          "label": "Client VAT Number",
+          "type": "text",
+          "required": false,
+          "description": "Client VAT number (required for B2B invoices)"
+        },
+        {
+          "id": "invoice_client_company_name",
+          "name": "client_company_name",
+          "label": "Client Company Name",
+          "type": "text",
+          "required": true,
+          "description": "Client company or business name"
+        },
+        {
+          "id": "invoice_client_street",
+          "name": "client_street",
+          "label": "Client Street Address",
+          "type": "text",
+          "required": true,
+          "description": "Client street address"
+        },
+        {
+          "id": "invoice_client_city",
+          "name": "client_city",
+          "label": "Client City",
+          "type": "text",
+          "required": true,
+          "description": "Client city"
+        },
+        {
+          "id": "invoice_client_postal_code",
+          "name": "client_postal_code",
+          "label": "Client Postal Code",
+          "type": "text",
+          "required": true,
+          "description": "Client postal/zip code"
+        },
+        {
+          "id": "invoice_client_country_code",
+          "name": "client_country_code",
+          "label": "Client Country",
+          "type": "text",
+          "required": true,
+          "description": "Client country code (e.g., BE, FR, DE)",
+          "defaultValue": "BE"
+        },
+        {
+          "id": "invoice_client_state",
+          "name": "client_state",
+          "label": "Client State/Province",
+          "type": "text",
+          "required": false,
+          "description": "Client state, province, or region"
+        },
+        {
+          "id": "invoice_client_registration_numbers",
+          "name": "client_registration_numbers",
+          "label": "Client Registration Numbers",
+          "type": "json",
+          "required": false,
+          "description": "Client country-specific identifiers"
+        },
+        {
+          "id": "invoice_billing_contact_name",
+          "name": "billing_contact_name",
+          "label": "Billing Contact Name",
+          "type": "text",
+          "required": false,
+          "description": "Name of the person responsible for this invoice"
+        },
+        {
+          "id": "invoice_billing_contact_email",
+          "name": "billing_contact_email",
+          "label": "Billing Contact Email",
+          "type": "text",
+          "required": false,
+          "description": "Email of the person responsible for this invoice"
+        },
+        {
+          "id": "invoice_supply_date",
+          "name": "supply_date",
+          "label": "Date of Supply/Service",
+          "type": "date",
+          "required": false,
+          "description": "Date goods delivered or services performed (EU requirement when different from invoice date)"
+        },
+        {
+          "id": "invoice_document_references",
+          "name": "document_references",
+          "label": "Document References",
+          "type": "json",
+          "required": false,
+          "description": "Additional references (PO number, CIG/CUP for Italy, contract, etc.)"
+        },
+        {
+          "id": "invoice_currency",
+          "name": "currency",
+          "label": "Currency",
+          "type": "text",
+          "required": true,
+          "description": "Invoice currency code",
+          "defaultValue": "EUR"
+        },
+        {
+          "id": "invoice_subtotal",
+          "name": "subtotal",
+          "label": "Subtotal",
+          "type": "number",
+          "required": true,
+          "description": "Invoice subtotal before taxes",
+          "defaultValue": 0
+        },
+        {
+          "id": "invoice_tax_amount",
+          "name": "tax_amount",
+          "label": "Tax Amount",
+          "type": "number",
+          "required": true,
+          "description": "Total tax amount",
+          "defaultValue": 0
+        },
+        {
+          "id": "invoice_total",
+          "name": "total",
+          "label": "Total",
+          "type": "number",
+          "required": true,
+          "description": "Invoice total including taxes",
+          "defaultValue": 0
+        },
+        {
+          "id": "invoice_vat_type",
+          "name": "vat_type",
+          "label": "VAT Type",
+          "type": "text",
+          "required": true,
+          "description": "Type of VAT treatment for this invoice",
+          "validation": {
+            "enum": [
+              "standard",
+              "reverse_charge",
+              "intra_community",
+              "export",
+              "exempt"
+            ]
+          },
+          "defaultValue": "standard"
+        },
+        {
+          "id": "invoice_legal_mention",
+          "name": "legal_mention",
+          "label": "Legal Mention",
+          "type": "text",
+          "required": false,
+          "description": "Required legal text for special VAT cases (e.g., reverse charge mention)"
+        },
+        {
+          "id": "invoice_status",
+          "name": "status",
+          "label": "Status",
+          "type": "text",
+          "required": true,
+          "description": "Invoice payment status",
+          "validation": {
+            "enum": [
+              "draft",
+              "sent",
+              "paid",
+              "overdue",
+              "cancelled"
+            ]
+          },
+          "defaultValue": "draft"
+        },
+        {
+          "id": "invoice_paid_at",
+          "name": "paid_at",
+          "label": "Paid At",
+          "type": "timestamp",
+          "required": false,
+          "description": "Timestamp when invoice was marked as paid"
+        },
+        {
+          "id": "invoice_document_snapshot",
+          "name": "document_snapshot",
+          "label": "Invoice Document Snapshot",
+          "type": "json",
+          "required": false,
+          "description": "Full JSON snapshot of the invoice at creation"
+        },
+        {
+          "id": "invoice_line_items_snapshot",
+          "name": "line_items_snapshot",
+          "label": "Line Items Snapshot",
+          "type": "json",
+          "required": false,
+          "description": "Snapshot of line items at invoice creation"
+        },
+        {
+          "id": "invoice_seller_snapshot",
+          "name": "seller_snapshot",
+          "label": "Seller Snapshot",
+          "type": "json",
+          "required": false,
+          "description": "Snapshot of seller information at invoice creation"
+        },
+        {
+          "id": "invoice_notes",
+          "name": "notes",
+          "label": "Notes",
+          "type": "text",
+          "required": false,
+          "description": "Additional notes on the invoice"
+        },
+        {
+          "id": "invoice_terms",
+          "name": "terms",
+          "label": "Terms & Conditions",
+          "type": "text",
+          "required": false,
+          "description": "Payment terms and conditions"
+        },
+        {
+          "id": "invoice_einvoice_status",
+          "name": "einvoice_status",
+          "label": "E-Invoice Status",
+          "type": "text",
+          "required": false,
+          "description": "Current status of Peppol e-invoice",
+          "validation": {
+            "enum": [
+              "pending",
+              "sent",
+              "failed"
+            ]
+          }
+        },
+        {
+          "id": "invoice_einvoice_document_id",
+          "name": "einvoice_document_id",
+          "label": "E-Invoice Document ID",
+          "type": "text",
+          "required": false,
+          "description": "Dokapi document ID for tracking"
+        },
+        {
+          "id": "invoice_einvoice_sent_at",
+          "name": "einvoice_sent_at",
+          "label": "E-Invoice Sent At",
+          "type": "timestamp",
+          "required": false,
+          "description": "Timestamp when e-invoice was successfully sent"
+        },
+        {
+          "id": "invoice_created_by",
+          "name": "created_by",
+          "label": "Created By",
+          "type": "entity_link",
+          "required": false,
+          "description": "Organization member who created this invoice",
+          "references": {
+            "entity": "system.organization_members",
+            "field": "user_id"
+          }
+        },
+        {
+          "id": "invoice_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Invoice creation timestamp"
+        },
+        {
+          "id": "invoice_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Last update timestamp"
+        }
+      ]
+    },
+    {
+      "entityName": "invoice_line_item",
+      "fields": [
+        {
+          "id": "inv_line_item_invoice_id",
+          "name": "invoice_id",
+          "label": "Invoice",
+          "type": "entity_link",
+          "required": true,
+          "description": "Associated invoice",
+          "references": {
+            "entity": "invoice",
+            "field": "id"
+          }
+        },
+        {
+          "id": "inv_line_item_product_service",
+          "name": "product_service",
+          "label": "Product/Service",
+          "type": "text",
+          "required": true,
+          "description": "Product or service name/description"
+        },
+        {
+          "id": "inv_line_item_description",
+          "name": "description",
+          "label": "Description",
+          "type": "text",
+          "required": false,
+          "description": "Detailed item description"
+        },
+        {
+          "id": "inv_line_item_quantity",
+          "name": "quantity",
+          "label": "Quantity",
+          "type": "number",
+          "required": true,
+          "description": "Item quantity",
+          "defaultValue": 1
+        },
+        {
+          "id": "inv_line_item_unit",
+          "name": "unit",
+          "label": "Unit",
+          "type": "text",
+          "required": false,
+          "description": "Unit of measurement",
+          "defaultValue": "each"
+        },
+        {
+          "id": "inv_line_item_unit_price",
+          "name": "unit_price",
+          "label": "Unit Price",
+          "type": "number",
+          "required": true,
+          "description": "Price per unit (excluding VAT)",
+          "defaultValue": 0
+        },
+        {
+          "id": "inv_line_item_discount_percent",
+          "name": "discount_percent",
+          "label": "Discount (%)",
+          "type": "number",
+          "required": false,
+          "description": "Discount percentage",
+          "defaultValue": 0
+        },
+        {
+          "id": "inv_line_item_tax_rate",
+          "name": "tax_rate",
+          "label": "VAT Rate (%)",
+          "type": "number",
+          "required": true,
+          "description": "VAT rate for this line item (e.g., 21, 12, 6, 0)",
+          "defaultValue": 21
+        },
+        {
+          "id": "inv_line_item_subtotal",
+          "name": "subtotal",
+          "label": "Subtotal",
+          "type": "number",
+          "required": true,
+          "description": "Line item subtotal before VAT",
+          "defaultValue": 0
+        },
+        {
+          "id": "inv_line_item_tax_amount",
+          "name": "tax_amount",
+          "label": "VAT Amount",
+          "type": "number",
+          "required": true,
+          "description": "VAT amount for this line item",
+          "defaultValue": 0
+        },
+        {
+          "id": "inv_line_item_total",
+          "name": "total",
+          "label": "Total",
+          "type": "number",
+          "required": true,
+          "description": "Line item total including VAT",
+          "defaultValue": 0
+        },
+        {
+          "id": "inv_line_item_order",
+          "name": "order_position",
+          "label": "Order Position",
+          "type": "number",
+          "required": false,
+          "description": "Position for ordering line items"
+        },
+        {
+          "id": "inv_line_item_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Line item creation timestamp"
+        },
+        {
+          "id": "inv_line_item_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Last update timestamp"
+        }
+      ]
+    },
+    {
+      "entityName": "invoice_number_sequence",
+      "fields": [
+        {
+          "id": "seq_date_prefix",
+          "name": "date_prefix",
+          "label": "Date Prefix",
+          "type": "text",
+          "required": true,
+          "description": "Date prefix for this sequence (YYYYMMDD format)"
+        },
+        {
+          "id": "seq_last_number",
+          "name": "last_number",
+          "label": "Last Number",
+          "type": "number",
+          "required": true,
+          "description": "Last used invoice number for this date",
+          "defaultValue": 0
+        },
+        {
+          "id": "seq_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Sequence creation timestamp"
+        },
+        {
+          "id": "seq_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Last update timestamp"
+        }
+      ]
+    },
+    {
+      "entityName": "quote_number_sequence",
+      "fields": [
+        {
+          "id": "quote_seq_date_prefix",
+          "name": "date_prefix",
+          "label": "Date Prefix",
+          "type": "text",
+          "required": true,
+          "description": "Date prefix for this sequence (YYYYMMDD format)"
+        },
+        {
+          "id": "quote_seq_last_number",
+          "name": "last_number",
+          "label": "Last Number",
+          "type": "number",
+          "required": true,
+          "description": "Last used quote number for this date",
+          "defaultValue": 0
+        },
+        {
+          "id": "quote_seq_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Sequence creation timestamp"
+        },
+        {
+          "id": "quote_seq_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Last update timestamp"
+        }
+      ]
+    }
+  ]
+}

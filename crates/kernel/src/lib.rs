@@ -1,8 +1,12 @@
 mod error;
+pub mod manifest;
 mod schema;
 
 pub use error::KernelError;
-pub use schema::bootstrap;
+pub use manifest::install_app;
+pub use schema::{bootstrap, bootstrap_with_apps};
+
+use std::path::PathBuf;
 
 use rootcx_postgres_mgmt::PostgresManager;
 use rootcx_shared_types::{KernelStatus, OsStatus, PostgresStatus, ServiceState};
@@ -18,14 +22,22 @@ const KERNEL_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct Kernel {
     pg: PostgresManager,
     pool: Option<PgPool>,
+    /// Path to bundled app manifests (resources/apps/).
+    apps_dir: Option<PathBuf>,
 }
 
 impl Kernel {
     pub fn new(pg: PostgresManager) -> Self {
-        Self { pg, pool: None }
+        Self { pg, pool: None, apps_dir: None }
     }
 
-    /// Boot sequence: init cluster → start postgres → connect → bootstrap schema.
+    /// Set the directory containing bundled app manifests.
+    pub fn with_apps_dir(mut self, apps_dir: PathBuf) -> Self {
+        self.apps_dir = Some(apps_dir);
+        self
+    }
+
+    /// Boot sequence: init cluster → start postgres → connect → bootstrap schema → install apps.
     pub async fn boot(&mut self) -> Result<(), KernelError> {
         info!("kernel boot sequence starting");
 
@@ -46,8 +58,12 @@ impl Kernel {
             .await
             .map_err(KernelError::Database)?;
 
-        // 4. Bootstrap the system schema.
-        schema::bootstrap(&pool).await?;
+        // 4. Bootstrap system schema + install all bundled apps.
+        if let Some(ref apps_dir) = self.apps_dir {
+            schema::bootstrap_with_apps(&pool, apps_dir).await?;
+        } else {
+            schema::bootstrap(&pool).await?;
+        }
 
         self.pool = Some(pool);
         info!("kernel boot complete");

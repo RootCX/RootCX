@@ -1,0 +1,21 @@
+{
+  "id": "views",
+  "name": "Views",
+  "description": "Manage and discover OS Views across all applications",
+  "version": "1.0.0",
+  "type": "system",
+  "category": "System",
+  "icon": "LayoutTemplate",
+  "permissions": ["read", "write"],
+  "dependencies": [],
+  "author": "RootCX",
+  "tags": ["views", "management", "system", "discovery"],
+  "screenshots": [],
+  "features": [
+    "Browse all available OS Views",
+    "View configuration details",
+    "Test views with sample data",
+    "Manage view permissions",
+    "Share views across apps"
+  ]
+}

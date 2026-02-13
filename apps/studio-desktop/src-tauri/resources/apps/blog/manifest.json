@@ -1,0 +1,452 @@
+{
+  "appId": "blog",
+  "name": "Blog",
+  "version": "1.0.0",
+  "description": "Blog content and comments",
+  "routes": [
+    {
+      "path": "/posts",
+      "label": "Articles",
+      "description": "List of all blog posts"
+    },
+    {
+      "path": "/posts/:id",
+      "label": "Edit Article",
+      "entity": "post",
+      "description": "Edit a specific blog post"
+    },
+    {
+      "path": "/create",
+      "label": "New Article",
+      "description": "Create a new blog post"
+    },
+    {
+      "path": "/settings",
+      "label": "Settings",
+      "description": "Blog settings"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "blog.posts.create",
+      "description": "Create blog posts",
+      "category": "write"
+    },
+    {
+      "name": "blog.posts.read",
+      "description": "View blog posts",
+      "category": "read"
+    },
+    {
+      "name": "blog.posts.update",
+      "description": "Edit blog posts",
+      "category": "write"
+    },
+    {
+      "name": "blog.posts.delete",
+      "description": "Delete blog posts",
+      "category": "delete"
+    },
+    {
+      "name": "blog.categories.manage",
+      "description": "Manage blog categories",
+      "category": "write"
+    },
+    {
+      "name": "blog.admin",
+      "description": "Full blog administration",
+      "category": "admin"
+    }
+  ],
+  "publicPages": {
+    "enabled": true,
+    "routes": [
+      {
+        "path": "/[orgName]",
+        "component": "BlogIndexPage"
+      },
+      {
+        "path": "/[orgName]/[postSlug]",
+        "component": "BlogPostPage",
+        "title": "{post.title} | Blog"
+      }
+    ]
+  },
+  "dataContract": [
+    {
+      "entityName": "post",
+      "displayName": "Blog Posts",
+      "recordLabelField": "title",
+      "publicAccess": {
+        "enabled": true,
+        "conditions": [
+          {
+            "field": "status",
+            "operator": "eq",
+            "value": "published"
+          }
+        ]
+      },
+      "fields": [
+        {
+          "id": "post_id",
+          "name": "id",
+          "label": "Post ID",
+          "type": "text",
+          "required": true,
+          "description": "Unique blog post identifier",
+          "isPrimaryKey": true
+        },
+        {
+          "id": "post_slug",
+          "name": "slug",
+          "label": "Slug",
+          "type": "text",
+          "required": true,
+          "description": "URL-friendly identifier",
+          "validation": {
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+            "minLength": 3,
+            "maxLength": 100
+          }
+        },
+        {
+          "id": "post_title",
+          "name": "title",
+          "label": "Title",
+          "type": "text",
+          "required": true,
+          "description": "Blog post title",
+          "validation": {
+            "minLength": 5,
+            "maxLength": 200
+          }
+        },
+        {
+          "id": "post_content",
+          "name": "content",
+          "label": "Content",
+          "type": "text",
+          "required": true,
+          "description": "Blog post content in markdown format",
+          "validation": {
+            "minLength": 50
+          }
+        },
+        {
+          "id": "post_cover_image",
+          "name": "cover_image",
+          "label": "Cover Image",
+          "type": "file",
+          "required": false,
+          "description": "Blog post cover image"
+        },
+        {
+          "id": "post_attachments",
+          "name": "attachments",
+          "label": "Attachments",
+          "type": "file",
+          "required": false,
+          "description": "Images and files attached to the post"
+        },
+        {
+          "id": "post_excerpt",
+          "name": "excerpt",
+          "label": "Excerpt",
+          "type": "text",
+          "required": false,
+          "description": "Short summary of the blog post",
+          "validation": {
+            "maxLength": 300
+          }
+        },
+        {
+          "id": "post_author_id",
+          "name": "author_id",
+          "label": "Author ID",
+          "type": "text",
+          "required": true,
+          "description": "Author user ID"
+        },
+        {
+          "id": "post_category_id",
+          "name": "category_id",
+          "label": "Category",
+          "type": "entity_link",
+          "required": false,
+          "description": "Blog post category",
+          "references": {
+            "entity": "category",
+            "field": "id"
+          }
+        },
+        {
+          "id": "post_tags",
+          "name": "tags",
+          "label": "Tags",
+          "type": "json",
+          "required": false,
+          "description": "Array of tags associated with the post"
+        },
+        {
+          "id": "post_status",
+          "name": "status",
+          "label": "Status",
+          "type": "text",
+          "required": true,
+          "description": "Publication status of the post",
+          "validation": {
+            "enum": [
+              "draft",
+              "published",
+              "archived"
+            ]
+          },
+          "defaultValue": "draft"
+        },
+        {
+          "id": "post_organization_id",
+          "name": "organization_id",
+          "label": "Organization ID",
+          "type": "text",
+          "required": true,
+          "description": "Organization that owns this post"
+        },
+        {
+          "id": "post_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Post creation timestamp"
+        },
+        {
+          "id": "post_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Post last update timestamp"
+        },
+        {
+          "id": "post_published_at",
+          "name": "published_at",
+          "label": "Published At",
+          "type": "timestamp",
+          "required": false,
+          "description": "Post publication timestamp"
+        },
+        {
+          "id": "post_view_count",
+          "name": "view_count",
+          "label": "View Count",
+          "type": "number",
+          "required": false,
+          "description": "Number of times the post has been viewed",
+          "defaultValue": 0
+        }
+      ]
+    },
+    {
+      "entityName": "category",
+      "displayName": "Categories",
+      "recordLabelField": "name",
+      "fields": [
+        {
+          "id": "category_id",
+          "name": "id",
+          "label": "Category ID",
+          "type": "text",
+          "required": true,
+          "description": "Unique category identifier",
+          "isPrimaryKey": true
+        },
+        {
+          "id": "category_name",
+          "name": "name",
+          "label": "Name",
+          "type": "text",
+          "required": true,
+          "description": "Category name",
+          "validation": {
+            "minLength": 2,
+            "maxLength": 50
+          }
+        },
+        {
+          "id": "category_description",
+          "name": "description",
+          "label": "Description",
+          "type": "text",
+          "required": false,
+          "description": "Category description",
+          "validation": {
+            "maxLength": 200
+          }
+        },
+        {
+          "id": "category_color",
+          "name": "color",
+          "label": "Color",
+          "type": "text",
+          "required": false,
+          "description": "Category color in hex format",
+          "validation": {
+            "pattern": "^#[0-9A-Fa-f]{6}$"
+          }
+        },
+        {
+          "id": "category_organization_id",
+          "name": "organization_id",
+          "label": "Organization ID",
+          "type": "text",
+          "required": true,
+          "description": "Organization that owns this category"
+        },
+        {
+          "id": "category_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Category creation timestamp"
+        },
+        {
+          "id": "category_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Category last update timestamp"
+        }
+      ]
+    },
+    {
+      "entityName": "comment",
+      "displayName": "Comments",
+      "recordLabelField": "content",
+      "fields": [
+        {
+          "id": "comment_id",
+          "name": "id",
+          "label": "Comment ID",
+          "type": "text",
+          "required": true,
+          "description": "Unique comment identifier",
+          "isPrimaryKey": true
+        },
+        {
+          "id": "comment_post_id",
+          "name": "post_id",
+          "label": "Post",
+          "type": "entity_link",
+          "required": true,
+          "description": "Associated blog post",
+          "references": {
+            "entity": "post",
+            "field": "id"
+          }
+        },
+        {
+          "id": "comment_author",
+          "name": "author",
+          "label": "Author",
+          "type": "text",
+          "required": true,
+          "description": "Comment author name",
+          "validation": {
+            "minLength": 2,
+            "maxLength": 50
+          }
+        },
+        {
+          "id": "comment_content",
+          "name": "content",
+          "label": "Content",
+          "type": "text",
+          "required": true,
+          "description": "Comment content",
+          "validation": {
+            "minLength": 3,
+            "maxLength": 1000
+          }
+        },
+        {
+          "id": "comment_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Comment creation timestamp"
+        },
+        {
+          "id": "comment_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Comment last update timestamp"
+        }
+      ]
+    },
+    {
+      "entityName": "blog_settings",
+      "displayName": "Settings",
+      "recordLabelField": "title",
+      "publicAccess": {
+        "enabled": true,
+        "conditions": []
+      },
+      "fields": [
+        {
+          "id": "settings_id",
+          "name": "id",
+          "label": "ID",
+          "type": "text",
+          "required": true,
+          "description": "Unique identifier",
+          "isPrimaryKey": true
+        },
+        {
+          "id": "settings_title",
+          "name": "title",
+          "label": "Blog Title",
+          "type": "text",
+          "required": true,
+          "description": "Title of the blog",
+          "defaultValue": "My Blog",
+          "validation": {
+            "maxLength": 100
+          }
+        },
+        {
+          "id": "settings_description",
+          "name": "description",
+          "label": "Description",
+          "type": "text",
+          "required": false,
+          "description": "Description of the blog",
+          "validation": {
+            "maxLength": 500
+          }
+        },
+        {
+          "id": "settings_organization_id",
+          "name": "organization_id",
+          "label": "Organization ID",
+          "type": "text",
+          "required": true,
+          "description": "Organization ID"
+        },
+        {
+          "id": "settings_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Last update timestamp"
+        }
+      ]
+    }
+  ]
+}

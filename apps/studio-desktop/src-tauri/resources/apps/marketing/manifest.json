@@ -1,0 +1,312 @@
+{
+  "appId": "marketing",
+  "name": "Marketing Automation",
+  "version": "0.0.1",
+  "description": "Create reusable marketing templates to support email and messaging campaigns without leaving RootCX.",
+  "routes": [
+    {
+      "path": "/campaigns",
+      "label": "Campaigns",
+      "description": "List of all campaigns"
+    },
+    {
+      "path": "/campaigns/new",
+      "label": "New Campaign",
+      "description": "Create a new campaign"
+    },
+    {
+      "path": "/campaigns/:id",
+      "label": "Campaign Details",
+      "entity": "campaign",
+      "description": "View a specific campaign"
+    },
+    {
+      "path": "/campaigns/:id/edit",
+      "label": "Edit Campaign",
+      "entity": "campaign",
+      "description": "Edit a specific campaign"
+    },
+    {
+      "path": "/audience",
+      "label": "Audience",
+      "description": "Audience management"
+    },
+    {
+      "path": "/lists/:id",
+      "label": "List Details",
+      "entity": "list",
+      "description": "View a specific contact list"
+    },
+    {
+      "path": "/settings",
+      "label": "Settings",
+      "description": "Marketing settings"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "marketing.list.create",
+      "description": "Create marketing lists",
+      "category": "write"
+    },
+    {
+      "name": "marketing.list.read",
+      "description": "View marketing lists",
+      "category": "read"
+    },
+    {
+      "name": "marketing.list.update",
+      "description": "Edit marketing lists",
+      "category": "write"
+    },
+    {
+      "name": "marketing.list.delete",
+      "description": "Delete marketing lists",
+      "category": "delete"
+    },
+    {
+      "name": "marketing.campaign.create",
+      "description": "Create marketing campaigns",
+      "category": "write"
+    },
+    {
+      "name": "marketing.campaign.read",
+      "description": "View marketing campaigns",
+      "category": "read"
+    },
+    {
+      "name": "marketing.campaign.update",
+      "description": "Edit marketing campaigns",
+      "category": "write"
+    },
+    {
+      "name": "marketing.campaign.delete",
+      "description": "Delete marketing campaigns",
+      "category": "delete"
+    },
+    {
+      "name": "marketing.settings.manage",
+      "description": "Manage marketing automation settings",
+      "category": "admin"
+    }
+  ],
+  "dataContract": [
+    {
+      "entityName": "list",
+      "recordLabelField": "name",
+      "fields": [
+        {
+          "id": "list_id",
+          "name": "id",
+          "label": "List ID",
+          "type": "text",
+          "required": true,
+          "description": "Unique identifier for the list",
+          "isPrimaryKey": true
+        },
+        {
+          "id": "list_name",
+          "name": "name",
+          "label": "List Name",
+          "type": "text",
+          "required": true,
+          "description": "Human friendly name of the list"
+        },
+        {
+          "id": "list_description",
+          "name": "description",
+          "label": "Description",
+          "type": "text",
+          "required": false,
+          "description": "Optional description of the list purpose"
+        },
+        {
+          "id": "list_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Timestamp when the list was created"
+        },
+        {
+          "id": "list_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Timestamp when the list was last updated"
+        },
+        {
+          "id": "list_members",
+          "name": "members",
+          "label": "Members",
+          "type": "entity_link",
+          "required": false,
+          "description": "Users that belong to this list",
+          "references": {
+            "entity": "system.core.User",
+            "field": "id"
+          },
+          "relationshipType": "many_to_many"
+        }
+      ]
+    },
+    {
+      "entityName": "campaign",
+      "recordLabelField": "name",
+      "fields": [
+        {
+          "id": "campaign_id",
+          "name": "id",
+          "label": "Campaign ID",
+          "type": "text",
+          "required": true,
+          "description": "Unique identifier for the campaign",
+          "isPrimaryKey": true
+        },
+        {
+          "id": "campaign_name",
+          "name": "name",
+          "label": "Campaign Name",
+          "type": "text",
+          "required": true,
+          "description": "Human friendly name of the campaign"
+        },
+        {
+          "id": "campaign_description",
+          "name": "description",
+          "label": "Description",
+          "type": "text",
+          "required": false,
+          "description": "Optional description of the campaign purpose"
+        },
+        {
+          "id": "campaign_status",
+          "name": "status",
+          "label": "Status",
+          "type": "select",
+          "required": true,
+          "description": "Current status of the campaign",
+          "defaultValue": "draft",
+          "validation": {
+            "enum": [
+              "draft",
+              "scheduled",
+              "sending",
+              "sent",
+              "archived"
+            ]
+          }
+        },
+        {
+          "id": "campaign_subject",
+          "name": "subject",
+          "label": "Email Subject",
+          "type": "text",
+          "required": true,
+          "description": "Subject line for the email campaign"
+        },
+        {
+          "id": "campaign_body",
+          "name": "body",
+          "label": "Email Body",
+          "type": "text",
+          "required": true,
+          "description": "Content body of the email (HTML or text)"
+        },
+        {
+          "id": "campaign_preview_text",
+          "name": "preview_text",
+          "label": "Preview Text",
+          "type": "text",
+          "required": false,
+          "description": "Short teaser copy for inbox previews"
+        },
+        {
+          "id": "campaign_list_id",
+          "name": "list_id",
+          "label": "List",
+          "type": "entity_link",
+          "required": true,
+          "description": "The list of recipients for this campaign",
+          "references": {
+            "entity": "marketing.list",
+            "field": "id"
+          }
+        },
+        {
+          "id": "campaign_scheduled_at",
+          "name": "scheduled_at",
+          "label": "Scheduled At",
+          "type": "timestamp",
+          "required": false,
+          "description": "Timestamp when the campaign is scheduled to be sent"
+        },
+        {
+          "id": "campaign_sent_at",
+          "name": "sent_at",
+          "label": "Sent At",
+          "type": "timestamp",
+          "required": false,
+          "description": "Timestamp when the campaign was actually sent"
+        },
+        {
+          "id": "campaign_recipient_count",
+          "name": "recipient_count",
+          "label": "Recipient Count",
+          "type": "number",
+          "required": false,
+          "description": "Number of recipients in the campaign"
+        },
+        {
+          "id": "campaign_created_by",
+          "name": "created_by",
+          "label": "Created By",
+          "type": "entity_link",
+          "required": false,
+          "description": "Organization member who created the campaign",
+          "references": {
+            "entity": "system.organization_members",
+            "field": "user_id"
+          }
+        },
+        {
+          "id": "campaign_updated_by",
+          "name": "updated_by",
+          "label": "Updated By",
+          "type": "entity_link",
+          "required": false,
+          "description": "Organization member who last updated the campaign",
+          "references": {
+            "entity": "system.organization_members",
+            "field": "user_id"
+          }
+        },
+        {
+          "id": "campaign_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Timestamp when the campaign was created"
+        },
+        {
+          "id": "campaign_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Timestamp when the campaign was last updated"
+        }
+      ],
+      "relationships": [
+        {
+          "type": "hasOne",
+          "targetEntity": "marketing.list",
+          "foreignKey": "list_id",
+          "description": "The list of recipients for this campaign"
+        }
+      ]
+    }
+  ]
+}

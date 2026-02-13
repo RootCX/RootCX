@@ -1,0 +1,415 @@
+{
+  "appId": "taskmanager",
+  "name": "Task Manager",
+  "version": "0.0.1",
+  "description": "RootCX Task Manager helps teams organize their work with clarity and precision. Everyone knows what needs to be done, nothing gets forgotten and deadlines are always under control. Tasks are not just isolated checklists, they can reference the real context from across your other applications such as tickets, documents or customer records. This makes planning more reliable, execution smoother and collaboration effortless. With RootCX Task Manager, teams stay aligned and deliver on time with confidence.",
+  "routes": [
+    {
+      "path": "/dashboard",
+      "label": "Dashboard",
+      "description": "Task overview and statistics"
+    },
+    {
+      "path": "/tasks",
+      "label": "Tasks",
+      "description": "List of all tasks"
+    },
+    {
+      "path": "/tasks/:taskId",
+      "label": "Task Details",
+      "entity": "task",
+      "description": "View a specific task"
+    },
+    {
+      "path": "/boards",
+      "label": "Boards",
+      "description": "Kanban boards"
+    },
+    {
+      "path": "/boards/:boardId",
+      "label": "Board View",
+      "entity": "board",
+      "description": "View a specific board"
+    },
+    {
+      "path": "/boards/:boardId/tasks/:taskId",
+      "label": "Task Details",
+      "entity": "task",
+      "description": "View a task within a board"
+    },
+    {
+      "path": "/calendar",
+      "label": "Calendar",
+      "description": "Calendar view of tasks"
+    },
+    {
+      "path": "/calendar/tasks/:taskId",
+      "label": "Task Details",
+      "entity": "task",
+      "description": "View a task from calendar"
+    }
+  ],
+  "permissions": [
+    {
+      "name": "taskmanager.task.create",
+      "description": "Create tasks",
+      "category": "write"
+    },
+    {
+      "name": "taskmanager.task.read",
+      "description": "View tasks",
+      "category": "read"
+    },
+    {
+      "name": "taskmanager.task.update",
+      "description": "Edit tasks",
+      "category": "write"
+    },
+    {
+      "name": "taskmanager.task.delete",
+      "description": "Delete tasks",
+      "category": "delete"
+    },
+    {
+      "name": "taskmanager.task.assign",
+      "description": "Assign tasks to users",
+      "category": "write"
+    },
+    {
+      "name": "taskmanager.settings.manage",
+      "description": "Manage Task Manager settings",
+      "category": "admin"
+    }
+  ],
+  "dataContract": [
+    {
+      "entityName": "task",
+      "unique_fields": [
+        "title"
+      ],
+      "fields": [
+        {
+          "id": "task_id",
+          "name": "id",
+          "label": "Task ID",
+          "type": "text",
+          "required": true,
+          "description": "Unique task identifier",
+          "isPrimaryKey": true
+        },
+        {
+          "id": "task_title",
+          "name": "title",
+          "label": "Title",
+          "type": "text",
+          "required": true,
+          "description": "Task title",
+          "validation": {
+            "maxLength": 255,
+            "minLength": 1
+          }
+        },
+        {
+          "id": "task_description",
+          "name": "description",
+          "label": "Description",
+          "type": "text",
+          "required": false,
+          "description": "Detailed task description"
+        },
+        {
+          "id": "task_status",
+          "name": "status",
+          "label": "Status",
+          "type": "text",
+          "required": true,
+          "description": "Task completion status",
+          "validation": {
+            "enum": [
+              "pending",
+              "in_progress",
+              "completed",
+              "cancelled"
+            ]
+          },
+          "defaultValue": "pending"
+        },
+        {
+          "id": "task_priority",
+          "name": "priority",
+          "label": "Priority",
+          "type": "text",
+          "required": true,
+          "description": "Task priority level",
+          "validation": {
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "urgent"
+            ]
+          },
+          "defaultValue": "medium"
+        },
+        {
+          "id": "task_assigned_to",
+          "name": "assigned_to",
+          "label": "Assigned To",
+          "type": "entity_link",
+          "required": false,
+          "description": "User assigned to the task",
+          "references": {
+            "entity": "system.organization_members",
+            "field": "user_id"
+          }
+        },
+        {
+          "id": "task_due_date",
+          "name": "due_date",
+          "label": "Due Date",
+          "type": "date",
+          "required": false,
+          "description": "Task due date"
+        },
+        {
+          "id": "task_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Task creation timestamp"
+        },
+        {
+          "id": "task_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Last update timestamp"
+        },
+        {
+          "id": "task_order_position",
+          "name": "order_position",
+          "label": "Order Position",
+          "type": "number",
+          "required": false,
+          "description": "Position for ordering tasks within a status"
+        },
+        {
+          "id": "task_list_id",
+          "name": "list_id",
+          "label": "List",
+          "type": "entity_link",
+          "required": false,
+          "description": "Custom list this task belongs to",
+          "references": {
+            "entity": "task_list",
+            "field": "id"
+          }
+        }
+      ]
+    },
+    {
+      "entityName": "board",
+      "fields": [
+        {
+          "id": "board_id",
+          "name": "id",
+          "label": "Board ID",
+          "type": "text",
+          "required": true,
+          "description": "Unique board identifier",
+          "isPrimaryKey": true
+        },
+        {
+          "id": "board_name",
+          "name": "name",
+          "label": "Name",
+          "type": "text",
+          "required": true,
+          "description": "Board display name",
+          "validation": {
+            "maxLength": 255,
+            "minLength": 1
+          }
+        },
+        {
+          "id": "board_description",
+          "name": "description",
+          "label": "Description",
+          "type": "text",
+          "required": false,
+          "description": "Board description"
+        },
+        {
+          "id": "board_statuses",
+          "name": "statuses",
+          "label": "Statuses",
+          "type": "json",
+          "required": true,
+          "description": "Configurable list of statuses for this board in order",
+          "defaultValue": [
+            {
+              "key": "pending",
+              "label": "To Do",
+              "order": 1,
+              "color": "gray"
+            },
+            {
+              "key": "in_progress",
+              "label": "In Progress",
+              "order": 2,
+              "color": "blue"
+            },
+            {
+              "key": "completed",
+              "label": "Done",
+              "order": 3,
+              "color": "green"
+            }
+          ]
+        },
+        {
+          "id": "board_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Board creation timestamp"
+        },
+        {
+          "id": "board_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Last update timestamp"
+        }
+      ]
+    },
+    {
+      "entityName": "task_board",
+      "fields": [
+        {
+          "id": "task_board_id",
+          "name": "id",
+          "label": "ID",
+          "type": "text",
+          "required": true,
+          "description": "Unique identifier",
+          "isPrimaryKey": true
+        },
+        {
+          "id": "task_board_task_id",
+          "name": "task_id",
+          "label": "Task",
+          "type": "entity_link",
+          "required": true,
+          "description": "Task linked to the board",
+          "references": {
+            "entity": "task",
+            "field": "id"
+          }
+        },
+        {
+          "id": "task_board_board_id",
+          "name": "board_id",
+          "label": "Board",
+          "type": "entity_link",
+          "required": true,
+          "description": "Board containing the task",
+          "references": {
+            "entity": "board",
+            "field": "id"
+          }
+        },
+        {
+          "id": "task_board_order_position",
+          "name": "order_position",
+          "label": "Order Position",
+          "type": "number",
+          "required": false,
+          "description": "Position within the board column for ordering"
+        },
+        {
+          "id": "task_board_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Association creation timestamp"
+        },
+        {
+          "id": "task_board_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Last update timestamp"
+        }
+      ]
+    },
+    {
+      "entityName": "task_list",
+      "fields": [
+        {
+          "id": "task_list_id",
+          "name": "id",
+          "label": "List ID",
+          "type": "text",
+          "required": true,
+          "description": "Unique list identifier",
+          "isPrimaryKey": true
+        },
+        {
+          "id": "task_list_board_id",
+          "name": "board_id",
+          "label": "Board",
+          "type": "entity_link",
+          "required": true,
+          "description": "Board this list belongs to",
+          "references": {
+            "entity": "board",
+            "field": "id"
+          }
+        },
+        {
+          "id": "task_list_name",
+          "name": "name",
+          "label": "Name",
+          "type": "text",
+          "required": true,
+          "description": "List display name",
+          "validation": {
+            "maxLength": 255
+          },
+          "defaultValue": ""
+        },
+        {
+          "id": "task_list_order",
+          "name": "order_position",
+          "label": "Order",
+          "type": "number",
+          "required": true,
+          "description": "Position for ordering lists within a board"
+        },
+        {
+          "id": "task_list_created_at",
+          "name": "created_at",
+          "label": "Created At",
+          "type": "timestamp",
+          "required": true,
+          "description": "List creation timestamp"
+        },
+        {
+          "id": "task_list_updated_at",
+          "name": "updated_at",
+          "label": "Updated At",
+          "type": "timestamp",
+          "required": true,
+          "description": "Last update timestamp"
+        }
+      ]
+    }
+  ]
+}
