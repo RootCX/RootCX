@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useOsStatus } from "./hooks/useOsStatus";
 import { helloManifest } from "./manifests/hello";
+import Forge from "./components/Forge";
 import type { ServiceState, InstalledApp } from "./types";
 import "./App.css";
 
@@ -154,6 +155,16 @@ export default function App() {
           ) : (
             <p className="no-apps">No apps installed</p>
           )}
+        </section>
+      )}
+
+      {isOnline && status?.forge.state === "online" && (
+        <section className="apps-section">
+          <div className="section-header">
+            <h2>AI Forge</h2>
+            <Badge label="Status" state={status.forge.state} />
+          </div>
+          <Forge projectId="studio-default" />
         </section>
       )}
     </div>

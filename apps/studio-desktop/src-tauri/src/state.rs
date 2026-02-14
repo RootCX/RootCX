@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rootcx_kernel::Kernel;
+use rootcx_kernel::{ForgeManager, Kernel};
 use rootcx_postgres_mgmt::{data_base_dir, PostgresManager};
 use rootcx_shared_types::OsStatus;
 use sqlx::PgPool;
@@ -40,8 +40,15 @@ impl AppState {
         let pg = PostgresManager::new(bin_dir, data_dir, PG_PORT)
             .with_lib_dir(lib_dir);
 
+        let mut kernel = Kernel::new(pg);
+
+        // Try to set up forge sidecar
+        if let Some(forge) = resolve_forge(app) {
+            kernel = kernel.with_forge(forge);
+        }
+
         Self {
-            kernel: Arc::new(Mutex::new(Kernel::new(pg))),
+            kernel: Arc::new(Mutex::new(kernel)),
         }
     }
 
@@ -89,6 +96,56 @@ fn resolve_pg_paths(app: &tauri::App) -> (PathBuf, PathBuf) {
         let bin_dir = pg_root.join("bin");
         let lib_dir = pg_root.join("lib");
         (bin_dir, lib_dir)
+    }
+}
+
+/// Resolve the AI Forge sidecar — dev mode uses `python3 -m ai_forge`,
+/// release mode uses a bundled binary.
+fn resolve_forge(app: &tauri::App) -> Option<ForgeManager> {
+    #[cfg(debug_assertions)]
+    {
+        let _ = app;
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        // packages/ai-forge lives three levels up from src-tauri
+        // src-tauri -> studio-desktop -> apps -> rootCX2
+        let ai_forge_dir = manifest_dir
+            .parent()?
+            .parent()?
+            .parent()?
+            .join("packages")
+            .join("ai-forge");
+
+        if ai_forge_dir.join("src").join("ai_forge").exists() {
+            // Prefer the project's venv Python if it exists
+            let venv_python = ai_forge_dir.join(".venv").join("bin").join("python3");
+            let python = if venv_python.exists() {
+                venv_python.display().to_string()
+            } else {
+                "python3".to_string()
+            };
+            info!(dir = %ai_forge_dir.display(), python = %python, "dev-mode forge source found");
+            return Some(ForgeManager::new_dev(&python, ai_forge_dir, PG_PORT));
+        }
+
+        info!("forge source not found, AI features disabled");
+        return None;
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        use tauri::Manager;
+        let resource_dir = app
+            .path()
+            .resource_dir()
+            .expect("failed to resolve resource directory");
+        let binary = resource_dir.join("resources").join("forge").join("ai-forge");
+        if binary.exists() {
+            info!(path = %binary.display(), "forge binary found");
+            Some(ForgeManager::new_binary(binary, PG_PORT))
+        } else {
+            info!(path = %binary.display(), "forge binary not found, AI features disabled");
+            None
+        }
     }
 }
 

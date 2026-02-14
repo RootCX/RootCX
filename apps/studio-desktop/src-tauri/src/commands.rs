@@ -1,4 +1,4 @@
-use rootcx_shared_types::{AppManifest, InstalledApp, OsStatus};
+use rootcx_shared_types::{AppManifest, ForgeStatus, InstalledApp, OsStatus};
 use tauri::State;
 
 use crate::state::AppState;
@@ -44,6 +44,13 @@ pub async fn install_app(
         .map_err(|e| e.to_string())?;
 
     Ok(format!("app '{}' installed successfully", manifest.app_id))
+}
+
+/// Returns the AI Forge sidecar status.
+#[tauri::command]
+pub async fn get_forge_status(state: State<'_, AppState>) -> Result<ForgeStatus, String> {
+    let status = state.status().await;
+    Ok(status.forge)
 }
 
 /// List all installed apps.

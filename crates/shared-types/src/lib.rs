@@ -6,6 +6,13 @@ use serde_json::Value as JsonValue;
 pub struct OsStatus {
     pub kernel: KernelStatus,
     pub postgres: PostgresStatus,
+    pub forge: ForgeStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForgeStatus {
+    pub state: ServiceState,
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

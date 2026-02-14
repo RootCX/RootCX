@@ -24,6 +24,22 @@ Thumbs.db
 *.swp
 *.swo
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+packages/ai-forge/build/
+packages/ai-forge/dist/
+
+# AI Forge sidecar binary
+apps/studio-desktop/src-tauri/resources/forge/
+
 # Env
 .env
 .env.*

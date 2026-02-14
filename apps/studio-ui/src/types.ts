@@ -2,6 +2,12 @@
 export interface OsStatus {
   kernel: KernelStatus;
   postgres: PostgresStatus;
+  forge: ForgeStatus;
+}
+
+export interface ForgeStatus {
+  state: ServiceState;
+  port: number | null;
 }
 
 export interface KernelStatus {
