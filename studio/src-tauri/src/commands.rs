@@ -40,8 +40,6 @@ pub async fn list_apps(state: State<'_, AppState>) -> Result<Vec<InstalledApp>, 
     state.list_installed_apps().await
 }
 
-// ── App Runner ──────────────────────────────────────
-
 #[derive(Serialize)]
 pub struct AppLogsResult {
     lines: Vec<String>,

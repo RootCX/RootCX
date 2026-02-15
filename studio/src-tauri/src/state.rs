@@ -12,10 +12,6 @@ use tracing::{info, warn};
 const PG_PORT: u16 = 5480;
 const DAEMON_URL: &str = "http://localhost:9100";
 
-/// Shared application state managed by Tauri.
-///
-/// Studio talks to the Runtime daemon over HTTP via `RuntimeClient`.
-/// Forge sidecar and AppRunner are managed locally (Studio-only concerns).
 #[derive(Clone)]
 pub struct AppState {
     client: RuntimeClient,
@@ -35,13 +31,11 @@ impl AppState {
     }
 
     pub async fn boot(&self) -> Result<(), String> {
-        // Wait for the Runtime daemon to be available
         if !self.client.is_available().await {
             return Err(format!("runtime daemon not reachable at {DAEMON_URL}"));
         }
         info!("connected to runtime daemon at {DAEMON_URL}");
 
-        // Start forge sidecar (non-fatal)
         if let Some(ref forge) = self.forge {
             if let Err(e) = forge.lock().await.start().await {
                 warn!("forge sidecar start failed (non-fatal): {e}");
@@ -66,7 +60,6 @@ impl AppState {
             .await
             .unwrap_or_else(|_| OsStatus::offline());
 
-        // Overlay forge status (managed by Studio, not the daemon)
         if let Some(ref forge) = self.forge {
             let running = forge.lock().await.is_running().await;
             status.forge = ForgeStatus {
@@ -85,8 +78,6 @@ impl AppState {
     pub async fn list_installed_apps(&self) -> Result<Vec<InstalledApp>, String> {
         self.client.list_apps().await.map_err(|e| e.to_string())
     }
-
-    // ── App Runner (Studio-only) ─────────────────────────
 
     pub async fn run_app(&self, project_path: String) -> Result<(), String> {
         {
@@ -131,7 +122,6 @@ impl AppState {
     }
 }
 
-/// Resolve the AI Forge sidecar.
 fn resolve_forge(_app: &tauri::App) -> Option<ForgeManager> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let ai_forge_dir = manifest_dir.parent()?.parent()?.join("forge");

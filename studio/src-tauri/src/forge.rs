@@ -10,10 +10,6 @@ const HEALTH_URL: &str = "http://127.0.0.1:3100/health";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Manages the AI Forge sidecar process.
-///
-/// Supports two launch modes:
-/// - **Binary** (production): spawns a compiled PyInstaller binary.
-/// - **Dev** (debug): spawns `python -m ai_forge` from the source tree.
 pub struct ForgeManager {
     command: Vec<String>,
     working_dir: Option<PathBuf>,
@@ -49,20 +45,6 @@ impl ForgeManager {
                 if !health_check().await {
                     break;
                 }
-            }
-        }
-
-        // In binary mode, check the binary exists
-        if self.working_dir.is_none() {
-            let binary = PathBuf::from(&self.command[0]);
-            if !binary.exists() {
-                warn!(
-                    path = %binary.display(),
-                    "forge binary not found, skipping sidecar start"
-                );
-                return Err(ForgeError::BinaryNotFound(
-                    binary.display().to_string(),
-                ));
             }
         }
 
@@ -210,9 +192,6 @@ async fn kill_listeners_on_port(port: u16) {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ForgeError {
-    #[error("forge binary not found: {0}")]
-    BinaryNotFound(String),
-
     #[error("failed to spawn forge sidecar: {0}")]
     SpawnFailed(String),
 }

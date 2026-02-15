@@ -13,26 +13,18 @@ use rootcx_shared_types::{AppManifest, InstalledApp, OsStatus};
 
 pub type SharedRuntime = Arc<Mutex<Runtime>>;
 
-// ── Helpers ─────────────────────────────────────────
-
 fn require_pool(runtime: &Runtime) -> Result<PgPool, ApiError> {
     runtime.pool().cloned().ok_or(ApiError::NotReady)
 }
-
-// ── Health ──────────────────────────────────────────
 
 pub async fn health() -> Json<JsonValue> {
     Json(json!({ "status": "ok" }))
 }
 
-// ── Status ──────────────────────────────────────────
-
 pub async fn get_status(State(rt): State<SharedRuntime>) -> Result<Json<OsStatus>, ApiError> {
     let runtime = rt.lock().await;
     Ok(Json(runtime.status().await))
 }
-
-// ── Apps ────────────────────────────────────────────
 
 pub async fn install_app(
     State(rt): State<SharedRuntime>,
@@ -40,7 +32,7 @@ pub async fn install_app(
 ) -> Result<Json<JsonValue>, ApiError> {
     let runtime = rt.lock().await;
     let pool = require_pool(&runtime)?;
-    crate::install_app(&pool, &manifest).await?;
+    crate::manifest::install_app(&pool, &manifest).await?;
     Ok(Json(json!({
         "message": format!("app '{}' installed successfully", manifest.app_id)
     })))
@@ -96,11 +88,9 @@ pub async fn uninstall_app(
 ) -> Result<Json<JsonValue>, ApiError> {
     let runtime = rt.lock().await;
     let pool = require_pool(&runtime)?;
-    crate::uninstall_app(&pool, &app_id).await?;
+    crate::manifest::uninstall_app(&pool, &app_id).await?;
     Ok(Json(json!({ "message": format!("app '{}' uninstalled", app_id) })))
 }
-
-// ── Collections CRUD ────────────────────────────────
 
 pub async fn list_records(
     State(rt): State<SharedRuntime>,
@@ -153,7 +143,6 @@ pub async fn create_record(
         table,
     );
 
-    // Build the query with bindings
     let mut q = sqlx::query_as::<_, (JsonValue,)>(&query);
     for val in &values {
         q = bind_json_value(q, val);
@@ -211,7 +200,6 @@ pub async fn update_record(
         values.push(val.clone());
     }
 
-    // Always update the updated_at timestamp
     set_clauses.push("\"updated_at\" = now()".to_string());
 
     let id_placeholder = format!("${}", values.len() + 1);
@@ -261,9 +249,6 @@ pub async fn delete_record(
     Ok(Json(json!({ "message": format!("record '{}' deleted", id) })))
 }
 
-// ── Bind helper ─────────────────────────────────────
-
-/// Bind a serde_json::Value to a sqlx query, choosing the right Postgres type.
 fn bind_json_value<'q>(
     q: sqlx::query::QueryAs<'q, sqlx::Postgres, (JsonValue,), sqlx::postgres::PgArguments>,
     val: &'q JsonValue,

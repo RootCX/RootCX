@@ -59,20 +59,6 @@ pub enum ServiceState {
     Error,
 }
 
-impl std::fmt::Display for ServiceState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Online => write!(f, "online"),
-            Self::Offline => write!(f, "offline"),
-            Self::Starting => write!(f, "starting"),
-            Self::Stopping => write!(f, "stopping"),
-            Self::Error => write!(f, "error"),
-        }
-    }
-}
-
-// ── App Manifest Types ──────────────────────────────────────────────
-
 /// Root structure of an app's manifest.json.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

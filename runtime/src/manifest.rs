@@ -6,13 +6,7 @@ use tracing::info;
 use crate::RuntimeError;
 use rootcx_shared_types::{AppManifest, EntityContract};
 
-// ── Public API ──────────────────────────────────────────────────────
-
-/// Install an app by creating real SQL tables from its manifest dataContract.
-///
-/// For each entity: creates a schema per app, a table per entity, with proper
-/// column types, constraints, indexes, and intra-app foreign keys.
-///
+/// Install an app: create schema, tables, indexes, and FKs from its manifest.
 /// Idempotent — uses `IF NOT EXISTS` throughout.
 pub async fn install_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), RuntimeError> {
     let app_id = &manifest.app_id;
@@ -92,8 +86,6 @@ pub async fn uninstall_app(pool: &PgPool, app_id: &str) -> Result<(), RuntimeErr
     info!(app = %app_id, "app uninstalled");
     Ok(())
 }
-
-// ── Pure SQL Generation (no DB, fully testable) ─────────────────────
 
 /// Generate a `CREATE TABLE IF NOT EXISTS` statement from an entity contract.
 fn generate_create_table(
@@ -307,7 +299,7 @@ fn json_to_sql_default(val: &serde_json::Value, pg_type: &str) -> Option<String>
     }
 }
 
-/// Quote a SQL identifier. Only allows alphanumeric and underscore.
+/// Quote a SQL identifier (alphanumeric + underscore only).
 pub fn quote_ident(ident: &str) -> String {
     let sanitized: String = ident
         .chars()
@@ -315,8 +307,6 @@ pub fn quote_ident(ident: &str) -> String {
         .collect();
     format!("\"{}\"", sanitized)
 }
-
-// ── Private: DB-only helpers ────────────────────────────────────────
 
 async fn register_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), RuntimeError> {
     let manifest_json = serde_json::to_value(manifest).unwrap_or_default();

@@ -1,13 +1,11 @@
+mod api_error;
 mod error;
-pub mod manifest;
+mod manifest;
+mod routes;
 mod schema;
 pub mod server;
-pub mod routes;
-pub mod api_error;
 
 pub use error::RuntimeError;
-pub use manifest::{install_app, uninstall_app};
-pub use schema::bootstrap;
 
 use rootcx_postgres_mgmt::PostgresManager;
 use rootcx_shared_types::{ForgeStatus, RuntimeStatus, OsStatus, PostgresStatus, ServiceState};
