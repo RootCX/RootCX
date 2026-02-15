@@ -1,7 +1,7 @@
 import { lazy } from "react";
 import { Code2 } from "lucide-react";
 import { views, commands, statusBar } from "@/core/studio";
-import { openFile, saveFile, closeTab, getSnapshot } from "./store";
+import { openFile, saveFile, closeTab, splitPane, findPane, getSnapshot } from "./store";
 import { CursorStatus, LanguageStatus } from "./status";
 
 export const activate = () => {
@@ -25,9 +25,24 @@ export const activate = () => {
   commands.register("editor.closeTab", {
     title: "Close Editor Tab",
     handler: (path?: unknown) => {
-      const target = (path as string) ?? getSnapshot().activeTab;
-      if (target) closeTab(target);
+      const { focusedPane, root } = getSnapshot();
+      const target = path as string | undefined;
+      if (target) closeTab(target, focusedPane);
+      else {
+        const pane = findPane(root, focusedPane);
+        if (pane?.activeTab) closeTab(pane.activeTab, focusedPane);
+      }
     },
+  });
+
+  commands.register("editor.splitRight", {
+    title: "Split Right",
+    handler: () => splitPane(getSnapshot().focusedPane, "horizontal"),
+  });
+
+  commands.register("editor.splitDown", {
+    title: "Split Down",
+    handler: () => splitPane(getSnapshot().focusedPane, "vertical"),
   });
 
   statusBar.register("editor.language", {

@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { subscribe, getSnapshot, subscribeCursor, getCursorSnapshot } from "./store";
+import { subscribe, getSnapshot, subscribeCursor, getCursorSnapshot, getFocusedFile } from "./store";
 import { getLanguageName } from "./languages";
 
 export function CursorStatus() {
@@ -8,12 +8,8 @@ export function CursorStatus() {
 }
 
 export function LanguageStatus() {
-  const { activeTab, tabs } = useSyncExternalStore(subscribe, getSnapshot);
-  const tab = tabs.find((t) => t.path === activeTab);
-  if (!tab) return null;
-  return (
-    <span className="text-xs text-muted-foreground">
-      {getLanguageName(tab.name)}
-    </span>
-  );
+  useSyncExternalStore(subscribe, getSnapshot);
+  const file = getFocusedFile();
+  if (!file) return null;
+  return <span className="text-xs text-muted-foreground">{getLanguageName(file.name)}</span>;
 }
