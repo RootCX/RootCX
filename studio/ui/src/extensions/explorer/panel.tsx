@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
 import { useProjectContext } from "@/components/layout/app-context";
 import { Button } from "@/components/ui/button";
 import { FolderOpen, ChevronRight, ChevronDown, File, Folder } from "lucide-react";
@@ -92,16 +91,9 @@ function FileTreeNode({
 }
 
 export default function ExplorerPanel() {
-  const { projectPath, openProject } = useProjectContext();
+  const { projectPath } = useProjectContext();
   const [entries, setEntries] = useState<DirEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
-
-  const handleOpenFolder = useCallback(async () => {
-    const selected = await open({ directory: true, multiple: false });
-    if (selected) {
-      openProject(selected);
-    }
-  }, [openProject]);
 
   useEffect(() => {
     if (!projectPath) {
@@ -125,7 +117,7 @@ export default function ExplorerPanel() {
     return (
       <div className="flex flex-col items-center justify-center gap-3 p-6">
         <p className="text-xs text-muted-foreground">No folder opened</p>
-        <Button size="sm" variant="outline" onClick={handleOpenFolder}>
+        <Button size="sm" variant="outline" onClick={() => executeCommand("project.open")}>
           <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
           Open Folder
         </Button>
@@ -141,7 +133,7 @@ export default function ExplorerPanel() {
         <span className="truncate text-xs font-medium uppercase tracking-wider text-muted-foreground">
           {folderName}
         </span>
-        <Button size="icon" variant="ghost" className="h-6 w-6" onClick={handleOpenFolder}>
+        <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => executeCommand("project.open")}>
           <FolderOpen className="h-3.5 w-3.5" />
         </Button>
       </div>

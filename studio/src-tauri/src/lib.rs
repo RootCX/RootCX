@@ -2,6 +2,7 @@ mod commands;
 mod forge;
 mod launch;
 mod menu;
+mod scaffold;
 mod state;
 mod terminal;
 

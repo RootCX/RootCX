@@ -1,6 +1,4 @@
-import { open, save } from "@tauri-apps/plugin-dialog";
-import { invoke } from "@tauri-apps/api/core";
-import { useProjectContext } from "@/components/layout/app-context";
+import { executeCommand } from "@/core/studio";
 import { Button } from "@/components/ui/button";
 import { FolderOpen, Plus } from "lucide-react";
 
@@ -13,21 +11,6 @@ function Logo({ className }: { className?: string }) {
 }
 
 export default function WelcomePanel() {
-  const { openProject } = useProjectContext();
-
-  const handleOpen = async () => {
-    const selected = await open({ directory: true });
-    if (selected) openProject(selected);
-  };
-
-  const handleCreate = async () => {
-    const path = await save({ title: "Create Project", defaultPath: "my-project" });
-    if (!path) return;
-    const name = path.split("/").pop() ?? path;
-    await invoke("scaffold_project", { path, name });
-    openProject(path);
-  };
-
   return (
     <div className="relative flex h-full items-center justify-center overflow-hidden">
       <Logo className="pointer-events-none absolute h-[60%] max-h-[400px] text-white/[0.03]" />
@@ -36,11 +19,11 @@ export default function WelcomePanel() {
           RootCX Studio
         </h1>
         <div className="flex gap-3">
-          <Button variant="outline" onClick={handleOpen}>
+          <Button variant="outline" onClick={() => executeCommand("project.open")}>
             <FolderOpen className="mr-2 h-4 w-4" />
             Open Folder
           </Button>
-          <Button variant="outline" onClick={handleCreate}>
+          <Button variant="outline" onClick={() => executeCommand("project.create")}>
             <Plus className="mr-2 h-4 w-4" />
             Create Project
           </Button>

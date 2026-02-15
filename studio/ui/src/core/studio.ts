@@ -33,6 +33,7 @@ export function executeCommand(id: string, ...args: unknown[]) {
 
 export const workspace = {
   projectPath: null as string | null,
+  openProject: (_path: string) => {},
 };
 
 export const layout = {

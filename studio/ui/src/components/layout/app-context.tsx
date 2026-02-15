@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
+import { workspace } from "@/core/studio";
 
 interface ProjectContext {
   projectPath: string | null;
@@ -12,7 +13,9 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
   const openProject = useCallback((path: string) => {
     setProjectPath(path);
+    workspace.projectPath = path;
   }, []);
+  workspace.openProject = openProject;
 
   return (
     <ProjectCtx.Provider value={{ projectPath, openProject }}>

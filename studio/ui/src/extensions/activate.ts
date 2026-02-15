@@ -1,3 +1,4 @@
+import { activate as project } from "./project";
 import { activate as explorer } from "./explorer";
 import { activate as forge } from "./forge";
 import { activate as welcome } from "./welcome";
@@ -8,6 +9,7 @@ import { activate as run } from "./run";
 import { activate as editor } from "./editor";
 
 export function activateBuiltins() {
+  project();
   explorer();
   forge();
   welcome();
