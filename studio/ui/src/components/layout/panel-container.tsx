@@ -1,14 +1,37 @@
-import { Suspense, useState, useCallback } from "react";
+import { Suspense, useEffect, useRef, useCallback } from "react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { viewMap, type ViewDefinition } from "@/components/panels/registry";
 import { useLayout, type ZoneId } from "./layout-store";
-import { cn } from "@/lib/utils";
 
-let draggedViewId: string | null = null;
+// ── Pointer-based drag (module-level, shared across instances) ──
+
+let drag: { viewId: string; startX: number; startY: number; active: boolean } | null = null;
+const zoneRefs = new Map<ZoneId, HTMLElement>();
+
+function hitZone(x: number, y: number): ZoneId | null {
+  for (const [id, el] of zoneRefs) {
+    const r = el.getBoundingClientRect();
+    if (r.width > 0 && r.height > 0 && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom)
+      return id;
+  }
+  return null;
+}
+
+function clearHighlights() {
+  for (const el of zoneRefs.values()) el.classList.remove("drop-target");
+}
+
+// ── Component ──
 
 export function PanelContainer({ zone }: { zone: ZoneId }) {
   const { state, dispatch } = useLayout();
-  const [dragOver, setDragOver] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (el) zoneRefs.set(zone, el);
+    return () => { zoneRefs.delete(zone); };
+  }, [zone]);
 
   const resolved: ViewDefinition[] = [];
   for (const id of state.zones[zone]) {
@@ -16,50 +39,64 @@ export function PanelContainer({ zone }: { zone: ZoneId }) {
   }
   const activeId = state.active[zone];
 
-  const onDragStart = useCallback((e: React.DragEvent, viewId: string) => {
-    draggedViewId = viewId;
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", viewId);
-  }, []);
-
-  const onDragEnd = useCallback(() => {
-    draggedViewId = null;
-    setDragOver(false);
-  }, []);
-
-  const onDrop = useCallback(
-    (e: React.DragEvent) => {
+  const startDrag = useCallback(
+    (e: React.PointerEvent, viewId: string) => {
       e.preventDefault();
-      setDragOver(false);
-      if (draggedViewId) {
-        dispatch({ type: "MOVE_VIEW", viewId: draggedViewId, toZone: zone });
-        draggedViewId = null;
-      }
+      drag = { viewId, startX: e.clientX, startY: e.clientY, active: false };
+
+      const cleanup = () => {
+        document.removeEventListener("pointermove", onMove);
+        document.removeEventListener("pointerup", onUp);
+        document.removeEventListener("keydown", onKey);
+        document.body.style.cursor = "";
+        clearHighlights();
+        drag = null;
+      };
+
+      const onMove = (ev: PointerEvent) => {
+        if (!drag) return;
+        if (!drag.active) {
+          const dx = ev.clientX - drag.startX;
+          const dy = ev.clientY - drag.startY;
+          if (dx * dx + dy * dy < 25) return;
+          drag.active = true;
+          document.body.style.cursor = "grabbing";
+        }
+        const target = hitZone(ev.clientX, ev.clientY);
+        for (const [z, el] of zoneRefs) {
+          el.classList.toggle("drop-target", z === target);
+        }
+      };
+
+      const onUp = (ev: PointerEvent) => {
+        const wasDrag = drag?.active;
+        const vid = drag?.viewId;
+        cleanup();
+        if (wasDrag && vid) {
+          const target = hitZone(ev.clientX, ev.clientY);
+          if (target) dispatch({ type: "MOVE_VIEW", viewId: vid, toZone: target });
+        } else {
+          dispatch({ type: "SET_ACTIVE", zone, viewId });
+        }
+      };
+
+      const onKey = (ev: KeyboardEvent) => {
+        if (ev.key === "Escape") cleanup();
+      };
+
+      document.addEventListener("pointermove", onMove);
+      document.addEventListener("pointerup", onUp);
+      document.addEventListener("keydown", onKey);
     },
-    [dispatch, zone],
+    [zone, dispatch],
   );
 
-  const onDragOver = useCallback((e: React.DragEvent) => {
-    if (draggedViewId) {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = "move";
-      setDragOver(true);
-    }
-  }, []);
-
-  const onDragLeave = useCallback((e: React.DragEvent) => {
-    if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragOver(false);
-  }, []);
-
-  if (resolved.length === 0) return null;
+  if (resolved.length === 0) {
+    return <div ref={ref} className="h-full" />;
+  }
 
   return (
-    <div
-      className={cn("flex h-full flex-col", dragOver && "ring-2 ring-inset ring-primary/50")}
-      onDragOver={onDragOver}
-      onDrop={onDrop}
-      onDragLeave={onDragLeave}
-    >
+    <div ref={ref} className="flex h-full flex-col">
       <Tabs
         value={activeId ?? resolved[0].id}
         onValueChange={(id) => dispatch({ type: "SET_ACTIVE", zone, viewId: id })}
@@ -71,9 +108,7 @@ export function PanelContainer({ zone }: { zone: ZoneId }) {
               <TabsTrigger
                 key={view.id}
                 value={view.id}
-                draggable
-                onDragStart={(e) => onDragStart(e, view.id)}
-                onDragEnd={onDragEnd}
+                onPointerDown={(e) => startDrag(e, view.id)}
               >
                 {view.title}
               </TabsTrigger>

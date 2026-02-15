@@ -31,53 +31,29 @@ function Shell() {
     };
   }, [dispatch]);
 
-  const hasVisible = (zone: "sidebar" | "editor" | "bottom") =>
-    state.zones[zone].some((id) => !state.hidden.has(id));
-
-  const sidebarOpen = hasVisible("sidebar");
-  const bottomOpen = hasVisible("bottom");
-
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden">
       <ResizablePanelGroup orientation="horizontal" className="flex-1 overflow-hidden">
-        {sidebarOpen && (
-          <>
-            <ResizablePanel
-              id="sidebar"
-              defaultSize="25%"
-              minSize="15%"
-              maxSize="40%"
-              className="bg-sidebar"
-            >
-              <PanelContainer zone="sidebar" />
-            </ResizablePanel>
-            <ResizableHandle />
-          </>
-        )}
+        <ResizablePanel
+          id="sidebar"
+          defaultSize="20%"
+          minSize="3%"
+          maxSize="40%"
+          className="bg-sidebar"
+        >
+          <PanelContainer zone="sidebar" />
+        </ResizablePanel>
+        <ResizableHandle />
 
-        <ResizablePanel id="main" defaultSize={sidebarOpen ? "75%" : "100%"}>
+        <ResizablePanel id="main" defaultSize="80%">
           <ResizablePanelGroup orientation="vertical">
-            <ResizablePanel
-              id="editor"
-              defaultSize={bottomOpen ? "70%" : "100%"}
-              minSize="30%"
-            >
+            <ResizablePanel id="editor" defaultSize="70%" minSize="10%">
               <PanelContainer zone="editor" />
             </ResizablePanel>
-
-            {bottomOpen && (
-              <>
-                <ResizableHandle />
-                <ResizablePanel
-                  id="bottom"
-                  defaultSize="30%"
-                  minSize="10%"
-                  maxSize="60%"
-                >
-                  <PanelContainer zone="bottom" />
-                </ResizablePanel>
-              </>
-            )}
+            <ResizableHandle />
+            <ResizablePanel id="bottom" defaultSize="30%" minSize="3%" maxSize="60%">
+              <PanelContainer zone="bottom" />
+            </ResizablePanel>
           </ResizablePanelGroup>
         </ResizablePanel>
       </ResizablePanelGroup>
