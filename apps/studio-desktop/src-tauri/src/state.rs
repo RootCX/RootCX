@@ -1,12 +1,13 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rootcx_kernel::{ForgeManager, Kernel};
+use rootcx_kernel::{AppRunner, ForgeManager, Kernel};
 use rootcx_postgres_mgmt::{data_base_dir, PostgresManager};
 use rootcx_shared_types::OsStatus;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 
 const PG_PORT: u16 = 5480;
 
@@ -17,6 +18,7 @@ const PG_PORT: u16 = 5480;
 #[derive(Clone)]
 pub struct AppState {
     kernel: Arc<Mutex<Kernel>>,
+    running_apps: Arc<Mutex<HashMap<String, AppRunner>>>,
 }
 
 impl AppState {
@@ -49,6 +51,7 @@ impl AppState {
 
         Self {
             kernel: Arc::new(Mutex::new(kernel)),
+            running_apps: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -67,6 +70,57 @@ impl AppState {
     /// Access the database pool (available after boot).
     pub async fn pool(&self) -> Option<PgPool> {
         self.kernel.lock().await.pool().cloned()
+    }
+
+    /// Start a Forge-built app via `cargo tauri dev`.
+    pub async fn run_app(&self, project_path: String) -> Result<(), String> {
+        // Check for duplicates with a short lock
+        {
+            let apps = self.running_apps.lock().await;
+            if apps.contains_key(&project_path) {
+                return Err("app is already running".into());
+            }
+        }
+        // start() may run npm install — don't hold the lock
+        let mut runner = AppRunner::new(PathBuf::from(&project_path));
+        runner.start().await.map_err(|e| e.to_string())?;
+        // Re-acquire lock to insert
+        self.running_apps.lock().await.insert(project_path, runner);
+        Ok(())
+    }
+
+    /// Stop a running app.
+    pub async fn stop_app(&self, project_path: String) -> Result<(), String> {
+        let mut apps = self.running_apps.lock().await;
+        if let Some(mut runner) = apps.remove(&project_path) {
+            runner.stop().await.map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Read new log lines since `since` offset.
+    pub async fn app_logs(&self, project_path: &str, since: u64) -> (Vec<String>, u64) {
+        let apps = self.running_apps.lock().await;
+        match apps.get(project_path) {
+            Some(runner) => runner.read_logs(since).await,
+            None => (vec![], since),
+        }
+    }
+
+    /// List currently running app project paths.
+    pub async fn running_app_paths(&self) -> Vec<String> {
+        let apps = self.running_apps.lock().await;
+        apps.keys().cloned().collect()
+    }
+
+    /// Stop all running apps (called on exit).
+    pub async fn stop_all_apps(&self) {
+        let mut apps = self.running_apps.lock().await;
+        for (path, mut runner) in apps.drain() {
+            if let Err(e) = runner.stop().await {
+                warn!(path = %path, "failed to stop app: {e}");
+            }
+        }
     }
 }
 

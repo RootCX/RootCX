@@ -1,8 +1,10 @@
+pub mod app_runner;
 mod error;
 pub mod forge;
 pub mod manifest;
 mod schema;
 
+pub use app_runner::{AppRunner, AppRunnerError};
 pub use error::KernelError;
 pub use forge::ForgeManager;
 pub use manifest::{install_app, uninstall_app};

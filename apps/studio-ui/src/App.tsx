@@ -1,10 +1,13 @@
 import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useOsStatus } from "./hooks/useOsStatus";
+import { useAppRunner } from "./hooks/useAppRunner";
 import { helloManifest } from "./manifests/hello";
 import Forge from "./components/Forge";
+import BottomPanel from "./components/BottomPanel";
 import type { ServiceState, InstalledApp } from "./types";
 import "./App.css";
+
 
 function stateColor(state: ServiceState): string {
   switch (state) {
@@ -39,6 +42,13 @@ export default function App() {
     text: string;
     type: "success" | "error";
   } | null>(null);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const runner = useAppRunner();
+
+  const handleRunApp = useCallback((projectPath: string) => {
+    setPanelOpen(true);
+    runner.runApp(projectPath);
+  }, [runner.runApp]);
 
   const isOnline = status?.kernel.state === "online";
 
@@ -164,8 +174,24 @@ export default function App() {
             <h2>AI Forge</h2>
             <Badge label="Status" state={status.forge.state} />
           </div>
-          <Forge projectId="studio-default" />
+          <Forge
+            projectId="studio-default"
+            onRun={handleRunApp}
+            onStop={runner.stopApp}
+            isAppRunning={runner.isRunning}
+          />
         </section>
+      )}
+
+      {(panelOpen || runner.isRunning || runner.logs.length > 0) && (
+        <BottomPanel
+          logs={runner.logs}
+          isRunning={runner.isRunning}
+          isOpen={panelOpen}
+          onToggle={() => setPanelOpen((o) => !o)}
+          onClear={runner.clearLogs}
+          onStop={runner.stopApp}
+        />
       )}
     </div>
   );

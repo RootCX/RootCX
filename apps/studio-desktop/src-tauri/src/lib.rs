@@ -32,6 +32,10 @@ pub fn run() {
             commands::install_app,
             commands::list_apps,
             commands::get_forge_status,
+            commands::run_app,
+            commands::stop_app,
+            commands::app_logs,
+            commands::list_running_apps,
         ])
         .setup(|app| {
             // Create state inside setup() where the app handle is available,
@@ -55,6 +59,7 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 let state = app.state::<AppState>().inner().clone();
                 tauri::async_runtime::block_on(async {
+                    state.stop_all_apps().await;
                     if let Err(e) = state.shutdown().await {
                         error!("kernel shutdown failed: {e}");
                     }

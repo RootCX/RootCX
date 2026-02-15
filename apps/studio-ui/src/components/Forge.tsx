@@ -37,7 +37,14 @@ function phaseColor(phase: ForgePhase): string {
   }
 }
 
-export default function Forge({ projectId }: { projectId: string }) {
+interface ForgeProps {
+  projectId: string;
+  onRun?: (projectPath: string) => void;
+  onStop?: () => void;
+  isAppRunning?: boolean;
+}
+
+export default function Forge({ projectId, onRun, onStop, isAppRunning }: ForgeProps) {
   const {
     messages,
     phase,
@@ -82,11 +89,29 @@ export default function Forge({ projectId }: { projectId: string }) {
           />
           <span className="forge-phase-label">{phaseLabel(phase)}</span>
         </div>
-        {isStreaming && (
-          <button className="btn forge-stop-btn" onClick={stopBuild}>
-            Stop
-          </button>
-        )}
+        <div style={{ display: "flex", gap: "8px" }}>
+          {phase === "done" && projectPath && !isAppRunning && (
+            <button
+              className="btn btn-run"
+              onClick={() => onRun?.(projectPath)}
+            >
+              Run
+            </button>
+          )}
+          {phase === "done" && isAppRunning && (
+            <button
+              className="btn btn-run-stop"
+              onClick={() => onStop?.()}
+            >
+              Stop App
+            </button>
+          )}
+          {isStreaming && (
+            <button className="btn forge-stop-btn" onClick={stopBuild}>
+              Stop
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Project path input */}

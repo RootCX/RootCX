@@ -1,4 +1,5 @@
 use rootcx_shared_types::{AppManifest, ForgeStatus, InstalledApp, OsStatus};
+use serde::Serialize;
 use tauri::State;
 
 use crate::state::AppState;
@@ -100,4 +101,41 @@ pub async fn list_apps(state: State<'_, AppState>) -> Result<Vec<InstalledApp>, 
         .collect();
 
     Ok(apps)
+}
+
+// ── App Runner commands ─────────────────────────────
+
+#[derive(Serialize)]
+pub struct AppLogsResult {
+    lines: Vec<String>,
+    offset: u64,
+}
+
+/// Start a Forge-built app via `cargo tauri dev`.
+#[tauri::command]
+pub async fn run_app(state: State<'_, AppState>, project_path: String) -> Result<(), String> {
+    state.run_app(project_path).await
+}
+
+/// Stop a running app.
+#[tauri::command]
+pub async fn stop_app(state: State<'_, AppState>, project_path: String) -> Result<(), String> {
+    state.stop_app(project_path).await
+}
+
+/// Poll for new log lines from a running app.
+#[tauri::command]
+pub async fn app_logs(
+    state: State<'_, AppState>,
+    project_path: String,
+    since: u64,
+) -> Result<AppLogsResult, String> {
+    let (lines, offset) = state.app_logs(&project_path, since).await;
+    Ok(AppLogsResult { lines, offset })
+}
+
+/// List all currently running app project paths.
+#[tauri::command]
+pub async fn list_running_apps(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(state.running_app_paths().await)
 }
