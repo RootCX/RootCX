@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { ask } from "@tauri-apps/plugin-dialog";
 import {
   ResizablePanelGroup,
   ResizablePanel,
@@ -23,11 +24,21 @@ function Shell() {
   }, [state.hidden]);
 
   useEffect(() => {
-    const unlisten = listen<string>("toggle-view", (e) => {
+    const u1 = listen<string>("toggle-view", (e) => {
       dispatch({ type: "TOGGLE_VIEW", viewId: e.payload });
     });
+    const u2 = listen("reset-layout", async () => {
+      const ok = await ask("Reset all views to their default positions?", {
+        title: "Reset Layout",
+        kind: "warning",
+        okLabel: "Reset",
+        cancelLabel: "Cancel",
+      });
+      if (ok) dispatch({ type: "RESET", defaultState });
+    });
     return () => {
-      unlisten.then((fn) => fn());
+      u1.then((fn) => fn());
+      u2.then((fn) => fn());
     };
   }, [dispatch]);
 

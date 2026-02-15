@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use tauri::menu::{CheckMenuItem, MenuBuilder, SubmenuBuilder};
+use tauri::menu::{CheckMenuItem, MenuBuilder, MenuItem, SubmenuBuilder};
 use tauri::{App, Wry};
 
 const VIEWS: &[(&str, &str)] = &[
@@ -40,7 +40,8 @@ pub fn setup(app: &mut App) -> tauri::Result<ViewMenuItems> {
         view_builder = view_builder.item(&check);
         items.insert(id.to_string(), check);
     }
-    let view_menu = view_builder.build()?;
+    let reset = MenuItem::with_id(app, "reset-layout", "Reset Default Layout", true, None::<&str>)?;
+    let view_menu = view_builder.separator().item(&reset).build()?;
 
     let window_menu = SubmenuBuilder::new(app, "Window")
         .minimize()

@@ -17,7 +17,8 @@ export interface LayoutState {
 type Action =
   | { type: "MOVE_VIEW"; viewId: string; toZone: ZoneId; index?: number }
   | { type: "TOGGLE_VIEW"; viewId: string }
-  | { type: "SET_ACTIVE"; zone: ZoneId; viewId: string };
+  | { type: "SET_ACTIVE"; zone: ZoneId; viewId: string }
+  | { type: "RESET"; defaultState: LayoutState };
 
 const STORAGE_KEY = "studio:layout";
 const ZONE_IDS: ZoneId[] = ["sidebar", "editor", "bottom"];
@@ -71,6 +72,9 @@ function reducer(state: LayoutState, action: Action): LayoutState {
 
     case "SET_ACTIVE":
       return { ...state, active: { ...state.active, [action.zone]: action.viewId } };
+
+    case "RESET":
+      return action.defaultState;
   }
 }
 

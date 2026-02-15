@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default capabilities for RootCX Studio","local":true,"windows":["main"],"permissions":["core:default","shell:allow-open","dialog:allow-open"]}}
+{"default":{"identifier":"default","description":"Default capabilities for RootCX Studio","local":true,"windows":["main"],"permissions":["core:default","shell:allow-open","dialog:allow-open","dialog:allow-ask"]}}

@@ -47,6 +47,8 @@ pub fn run() {
             let id = event.id().as_ref();
             if app.state::<menu::ViewMenuItems>().0.contains_key(id) {
                 let _ = app.emit("toggle-view", id);
+            } else if id == "reset-layout" {
+                let _ = app.emit("reset-layout", ());
             }
         })
         .build(tauri::generate_context!())
