@@ -1,5 +1,6 @@
 mod commands;
 mod forge;
+mod launch;
 mod menu;
 mod state;
 mod terminal;
@@ -27,6 +28,8 @@ pub fn run() {
             commands::get_forge_status,
             commands::read_dir,
             commands::sync_view_menu,
+            commands::read_launch_config,
+            commands::init_launch_config,
             commands::spawn_terminal,
             commands::terminal_write,
             commands::terminal_resize,

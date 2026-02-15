@@ -72,6 +72,18 @@ pub fn sync_view_menu(hidden: Vec<String>, state: State<'_, ViewMenuItems>) {
     }
 }
 
+// ── Launch config ──
+
+#[tauri::command]
+pub fn read_launch_config(project_path: String) -> Result<crate::launch::LaunchConfig, String> {
+    crate::launch::read(std::path::Path::new(&project_path))
+}
+
+#[tauri::command]
+pub fn init_launch_config(project_path: String) -> Result<(), String> {
+    crate::launch::init(std::path::Path::new(&project_path))
+}
+
 // ── Terminal ──
 
 #[tauri::command]

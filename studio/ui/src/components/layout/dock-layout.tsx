@@ -9,15 +9,17 @@ import {
 } from "@/components/ui/resizable";
 import { StatusBar } from "./status-bar";
 import { PanelContainer } from "./panel-container";
-import { ProjectProvider } from "./app-context";
+import { ProjectProvider, useProjectContext } from "./app-context";
 import { LayoutProvider, useLayout, buildDefaultState } from "./layout-store";
 import { views } from "@/components/panels/registry";
+import { runProject } from "@/lib/run";
 
 const defaultState = buildDefaultState(views);
 const validIds = new Set(views.map((v) => v.id));
 
 function Shell() {
   const { state, dispatch } = useLayout();
+  const { projectPath } = useProjectContext();
 
   useEffect(() => {
     invoke("sync_view_menu", { hidden: [...state.hidden] }).catch(() => {});
@@ -28,7 +30,7 @@ function Shell() {
       dispatch({ type: "TOGGLE_VIEW", viewId: e.payload });
     });
     const u2 = listen("run", () => {
-      dispatch({ type: "SHOW_VIEW", viewId: "console" });
+      runProject(dispatch, projectPath);
     });
     const u3 = listen("reset-layout", async () => {
       const ok = await ask("Reset all views to their default positions?", {
@@ -44,7 +46,7 @@ function Shell() {
       u2.then((fn) => fn());
       u3.then((fn) => fn());
     };
-  }, [dispatch]);
+  }, [dispatch, projectPath]);
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden">

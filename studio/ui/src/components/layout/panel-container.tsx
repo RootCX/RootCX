@@ -1,9 +1,10 @@
 import { Suspense, useEffect, useRef, useCallback } from "react";
 import { Play } from "lucide-react";
-import { emit } from "@tauri-apps/api/event";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { viewMap, type ViewDefinition } from "@/components/panels/registry";
 import { useLayout, type ZoneId } from "./layout-store";
+import { useProjectContext } from "./app-context";
+import { runProject } from "@/lib/run";
 
 // ── Pointer-based drag (module-level, shared across instances) ──
 
@@ -49,6 +50,7 @@ function clearHighlights() {
 
 export function PanelContainer({ zone }: { zone: ZoneId }) {
   const { state, dispatch } = useLayout();
+  const { projectPath } = useProjectContext();
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -152,7 +154,7 @@ export function PanelContainer({ zone }: { zone: ZoneId }) {
           </TabsList>
           {zone === "bottom" && (
             <button
-              onClick={() => emit("run")}
+              onClick={() => runProject(dispatch, projectPath)}
               className="ml-auto mr-2 flex h-5 w-5 items-center justify-center rounded text-green-400 hover:bg-accent"
               title="Run (F5)"
             >

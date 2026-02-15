@@ -14,7 +14,7 @@ export interface LayoutState {
   hidden: Set<string>;
 }
 
-type Action =
+export type Action =
   | { type: "MOVE_VIEW"; viewId: string; toZone: ZoneId; index?: number }
   | { type: "TOGGLE_VIEW"; viewId: string }
   | { type: "SHOW_VIEW"; viewId: string }
