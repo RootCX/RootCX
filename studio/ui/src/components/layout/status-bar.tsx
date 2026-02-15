@@ -1,4 +1,4 @@
-import { useStatusBarItems } from "@/extensions/hooks";
+import { useStatusBarItems } from "@/core/hooks";
 
 export function StatusBar() {
   const items = useStatusBarItems();

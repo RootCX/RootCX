@@ -11,13 +11,17 @@ import { StatusBar } from "./status-bar";
 import { PanelContainer } from "./panel-container";
 import { ProjectProvider, useProjectContext } from "./app-context";
 import { LayoutProvider, useLayout, buildDefaultState } from "./layout-store";
-import { useViews } from "@/extensions/hooks";
-import { views as viewRegistry } from "@/extensions/studio";
-import { runProject } from "@/lib/run";
+import { useViews } from "@/core/hooks";
+import { views as viewRegistry, executeCommand, workspace, layout } from "@/core/studio";
 
 function Shell() {
   const { state, dispatch } = useLayout();
   const { projectPath } = useProjectContext();
+
+  useEffect(() => {
+    layout.dispatch = dispatch;
+    workspace.projectPath = projectPath;
+  }, [dispatch, projectPath]);
 
   useEffect(() => {
     invoke("sync_view_menu", { hidden: [...state.hidden] }).catch(() => {});
@@ -28,7 +32,7 @@ function Shell() {
       dispatch({ type: "TOGGLE_VIEW", viewId: e.payload });
     });
     const u2 = listen("run", () => {
-      runProject(dispatch, projectPath);
+      executeCommand("rootcx.run");
     });
     const u3 = listen("reset-layout", async () => {
       const ok = await ask("Reset all views to their default positions?", {
@@ -44,7 +48,7 @@ function Shell() {
       u2.then((fn) => fn());
       u3.then((fn) => fn());
     };
-  }, [dispatch, projectPath]);
+  }, [dispatch]);
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden">

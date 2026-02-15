@@ -1,5 +1,5 @@
-import { statusBar } from "../studio";
-import { ServiceStatus } from "@/components/layout/service-status";
+import { statusBar } from "@/core/studio";
+import { ServiceStatus } from "./service-status";
 
 export function activate() {
   statusBar.register("rootcx.services", {

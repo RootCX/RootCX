@@ -1,11 +1,9 @@
 import { Suspense, useEffect, useRef, useCallback } from "react";
 import { Play } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { views, type View } from "@/extensions/studio";
-import type { Entry } from "@/extensions/registry";
+import { views, executeCommand, type View } from "@/core/studio";
+import type { Entry } from "@/core/registry";
 import { useLayout, type ZoneId } from "./layout-store";
-import { useProjectContext } from "./app-context";
-import { runProject } from "@/lib/run";
 
 // ── Pointer-based drag (module-level, shared across instances) ──
 
@@ -51,7 +49,6 @@ function clearHighlights() {
 
 export function PanelContainer({ zone }: { zone: ZoneId }) {
   const { state, dispatch } = useLayout();
-  const { projectPath } = useProjectContext();
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -156,7 +153,7 @@ export function PanelContainer({ zone }: { zone: ZoneId }) {
           </TabsList>
           {zone === "bottom" && (
             <button
-              onClick={() => runProject(dispatch, projectPath)}
+              onClick={() => executeCommand("rootcx.run")}
               className="ml-auto mr-2 flex h-5 w-5 items-center justify-center rounded text-green-400 hover:bg-accent"
               title="Run (F5)"
             >

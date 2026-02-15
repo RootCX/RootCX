@@ -1,6 +1,6 @@
 import type { ComponentType } from "react";
 import type { LucideIcon } from "lucide-react";
-import type { ZoneId } from "@/components/layout/layout-store";
+import type { ZoneId, Action } from "@/components/layout/layout-store";
 import { Registry } from "./registry";
 
 export interface View {
@@ -30,3 +30,14 @@ export function executeCommand(id: string, ...args: unknown[]) {
   if (!cmd) throw new Error(`Unknown command: ${id}`);
   return cmd.handler(...args);
 }
+
+export const workspace = {
+  projectPath: null as string | null,
+};
+
+export const layout = {
+  dispatch: null as React.Dispatch<Action> | null,
+  showView(id: string) {
+    this.dispatch?.({ type: "SHOW_VIEW", viewId: id });
+  },
+};

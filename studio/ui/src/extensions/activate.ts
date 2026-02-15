@@ -4,6 +4,7 @@ import { activate as welcome } from "./welcome";
 import { activate as console } from "./console";
 import { activate as output } from "./output";
 import { activate as coreStatus } from "./core-status";
+import { activate as run } from "./run";
 
 export function activateBuiltins() {
   explorer();
@@ -12,4 +13,5 @@ export function activateBuiltins() {
   console();
   output();
   coreStatus();
+  run();
 }
