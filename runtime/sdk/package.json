@@ -1,0 +1,28 @@
+{
+  "name": "@rootcx/runtime",
+  "version": "0.1.0",
+  "description": "RootCX Runtime SDK — React hooks for app collections backed by the Runtime daemon",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/react": "^19.0.0"
+  },
+  "files": [
+    "dist"
+  ]
+}

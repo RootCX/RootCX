@@ -4,9 +4,30 @@ use serde_json::Value as JsonValue;
 /// Status of the RootCX operating system, exposed to frontends.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OsStatus {
-    pub kernel: KernelStatus,
+    pub runtime: RuntimeStatus,
     pub postgres: PostgresStatus,
     pub forge: ForgeStatus,
+}
+
+impl OsStatus {
+    /// Returns a status where all services are offline.
+    pub fn offline() -> Self {
+        Self {
+            runtime: RuntimeStatus {
+                version: String::new(),
+                state: ServiceState::Offline,
+            },
+            postgres: PostgresStatus {
+                state: ServiceState::Offline,
+                port: None,
+                data_dir: None,
+            },
+            forge: ForgeStatus {
+                state: ServiceState::Offline,
+                port: None,
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -16,7 +37,7 @@ pub struct ForgeStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KernelStatus {
+pub struct RuntimeStatus {
     pub version: String,
     pub state: ServiceState,
 }

@@ -1,10 +1,11 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/kernel",
+    "runtime",
+    "runtime/client",
     "crates/postgres-mgmt",
     "crates/shared-types",
-    "apps/studio-desktop/src-tauri",
+    "studio/src-tauri",
 ]
 
 [workspace.package]
@@ -30,7 +31,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# HTTP
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+
 # Internal crates
-rootcx-kernel = { path = "crates/kernel" }
+rootcx-runtime = { path = "runtime" }
+rootcx-runtime-client = { path = "runtime/client" }
 rootcx-postgres-mgmt = { path = "crates/postgres-mgmt" }
 rootcx-shared-types = { path = "crates/shared-types" }

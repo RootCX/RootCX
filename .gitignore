@@ -6,13 +6,8 @@
 node_modules/
 dist/
 
-# PostgreSQL bundled binaries (downloaded by scripts/bundle-postgres.sh)
-apps/studio-desktop/src-tauri/resources/pg/
-
-# Old PG sidecar layout (deprecated, to be removed)
-apps/studio-desktop/src-tauri/bin/
-apps/studio-desktop/src-tauri/lib/
-apps/studio-desktop/src-tauri/share/
+# PostgreSQL bundled binaries
+runtime/resources/
 
 # OS
 .DS_Store
@@ -34,11 +29,8 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-packages/ai-forge/build/
-packages/ai-forge/dist/
-
-# AI Forge sidecar binary
-apps/studio-desktop/src-tauri/resources/forge/
+forge/build/
+forge/dist/
 
 # Env
 .env
