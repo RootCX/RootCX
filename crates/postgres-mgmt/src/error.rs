@@ -23,14 +23,8 @@ pub enum PgError {
     #[error("pg_ctl stop exited with status {status}: {stderr}")]
     StopFailed { status: i32, stderr: String },
 
-    #[error("data directory is not valid: {0}")]
-    InvalidDataDir(PathBuf),
-
     #[error("could not determine user data directory")]
     NoDataDir,
-
-    #[error("PostgreSQL binaries not found — install PostgreSQL or set ROOTCX_PG_BIN")]
-    PgNotFound,
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),

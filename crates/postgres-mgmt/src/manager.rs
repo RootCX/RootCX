@@ -46,31 +46,6 @@ impl PostgresManager {
         self
     }
 
-    /// Create a manager using platform-default paths (system PG installation).
-    ///
-    /// - **bin_dir** : auto-detected from common install locations.
-    /// - **data_dir** :
-    ///   - macOS  : `~/Library/Application Support/RootCX/data/pg`
-    ///   - Linux  : `~/.local/share/RootCX/data/pg`
-    ///   - Windows: `%APPDATA%/RootCX/data/pg`
-    pub fn with_defaults(port: u16) -> Result<Self, PgError> {
-        let bin_dir = discover_pg_bin_dir()?;
-        let data_dir = data_base_dir()?.join("data").join("pg");
-
-        info!(
-            bin_dir = %bin_dir.display(),
-            data_dir = %data_dir.display(),
-            "resolved PostgreSQL paths"
-        );
-
-        Ok(Self {
-            bin_dir,
-            lib_dir: None,
-            data_dir,
-            port,
-        })
-    }
-
     // ── Public API ─────────────────────────────────────────────────
 
     pub fn port(&self) -> u16 {
@@ -79,10 +54,6 @@ impl PostgresManager {
 
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
-    }
-
-    pub fn bin_dir(&self) -> &Path {
-        &self.bin_dir
     }
 
     /// Initialise the PostgreSQL cluster if the data directory is empty or absent.
@@ -238,75 +209,6 @@ impl PostgresManager {
 
         cmd
     }
-}
-
-// ── Path Discovery (for system-installed PG) ───────────────────────
-
-/// Search well-known locations for a directory containing `pg_ctl`.
-fn discover_pg_bin_dir() -> Result<PathBuf, PgError> {
-    // 1. Explicit override.
-    if let Ok(dir) = std::env::var("ROOTCX_PG_BIN") {
-        let p = PathBuf::from(&dir);
-        if p.join("pg_ctl").exists() {
-            return Ok(p);
-        }
-        warn!(dir = %dir, "ROOTCX_PG_BIN set but pg_ctl not found there, continuing search");
-    }
-
-    // 2/3. Homebrew paths (macOS ARM + Intel), multiple PG versions.
-    let homebrew_prefixes = ["/opt/homebrew/opt", "/usr/local/opt"];
-    let pg_versions = [
-        "postgresql@17",
-        "postgresql@16",
-        "postgresql@15",
-        "postgresql",
-    ];
-
-    for prefix in &homebrew_prefixes {
-        for ver in &pg_versions {
-            let candidate = PathBuf::from(prefix).join(ver).join("bin");
-            if candidate.join("pg_ctl").exists() {
-                return Ok(candidate);
-            }
-        }
-    }
-
-    // 4. Linux package manager paths.
-    for ver in ["17", "16", "15"] {
-        let candidate = PathBuf::from(format!("/usr/lib/postgresql/{ver}/bin"));
-        if candidate.join("pg_ctl").exists() {
-            return Ok(candidate);
-        }
-    }
-    let usr_bin = PathBuf::from("/usr/bin");
-    if usr_bin.join("pg_ctl").exists() {
-        return Ok(usr_bin);
-    }
-
-    // 5. Windows.
-    #[cfg(target_os = "windows")]
-    {
-        let program_files = std::env::var("ProgramFiles").unwrap_or_default();
-        for ver in ["17", "16", "15"] {
-            let candidate =
-                PathBuf::from(&program_files).join(format!("PostgreSQL\\{ver}\\bin"));
-            if candidate.join("pg_ctl.exe").exists() {
-                return Ok(candidate);
-            }
-        }
-    }
-
-    // 6. Last resort: check PATH.
-    if let Ok(output) = std::process::Command::new("which").arg("pg_ctl").output() {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout);
-            if let Some(parent) = PathBuf::from(path_str.trim()).parent() {
-                return Ok(parent.to_path_buf());
-            }
-        }
-    }
-
-    Err(PgError::PgNotFound)
 }
 
 /// Resolve the platform-specific RootCX data root.

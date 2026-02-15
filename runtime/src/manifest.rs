@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use tracing::info;
 
 use crate::RuntimeError;
-use rootcx_shared_types::{AppManifest, EntityContract, FieldContract};
+use rootcx_shared_types::{AppManifest, EntityContract};
 
 // ── Public API ──────────────────────────────────────────────────────
 
@@ -96,7 +96,7 @@ pub async fn uninstall_app(pool: &PgPool, app_id: &str) -> Result<(), RuntimeErr
 // ── Pure SQL Generation (no DB, fully testable) ─────────────────────
 
 /// Generate a `CREATE TABLE IF NOT EXISTS` statement from an entity contract.
-pub fn generate_create_table(
+fn generate_create_table(
     app_id: &str,
     entity: &EntityContract,
     pk_types: &HashMap<String, &'static str>,
@@ -136,7 +136,7 @@ pub fn generate_create_table(
 }
 
 /// Generate an index on organization_id for an entity table.
-pub fn generate_org_index(app_id: &str, entity: &EntityContract) -> String {
+fn generate_org_index(app_id: &str, entity: &EntityContract) -> String {
     let table_name = format!("{}.{}", quote_ident(app_id), quote_ident(&entity.entity_name));
     let idx_name = format!("idx_{}_{}_org", app_id, entity.entity_name);
     format!(
@@ -146,11 +146,8 @@ pub fn generate_org_index(app_id: &str, entity: &EntityContract) -> String {
     )
 }
 
-/// Generate FK constraint + index statements for entity_link fields referencing
-/// entities within the same app.
-///
-/// Returns pairs of (ALTER TABLE + DO block, CREATE INDEX) statements.
-pub fn generate_foreign_keys(
+/// Generate FK constraint + index statements for entity_link fields.
+fn generate_foreign_keys(
     app_id: &str,
     entity: &EntityContract,
     all_entities: &[EntityContract],
@@ -210,10 +207,7 @@ pub fn generate_foreign_keys(
 }
 
 /// Build a map of entity_name → PG type of its primary key.
-///
-/// If an entity explicitly defines an `id` field with `isPrimaryKey: true`,
-/// we use its manifest type. Otherwise the PK is UUID.
-pub fn build_pk_type_map(entities: &[EntityContract]) -> HashMap<String, &'static str> {
+fn build_pk_type_map(entities: &[EntityContract]) -> HashMap<String, &'static str> {
     let mut map = HashMap::new();
     for entity in entities {
         let pk_field = entity.fields.iter().find(|f| {
@@ -228,11 +222,7 @@ pub fn build_pk_type_map(entities: &[EntityContract]) -> HashMap<String, &'stati
     map
 }
 
-/// Convert a manifest FieldContract to a SQL column definition string.
-///
-/// `pk_types` maps entity names to their PK SQL type, so entity_link columns
-/// match the type of the referenced entity's primary key.
-pub fn field_to_column(field: &FieldContract, pk_types: &HashMap<String, &'static str>) -> String {
+fn field_to_column(field: &rootcx_shared_types::FieldContract, pk_types: &HashMap<String, &'static str>) -> String {
     let col_name = quote_ident(&field.name);
     let is_pk = field.is_primary_key.unwrap_or(false) || field.name == "id";
 
@@ -269,26 +259,23 @@ pub fn field_to_column(field: &FieldContract, pk_types: &HashMap<String, &'stati
 
     let col_def = parts.join(" ");
 
-    if let Some(ref validation) = field.validation {
-        if let Some(ref enum_values) = validation.enum_values {
-            if !enum_values.is_empty() {
-                let values_list: Vec<String> = enum_values
-                    .iter()
-                    .map(|v| format!("'{}'", v.replace('\'', "''")))
-                    .collect();
-                return format!(
-                    "{col_def} CHECK ({col_name} IN ({}))",
-                    values_list.join(", ")
-                );
-            }
+    if let Some(ref enum_values) = field.enum_values {
+        if !enum_values.is_empty() {
+            let values_list: Vec<String> = enum_values
+                .iter()
+                .map(|v| format!("'{}'", v.replace('\'', "''")))
+                .collect();
+            return format!(
+                "{col_def} CHECK ({col_name} IN ({}))",
+                values_list.join(", ")
+            );
         }
     }
 
     col_def
 }
 
-/// Map manifest field type strings to PostgreSQL types.
-pub fn map_field_type(field_type: &str) -> &'static str {
+fn map_field_type(field_type: &str) -> &'static str {
     match field_type {
         "text" => "TEXT",
         "number" => "DOUBLE PRECISION",
@@ -304,8 +291,7 @@ pub fn map_field_type(field_type: &str) -> &'static str {
     }
 }
 
-/// Convert a serde_json Value to a SQL DEFAULT literal.
-pub fn json_to_sql_default(val: &serde_json::Value, pg_type: &str) -> Option<String> {
+fn json_to_sql_default(val: &serde_json::Value, pg_type: &str) -> Option<String> {
     match val {
         serde_json::Value::Null => None,
         serde_json::Value::Bool(b) => Some(b.to_string()),

@@ -100,14 +100,6 @@ fn default_version() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct EntityContract {
     pub entity_name: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
-    pub record_label_field: Option<String>,
-    #[serde(default)]
-    pub core_entity: Option<String>,
-    #[serde(default)]
-    pub unique_fields: Option<Vec<String>>,
     pub fields: Vec<FieldContract>,
 }
 
@@ -115,45 +107,19 @@ pub struct EntityContract {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldContract {
-    #[serde(default)]
-    pub id: Option<String>,
     pub name: String,
-    #[serde(default)]
-    pub label: Option<String>,
     #[serde(rename = "type")]
     pub field_type: String,
     #[serde(default)]
     pub required: bool,
     #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
     pub default_value: Option<JsonValue>,
     #[serde(default)]
-    pub validation: Option<FieldValidation>,
+    pub enum_values: Option<Vec<String>>,
     #[serde(default)]
     pub references: Option<FieldReference>,
     #[serde(default)]
     pub is_primary_key: Option<bool>,
-    #[serde(default)]
-    pub relationship_type: Option<String>,
-}
-
-/// Validation rules for a field (enum constraints, min/max, pattern).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FieldValidation {
-    #[serde(rename = "enum", default)]
-    pub enum_values: Option<Vec<String>>,
-    #[serde(default)]
-    pub min: Option<f64>,
-    #[serde(default)]
-    pub max: Option<f64>,
-    #[serde(default)]
-    pub min_length: Option<usize>,
-    #[serde(default)]
-    pub max_length: Option<usize>,
-    #[serde(default)]
-    pub pattern: Option<String>,
 }
 
 /// Foreign key reference for entity_link fields.

@@ -102,8 +102,6 @@ impl AppRunner {
 
         info!(path = %self.project_path.display(), "app runner started");
         self.child = Some(child);
-        self.log_lines = log_lines;
-        self.log_offset = log_offset;
         Ok(())
     }
 

@@ -114,8 +114,7 @@ pub async fn list_records(
 
     let rows: Vec<(JsonValue,)> = sqlx::query_as(&query)
         .fetch_all(&pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .await?;
 
     Ok(Json(rows.into_iter().map(|(r,)| r).collect()))
 }
@@ -162,8 +161,7 @@ pub async fn create_record(
 
     let (row,) = q
         .fetch_one(&pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .await?;
 
     Ok((axum::http::StatusCode::CREATED, Json(row)))
 }
@@ -181,8 +179,7 @@ pub async fn get_record(
     let result: Option<(JsonValue,)> = sqlx::query_as(&query)
         .bind(&id)
         .fetch_optional(&pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .await?;
 
     match result {
         Some((row,)) => Ok(Json(row)),
@@ -234,8 +231,7 @@ pub async fn update_record(
 
     let result = q
         .fetch_optional(&pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .await?;
 
     match result {
         Some((row,)) => Ok(Json(row)),
@@ -256,8 +252,7 @@ pub async fn delete_record(
     let result: sqlx::postgres::PgQueryResult = sqlx::query(&query)
         .bind(&id)
         .execute(&pool)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .await?;
 
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound(format!("record '{}' not found", id)));

@@ -132,35 +132,21 @@ impl AppState {
 }
 
 /// Resolve the AI Forge sidecar.
-fn resolve_forge(app: &tauri::App) -> Option<ForgeManager> {
-    #[cfg(debug_assertions)]
-    {
-        let _ = app;
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let ai_forge_dir = manifest_dir
-            .parent()?
-            .parent()?
-            .join("forge");
+fn resolve_forge(_app: &tauri::App) -> Option<ForgeManager> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let ai_forge_dir = manifest_dir.parent()?.parent()?.join("forge");
 
-        if ai_forge_dir.join("src").join("ai_forge").exists() {
-            let venv_python = ai_forge_dir.join(".venv").join("bin").join("python3");
-            let python = if venv_python.exists() {
-                venv_python.display().to_string()
-            } else {
-                "python3".to_string()
-            };
-            info!(dir = %ai_forge_dir.display(), python = %python, "dev-mode forge source found");
-            return Some(ForgeManager::new_dev(&python, ai_forge_dir, PG_PORT));
-        }
-
+    if !ai_forge_dir.join("src").join("ai_forge").exists() {
         info!("forge source not found, AI features disabled");
         return None;
     }
 
-    #[cfg(not(debug_assertions))]
-    {
-        let _ = app;
-        info!("release-mode forge not yet supported");
-        None
-    }
+    let venv_python = ai_forge_dir.join(".venv").join("bin").join("python3");
+    let python = if venv_python.exists() {
+        venv_python.display().to_string()
+    } else {
+        "python3".to_string()
+    };
+    info!(dir = %ai_forge_dir.display(), python = %python, "forge source found");
+    Some(ForgeManager::new_dev(&python, ai_forge_dir, PG_PORT))
 }
