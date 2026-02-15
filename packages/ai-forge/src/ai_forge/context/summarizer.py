@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 __all__ = [
-    "CONTEXT_LIMIT",
-    "SAFE_THRESHOLD",
     "estimate_tokens",
     "needs_summarization",
     "supersede_writes",
@@ -30,14 +28,10 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from ai_forge.config import ForgeConfig
-
 logger = logging.getLogger(__name__)
 
-CONTEXT_LIMIT = 200_000
-SAFE_THRESHOLD = 0.80  # Summarize at 80% capacity
 PROTECTED_TOKENS = 40_000  # Keep recent messages
-TARGET_AFTER_SUMMARY = 0.50  # Aim for 50% after summarization
+_DEFAULT_TARGET_RATIO = 0.50  # Aim for 50% after summarization
 
 
 def _count_tokens(text: str) -> int:
@@ -70,10 +64,15 @@ def estimate_tokens(messages: list[AnyMessage]) -> int:
     return total
 
 
-def needs_summarization(messages: list[AnyMessage]) -> bool:
+def needs_summarization(
+    messages: list[AnyMessage],
+    *,
+    context_limit: int,
+    safe_threshold: float = 0.80,
+) -> bool:
     """Check if messages exceed the safe threshold."""
     tokens = estimate_tokens(messages)
-    threshold = int(CONTEXT_LIMIT * SAFE_THRESHOLD)
+    threshold = int(context_limit * safe_threshold)
     return tokens > threshold
 
 
@@ -234,20 +233,20 @@ def prune_tool_outputs(messages: list[AnyMessage]) -> list[AnyMessage]:
 async def summarize_until_fits(
     messages: list[AnyMessage],
     existing_summary: str | None,
-    config: ForgeConfig,
     *,
-    target_ratio: float = TARGET_AFTER_SUMMARY,
+    context_limit: int,
+    summarizer_llm: ChatBedrockConverse,
+    target_ratio: float = _DEFAULT_TARGET_RATIO,
 ) -> list[AnyMessage]:
     """Summarize older messages until we're under the target threshold.
 
-    Returns new message list with a synthetic summary HumanMessage injected
-    after the system message.  Uses LangGraph-compatible message replacement.
-    """
-    target_tokens = int(CONTEXT_LIMIT * target_ratio)
+    Assumes the caller has already applied layers 1-2 (supersede_writes,
+    prune_tool_outputs).  This function only does LLM-based summarization.
 
-    # First try non-destructive approaches
-    messages = prune_tool_outputs(messages)
-    messages = supersede_writes(messages)
+    Returns new message list with a synthetic summary HumanMessage injected
+    after the system message.
+    """
+    target_tokens = int(context_limit * target_ratio)
 
     if estimate_tokens(messages) <= target_tokens:
         return messages
@@ -282,13 +281,6 @@ async def summarize_until_fits(
     if existing_summary:
         context = f"Previous summary:\n{existing_summary}\n\n"
 
-    llm = ChatBedrockConverse(
-        model=config.summarizer_model_id,
-        region_name=config.aws_region,
-        max_tokens=4096,
-        temperature=0,
-    )
-
     summary_prompt = (
         f"{context}"
         f"Summarize this conversation segment concisely. "
@@ -297,7 +289,7 @@ async def summarize_until_fits(
     )
 
     try:
-        response = await llm.ainvoke([HumanMessage(content=summary_prompt)])
+        response = await summarizer_llm.ainvoke([HumanMessage(content=summary_prompt)])
         new_summary = response.content if isinstance(response.content, str) else str(response.content)
     except Exception as exc:
         logger.warning("Summarization failed: %s", exc)
@@ -320,8 +312,7 @@ async def summarize_until_fits(
     if to_keep and isinstance(to_keep[0], HumanMessage):
         result.append(AIMessage(content="Understood. Continuing from where we left off."))
 
-    # If first kept message is a ToolMessage, we need the preceding AIMessage with tool_calls
-    # Walk backwards to find it and include it
+    # If first kept message is a ToolMessage, we need a preceding AIMessage
     if to_keep and isinstance(to_keep[0], ToolMessage):
         result.append(AIMessage(content="Understood. Continuing from where we left off."))
 

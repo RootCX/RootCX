@@ -2,19 +2,40 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 
-from ai_forge.config import ForgeConfig
 from ai_forge.context.cancellation import ForgeCancellation
 from ai_forge.graph.state import BuildState, FileChange
 from ai_forge.server.sse import ForgeBroadcaster
-from ai_forge.tools.executor import execute_tool
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ToolResult:
+    """Result of a tool execution."""
+
+    output: str
+    change: FileChange | None = None
+
+
+def _parse_tool_output(raw: str) -> ToolResult:
+    """Parse tool output, extracting FileChange if the tool encoded one."""
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict) and "change" in data:
+            change_data = data["change"]
+            change = FileChange(path=change_data["path"], action=change_data["action"])
+            return ToolResult(output=data.get("message", raw), change=change)
+    except (json.JSONDecodeError, KeyError, TypeError):
+        pass
+    return ToolResult(output=raw)
 
 
 async def tools_node(
@@ -22,10 +43,13 @@ async def tools_node(
     config: RunnableConfig,
 ) -> dict[str, Any]:
     """Execute all pending tool calls and return tool messages."""
-    forge_config: ForgeConfig = config["configurable"]["forge_config"]
     broadcaster: ForgeBroadcaster = config["configurable"]["broadcaster"]
     cancellation: ForgeCancellation = config["configurable"]["cancellation"]
+    tools: list = config["configurable"]["tools"]
     project_id = state["project_id"]
+
+    # Build name -> tool lookup
+    tool_by_name = {t.name: t for t in tools}
 
     # Get the last AI message with tool calls
     if not state["messages"]:
@@ -59,12 +83,17 @@ async def tools_node(
             "args": tool_args,
         })
 
-        result = await execute_tool(
-            tool_name,
-            tool_args,
-            config=forge_config,
-            project_path=state["project_path"],
-        )
+        tool_impl = tool_by_name.get(tool_name)
+        if tool_impl is None:
+            raw_output = f"Unknown tool: {tool_name}"
+        else:
+            try:
+                raw_output = await tool_impl.ainvoke(tool_args)
+            except Exception as exc:
+                logger.exception("Tool execution failed: %s", tool_name)
+                raw_output = f"Error executing {tool_name}: {exc}"
+
+        result = _parse_tool_output(str(raw_output))
 
         if result.change is not None:
             applied_changes.append(result.change)

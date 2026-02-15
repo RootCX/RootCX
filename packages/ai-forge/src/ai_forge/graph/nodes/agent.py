@@ -14,7 +14,6 @@ from ai_forge.context.cancellation import ForgeCancellation
 from ai_forge.context.manager import ContextManager
 from ai_forge.graph.state import BuildState
 from ai_forge.server.sse import ForgeBroadcaster
-from ai_forge.tools.definitions import TOOL_DEFINITIONS
 
 logger = logging.getLogger(__name__)
 
@@ -51,19 +50,14 @@ def _parse_stream_chunk(event: dict) -> str | None:
 
 async def _invoke_llm(
     messages: list,
-    forge_config: ForgeConfig,
+    llm: ChatBedrockConverse,
+    tools: list,
     broadcaster: ForgeBroadcaster,
     project_id: str,
     cancellation: ForgeCancellation,
 ) -> AIMessage | None:
     """Stream an LLM call and return the final AIMessage, or None if cancelled/empty."""
-    llm = ChatBedrockConverse(
-        model=forge_config.model_id,
-        region_name=forge_config.aws_region,
-        max_tokens=forge_config.llm_max_tokens,
-        temperature=forge_config.llm_temperature,
-    )
-    llm_with_tools = llm.bind_tools(TOOL_DEFINITIONS)
+    llm_with_tools = llm.bind_tools(tools)
 
     full_response: AIMessage | None = None
 
@@ -106,6 +100,9 @@ async def agent_node(
     forge_config: ForgeConfig = config["configurable"]["forge_config"]
     broadcaster: ForgeBroadcaster = config["configurable"]["broadcaster"]
     cancellation: ForgeCancellation = config["configurable"]["cancellation"]
+    llm: ChatBedrockConverse = config["configurable"]["llm"]
+    summarizer_llm: ChatBedrockConverse = config["configurable"]["summarizer_llm"]
+    tools: list = config["configurable"]["tools"]
     project_id = state["project_id"]
 
     # Check cancellation
@@ -113,7 +110,7 @@ async def agent_node(
         return {"phase": "stopped"}
 
     # Prepare messages with context management (layers 1-3)
-    ctx = ContextManager(forge_config)
+    ctx = ContextManager(forge_config, summarizer_llm=summarizer_llm)
     messages = list(state["messages"])
 
     messages = await ctx.prepare_messages(messages)
@@ -126,7 +123,7 @@ async def agent_node(
 
     try:
         full_response = await _invoke_llm(
-            messages, forge_config, broadcaster, project_id, cancellation,
+            messages, llm, tools, broadcaster, project_id, cancellation,
         )
     except Exception as exc:
         if _is_context_overflow(exc):
@@ -139,7 +136,7 @@ async def agent_node(
             messages = await ctx.handle_overflow(messages)
             try:
                 full_response = await _invoke_llm(
-                    messages, forge_config, broadcaster, project_id, cancellation,
+                    messages, llm, tools, broadcaster, project_id, cancellation,
                 )
             except Exception as retry_exc:
                 logger.exception("Agent LLM call failed after overflow retry")
@@ -173,7 +170,6 @@ async def agent_node(
         })
 
     # Determine phase based on response
-    phase = state.get("phase", "analyzing")
     if full_response.tool_calls:
         phase = "executing"
     else:

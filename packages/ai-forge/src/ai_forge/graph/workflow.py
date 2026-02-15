@@ -9,6 +9,7 @@ import uuid
 from typing import Any, Literal
 
 import asyncpg
+from langchain_aws import ChatBedrockConverse
 from langchain_core.messages import AIMessage
 from langgraph.graph import END, START, StateGraph
 
@@ -21,6 +22,7 @@ from ai_forge.graph.nodes.tools import tools_node
 from ai_forge.graph.nodes.verify import stopped_node, verify_node
 from ai_forge.graph.state import BuildState
 from ai_forge.server.sse import ForgeBroadcaster
+from ai_forge.tools import make_tools
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +136,7 @@ async def run_workflow(
     app_id: str,
     broadcaster: ForgeBroadcaster,
     cancellation: ForgeCancellation,
+    pg_pool: asyncpg.Pool | None = None,
 ) -> None:
     """Run the full build workflow — called as an asyncio task."""
     logger.info(
@@ -143,16 +146,31 @@ async def run_workflow(
     )
 
     try:
-        # Persist conversation
-        try:
-            conn = await asyncpg.connect(config.pg_connection_string)
+        # Persist conversation using the shared pool
+        if pg_pool is not None:
             try:
-                await _ensure_conversation(conn, conversation_id, project_id)
-                await _save_message(conn, conversation_id, "user", user_prompt)
-            finally:
-                await conn.close()
-        except Exception as exc:
-            logger.warning("Failed to persist conversation: %s", exc)
+                async with pg_pool.acquire() as conn:
+                    await _ensure_conversation(conn, conversation_id, project_id)
+                    await _save_message(conn, conversation_id, "user", user_prompt)
+            except Exception as exc:
+                logger.warning("Failed to persist conversation: %s", exc)
+
+        # Create LLM instances once for the entire workflow run
+        llm = ChatBedrockConverse(
+            model=config.model_id,
+            region_name=config.aws_region,
+            max_tokens=config.llm_max_tokens,
+            temperature=config.llm_temperature,
+        )
+        summarizer_llm = ChatBedrockConverse(
+            model=config.summarizer_model_id,
+            region_name=config.aws_region,
+            max_tokens=4096,
+            temperature=0,
+        )
+
+        # Create tools once with bound context
+        tools = make_tools(project_path, pg_pool)
 
         # Build and compile graph
         graph = build_graph()
@@ -192,22 +210,24 @@ async def run_workflow(
                 "forge_config": config,
                 "broadcaster": broadcaster,
                 "cancellation": cancellation,
+                "pg_pool": pg_pool,
+                "llm": llm,
+                "summarizer_llm": summarizer_llm,
+                "tools": tools,
             }
         }
 
         # Run the graph
         final_state = await compiled.ainvoke(initial_state, config=run_config)
 
-        # Persist assistant response
-        try:
-            conn = await asyncpg.connect(config.pg_connection_string)
+        # Persist assistant response using the shared pool
+        if pg_pool is not None:
             try:
-                summary = final_state.get("message", "Build complete.")
-                await _save_message(conn, conversation_id, "assistant", summary)
-            finally:
-                await conn.close()
-        except Exception as exc:
-            logger.warning("Failed to persist response: %s", exc)
+                async with pg_pool.acquire() as conn:
+                    summary = final_state.get("message", "Build complete.")
+                    await _save_message(conn, conversation_id, "assistant", summary)
+            except Exception as exc:
+                logger.warning("Failed to persist response: %s", exc)
 
     except asyncio.CancelledError:
         logger.info("Workflow cancelled for project=%s", project_id)

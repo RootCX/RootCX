@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 
+import asyncpg
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +21,30 @@ def create_app(config: ForgeConfig | None = None) -> FastAPI:
     if config is None:
         config = ForgeConfig.from_env()
 
-    app = FastAPI(title="AI Forge", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Startup: create asyncpg connection pool
+        try:
+            pool = await asyncpg.create_pool(
+                config.pg_connection_string,
+                min_size=2,
+                max_size=10,
+            )
+            app.state.pg_pool = pool  # type: ignore[attr-defined]
+            logger.info("PostgreSQL connection pool created")
+        except (asyncpg.PostgresError, OSError) as exc:
+            logger.warning("Failed to create PG pool (DB tools will be unavailable): %s", exc)
+            app.state.pg_pool = None  # type: ignore[attr-defined]
+            pool = None
+
+        yield
+
+        # Shutdown: close the pool
+        if pool is not None:
+            await pool.close()
+            logger.info("PostgreSQL connection pool closed")
+
+    app = FastAPI(title="AI Forge", version="0.1.0", lifespan=lifespan)
 
     app.add_middleware(
         CORSMiddleware,

@@ -6,12 +6,11 @@ __all__ = ["ContextManager"]
 
 import logging
 
-from langchain_core.messages import AnyMessage
+from langchain_aws import ChatBedrockConverse
+from langchain_core.messages import AnyMessage, HumanMessage
 
 from ai_forge.config import ForgeConfig
 from ai_forge.context.summarizer import (
-    CONTEXT_LIMIT,
-    SAFE_THRESHOLD,
     estimate_tokens,
     prune_tool_outputs,
     summarize_until_fits,
@@ -19,6 +18,8 @@ from ai_forge.context.summarizer import (
 )
 
 logger = logging.getLogger(__name__)
+
+_SAFE_THRESHOLD = 0.80  # Summarize at 80% capacity
 
 
 class ContextManager:
@@ -30,8 +31,25 @@ class ContextManager:
     Layer 4: handle_overflow — aggressive reduction to 50% for retry after context overflow
     """
 
-    def __init__(self, config: ForgeConfig) -> None:
+    def __init__(
+        self,
+        config: ForgeConfig,
+        summarizer_llm: ChatBedrockConverse | None = None,
+    ) -> None:
         self.config = config
+        self._summarizer_llm = summarizer_llm
+
+    @property
+    def _llm(self) -> ChatBedrockConverse:
+        """Lazy-create summarizer LLM only if needed (and not provided)."""
+        if self._summarizer_llm is None:
+            self._summarizer_llm = ChatBedrockConverse(
+                model=self.config.summarizer_model_id,
+                region_name=self.config.aws_region,
+                max_tokens=4096,
+                temperature=0,
+            )
+        return self._summarizer_llm
 
     async def prepare_messages(
         self,
@@ -41,8 +59,8 @@ class ContextManager:
 
         Returns the (possibly reduced) message list.
         """
-        tokens = estimate_tokens(messages)
-        threshold = int(CONTEXT_LIMIT * SAFE_THRESHOLD)
+        context_limit = self.config.context_limit
+        threshold = int(context_limit * _SAFE_THRESHOLD)
 
         # Layer 1: always apply — cheap, preserves structure
         messages = supersede_writes(messages)
@@ -63,7 +81,8 @@ class ContextManager:
         messages = await summarize_until_fits(
             messages,
             self._extract_existing_summary(messages),
-            self.config,
+            context_limit=context_limit,
+            summarizer_llm=self._llm,
         )
 
         return messages
@@ -77,6 +96,7 @@ class ContextManager:
         Targets 50% of context limit with more aggressive pruning.
         """
         logger.warning("Context overflow detected, applying aggressive reduction...")
+        context_limit = self.config.context_limit
 
         # Apply layers 1-2 first
         messages = supersede_writes(messages)
@@ -86,7 +106,8 @@ class ContextManager:
         messages = await summarize_until_fits(
             messages,
             self._extract_existing_summary(messages),
-            self.config,
+            context_limit=context_limit,
+            summarizer_llm=self._llm,
             target_ratio=0.50,
         )
 
@@ -98,8 +119,6 @@ class ContextManager:
     @staticmethod
     def _extract_existing_summary(messages: list[AnyMessage]) -> str | None:
         """Extract the existing conversation summary from messages, if present."""
-        from langchain_core.messages import HumanMessage
-
         for msg in messages:
             if (
                 isinstance(msg, HumanMessage)

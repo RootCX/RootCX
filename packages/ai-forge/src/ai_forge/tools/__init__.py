@@ -1,4 +1,3 @@
-"""Tools package — import all modules to populate the registry."""
+"""Tools package — closure-based tool factory."""
 
-# Import tool modules so their @register_tool decorators execute.
-from ai_forge.tools import apps, build, components, file, integrations, web  # noqa: F401
+from ai_forge.tools.factory import make_tools  # noqa: F401

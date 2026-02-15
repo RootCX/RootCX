@@ -11,7 +11,6 @@ from typing import Any
 
 import asyncpg
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
@@ -30,6 +29,10 @@ _task_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 def _get_config(request: Request):
     return request.app.state.config
+
+
+def _get_pool(request: Request) -> asyncpg.Pool | None:
+    return getattr(request.app.state, "pg_pool", None)
 
 
 # ── Request / Response models ───────────────────────────────────────
@@ -82,6 +85,7 @@ async def health():
 async def chat(body: ChatRequest, request: Request):
     """Start a build workflow. Returns 202 immediately; stream via /stream."""
     config = _get_config(request)
+    pg_pool = _get_pool(request)
 
     if not body.project_id.strip():
         raise HTTPException(status_code=400, detail="project_id is required")
@@ -117,6 +121,7 @@ async def chat(body: ChatRequest, request: Request):
                 app_id=body.app_id,
                 broadcaster=_broadcaster,
                 cancellation=_cancellation,
+                pg_pool=pg_pool,
             )
         )
         _running_tasks[body.project_id] = task
@@ -174,40 +179,36 @@ async def stop(body: StopRequest):
 @router.get("/conversations", response_model=list[ConversationOut])
 async def list_conversations(project_id: str, request: Request):
     """List conversations for a project."""
-    config = _get_config(request)
-    try:
-        conn = await asyncpg.connect(config.pg_connection_string)
-    except (asyncpg.PostgresError, OSError) as exc:
-        logger.error("Database connection failed: %s", exc)
+    pg_pool = _get_pool(request)
+    if pg_pool is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        rows = await conn.fetch(
-            """
-            SELECT id, project_id, title, created_at, updated_at
-            FROM rootcx_system.forge_conversations
-            WHERE project_id = $1
-            ORDER BY updated_at DESC
-            """,
-            project_id,
-        )
-        return [
-            ConversationOut(
-                id=r["id"],
-                project_id=r["project_id"],
-                title=r["title"],
-                created_at=r["created_at"].isoformat(),
-                updated_at=r["updated_at"].isoformat(),
+        async with pg_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, project_id, title, created_at, updated_at
+                FROM rootcx_system.forge_conversations
+                WHERE project_id = $1
+                ORDER BY updated_at DESC
+                """,
+                project_id,
             )
-            for r in rows
-        ]
+            return [
+                ConversationOut(
+                    id=r["id"],
+                    project_id=r["project_id"],
+                    title=r["title"],
+                    created_at=r["created_at"].isoformat(),
+                    updated_at=r["updated_at"].isoformat(),
+                )
+                for r in rows
+            ]
     except asyncpg.UndefinedTableError:
         return []
     except asyncpg.PostgresError as exc:
         logger.error("Query failed: %s", exc)
         raise HTTPException(status_code=503, detail="Database query failed")
-    finally:
-        await conn.close()
 
 
 # ── History ─────────────────────────────────────────────────────────
@@ -216,36 +217,32 @@ async def list_conversations(project_id: str, request: Request):
 @router.get("/history/{conversation_id}", response_model=list[MessageOut])
 async def get_history(conversation_id: str, request: Request):
     """Get message history for a conversation."""
-    config = _get_config(request)
-    try:
-        conn = await asyncpg.connect(config.pg_connection_string)
-    except (asyncpg.PostgresError, OSError) as exc:
-        logger.error("Database connection failed: %s", exc)
+    pg_pool = _get_pool(request)
+    if pg_pool is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        rows = await conn.fetch(
-            """
-            SELECT id, role, content, created_at
-            FROM rootcx_system.forge_messages
-            WHERE conversation_id = $1
-            ORDER BY created_at ASC
-            """,
-            conversation_id,
-        )
-        return [
-            MessageOut(
-                id=r["id"],
-                role=r["role"],
-                content=json.loads(r["content"]),
-                created_at=r["created_at"].isoformat(),
+        async with pg_pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, role, content, created_at
+                FROM rootcx_system.forge_messages
+                WHERE conversation_id = $1
+                ORDER BY created_at ASC
+                """,
+                conversation_id,
             )
-            for r in rows
-        ]
+            return [
+                MessageOut(
+                    id=r["id"],
+                    role=r["role"],
+                    content=json.loads(r["content"]),
+                    created_at=r["created_at"].isoformat(),
+                )
+                for r in rows
+            ]
     except asyncpg.UndefinedTableError:
         return []
     except asyncpg.PostgresError as exc:
         logger.error("Query failed: %s", exc)
         raise HTTPException(status_code=503, detail="Database query failed")
-    finally:
-        await conn.close()
