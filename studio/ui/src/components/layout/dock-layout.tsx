@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useMemo } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -11,11 +11,9 @@ import { StatusBar } from "./status-bar";
 import { PanelContainer } from "./panel-container";
 import { ProjectProvider, useProjectContext } from "./app-context";
 import { LayoutProvider, useLayout, buildDefaultState } from "./layout-store";
-import { views } from "@/components/panels/registry";
+import { useViews } from "@/extensions/hooks";
+import { views as viewRegistry } from "@/extensions/studio";
 import { runProject } from "@/lib/run";
-
-const defaultState = buildDefaultState(views);
-const validIds = new Set(views.map((v) => v.id));
 
 function Shell() {
   const { state, dispatch } = useLayout();
@@ -39,7 +37,7 @@ function Shell() {
         okLabel: "Reset",
         cancelLabel: "Cancel",
       });
-      if (ok) dispatch({ type: "RESET", defaultState });
+      if (ok) dispatch({ type: "RESET", defaultState: buildDefaultState(viewRegistry.getAll()) });
     });
     return () => {
       u1.then((fn) => fn());
@@ -80,6 +78,10 @@ function Shell() {
 }
 
 export function DockLayout() {
+  const views = useViews();
+  const defaultState = useMemo(() => buildDefaultState(views), [views]);
+  const validIds = useMemo(() => new Set(views.map((v) => v.id)), [views]);
+
   return (
     <ProjectProvider>
       <LayoutProvider defaultState={defaultState} validIds={validIds}>

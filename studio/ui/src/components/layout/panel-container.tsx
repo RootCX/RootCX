@@ -1,7 +1,8 @@
 import { Suspense, useEffect, useRef, useCallback } from "react";
 import { Play } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { viewMap, type ViewDefinition } from "@/components/panels/registry";
+import { views, type View } from "@/extensions/studio";
+import type { Entry } from "@/extensions/registry";
 import { useLayout, type ZoneId } from "./layout-store";
 import { useProjectContext } from "./app-context";
 import { runProject } from "@/lib/run";
@@ -59,9 +60,10 @@ export function PanelContainer({ zone }: { zone: ZoneId }) {
     return () => { zoneRefs.delete(zone); };
   }, [zone]);
 
-  const resolved: ViewDefinition[] = [];
+  const resolved: Entry<View>[] = [];
   for (const id of state.zones[zone]) {
-    if (!state.hidden.has(id) && viewMap[id]) resolved.push(viewMap[id]);
+    const v = views.get(id);
+    if (!state.hidden.has(id) && v) resolved.push({ ...v, id });
   }
   const activeId = state.active[zone];
 
