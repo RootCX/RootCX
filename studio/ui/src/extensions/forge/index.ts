@@ -13,7 +13,8 @@ export const activate = () => {
   });
 
   commands.register("forge.send", {
-    title: "Forge: Send Message",
+    title: "Send Message",
+    category: "AI Forge",
     handler: (prompt: unknown, appId?: unknown) => {
       if (typeof prompt !== "string" || !workspace.projectPath) return;
       sendMessage(prompt, workspace.projectPath, appId as string | undefined);
@@ -21,7 +22,8 @@ export const activate = () => {
   });
 
   commands.register("forge.stop", {
-    title: "Forge: Stop Build",
+    title: "Stop Build",
+    category: "AI Forge",
     handler: () => stopBuild(),
   });
 

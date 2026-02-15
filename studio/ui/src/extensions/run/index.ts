@@ -4,6 +4,7 @@ import { commands, workspace, layout } from "@/core/studio";
 export function activate() {
   commands.register("rootcx.run", {
     title: "Run Project",
+    category: "Project",
     handler: async () => {
       layout.showView("console");
 

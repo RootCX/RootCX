@@ -15,6 +15,6 @@ async function createProject() {
 }
 
 export function activate() {
-  commands.register("project.open", { title: "Open Folder", handler: openFolder });
-  commands.register("project.create", { title: "Create Project", handler: createProject });
+  commands.register("project.open", { title: "Open Folder", category: "File", handler: openFolder });
+  commands.register("project.create", { title: "Create Project", category: "File", handler: createProject });
 }

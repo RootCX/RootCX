@@ -14,16 +14,21 @@ export const activate = () => {
 
   commands.register("editor.open", {
     title: "Open File in Editor",
+    category: "Editor",
     handler: (path: unknown) => openFile(path as string),
   });
 
   commands.register("editor.save", {
     title: "Save File",
+    category: "Editor",
+    keybinding: "Mod+S",
     handler: () => saveFile(),
   });
 
   commands.register("editor.closeTab", {
     title: "Close Editor Tab",
+    category: "Editor",
+    keybinding: "Mod+W",
     handler: (path?: unknown) => {
       const { focusedPane, root } = getSnapshot();
       const target = path as string | undefined;
@@ -37,11 +42,13 @@ export const activate = () => {
 
   commands.register("editor.splitRight", {
     title: "Split Right",
+    category: "Editor",
     handler: () => splitPane(getSnapshot().focusedPane, "horizontal"),
   });
 
   commands.register("editor.splitDown", {
     title: "Split Down",
+    category: "Editor",
     handler: () => splitPane(getSnapshot().focusedPane, "vertical"),
   });
 

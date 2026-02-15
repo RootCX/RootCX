@@ -13,6 +13,7 @@ import { ProjectProvider, useProjectContext } from "./app-context";
 import { LayoutProvider, useLayout, buildDefaultState } from "./layout-store";
 import { useViews } from "@/core/hooks";
 import { views as viewRegistry, executeCommand, workspace, layout } from "@/core/studio";
+import { CommandPaletteOverlay } from "@/extensions/command-palette/palette";
 
 function Shell() {
   const { state, dispatch } = useLayout();
@@ -87,6 +88,7 @@ function Shell() {
         </ResizablePanel>
       </ResizablePanelGroup>
       <StatusBar />
+      <CommandPaletteOverlay />
     </div>
   );
 }
