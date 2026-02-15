@@ -6,7 +6,7 @@ import {
   type ReactNode,
 } from "react";
 
-export type ZoneId = "sidebar" | "editor" | "bottom";
+export type ZoneId = "sidebar" | "editor" | "bottom" | "right";
 
 export interface LayoutState {
   zones: Record<ZoneId, string[]>;
@@ -22,15 +22,14 @@ export type Action =
   | { type: "RESET"; defaultState: LayoutState };
 
 const STORAGE_KEY = "studio:layout";
-const ZONE_IDS: ZoneId[] = ["sidebar", "editor", "bottom"];
+const ZONE_IDS: ZoneId[] = ["sidebar", "editor", "bottom", "right"];
 
 export function buildDefaultState(
   views: { id: string; defaultZone: ZoneId }[],
 ): LayoutState {
-  const zones: Record<ZoneId, string[]> = { sidebar: [], editor: [], bottom: [] };
+  const zones = Object.fromEntries(ZONE_IDS.map((z) => [z, []])) as Record<ZoneId, string[]>;
   for (const v of views) zones[v.defaultZone].push(v.id);
-  const active = {} as Record<ZoneId, string | null>;
-  for (const z of ZONE_IDS) active[z] = zones[z][0] ?? null;
+  const active = Object.fromEntries(ZONE_IDS.map((z) => [z, zones[z][0] ?? null])) as Record<ZoneId, string | null>;
   return { zones, active, hidden: new Set() };
 }
 

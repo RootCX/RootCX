@@ -64,7 +64,7 @@ function Shell() {
         </ResizablePanel>
         <ResizableHandle />
 
-        <ResizablePanel id="main" defaultSize="80%">
+        <ResizablePanel id="main" defaultSize="60%">
           <ResizablePanelGroup orientation="vertical">
             <ResizablePanel id="editor" defaultSize="70%" minSize="10%">
               <PanelContainer zone="editor" />
@@ -74,6 +74,16 @@ function Shell() {
               <PanelContainer zone="bottom" />
             </ResizablePanel>
           </ResizablePanelGroup>
+        </ResizablePanel>
+        <ResizableHandle />
+        <ResizablePanel
+          id="right"
+          defaultSize="20%"
+          minSize="3%"
+          maxSize="40%"
+          className="bg-sidebar"
+        >
+          <PanelContainer zone="right" />
         </ResizablePanel>
       </ResizablePanelGroup>
       <StatusBar />
