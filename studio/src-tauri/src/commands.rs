@@ -72,7 +72,7 @@ pub fn sync_view_menu(hidden: Vec<String>, state: State<'_, ViewMenuItems>) {
     }
 }
 
-// ── File I/O ──
+// ── Filesystem ──
 
 #[tauri::command]
 pub async fn read_file(path: String) -> Result<String, String> {
@@ -86,6 +86,26 @@ pub async fn write_file(path: String, contents: String) -> Result<(), String> {
     tokio::fs::write(&path, contents.as_bytes())
         .await
         .map_err(|e| format!("failed to write file: {e}"))
+}
+
+#[tauri::command]
+pub async fn scaffold_project(path: String, name: String) -> Result<(), String> {
+    tokio::fs::create_dir_all(&path)
+        .await
+        .map_err(|e| format!("failed to create directory: {e}"))?;
+    let manifest = serde_json::json!({
+        "appId": name.to_lowercase().replace(' ', "-"),
+        "name": name,
+        "version": "0.0.1",
+        "description": "",
+        "dataContract": []
+    });
+    tokio::fs::write(
+        format!("{path}/manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .await
+    .map_err(|e| format!("failed to write manifest: {e}"))
 }
 
 // ── Launch config ──

@@ -29,6 +29,7 @@ pub fn run() {
             commands::read_dir,
             commands::read_file,
             commands::write_file,
+            commands::scaffold_project,
             commands::sync_view_menu,
             commands::read_launch_config,
             commands::init_launch_config,
