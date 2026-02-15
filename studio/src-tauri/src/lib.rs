@@ -2,6 +2,7 @@ mod commands;
 mod forge;
 mod menu;
 mod state;
+mod terminal;
 
 use state::AppState;
 use tauri::{Emitter, Manager};
@@ -26,10 +27,15 @@ pub fn run() {
             commands::get_forge_status,
             commands::read_dir,
             commands::sync_view_menu,
+            commands::spawn_terminal,
+            commands::terminal_write,
+            commands::terminal_resize,
         ])
         .setup(|app| {
             let view_menu = menu::setup(app)?;
             app.manage(view_menu);
+
+            app.manage(tokio::sync::Mutex::new(terminal::TerminalState::default()));
 
             let app_state = AppState::from_tauri(app);
             let state = app_state.clone();

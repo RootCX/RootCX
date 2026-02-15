@@ -1,9 +1,11 @@
 use rootcx_shared_types::OsStatus;
 use serde::Serialize;
-use tauri::State;
+use tauri::{ipc::Channel, State};
+use tokio::sync::Mutex;
 
 use crate::menu::ViewMenuItems;
 use crate::state::AppState;
+use crate::terminal::TerminalState;
 
 #[tauri::command]
 pub async fn get_os_status(state: State<'_, AppState>) -> Result<OsStatus, String> {
@@ -68,4 +70,34 @@ pub fn sync_view_menu(hidden: Vec<String>, state: State<'_, ViewMenuItems>) {
     for (id, item) in &state.0 {
         let _ = item.set_checked(!hidden.contains(id));
     }
+}
+
+// ── Terminal ──
+
+#[tauri::command]
+pub async fn spawn_terminal(
+    cwd: Option<String>,
+    rows: u16,
+    cols: u16,
+    channel: Channel<Vec<u8>>,
+    state: State<'_, Mutex<TerminalState>>,
+) -> Result<(), String> {
+    state.lock().await.spawn(cwd.as_deref(), rows, cols, channel)
+}
+
+#[tauri::command]
+pub async fn terminal_write(
+    data: String,
+    state: State<'_, Mutex<TerminalState>>,
+) -> Result<(), String> {
+    state.lock().await.write(data.as_bytes()).await
+}
+
+#[tauri::command]
+pub async fn terminal_resize(
+    rows: u16,
+    cols: u16,
+    state: State<'_, Mutex<TerminalState>>,
+) -> Result<(), String> {
+    state.lock().await.resize(rows, cols).await
 }
