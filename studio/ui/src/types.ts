@@ -27,12 +27,3 @@ export type ServiceState =
   | "starting"
   | "stopping"
   | "error";
-
-/** Mirrors rootcx-shared-types::InstalledApp */
-export interface InstalledApp {
-  id: string;
-  name: string;
-  version: string;
-  status: string;
-  entities: string[];
-}

@@ -113,7 +113,7 @@ export function useForge(projectId: string) {
     });
 
     es.addEventListener("error", (e) => {
-      const data = JSON.parse(e.data);
+      const data = JSON.parse((e as MessageEvent).data);
       setErrors((prev) => [...prev, data.message]);
     });
 

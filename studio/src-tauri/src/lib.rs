@@ -1,4 +1,3 @@
-mod app_runner;
 mod commands;
 mod forge;
 mod state;
@@ -18,17 +17,13 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::get_os_status,
             commands::boot_runtime,
             commands::shutdown_runtime,
-            commands::install_app,
-            commands::list_apps,
             commands::get_forge_status,
-            commands::run_app,
-            commands::stop_app,
-            commands::app_logs,
-            commands::list_running_apps,
+            commands::read_dir,
         ])
         .setup(|app| {
             let app_state = AppState::from_tauri(app);
@@ -45,11 +40,10 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("failed to build tauri application")
-        .run(|app, event| {
+        .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
-                let state = app.state::<AppState>().inner().clone();
+                let state = _app.state::<AppState>().inner().clone();
                 tauri::async_runtime::block_on(async {
-                    state.stop_all_apps().await;
                     state.shutdown().await;
                 });
             }

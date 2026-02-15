@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::app_runner::AppRunner;
 use crate::forge::ForgeManager;
 use rootcx_runtime_client::RuntimeClient;
-use rootcx_shared_types::{ForgeStatus, InstalledApp, AppManifest, OsStatus, ServiceState};
+use rootcx_shared_types::{ForgeStatus, OsStatus, ServiceState};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -16,7 +14,6 @@ const DAEMON_URL: &str = "http://localhost:9100";
 pub struct AppState {
     client: RuntimeClient,
     forge: Option<Arc<Mutex<ForgeManager>>>,
-    running_apps: Arc<Mutex<HashMap<String, AppRunner>>>,
 }
 
 impl AppState {
@@ -26,7 +23,6 @@ impl AppState {
         Self {
             client: RuntimeClient::new(DAEMON_URL),
             forge,
-            running_apps: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -69,56 +65,6 @@ impl AppState {
         }
 
         status
-    }
-
-    pub async fn install_app_manifest(&self, manifest: &AppManifest) -> Result<String, String> {
-        self.client.install_app(manifest).await.map_err(|e| e.to_string())
-    }
-
-    pub async fn list_installed_apps(&self) -> Result<Vec<InstalledApp>, String> {
-        self.client.list_apps().await.map_err(|e| e.to_string())
-    }
-
-    pub async fn run_app(&self, project_path: String) -> Result<(), String> {
-        {
-            let apps = self.running_apps.lock().await;
-            if apps.contains_key(&project_path) {
-                return Err("app is already running".into());
-            }
-        }
-        let mut runner = AppRunner::new(PathBuf::from(&project_path));
-        runner.start().await.map_err(|e| e.to_string())?;
-        self.running_apps.lock().await.insert(project_path, runner);
-        Ok(())
-    }
-
-    pub async fn stop_app(&self, project_path: String) -> Result<(), String> {
-        let mut apps = self.running_apps.lock().await;
-        if let Some(mut runner) = apps.remove(&project_path) {
-            runner.stop().await.map_err(|e| e.to_string())?;
-        }
-        Ok(())
-    }
-
-    pub async fn app_logs(&self, project_path: &str, since: u64) -> (Vec<String>, u64) {
-        let apps = self.running_apps.lock().await;
-        match apps.get(project_path) {
-            Some(runner) => runner.read_logs(since).await,
-            None => (vec![], since),
-        }
-    }
-
-    pub async fn running_app_paths(&self) -> Vec<String> {
-        self.running_apps.lock().await.keys().cloned().collect()
-    }
-
-    pub async fn stop_all_apps(&self) {
-        let mut apps = self.running_apps.lock().await;
-        for (path, mut runner) in apps.drain() {
-            if let Err(e) = runner.stop().await {
-                warn!(path = %path, "failed to stop app: {e}");
-            }
-        }
     }
 }
 
