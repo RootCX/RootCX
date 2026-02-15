@@ -1,9 +1,10 @@
 mod commands;
 mod forge;
+mod menu;
 mod state;
 
 use state::AppState;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tracing::error;
 use tracing_subscriber::EnvFilter;
 
@@ -24,8 +25,12 @@ pub fn run() {
             commands::shutdown_runtime,
             commands::get_forge_status,
             commands::read_dir,
+            commands::sync_view_menu,
         ])
         .setup(|app| {
+            let view_menu = menu::setup(app)?;
+            app.manage(view_menu);
+
             let app_state = AppState::from_tauri(app);
             let state = app_state.clone();
             app.manage(app_state);
@@ -37,6 +42,12 @@ pub fn run() {
             });
 
             Ok(())
+        })
+        .on_menu_event(|app, event| {
+            let id = event.id().as_ref();
+            if app.state::<menu::ViewMenuItems>().0.contains_key(id) {
+                let _ = app.emit("toggle-view", id);
+            }
         })
         .build(tauri::generate_context!())
         .expect("failed to build tauri application")

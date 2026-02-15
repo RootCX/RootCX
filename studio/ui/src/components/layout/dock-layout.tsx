@@ -1,102 +1,97 @@
-import { useState } from "react";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { useEffect } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import {
   ResizablePanelGroup,
   ResizablePanel,
   ResizableHandle,
 } from "@/components/ui/resizable";
-import { ActivityBar } from "./activity-bar";
 import { StatusBar } from "./status-bar";
 import { PanelContainer } from "./panel-container";
 import { ProjectProvider } from "./app-context";
-import { getPanelsByPosition } from "@/components/panels/registry";
+import { LayoutProvider, useLayout, buildDefaultState } from "./layout-store";
+import { views } from "@/components/panels/registry";
 
-const sidebarPanels = getPanelsByPosition("sidebar");
-const editorPanels = getPanelsByPosition("editor");
-const bottomPanels = getPanelsByPosition("bottom");
+const defaultState = buildDefaultState(views);
+const validIds = new Set(views.map((v) => v.id));
 
-export function DockLayout() {
-  const [activeSidebarId, setActiveSidebarId] = useState<string | null>(
-    sidebarPanels[0]?.id ?? null,
-  );
-  const [activeEditorId, setActiveEditorId] = useState(
-    editorPanels[0]?.id ?? "",
-  );
-  const [activeBottomId, setActiveBottomId] = useState(
-    bottomPanels[0]?.id ?? "",
-  );
+function Shell() {
+  const { state, dispatch } = useLayout();
 
-  const handleSidebarToggle = (id: string) => {
-    setActiveSidebarId((prev) => (prev === id ? null : id));
-  };
+  useEffect(() => {
+    invoke("sync_view_menu", { hidden: [...state.hidden] }).catch(() => {});
+  }, [state.hidden]);
 
-  const sidebarOpen = activeSidebarId !== null;
+  useEffect(() => {
+    const unlisten = listen<string>("toggle-view", (e) => {
+      dispatch({ type: "TOGGLE_VIEW", viewId: e.payload });
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [dispatch]);
+
+  const hasVisible = (zone: "sidebar" | "editor" | "bottom") =>
+    state.zones[zone].some((id) => !state.hidden.has(id));
+
+  const sidebarOpen = hasVisible("sidebar");
+  const bottomOpen = hasVisible("bottom");
 
   return (
-    <TooltipProvider delayDuration={300}>
-      <ProjectProvider>
-        <div className="flex h-screen w-screen flex-col overflow-hidden">
-          <div className="flex flex-1 overflow-hidden">
-            {/* Activity Bar */}
-            <ActivityBar
-              sidebarPanels={sidebarPanels}
-              activeSidebarId={activeSidebarId}
-              onToggle={handleSidebarToggle}
-            />
+    <div className="flex h-screen w-screen flex-col overflow-hidden">
+      <ResizablePanelGroup orientation="horizontal" className="flex-1 overflow-hidden">
+        {sidebarOpen && (
+          <>
+            <ResizablePanel
+              id="sidebar"
+              defaultSize="25%"
+              minSize="15%"
+              maxSize="40%"
+              className="bg-sidebar"
+            >
+              <PanelContainer zone="sidebar" />
+            </ResizablePanel>
+            <ResizableHandle />
+          </>
+        )}
 
-            {/* Main content area */}
-            <ResizablePanelGroup orientation="horizontal" className="flex-1">
-              {/* Sidebar */}
-              {sidebarOpen && (
-                <>
-                  <ResizablePanel
-                    id="sidebar"
-                    defaultSize="25%"
-                    minSize="15%"
-                    maxSize="40%"
-                    className="bg-sidebar"
-                  >
-                    <PanelContainer
-                      panels={sidebarPanels}
-                      activeId={activeSidebarId!}
-                      onTabChange={setActiveSidebarId}
-                    />
-                  </ResizablePanel>
-                  <ResizableHandle />
-                </>
-              )}
+        <ResizablePanel id="main" defaultSize={sidebarOpen ? "75%" : "100%"}>
+          <ResizablePanelGroup orientation="vertical">
+            <ResizablePanel
+              id="editor"
+              defaultSize={bottomOpen ? "70%" : "100%"}
+              minSize="30%"
+            >
+              <PanelContainer zone="editor" />
+            </ResizablePanel>
 
-              {/* Editor + Bottom */}
-              <ResizablePanel id="main" defaultSize={sidebarOpen ? "75%" : "100%"}>
-                <ResizablePanelGroup orientation="vertical">
-                  {/* Editor Area */}
-                  <ResizablePanel id="editor" defaultSize="70%" minSize="30%">
-                    <PanelContainer
-                      panels={editorPanels}
-                      activeId={activeEditorId}
-                      onTabChange={setActiveEditorId}
-                    />
-                  </ResizablePanel>
+            {bottomOpen && (
+              <>
+                <ResizableHandle />
+                <ResizablePanel
+                  id="bottom"
+                  defaultSize="30%"
+                  minSize="10%"
+                  maxSize="60%"
+                >
+                  <PanelContainer zone="bottom" />
+                </ResizablePanel>
+              </>
+            )}
+          </ResizablePanelGroup>
+        </ResizablePanel>
+      </ResizablePanelGroup>
+      <StatusBar />
+    </div>
+  );
+}
 
-                  <ResizableHandle />
-
-                  {/* Bottom Panel */}
-                  <ResizablePanel id="bottom" defaultSize="30%" minSize="10%" maxSize="60%">
-                    <PanelContainer
-                      panels={bottomPanels}
-                      activeId={activeBottomId}
-                      onTabChange={setActiveBottomId}
-                    />
-                  </ResizablePanel>
-                </ResizablePanelGroup>
-              </ResizablePanel>
-            </ResizablePanelGroup>
-          </div>
-
-          {/* Status Bar */}
-          <StatusBar />
-        </div>
-      </ProjectProvider>
-    </TooltipProvider>
+export function DockLayout() {
+  return (
+    <ProjectProvider>
+      <LayoutProvider defaultState={defaultState} validIds={validIds}>
+        <Shell />
+      </LayoutProvider>
+    </ProjectProvider>
   );
 }

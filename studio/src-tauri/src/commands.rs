@@ -2,6 +2,7 @@ use rootcx_shared_types::OsStatus;
 use serde::Serialize;
 use tauri::State;
 
+use crate::menu::ViewMenuItems;
 use crate::state::AppState;
 
 #[tauri::command]
@@ -60,4 +61,11 @@ pub async fn read_dir(path: String) -> Result<Vec<DirEntry>, String> {
     });
 
     Ok(entries)
+}
+
+#[tauri::command]
+pub fn sync_view_menu(hidden: Vec<String>, state: State<'_, ViewMenuItems>) {
+    for (id, item) in &state.0 {
+        let _ = item.set_checked(!hidden.contains(id));
+    }
 }
