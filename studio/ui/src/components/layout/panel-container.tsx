@@ -1,4 +1,6 @@
 import { Suspense, useEffect, useRef, useCallback } from "react";
+import { Play } from "lucide-react";
+import { emit } from "@tauri-apps/api/event";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { viewMap, type ViewDefinition } from "@/components/panels/registry";
 import { useLayout, type ZoneId } from "./layout-store";
@@ -148,6 +150,15 @@ export function PanelContainer({ zone }: { zone: ZoneId }) {
               </TabsTrigger>
             ))}
           </TabsList>
+          {zone === "bottom" && (
+            <button
+              onClick={() => emit("run")}
+              className="ml-auto mr-2 flex h-5 w-5 items-center justify-center rounded text-green-400 hover:bg-accent"
+              title="Run (F5)"
+            >
+              <Play className="h-3.5 w-3.5 fill-current" />
+            </button>
+          )}
         </div>
         {resolved.map((view) => (
           <TabsContent key={view.id} value={view.id} className="flex-1 overflow-auto">

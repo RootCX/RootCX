@@ -27,7 +27,10 @@ function Shell() {
     const u1 = listen<string>("toggle-view", (e) => {
       dispatch({ type: "TOGGLE_VIEW", viewId: e.payload });
     });
-    const u2 = listen("reset-layout", async () => {
+    const u2 = listen("run", () => {
+      dispatch({ type: "SHOW_VIEW", viewId: "console" });
+    });
+    const u3 = listen("reset-layout", async () => {
       const ok = await ask("Reset all views to their default positions?", {
         title: "Reset Layout",
         kind: "warning",
@@ -39,6 +42,7 @@ function Shell() {
     return () => {
       u1.then((fn) => fn());
       u2.then((fn) => fn());
+      u3.then((fn) => fn());
     };
   }, [dispatch]);
 

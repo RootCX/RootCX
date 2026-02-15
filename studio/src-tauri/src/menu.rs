@@ -43,6 +43,10 @@ pub fn setup(app: &mut App) -> tauri::Result<ViewMenuItems> {
     let reset = MenuItem::with_id(app, "reset-layout", "Reset Default Layout", true, None::<&str>)?;
     let view_menu = view_builder.separator().item(&reset).build()?;
 
+    let run_menu = SubmenuBuilder::with_id(app, "run-menu", "Run")
+        .item(&MenuItem::with_id(app, "run", "Run", true, Some("F5"))?)
+        .build()?;
+
     let window_menu = SubmenuBuilder::new(app, "Window")
         .minimize()
         .close_window()
@@ -52,6 +56,7 @@ pub fn setup(app: &mut App) -> tauri::Result<ViewMenuItems> {
         .item(&app_menu)
         .item(&edit_menu)
         .item(&view_menu)
+        .item(&run_menu)
         .item(&window_menu)
         .build()?;
 

@@ -17,6 +17,7 @@ export interface LayoutState {
 type Action =
   | { type: "MOVE_VIEW"; viewId: string; toZone: ZoneId; index?: number }
   | { type: "TOGGLE_VIEW"; viewId: string }
+  | { type: "SHOW_VIEW"; viewId: string }
   | { type: "SET_ACTIVE"; zone: ZoneId; viewId: string }
   | { type: "RESET"; defaultState: LayoutState };
 
@@ -68,6 +69,19 @@ function reducer(state: LayoutState, action: Action): LayoutState {
       }
       hidden.add(action.viewId);
       return { ...state, hidden };
+    }
+
+    case "SHOW_VIEW": {
+      const hidden = new Set(state.hidden);
+      hidden.delete(action.viewId);
+      const active = { ...state.active };
+      for (const z of ZONE_IDS) {
+        if (state.zones[z].includes(action.viewId)) {
+          active[z] = action.viewId;
+          break;
+        }
+      }
+      return { ...state, active, hidden };
     }
 
     case "SET_ACTIVE":
