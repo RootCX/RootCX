@@ -72,6 +72,22 @@ pub fn sync_view_menu(hidden: Vec<String>, state: State<'_, ViewMenuItems>) {
     }
 }
 
+// ── File I/O ──
+
+#[tauri::command]
+pub async fn read_file(path: String) -> Result<String, String> {
+    tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| format!("failed to read file: {e}"))
+}
+
+#[tauri::command]
+pub async fn write_file(path: String, contents: String) -> Result<(), String> {
+    tokio::fs::write(&path, contents.as_bytes())
+        .await
+        .map_err(|e| format!("failed to write file: {e}"))
+}
+
 // ── Launch config ──
 
 #[tauri::command]

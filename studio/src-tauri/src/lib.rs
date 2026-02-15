@@ -27,6 +27,8 @@ pub fn run() {
             commands::shutdown_runtime,
             commands::get_forge_status,
             commands::read_dir,
+            commands::read_file,
+            commands::write_file,
             commands::sync_view_menu,
             commands::read_launch_config,
             commands::init_launch_config,

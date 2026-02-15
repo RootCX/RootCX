@@ -5,6 +5,7 @@ import { activate as console } from "./console";
 import { activate as output } from "./output";
 import { activate as coreStatus } from "./core-status";
 import { activate as run } from "./run";
+import { activate as editor } from "./editor";
 
 export function activateBuiltins() {
   explorer();
@@ -14,4 +15,5 @@ export function activateBuiltins() {
   output();
   coreStatus();
   run();
+  editor();
 }

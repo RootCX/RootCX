@@ -5,6 +5,7 @@ import { useProjectContext } from "@/components/layout/app-context";
 import { Button } from "@/components/ui/button";
 import { FolderOpen, ChevronRight, ChevronDown, File, Folder } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { executeCommand, layout } from "@/core/studio";
 
 interface DirEntry {
   name: string;
@@ -29,8 +30,16 @@ function FileTreeNode({
     children: null,
   });
 
-  const toggle = useCallback(async () => {
-    if (!entry.is_dir) return;
+  const handleClick = useCallback(async () => {
+    if (!entry.is_dir) {
+      layout.showView("editor");
+      try {
+        await executeCommand("editor.open", entry.path);
+      } catch (e) {
+        console.error("Failed to open file:", e);
+      }
+      return;
+    }
 
     if (!state.expanded && state.children === null) {
       try {
@@ -49,10 +58,9 @@ function FileTreeNode({
   return (
     <div>
       <button
-        onClick={toggle}
+        onClick={handleClick}
         className={cn(
           "flex w-full items-center gap-1 px-1 py-0.5 text-left text-xs hover:bg-accent",
-          !entry.is_dir && "cursor-default",
         )}
         style={{ paddingLeft: `${depth * 12 + 4}px` }}
       >
