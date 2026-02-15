@@ -5,7 +5,16 @@ import { useLayout, type ZoneId } from "./layout-store";
 
 // ── Pointer-based drag (module-level, shared across instances) ──
 
-let drag: { viewId: string; startX: number; startY: number; active: boolean } | null = null;
+let drag: {
+  viewId: string;
+  startX: number;
+  startY: number;
+  active: boolean;
+  originZone: ZoneId;
+  originIndex: number;
+  lastZone: ZoneId | null;
+  lastIndex: number;
+} | null = null;
 const zoneRefs = new Map<ZoneId, HTMLElement>();
 
 function hitZone(x: number, y: number): ZoneId | null {
@@ -15,6 +24,19 @@ function hitZone(x: number, y: number): ZoneId | null {
       return id;
   }
   return null;
+}
+
+function hitIndex(zone: ZoneId, clientX: number, draggedId: string): number {
+  const el = zoneRefs.get(zone);
+  if (!el) return 0;
+  const tabs = [...el.querySelectorAll<HTMLElement>('[role="tab"]')].filter(
+    (t) => t.dataset.viewId !== draggedId,
+  );
+  for (let i = 0; i < tabs.length; i++) {
+    const r = tabs[i].getBoundingClientRect();
+    if (clientX < r.left + r.width / 2) return i;
+  }
+  return tabs.length;
 }
 
 function clearHighlights() {
@@ -42,7 +64,11 @@ export function PanelContainer({ zone }: { zone: ZoneId }) {
   const startDrag = useCallback(
     (e: React.PointerEvent, viewId: string) => {
       e.preventDefault();
-      drag = { viewId, startX: e.clientX, startY: e.clientY, active: false };
+      const originIndex = state.zones[zone].indexOf(viewId);
+      drag = {
+        viewId, startX: e.clientX, startY: e.clientY, active: false,
+        originZone: zone, originIndex, lastZone: null, lastIndex: -1,
+      };
 
       const cleanup = () => {
         document.removeEventListener("pointermove", onMove);
@@ -66,29 +92,36 @@ export function PanelContainer({ zone }: { zone: ZoneId }) {
         for (const [z, el] of zoneRefs) {
           el.classList.toggle("drop-target", z === target);
         }
+        if (target) {
+          const idx = hitIndex(target, ev.clientX, drag.viewId);
+          if (target !== drag.lastZone || idx !== drag.lastIndex) {
+            drag.lastZone = target;
+            drag.lastIndex = idx;
+            dispatch({ type: "MOVE_VIEW", viewId: drag.viewId, toZone: target, index: idx });
+          }
+        }
       };
 
-      const onUp = (ev: PointerEvent) => {
+      const onUp = () => {
         const wasDrag = drag?.active;
-        const vid = drag?.viewId;
         cleanup();
-        if (wasDrag && vid) {
-          const target = hitZone(ev.clientX, ev.clientY);
-          if (target) dispatch({ type: "MOVE_VIEW", viewId: vid, toZone: target });
-        } else {
+        if (!wasDrag) {
           dispatch({ type: "SET_ACTIVE", zone, viewId });
         }
       };
 
       const onKey = (ev: KeyboardEvent) => {
-        if (ev.key === "Escape") cleanup();
+        if (ev.key !== "Escape" || !drag) return;
+        const { originZone, originIndex, viewId: vid } = drag;
+        cleanup();
+        dispatch({ type: "MOVE_VIEW", viewId: vid, toZone: originZone, index: originIndex });
       };
 
       document.addEventListener("pointermove", onMove);
       document.addEventListener("pointerup", onUp);
       document.addEventListener("keydown", onKey);
     },
-    [zone, dispatch],
+    [zone, state, dispatch],
   );
 
   if (resolved.length === 0) {
@@ -108,6 +141,7 @@ export function PanelContainer({ zone }: { zone: ZoneId }) {
               <TabsTrigger
                 key={view.id}
                 value={view.id}
+                data-view-id={view.id}
                 onPointerDown={(e) => startDrag(e, view.id)}
               >
                 {view.title}
