@@ -22,7 +22,6 @@ export function ServiceStatus() {
     <>
       <StatusDot label="Runtime" state={status.runtime.state} />
       <StatusDot label="Postgres" state={status.postgres.state} />
-      <StatusDot label="AI Forge" state={status.forge.state} />
     </>
   );
 }
