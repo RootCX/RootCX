@@ -9,10 +9,10 @@ use tracing::{info, warn};
 
 const DAEMON_URL: &str = "http://localhost:9100";
 
-// ── Embedded skill files ──
+// ── Embedded instruction files ──
 
-const ROOTCX_RUNTIME_SKILL: &str =
-    include_str!("../../../.agents/skills/rootcx-runtime/SKILL.md");
+const ROOTCX_RUNTIME_INSTRUCTIONS: &str =
+    include_str!("../../../.agents/instructions/rootcx-runtime.md");
 
 /// Default MCP servers always injected into the OpenCode config.
 fn default_mcp_servers() -> serde_json::Value {
@@ -25,13 +25,12 @@ fn default_mcp_servers() -> serde_json::Value {
     })
 }
 
-/// Merge default MCP servers into config JSON. User entries take precedence.
-fn ensure_default_mcp(config: &str) -> Result<String, String> {
+/// Enrich config JSON with default MCP servers and instruction paths.
+fn enrich_config(config: &str) -> Result<String, String> {
     let mut obj: serde_json::Value =
         serde_json::from_str(config).map_err(|e| format!("invalid config JSON: {e}"))?;
 
     let defaults = default_mcp_servers();
-
     if let Some(existing) = obj.get_mut("mcp").and_then(|v| v.as_object_mut()) {
         for (key, value) in defaults.as_object().unwrap() {
             existing.entry(key.clone()).or_insert_with(|| value.clone());
@@ -40,34 +39,20 @@ fn ensure_default_mcp(config: &str) -> Result<String, String> {
         obj["mcp"] = defaults;
     }
 
-    // Ensure instructions point to the global skills directory (absolute path).
-    // Replace if missing or if it still contains the old relative glob.
-    let needs_update = match obj.get("instructions").and_then(|v| v.as_array()) {
-        None => true,
-        Some(arr) => arr.iter().any(|v| {
-            v.as_str()
-                .map(|s| s.starts_with(".agents/"))
-                .unwrap_or(false)
-        }),
-    };
-    if needs_update {
-        if let Ok(dir) = skills_dir() {
-            let glob = dir.join("*/SKILL.md").to_string_lossy().to_string();
-            obj["instructions"] = serde_json::json!([glob]);
-        }
+    if let Ok(dir) = instructions_dir() {
+        obj["instructions"] = serde_json::json!([dir.join("*.md").to_string_lossy().as_ref()]);
     }
 
     serde_json::to_string_pretty(&obj).map_err(|e| format!("failed to serialize config: {e}"))
 }
 
-/// Write config JSON to disk, ensuring default MCP servers are present.
 async fn write_config(path: &Path, contents: &str) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         tokio::fs::create_dir_all(dir)
             .await
             .map_err(|e| format!("failed to create config dir: {e}"))?;
     }
-    let enriched = ensure_default_mcp(contents)?;
+    let enriched = enrich_config(contents)?;
     tokio::fs::write(path, enriched.as_bytes())
         .await
         .map_err(|e| format!("failed to write config: {e}"))
@@ -93,35 +78,28 @@ pub fn config_path() -> Result<PathBuf, String> {
     Ok(config_dir()?.join("config.json"))
 }
 
-pub fn skills_dir() -> Result<PathBuf, String> {
-    Ok(config_dir()?.join("skills"))
+pub fn instructions_dir() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("instructions"))
 }
 
-/// Install embedded skill files to ~/.config/rootcx/skills/.
-async fn ensure_skills() -> Result<(), String> {
-    let dir = skills_dir()?.join("rootcx-runtime");
+async fn ensure_instructions() -> Result<(), String> {
+    let dir = instructions_dir()?;
     tokio::fs::create_dir_all(&dir)
         .await
-        .map_err(|e| format!("failed to create skills dir: {e}"))?;
-    tokio::fs::write(dir.join("SKILL.md"), ROOTCX_RUNTIME_SKILL.as_bytes())
+        .map_err(|e| format!("failed to create instructions dir: {e}"))?;
+    tokio::fs::write(dir.join("rootcx-runtime.md"), ROOTCX_RUNTIME_INSTRUCTIONS.as_bytes())
         .await
-        .map_err(|e| format!("failed to write skill file: {e}"))?;
-    info!("installed skills to {}", dir.display());
+        .map_err(|e| format!("failed to write instruction file: {e}"))?;
+    info!("installed instructions to {}", dir.display());
     Ok(())
 }
 
-/// Ensure config file exists with default MCP servers, return its path.
 async fn ensure_config() -> Result<PathBuf, String> {
-    ensure_skills().await?;
-
+    ensure_instructions().await?;
     let path = config_path()?;
-    let raw = if path.exists() {
-        tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| format!("failed to read config: {e}"))?
-    } else {
-        info!("no forge config found, creating default with MCP servers");
-        "{}".to_string()
+    let raw = match tokio::fs::read_to_string(&path).await {
+        Ok(s) => s,
+        Err(_) => "{}".to_string(),
     };
     write_config(&path, &raw).await?;
     Ok(path)
