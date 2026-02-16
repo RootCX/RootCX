@@ -8,7 +8,7 @@ async fn w(path: &Path, content: &str) -> Result<(), String> {
     fs::write(path, content).await.map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-pub async fn create(root: &Path, name: &str) -> Result<(), String> {
+pub async fn create(root: &Path, name: &str, sdk_path: &Path) -> Result<(), String> {
     let app_id = name.to_lowercase().replace(' ', "-");
     let lib_name = app_id.replace('-', "_");
     let identifier = format!("com.rootcx.{app_id}");
@@ -28,12 +28,13 @@ pub async fn create(root: &Path, name: &str) -> Result<(), String> {
     w(&root.join("manifest.json"), &serde_json::to_string_pretty(&manifest).unwrap()).await?;
     w(&root.join(".rootcx/launch.json"), "{\n  \"command\": \"cargo tauri dev\"\n}\n").await?;
 
+    let sdk_dep = format!("file:{}", sdk_path.display());
     w(&root.join("package.json"), &format!(r#"{{
   "name": "{app_id}",
   "private": true,
   "type": "module",
   "scripts": {{ "dev": "vite", "build": "vite build", "tauri": "tauri" }},
-  "dependencies": {{ "react": "^19.0.0", "react-dom": "^19.0.0" }},
+  "dependencies": {{ "@rootcx/runtime": "{sdk_dep}", "react": "^19.0.0", "react-dom": "^19.0.0" }},
   "devDependencies": {{
     "@tauri-apps/cli": "^2.0.0",
     "@types/react": "^19.0.0",

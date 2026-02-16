@@ -36,13 +36,6 @@ pub async fn install_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), Ru
             .await
             .map_err(RuntimeError::Schema)?;
 
-        // Index on organization_id
-        let idx = generate_org_index(app_id, entity);
-        sqlx::query(&idx)
-            .execute(pool)
-            .await
-            .map_err(RuntimeError::Schema)?;
-
         info!(table = %format!("{}.{}", app_id, entity.entity_name), "table created");
     }
 
@@ -103,12 +96,6 @@ fn generate_create_table(
         columns.push("\"id\" UUID PRIMARY KEY DEFAULT gen_random_uuid()".to_string());
     }
 
-    // Auto-add organization_id if not defined
-    let has_org_id = entity.fields.iter().any(|f| f.name == "organization_id");
-    if !has_org_id {
-        columns.push("\"organization_id\" UUID NOT NULL".to_string());
-    }
-
     for field in &entity.fields {
         if field.name == "created_at" || field.name == "updated_at" {
             continue;
@@ -124,17 +111,6 @@ fn generate_create_table(
         "CREATE TABLE IF NOT EXISTS {} (\n  {}\n)",
         table_name,
         columns.join(",\n  ")
-    )
-}
-
-/// Generate an index on organization_id for an entity table.
-fn generate_org_index(app_id: &str, entity: &EntityContract) -> String {
-    let table_name = format!("{}.{}", quote_ident(app_id), quote_ident(&entity.entity_name));
-    let idx_name = format!("idx_{}_{}_org", app_id, entity.entity_name);
-    format!(
-        "CREATE INDEX IF NOT EXISTS {} ON {} (\"organization_id\")",
-        quote_ident(&idx_name),
-        table_name
     )
 }
 

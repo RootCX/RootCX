@@ -112,8 +112,17 @@ pub async fn ensure_dir(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn sync_manifest(
+    state: State<'_, AppState>,
+    project_path: String,
+) -> Result<(), String> {
+    state.sync_manifest(&project_path).await
+}
+
+#[tauri::command]
 pub async fn scaffold_project(path: String, name: String) -> Result<(), String> {
-    crate::scaffold::create(std::path::Path::new(&path), &name).await
+    let sdk = crate::state::sdk_runtime_dir()?;
+    crate::scaffold::create(std::path::Path::new(&path), &name, &sdk).await
 }
 
 #[tauri::command]

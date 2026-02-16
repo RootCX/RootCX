@@ -1,4 +1,5 @@
-import { createContext, useContext, useState, useCallback, type ReactNode } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { workspace } from "@/core/studio";
 
 interface ProjectContext {
@@ -16,6 +17,12 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     workspace.projectPath = path;
   }, []);
   workspace.openProject = openProject;
+
+  useEffect(() => {
+    if (projectPath) {
+      invoke("sync_manifest", { projectPath }).catch(console.error);
+    }
+  }, [projectPath]);
 
   return (
     <ProjectCtx.Provider value={{ projectPath, openProject }}>

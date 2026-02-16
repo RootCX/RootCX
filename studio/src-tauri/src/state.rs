@@ -82,6 +82,13 @@ pub fn instructions_dir() -> Result<PathBuf, String> {
     Ok(config_dir()?.join("instructions"))
 }
 
+pub fn sdk_runtime_dir() -> Result<PathBuf, String> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../runtime/sdk")
+        .canonicalize()
+        .map_err(|e| format!("SDK not found: {e}"))
+}
+
 async fn ensure_instructions() -> Result<(), String> {
     let dir = instructions_dir()?;
     tokio::fs::create_dir_all(&dir)
@@ -161,6 +168,18 @@ impl AppState {
                 .start(Path::new(pp), Some(&path))
                 .await
                 .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    pub async fn sync_manifest(&self, project_path: &str) -> Result<(), String> {
+        let contents = tokio::fs::read_to_string(Path::new(project_path).join("manifest.json"))
+            .await
+            .map_err(|e| format!("failed to read manifest: {e}"))?;
+        let manifest: rootcx_shared_types::AppManifest =
+            serde_json::from_str(&contents).map_err(|e| format!("invalid manifest: {e}"))?;
+        if !manifest.data_contract.is_empty() {
+            self.client.install_app(&manifest).await.map_err(|e| format!("failed to install app: {e}"))?;
         }
         Ok(())
     }
