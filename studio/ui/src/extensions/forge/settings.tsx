@@ -5,6 +5,35 @@ import { useProjectContext } from "@/components/layout/app-context";
 import { invoke } from "@tauri-apps/api/core";
 import type { Config } from "@opencode-ai/sdk";
 
+function SkillsSection() {
+  const [resolved, setResolved] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    invoke<string[]>("resolve_instructions")
+      .then(setResolved)
+      .catch(() => setResolved([]))
+      .finally(() => setLoading(false));
+  }, []);
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <h3 className="text-xs font-semibold uppercase tracking-wider text-primary">Skills</h3>
+      {loading ? (
+        <span className="text-[10px] text-muted-foreground">Resolving...</span>
+      ) : resolved.length === 0 ? (
+        <span className="text-[10px] text-yellow-400">No skill files found.</span>
+      ) : (
+        <div className="flex flex-col gap-0.5">
+          {resolved.map((f) => (
+            <span key={f} className="rounded-sm bg-accent px-1.5 py-0.5 font-mono text-[10px] text-foreground">{f}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function ForgeSettings() {
   const { providers, connectedProviders, currentConfig } =
     useSyncExternalStore(subscribe, getSnapshot);
@@ -125,6 +154,10 @@ export default function ForgeSettings() {
           {error}
         </div>
       )}
+
+      <div className="my-1 border-t border-border" />
+
+      <SkillsSection />
     </div>
   );
 }

@@ -34,6 +34,7 @@ pub fn run() {
             commands::write_file,
             commands::ensure_dir,
             commands::scaffold_project,
+            commands::resolve_instructions,
             commands::sync_view_menu,
             commands::read_launch_config,
             commands::init_launch_config,

@@ -116,6 +116,29 @@ pub async fn scaffold_project(path: String, name: String) -> Result<(), String> 
     crate::scaffold::create(std::path::Path::new(&path), &name).await
 }
 
+// ── Skills / Instructions ──
+
+/// List installed skill files under ~/.config/rootcx/skills/*/SKILL.md.
+#[tauri::command]
+pub async fn resolve_instructions() -> Result<Vec<String>, String> {
+    let dir = crate::state::skills_dir()?;
+    let mut rd = match tokio::fs::read_dir(&dir).await {
+        Ok(rd) => rd,
+        Err(_) => return Ok(vec![]),
+    };
+    let mut skills = Vec::new();
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+            let path = entry.path().join("SKILL.md");
+            if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+                skills.push(format!("{}/SKILL.md", entry.file_name().to_string_lossy()));
+            }
+        }
+    }
+    skills.sort();
+    Ok(skills)
+}
+
 // ── Launch config ──
 
 #[tauri::command]
