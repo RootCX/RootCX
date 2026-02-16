@@ -54,36 +54,15 @@ function Shell() {
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden">
       <ResizablePanelGroup orientation="horizontal" className="flex-1 overflow-hidden">
-        <ResizablePanel
-          id="sidebar"
-          defaultSize="20%"
-          minSize="3%"
-          maxSize="40%"
-          className="bg-sidebar"
-        >
+        <ResizablePanel id="sidebar" defaultSize="40%" minSize="10%" maxSize="60%" className="bg-sidebar">
           <PanelContainer zone="sidebar" />
         </ResizablePanel>
         <ResizableHandle />
-
-        <ResizablePanel id="main" defaultSize="60%">
-          <ResizablePanelGroup orientation="vertical">
-            <ResizablePanel id="editor" defaultSize="70%" minSize="10%">
-              <PanelContainer zone="editor" />
-            </ResizablePanel>
-            <ResizableHandle />
-            <ResizablePanel id="bottom" defaultSize="30%" minSize="3%" maxSize="60%">
-              <PanelContainer zone="bottom" />
-            </ResizablePanel>
-          </ResizablePanelGroup>
+        <ResizablePanel id="main" defaultSize="40%">
+          <PanelContainer zone="editor" />
         </ResizablePanel>
         <ResizableHandle />
-        <ResizablePanel
-          id="right"
-          defaultSize="20%"
-          minSize="3%"
-          maxSize="40%"
-          className="bg-sidebar"
-        >
+        <ResizablePanel id="right" defaultSize="20%" minSize="3%" maxSize="40%" className="bg-sidebar">
           <PanelContainer zone="right" />
         </ResizablePanel>
       </ResizablePanelGroup>

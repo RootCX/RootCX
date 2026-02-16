@@ -6,6 +6,6 @@ export const activate = () =>
   views.register("explorer", {
     title: "Explorer",
     icon: FolderOpen,
-    defaultZone: "sidebar",
+    defaultZone: "right",
     component: lazy(() => import("./panel")),
   });

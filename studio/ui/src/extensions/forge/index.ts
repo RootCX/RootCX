@@ -8,7 +8,7 @@ export const activate = () => {
   views.register("forge", {
     title: "AI Forge",
     icon: Bot,
-    defaultZone: "right",
+    defaultZone: "sidebar",
     component: lazy(() => import("./panel")),
   });
 

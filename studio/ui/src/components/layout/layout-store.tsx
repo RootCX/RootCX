@@ -30,7 +30,8 @@ export function buildDefaultState(
   const zones = Object.fromEntries(ZONE_IDS.map((z) => [z, []])) as Record<ZoneId, string[]>;
   for (const v of views) zones[v.defaultZone].push(v.id);
   const active = Object.fromEntries(ZONE_IDS.map((z) => [z, zones[z][0] ?? null])) as Record<ZoneId, string | null>;
-  return { zones, active, hidden: new Set() };
+  const hidden = new Set<string>(zones.bottom);
+  return { zones, active, hidden };
 }
 
 function reducer(state: LayoutState, action: Action): LayoutState {
