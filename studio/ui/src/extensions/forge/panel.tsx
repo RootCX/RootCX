@@ -17,65 +17,45 @@ import {
   TooltipContent,
   TooltipProvider,
 } from "@/components/ui/tooltip";
-import { Settings } from "lucide-react";
+import { Settings, SendHorizontal, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { Message, Part, Permission, Session } from "@opencode-ai/sdk";
 
 const ForgeSettings = lazy(() => import("./settings"));
 
-function TextPartView({ part }: { part: Extract<Part, { type: "text" }> }) {
-  return (
-    <div className="whitespace-pre-wrap break-words text-xs leading-relaxed">
-      {part.text}
-    </div>
-  );
-}
-
-function ReasoningPartView({
-  part,
-}: {
-  part: Extract<Part, { type: "reasoning" }>;
-}) {
-  return (
-    <div className="whitespace-pre-wrap break-words text-xs italic text-muted-foreground">
-      {part.text}
-    </div>
-  );
-}
-
-function ToolPartView({ part }: { part: Extract<Part, { type: "tool" }> }) {
-  const statusIcon =
-    part.state.status === "completed"
-      ? "done"
-      : part.state.status === "running"
-        ? "..."
-        : part.state.status === "error"
-          ? "err"
-          : "";
-  return (
-    <div className="flex items-center gap-1.5 rounded-sm border border-border bg-accent px-2 py-1">
-      <span className="font-mono text-[10px] text-primary">{part.tool}</span>
-      <span className="text-[10px] text-muted-foreground">{statusIcon}</span>
-      {"title" in part.state && part.state.title && (
-        <span className="text-[10px] text-muted-foreground">
-          {part.state.title}
-        </span>
-      )}
-    </div>
-  );
-}
+const toolStatusLabel: Record<string, string> = {
+  completed: "done",
+  running: "...",
+  error: "err",
+};
 
 function PartView({ part }: { part: Part }) {
-  switch (part.type) {
-    case "text":
-      return <TextPartView part={part} />;
-    case "reasoning":
-      return <ReasoningPartView part={part} />;
-    case "tool":
-      return <ToolPartView part={part} />;
-    default:
-      return null;
+  if (part.type === "text" || part.type === "reasoning") {
+    return (
+      <div className={cn(
+        "whitespace-pre-wrap break-words text-xs leading-relaxed",
+        part.type === "reasoning" && "italic text-muted-foreground",
+      )}>
+        {part.text}
+      </div>
+    );
   }
+  if (part.type === "tool") {
+    return (
+      <div className="flex min-w-0 items-center gap-1.5 rounded-sm border border-border bg-accent px-2 py-1">
+        <span className="shrink-0 font-mono text-[10px] text-primary">{part.tool}</span>
+        <span className="shrink-0 text-[10px] text-muted-foreground">
+          {toolStatusLabel[part.state.status] ?? ""}
+        </span>
+        {"title" in part.state && part.state.title && (
+          <span className="min-w-0 truncate text-[10px] text-muted-foreground">
+            {part.state.title}
+          </span>
+        )}
+      </div>
+    );
+  }
+  return null;
 }
 
 function MessageView({
@@ -89,7 +69,7 @@ function MessageView({
   return (
     <div
       className={cn(
-        "rounded-md px-3 py-2 text-xs leading-relaxed",
+        "min-w-0 overflow-hidden rounded-md px-3 py-2 text-xs leading-relaxed",
         isUser && "self-end max-w-[80%] border border-blue-600 bg-blue-950",
         !isUser && "border border-border bg-background",
       )}
@@ -119,7 +99,7 @@ function PermissionCard({ perm }: { perm: Permission }) {
   return (
     <div className="rounded-md border border-yellow-700 bg-yellow-950/50 px-3 py-2 text-xs">
       <div className="mb-1 font-semibold text-yellow-300">{perm.title}</div>
-      <div className="mb-2 font-mono text-[10px] text-muted-foreground">
+      <div className="mb-2 truncate font-mono text-[10px] text-muted-foreground">
         {perm.type}
         {perm.pattern &&
           `: ${Array.isArray(perm.pattern) ? perm.pattern.join(", ") : perm.pattern}`}
@@ -166,9 +146,9 @@ function SessionSelector({
   onCreate: () => void;
 }) {
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex min-w-0 items-center gap-2">
       <select
-        className="flex-1 rounded-md border border-input bg-background px-2 py-1 font-mono text-[10px] text-foreground focus:border-ring focus:outline-none"
+        className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-1 font-mono text-[10px] text-foreground focus:border-ring focus:outline-none"
         value={currentId ?? ""}
         onChange={(e) => {
           if (e.target.value) onSelect(e.target.value);
@@ -206,16 +186,21 @@ export default function ForgePanel() {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, parts]);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const submit = () => {
     if (!input.trim() || streaming) return;
     sendMessage(input.trim());
     setInput("");
   };
 
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      submit();
+    }
+  };
+
   return (
-    <div className="flex h-full flex-col">
-      {/* Header: connection status + session selector + gear icon */}
+    <div className="flex h-full min-w-0 flex-col overflow-hidden">
       <div className="flex shrink-0 flex-col gap-1.5 border-b border-border px-3 py-1.5">
         <div className="flex items-center gap-1.5">
           <span
@@ -274,8 +259,7 @@ export default function ForgePanel() {
         </div>
       ) : (
         <>
-          {/* Messages */}
-          <div className="flex flex-1 flex-col gap-2 overflow-y-auto p-3">
+          <div className="flex min-w-0 flex-1 flex-col gap-2 overflow-y-auto overflow-x-hidden p-3">
             {messages.map((msg) => (
               <MessageView
                 key={msg.id}
@@ -297,38 +281,43 @@ export default function ForgePanel() {
             <div ref={endRef} />
           </div>
 
-          {/* Input */}
-          <form
-            className="flex shrink-0 gap-2 border-t border-border p-3"
-            onSubmit={handleSubmit}
-          >
-            <input
-              type="text"
-              className="flex-1 rounded-md border border-input bg-background px-2.5 py-1.5 font-mono text-xs text-foreground placeholder:text-muted-foreground focus:border-ring focus:outline-none"
-              placeholder={
-                !connected
-                  ? "Connecting..."
-                  : streaming
-                    ? "Thinking..."
-                    : "Ask AI Forge..."
-              }
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              disabled={streaming || !connected}
-            />
-            <Button
-              type="submit"
-              size="sm"
-              disabled={streaming || !input.trim() || !connected}
-            >
-              Send
-            </Button>
-            {streaming && (
-              <Button size="sm" variant="destructive" onClick={abortSession}>
-                Stop
-              </Button>
-            )}
-          </form>
+          <div className="shrink-0 border-t border-border p-3">
+            <div className="flex flex-col rounded-md border border-input bg-background focus-within:border-ring">
+              <textarea
+                rows={3}
+                className="min-w-0 w-full resize-none border-none bg-transparent px-2.5 pt-1.5 font-mono text-xs text-foreground placeholder:text-muted-foreground focus:outline-none"
+                placeholder={
+                  !connected
+                    ? "Connecting..."
+                    : streaming
+                      ? "Thinking..."
+                      : "Ask AI Forge... (Shift+Enter for new line)"
+                }
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                disabled={streaming || !connected}
+              />
+              <div className="flex items-center justify-end px-2 py-1">
+                {streaming ? (
+                  <button
+                    className="rounded-md p-1 text-destructive hover:bg-destructive/10"
+                    onClick={abortSession}
+                  >
+                    <Square className="h-4 w-4" />
+                  </button>
+                ) : (
+                  <button
+                    className="rounded-md p-1 text-muted-foreground hover:text-foreground disabled:opacity-30"
+                    disabled={!input.trim() || !connected}
+                    onClick={submit}
+                  >
+                    <SendHorizontal className="h-4 w-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
         </>
       )}
     </div>
