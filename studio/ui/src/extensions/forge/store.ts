@@ -9,13 +9,34 @@ import {
 } from "@opencode-ai/sdk";
 import { invoke } from "@tauri-apps/api/core";
 
-const client = createOpencodeClient({ baseUrl: "http://127.0.0.1:4096" });
+const BASE_URL = "http://127.0.0.1:4096";
+const client = createOpencodeClient({ baseUrl: BASE_URL });
 
 export interface ProviderInfo {
   id: string;
   name: string;
   env: string[];
   models: Record<string, { id: string; name: string }>;
+}
+
+export interface QuestionOption {
+  label: string;
+  description: string;
+}
+
+export interface QuestionInfo {
+  question: string;
+  header: string;
+  options: QuestionOption[];
+  multiple?: boolean;
+  custom?: boolean;
+}
+
+export interface QuestionRequest {
+  id: string;
+  sessionID: string;
+  questions: QuestionInfo[];
+  tool?: { messageID: string; callID: string };
 }
 
 export interface ForgeState {
@@ -25,6 +46,7 @@ export interface ForgeState {
   messages: Message[];
   parts: Map<string, Part[]>;
   permissions: Permission[];
+  questions: QuestionRequest[];
   streaming: boolean;
   error: string | null;
   providers: ProviderInfo[];
@@ -34,6 +56,16 @@ export interface ForgeState {
 
 type Listener = () => void;
 
+const EMPTY_SESSION = {
+  sessionId: null as string | null,
+  messages: [] as Message[],
+  parts: new Map<string, Part[]>(),
+  permissions: [] as Permission[],
+  questions: [] as QuestionRequest[],
+  streaming: false,
+  error: null as string | null,
+};
+
 let state: ForgeState = {
   connected: false,
   sessionId: null,
@@ -41,6 +73,7 @@ let state: ForgeState = {
   messages: [],
   parts: new Map(),
   permissions: [],
+  questions: [],
   streaming: false,
   error: null,
   providers: [],
@@ -176,9 +209,7 @@ function handleEvent(event: Event) {
       state = {
         ...state,
         sessions: state.sessions.filter((s) => s.id !== session.id),
-        ...(state.sessionId === session.id
-          ? { sessionId: null, messages: [], parts: new Map(), permissions: [] }
-          : {}),
+        ...(state.sessionId === session.id ? EMPTY_SESSION : {}),
       };
       emit();
       break;
@@ -189,6 +220,20 @@ function handleEvent(event: Event) {
         emit();
       }
       break;
+    }
+    default: {
+      // Question events (v2 API, not typed in SDK Event union)
+      const { type, properties } = event as { type: string; properties: Record<string, unknown> };
+      if (type === "question.asked") {
+        const q = properties as unknown as QuestionRequest;
+        if (q.sessionID === state.sessionId) {
+          state = { ...state, questions: [...state.questions, q] };
+          emit();
+        }
+      } else if (type === "question.replied" || type === "question.rejected") {
+        state = { ...state, questions: state.questions.filter((q) => q.id !== properties.requestID) };
+        emit();
+      }
     }
   }
 }
@@ -206,7 +251,7 @@ export async function loadSessions() {
 }
 
 export async function selectSession(sessionId: string) {
-  state = { ...state, sessionId, messages: [], parts: new Map(), permissions: [], streaming: false, error: null };
+  state = { ...state, ...EMPTY_SESSION, sessionId };
   emit();
   try {
     const result = await client.session.messages({ path: { id: sessionId } });
@@ -222,7 +267,7 @@ export async function createSession() {
     const result = await client.session.create();
     if (result.data) {
       const session = result.data;
-      state = { ...state, sessionId: session.id, sessions: [session, ...state.sessions], messages: [], parts: new Map(), permissions: [], streaming: false, error: null };
+      state = { ...state, ...EMPTY_SESSION, sessionId: session.id, sessions: [session, ...state.sessions] };
       emit();
       return session.id;
     }
@@ -267,6 +312,32 @@ export async function replyPermission(permissionId: string, response: "once" | "
       body: { response },
     });
   } catch { /* best-effort */ }
+}
+
+function dismissQuestion(requestId: string) {
+  state = { ...state, questions: state.questions.filter((q) => q.id !== requestId) };
+  emit();
+}
+
+export async function replyQuestion(requestId: string, answers: string[][]) {
+  try {
+    await fetch(`${BASE_URL}/question/${requestId}/reply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answers }),
+    });
+  } catch { /* best-effort */ }
+  dismissQuestion(requestId);
+}
+
+export async function rejectQuestion(requestId: string) {
+  try {
+    await fetch(`${BASE_URL}/question/${requestId}/reject`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch { /* best-effort */ }
+  dismissQuestion(requestId);
 }
 
 export async function loadProviders() {
