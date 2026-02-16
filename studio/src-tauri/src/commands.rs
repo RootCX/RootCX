@@ -28,6 +28,22 @@ pub async fn get_forge_status(state: State<'_, AppState>) -> Result<rootcx_share
     Ok(state.status().await.forge)
 }
 
+#[tauri::command]
+pub async fn start_forge(state: State<'_, AppState>, project_path: String) -> Result<(), String> {
+    state.start_forge(&project_path).await
+}
+
+#[tauri::command]
+pub async fn save_forge_config(
+    state: State<'_, AppState>,
+    contents: String,
+    project_path: Option<String>,
+) -> Result<(), String> {
+    state
+        .save_forge_config(&contents, project_path.as_deref())
+        .await
+}
+
 #[derive(Serialize)]
 pub struct DirEntry {
     name: String,
@@ -86,6 +102,13 @@ pub async fn write_file(path: String, contents: String) -> Result<(), String> {
     tokio::fs::write(&path, contents.as_bytes())
         .await
         .map_err(|e| format!("failed to write file: {e}"))
+}
+
+#[tauri::command]
+pub async fn ensure_dir(path: String) -> Result<(), String> {
+    tokio::fs::create_dir_all(&path)
+        .await
+        .map_err(|e| format!("failed to create directory: {e}"))
 }
 
 #[tauri::command]

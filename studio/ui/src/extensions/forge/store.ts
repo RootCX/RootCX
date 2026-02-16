@@ -1,44 +1,59 @@
-const FORGE_BASE = "http://127.0.0.1:3100";
-const PROJECT_ID = "studio-default";
+import {
+  createOpencodeClient,
+  type Session,
+  type Message,
+  type Part,
+  type Permission,
+  type Event,
+  type Config,
+} from "@opencode-ai/sdk";
+import { invoke } from "@tauri-apps/api/core";
 
-export type ForgePhase =
-  | "idle" | "analyzing" | "planning" | "executing"
-  | "verifying" | "done" | "error" | "stopped";
+const client = createOpencodeClient({ baseUrl: "http://127.0.0.1:4096" });
 
-export interface ForgeToolCall { name: string; args: Record<string, unknown> }
-export interface ForgeFileChange { path: string; action: "create" | "update" | "delete" }
-export interface ForgeMessage { id: string; role: "user" | "assistant" | "status"; content: string; timestamp: number }
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  env: string[];
+  models: Record<string, { id: string; name: string }>;
+}
 
-interface ForgeState {
-  messages: ForgeMessage[];
-  phase: ForgePhase;
-  thinking: string;
-  toolCalls: ForgeToolCall[];
-  files: ForgeFileChange[];
-  errors: string[];
-  isStreaming: boolean;
-  conversationId: string | null;
+export interface ForgeState {
+  connected: boolean;
+  sessionId: string | null;
+  sessions: Session[];
+  messages: Message[];
+  parts: Map<string, Part[]>;
+  permissions: Permission[];
+  streaming: boolean;
+  error: string | null;
+  providers: ProviderInfo[];
+  connectedProviders: string[];
+  currentConfig: Config | null;
 }
 
 type Listener = () => void;
 
 let state: ForgeState = {
-  messages: [], phase: "idle", thinking: "", toolCalls: [],
-  files: [], errors: [], isStreaming: false, conversationId: null,
+  connected: false,
+  sessionId: null,
+  sessions: [],
+  messages: [],
+  parts: new Map(),
+  permissions: [],
+  streaming: false,
+  error: null,
+  providers: [],
+  connectedProviders: [],
+  currentConfig: null,
 };
 const listeners = new Set<Listener>();
 let snapshot = state;
-let thinkingBuffer = "";
-let eventSource: EventSource | null = null;
+let eventStream: AsyncGenerator | null = null;
 
 function emit() {
-  snapshot = { ...state };
+  snapshot = { ...state, parts: new Map(state.parts) };
   listeners.forEach((fn) => fn());
-}
-
-function pushStatus(id: string, content: string) {
-  state = { ...state, messages: [...state.messages, { id, role: "status", content, timestamp: Date.now() }] };
-  emit();
 }
 
 export function subscribe(fn: Listener): () => void {
@@ -50,88 +65,251 @@ export function getSnapshot(): ForgeState {
   return snapshot;
 }
 
-function connectSSE() {
-  if (eventSource) eventSource.close();
-  const es = new EventSource(`${FORGE_BASE}/stream/${PROJECT_ID}`);
-  eventSource = es;
+// ── SSE event loop ──
 
-  es.addEventListener("phase", (e) => {
-    state = { ...state, phase: JSON.parse(e.data).phase };
+async function connectEvents() {
+  if (eventStream) return;
+  try {
+    const result = await client.event.subscribe({ query: {} });
+    eventStream = result.stream;
+    state = { ...state, connected: true };
     emit();
-  });
 
-  es.addEventListener("agent_thinking", (e) => {
-    thinkingBuffer += JSON.parse(e.data).content;
-    state = { ...state, thinking: thinkingBuffer };
+    loadSessions();
+    loadProviders();
+    loadConfig();
+
+    for await (const event of eventStream) {
+      handleEvent(event as Event);
+    }
+  } catch {
+    // stream ended or connection failed
+  } finally {
+    eventStream = null;
+    state = { ...state, connected: false };
     emit();
-  });
-
-  es.addEventListener("tool_calls", (e) => {
-    state = { ...state, toolCalls: JSON.parse(e.data).calls || [] };
-    emit();
-  });
-
-  es.addEventListener("tool_executing", (e) =>
-    pushStatus(`tool-${Date.now()}`, `Running ${JSON.parse(e.data).name}...`));
-
-  es.addEventListener("tool_result", (e) => {
-    const d = JSON.parse(e.data);
-    pushStatus(`result-${Date.now()}`, `${d.name}: ${d.output}`);
-  });
-
-  es.addEventListener("status", (e) =>
-    pushStatus(`status-${Date.now()}`, JSON.parse(e.data).message));
-
-  es.addEventListener("error", (e) => {
-    state = { ...state, errors: [...state.errors, JSON.parse((e as MessageEvent).data).message] };
-    emit();
-  });
-
-  es.addEventListener("complete", (e) => {
-    const data = JSON.parse(e.data);
-    const messages = thinkingBuffer
-      ? [...state.messages, { id: `assistant-${Date.now()}`, role: "assistant" as const, content: thinkingBuffer, timestamp: Date.now() }]
-      : state.messages;
-    thinkingBuffer = "";
-    state = { ...state, messages, isStreaming: false, phase: data.success ? "done" : "error", files: data.applied_changes || [], thinking: "" };
-    emit();
-    es.close();
-    eventSource = null;
-  });
-
-  es.onerror = () => {
-    if (state.phase === "idle") { es.close(); eventSource = null; }
-  };
+    setTimeout(connectEvents, 3000);
+  }
 }
 
-export async function sendMessage(prompt: string, projectPath: string, appId?: string) {
-  thinkingBuffer = "";
-  state = {
-    ...state, isStreaming: true, phase: "analyzing", thinking: "", toolCalls: [], errors: [],
-    messages: [...state.messages, { id: `user-${Date.now()}`, role: "user", content: prompt, timestamp: Date.now() }],
-  };
-  emit();
-  connectSSE();
+function handleEvent(event: Event) {
+  switch (event.type) {
+    case "message.updated": {
+      const msg = event.properties.info;
+      if (msg.sessionID !== state.sessionId) break;
+      const idx = state.messages.findIndex((m) => m.id === msg.id);
+      const messages =
+        idx >= 0
+          ? state.messages.map((m, i) => (i === idx ? msg : m))
+          : [...state.messages, msg];
+      state = {
+        ...state,
+        messages,
+        streaming: msg.role === "assistant" && !msg.time.completed && !msg.error,
+      };
+      emit();
+      break;
+    }
+    case "message.removed": {
+      if (event.properties.sessionID !== state.sessionId) break;
+      state = {
+        ...state,
+        messages: state.messages.filter((m) => m.id !== event.properties.messageID),
+      };
+      emit();
+      break;
+    }
+    case "message.part.updated": {
+      const part = event.properties.part;
+      if (part.sessionID !== state.sessionId) break;
+      const parts = new Map(state.parts);
+      const existing = parts.get(part.messageID) || [];
+      const partIdx = existing.findIndex((p) => p.id === part.id);
+      if (partIdx >= 0) {
+        const updated = [...existing];
+        updated[partIdx] = part;
+        parts.set(part.messageID, updated);
+      } else {
+        parts.set(part.messageID, [...existing, part]);
+      }
+      state = { ...state, parts };
+      emit();
+      break;
+    }
+    case "message.part.removed": {
+      const { messageID, partID } = event.properties;
+      if (!state.parts.has(messageID)) break;
+      const parts = new Map(state.parts);
+      parts.set(messageID, (parts.get(messageID) || []).filter((p) => p.id !== partID));
+      state = { ...state, parts };
+      emit();
+      break;
+    }
+    case "permission.updated": {
+      const perm = event.properties.permission;
+      if (perm.sessionID !== state.sessionId) break;
+      state = { ...state, permissions: [...state.permissions, perm] };
+      emit();
+      break;
+    }
+    case "permission.replied": {
+      state = {
+        ...state,
+        permissions: state.permissions.filter((p) => p.id !== event.properties.permissionID),
+      };
+      emit();
+      break;
+    }
+    case "session.updated": {
+      const session = event.properties.info;
+      state = { ...state, sessions: state.sessions.map((s) => (s.id === session.id ? session : s)) };
+      emit();
+      break;
+    }
+    case "session.created": {
+      state = { ...state, sessions: [event.properties.info, ...state.sessions] };
+      emit();
+      break;
+    }
+    case "session.deleted": {
+      const session = event.properties.info;
+      state = {
+        ...state,
+        sessions: state.sessions.filter((s) => s.id !== session.id),
+        ...(state.sessionId === session.id
+          ? { sessionId: null, messages: [], parts: new Map(), permissions: [] }
+          : {}),
+      };
+      emit();
+      break;
+    }
+    case "session.idle": {
+      if (event.properties.sessionID === state.sessionId) {
+        state = { ...state, streaming: false };
+        emit();
+      }
+      break;
+    }
+  }
+}
 
+// ── API actions ──
+
+export async function loadSessions() {
   try {
-    const resp = await fetch(`${FORGE_BASE}/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ project_id: PROJECT_ID, project_path: projectPath, prompt, conversation_id: state.conversationId, app_id: appId || "" }),
-    });
-    if (!resp.ok) throw new Error(`Forge API error: ${resp.status}`);
-    state = { ...state, conversationId: (await resp.json()).conversation_id };
-    emit();
+    const result = await client.session.list();
+    if (result.data) {
+      state = { ...state, sessions: result.data };
+      emit();
+    }
+  } catch { /* ignore */ }
+}
+
+export async function selectSession(sessionId: string) {
+  state = { ...state, sessionId, messages: [], parts: new Map(), permissions: [], streaming: false, error: null };
+  emit();
+  try {
+    const result = await client.session.messages({ path: { id: sessionId } });
+    if (result.data) {
+      state = { ...state, messages: result.data };
+      emit();
+    }
+  } catch { /* ignore */ }
+}
+
+export async function createSession() {
+  try {
+    const result = await client.session.create();
+    if (result.data) {
+      const session = result.data;
+      state = { ...state, sessionId: session.id, sessions: [session, ...state.sessions], messages: [], parts: new Map(), permissions: [], streaming: false, error: null };
+      emit();
+      return session.id;
+    }
   } catch (err) {
-    state = { ...state, isStreaming: false, phase: "error", errors: [...state.errors, err instanceof Error ? err.message : String(err)] };
+    state = { ...state, error: err instanceof Error ? err.message : String(err) };
+    emit();
+  }
+  return null;
+}
+
+export async function sendMessage(prompt: string) {
+  let sessionId = state.sessionId;
+  if (!sessionId) {
+    sessionId = await createSession();
+    if (!sessionId) return;
+  }
+  state = { ...state, streaming: true, error: null };
+  emit();
+  try {
+    await client.session.promptAsync({
+      path: { id: sessionId },
+      body: { parts: [{ type: "text", text: prompt }] },
+    });
+  } catch (err) {
+    state = { ...state, streaming: false, error: err instanceof Error ? err.message : String(err) };
     emit();
   }
 }
 
-export async function stopBuild() {
-  try {
-    await fetch(`${FORGE_BASE}/stop`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ project_id: PROJECT_ID }) });
-  } catch { /* best-effort */ }
-  state = { ...state, isStreaming: false, phase: "stopped" };
+export async function abortSession() {
+  if (!state.sessionId) return;
+  try { await client.session.abort({ path: { id: state.sessionId } }); } catch { /* best-effort */ }
+  state = { ...state, streaming: false };
   emit();
 }
+
+export async function replyPermission(permissionId: string, response: "once" | "always" | "reject") {
+  if (!state.sessionId) return;
+  try {
+    await client.postSessionIdPermissionsPermissionId({
+      path: { id: state.sessionId, permissionID: permissionId },
+      body: { response },
+    });
+  } catch { /* best-effort */ }
+}
+
+export async function loadProviders() {
+  try {
+    const result = await client.provider.list();
+    if (result.data) {
+      state = {
+        ...state,
+        providers: result.data.all.map((p) => ({
+          id: p.id,
+          name: p.name,
+          env: p.env,
+          models: Object.fromEntries(
+            Object.entries(p.models).map(([key, m]) => [key, { id: m.id, name: m.name }]),
+          ),
+        })),
+        connectedProviders: result.data.connected,
+      };
+      emit();
+    }
+  } catch { /* ignore */ }
+}
+
+export async function loadConfig() {
+  try {
+    const result = await client.config.get();
+    if (result.data) {
+      state = { ...state, currentConfig: result.data };
+      emit();
+    }
+  } catch { /* ignore */ }
+}
+
+let startedProject: string | null = null;
+
+export async function startForProject(projectPath: string): Promise<void> {
+  if (startedProject === projectPath) return;
+  startedProject = projectPath;
+  try {
+    await invoke("start_forge", { projectPath });
+  } catch {
+    startedProject = null;
+  }
+}
+
+connectEvents();

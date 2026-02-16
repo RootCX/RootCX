@@ -1,13 +1,13 @@
 import { lazy } from "react";
-import { Hammer } from "lucide-react";
-import { views, commands, statusBar, workspace } from "@/core/studio";
-import { sendMessage, stopBuild } from "./store";
-import { ForgePhaseStatus } from "./status";
+import { Bot } from "lucide-react";
+import { views, commands, statusBar } from "@/core/studio";
+import { sendMessage, abortSession } from "./store";
+import { ForgeStatus } from "./status";
 
 export const activate = () => {
   views.register("forge", {
     title: "AI Forge",
-    icon: Hammer,
+    icon: Bot,
     defaultZone: "right",
     component: lazy(() => import("./panel")),
   });
@@ -15,21 +15,21 @@ export const activate = () => {
   commands.register("forge.send", {
     title: "Send Message",
     category: "AI Forge",
-    handler: (prompt: unknown, appId?: unknown) => {
-      if (typeof prompt !== "string" || !workspace.projectPath) return;
-      sendMessage(prompt, workspace.projectPath, appId as string | undefined);
+    handler: (prompt: unknown) => {
+      if (typeof prompt !== "string") return;
+      sendMessage(prompt);
     },
   });
 
-  commands.register("forge.stop", {
-    title: "Stop Build",
+  commands.register("forge.abort", {
+    title: "Abort Session",
     category: "AI Forge",
-    handler: () => stopBuild(),
+    handler: () => abortSession(),
   });
 
-  statusBar.register("forge.phase", {
+  statusBar.register("forge.status", {
     alignment: "left",
     priority: 10,
-    component: ForgePhaseStatus,
+    component: ForgeStatus,
   });
 };

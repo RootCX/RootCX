@@ -19,19 +19,6 @@ Thumbs.db
 *.swp
 *.swo
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-.venv/
-venv/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-forge/build/
-forge/dist/
-
 # Env
 .env
 .env.*
