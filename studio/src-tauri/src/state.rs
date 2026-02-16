@@ -9,6 +9,48 @@ use tracing::{info, warn};
 
 const DAEMON_URL: &str = "http://localhost:9100";
 
+/// Default MCP servers always injected into the OpenCode config.
+fn default_mcp_servers() -> serde_json::Value {
+    serde_json::json!({
+        "shadcn": {
+            "type": "local",
+            "command": ["npx", "shadcn@latest", "mcp"],
+            "enabled": true
+        }
+    })
+}
+
+/// Merge default MCP servers into config JSON. User entries take precedence.
+fn ensure_default_mcp(config: &str) -> Result<String, String> {
+    let mut obj: serde_json::Value =
+        serde_json::from_str(config).map_err(|e| format!("invalid config JSON: {e}"))?;
+
+    let defaults = default_mcp_servers();
+
+    if let Some(existing) = obj.get_mut("mcp").and_then(|v| v.as_object_mut()) {
+        for (key, value) in defaults.as_object().unwrap() {
+            existing.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    } else {
+        obj["mcp"] = defaults;
+    }
+
+    serde_json::to_string_pretty(&obj).map_err(|e| format!("failed to serialize config: {e}"))
+}
+
+/// Write config JSON to disk, ensuring default MCP servers are present.
+async fn write_config(path: &Path, contents: &str) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        tokio::fs::create_dir_all(dir)
+            .await
+            .map_err(|e| format!("failed to create config dir: {e}"))?;
+    }
+    let enriched = ensure_default_mcp(contents)?;
+    tokio::fs::write(path, enriched.as_bytes())
+        .await
+        .map_err(|e| format!("failed to write config: {e}"))
+}
+
 #[derive(Clone)]
 pub struct AppState {
     client: RuntimeClient,
@@ -25,9 +67,19 @@ fn config_path() -> Result<PathBuf, String> {
     Ok(home_dir()?.join(".config/rootcx/config.json"))
 }
 
-/// Returns the config path only if the file exists on disk.
-fn existing_config() -> Option<PathBuf> {
-    config_path().ok().filter(|p| p.exists())
+/// Ensure config file exists with default MCP servers, return its path.
+async fn ensure_config() -> Result<PathBuf, String> {
+    let path = config_path()?;
+    let raw = if path.exists() {
+        tokio::fs::read_to_string(&path)
+            .await
+            .map_err(|e| format!("failed to read config: {e}"))?
+    } else {
+        info!("no forge config found, creating default with MCP servers");
+        "{}".to_string()
+    };
+    write_config(&path, &raw).await?;
+    Ok(path)
 }
 
 impl AppState {
@@ -47,8 +99,9 @@ impl AppState {
 
     pub async fn boot(&self) -> Result<(), String> {
         if let Some(ref f) = self.forge {
+            let cfg = ensure_config().await?;
             let cwd = home_dir()?;
-            if let Err(e) = f.lock().await.start(&cwd, existing_config().as_deref()).await {
+            if let Err(e) = f.lock().await.start(&cwd, Some(cfg.as_path())).await {
                 warn!("forge sidecar start failed (non-fatal): {e}");
             }
         }
@@ -61,9 +114,10 @@ impl AppState {
 
     pub async fn start_forge(&self, project_path: &str) -> Result<(), String> {
         if let Some(ref f) = self.forge {
+            let cfg = ensure_config().await?;
             f.lock()
                 .await
-                .start(Path::new(project_path), existing_config().as_deref())
+                .start(Path::new(project_path), Some(cfg.as_path()))
                 .await
                 .map_err(|e| e.to_string())?;
         }
@@ -76,14 +130,7 @@ impl AppState {
         project_path: Option<&str>,
     ) -> Result<(), String> {
         let path = config_path()?;
-        if let Some(dir) = path.parent() {
-            tokio::fs::create_dir_all(dir)
-                .await
-                .map_err(|e| format!("failed to create config dir: {e}"))?;
-        }
-        tokio::fs::write(&path, contents.as_bytes())
-            .await
-            .map_err(|e| format!("failed to write config: {e}"))?;
+        write_config(&path, contents).await?;
 
         if let (Some(f), Some(pp)) = (&self.forge, project_path) {
             f.lock()

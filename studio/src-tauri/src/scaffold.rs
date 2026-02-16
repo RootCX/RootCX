@@ -122,7 +122,7 @@ serde_json = "1"
     "windows": [{{ "title": "{name}", "width": 900, "height": 600 }}],
     "security": {{ "csp": null }}
   }},
-  "bundle": {{ "icon": ["icons/icon.png"] }}
+  "bundle": {{ "active": true, "icon": ["icons/icon.png"] }}
 }}
 "#)).await?;
 
