@@ -3,12 +3,15 @@ use std::collections::HashMap;
 use sqlx::PgPool;
 use tracing::info;
 
+use crate::extensions::RuntimeExtension;
 use crate::RuntimeError;
 use rootcx_shared_types::{AppManifest, EntityContract};
 
-/// Install an app: create schema, tables, indexes, and FKs from its manifest.
-/// Idempotent — uses `IF NOT EXISTS` throughout.
-pub async fn install_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), RuntimeError> {
+pub async fn install_app(
+    pool: &PgPool,
+    manifest: &AppManifest,
+    extensions: &[Box<dyn RuntimeExtension>],
+) -> Result<(), RuntimeError> {
     let app_id = &manifest.app_id;
 
     if manifest.data_contract.is_empty() {
@@ -19,16 +22,12 @@ pub async fn install_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), Ru
 
     let pk_types = build_pk_type_map(&manifest.data_contract);
 
-    // 1. Create schema for this app
-    let create_schema = format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(app_id));
-    sqlx::query(&create_schema)
+    sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(app_id)))
         .execute(pool)
         .await
         .map_err(RuntimeError::Schema)?;
-
     info!(app = %app_id, "schema created");
 
-    // 2. First pass: create all tables (without FK constraints)
     for entity in &manifest.data_contract {
         let ddl = generate_create_table(app_id, entity, &pk_types);
         sqlx::query(&ddl)
@@ -39,20 +38,12 @@ pub async fn install_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), Ru
         info!(table = %format!("{}.{}", app_id, entity.entity_name), "table created");
     }
 
-    // 3. Enable audit tracking on each table
-    for entity in &manifest.data_contract {
-        let table_ref = format!("{}.{}", quote_ident(app_id), quote_ident(&entity.entity_name));
-        let enable = format!(
-            "SELECT rootcx_system.enable_tracking('{}'::regclass)",
-            table_ref
-        );
-        sqlx::query(&enable)
-            .execute(pool)
-            .await
-            .map_err(RuntimeError::Schema)?;
+    for ext in extensions {
+        for entity in &manifest.data_contract {
+            ext.on_table_created(pool, app_id, &entity.entity_name).await?;
+        }
     }
 
-    // 4. Second pass: add intra-app foreign keys
     for entity in &manifest.data_contract {
         let fk_statements = generate_foreign_keys(app_id, entity, &manifest.data_contract);
         for stmt in &fk_statements {
@@ -63,7 +54,6 @@ pub async fn install_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), Ru
         }
     }
 
-    // 5. Register in rootcx_system.apps
     register_app(pool, manifest).await?;
 
     info!(
@@ -75,7 +65,6 @@ pub async fn install_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), Ru
     Ok(())
 }
 
-/// Uninstall an app: drop its schema (CASCADE) and remove from rootcx_system.apps.
 pub async fn uninstall_app(pool: &PgPool, app_id: &str) -> Result<(), RuntimeError> {
     let drop_schema = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(app_id));
     sqlx::query(&drop_schema)
@@ -93,7 +82,6 @@ pub async fn uninstall_app(pool: &PgPool, app_id: &str) -> Result<(), RuntimeErr
     Ok(())
 }
 
-/// Generate a `CREATE TABLE IF NOT EXISTS` statement from an entity contract.
 fn generate_create_table(
     app_id: &str,
     entity: &EntityContract,
@@ -127,7 +115,6 @@ fn generate_create_table(
     )
 }
 
-/// Generate FK constraint + index statements for entity_link fields.
 fn generate_foreign_keys(
     app_id: &str,
     entity: &EntityContract,
@@ -187,7 +174,6 @@ fn generate_foreign_keys(
     stmts
 }
 
-/// Build a map of entity_name → PG type of its primary key.
 fn build_pk_type_map(entities: &[EntityContract]) -> HashMap<String, &'static str> {
     let mut map = HashMap::new();
     for entity in entities {
@@ -288,7 +274,6 @@ fn json_to_sql_default(val: &serde_json::Value, pg_type: &str) -> Option<String>
     }
 }
 
-/// Quote a SQL identifier (alphanumeric + underscore only).
 pub fn quote_ident(ident: &str) -> String {
     let sanitized: String = ident
         .chars()
@@ -322,4 +307,3 @@ async fn register_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), Runti
     info!(app = %manifest.app_id, "app registered");
     Ok(())
 }
-
