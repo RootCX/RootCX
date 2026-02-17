@@ -180,184 +180,158 @@ When creating or updating, pass only the user-defined fields — never pass `id`
 
 ### manifest.json
 
-```json
-{
-  "appId": "crm",
-  "name": "CRM",
-  "version": "0.0.1",
-  "description": "Manage contacts, companies and deals",
-  "dataContract": [
-    {
-      "entityName": "company",
-      "fields": [
-        { "name": "name", "type": "text", "required": true },
-        { "name": "industry", "type": "text" },
-        { "name": "website", "type": "text" }
-      ]
-    },
-    {
-      "entityName": "contact",
-      "fields": [
-        { "name": "first_name", "type": "text", "required": true },
-        { "name": "last_name", "type": "text", "required": true },
-        { "name": "email", "type": "text" },
-        { "name": "phone", "type": "text" },
-        { "name": "company_id", "type": "entity_link", "references": { "entity": "company", "field": "id" } }
-      ]
-    },
-    {
-      "entityName": "deal",
-      "fields": [
-        { "name": "title", "type": "text", "required": true },
-        { "name": "value", "type": "number" },
-        { "name": "stage", "type": "text", "enum_values": ["lead", "qualified", "proposal", "negotiation", "closed_won", "closed_lost"] },
-        { "name": "company_id", "type": "entity_link", "references": { "entity": "company", "field": "id" } },
-        { "name": "contact_id", "type": "entity_link", "references": { "entity": "contact", "field": "id" } }
-      ]
-    }
-  ]
-}
-```
+Use the CRM manifest from Section 1 above.
 
 ### App.tsx
 
+> **Note:** Before writing this component, install the required shadcn components:
+> `npx shadcn@latest add tabs card table button badge`
+
 ```tsx
-import { useState } from "react";
+import { type ReactNode } from "react";
 import { useAppCollection } from "@rootcx/runtime";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { IconPlus, IconTrash } from "@tabler/icons-react";
 
-interface Company {
-  id: string;
-  name: string;
-  industry: string;
-  website: string;
+interface Company { id: string; name: string; industry: string; website: string; }
+interface Contact { id: string; first_name: string; last_name: string; email: string; phone: string; company_id: string; }
+interface Deal { id: string; title: string; value: number; stage: string; company_id: string; contact_id: string; }
+
+interface Column<T> {
+  key: keyof T;
+  label: string;
+  render?: (row: T) => ReactNode;
 }
 
-interface Contact {
-  id: string;
-  first_name: string;
-  last_name: string;
-  email: string;
-  phone: string;
-  company_id: string;
-}
-
-interface Deal {
-  id: string;
-  title: string;
-  value: number;
-  stage: string;
-  company_id: string;
-  contact_id: string;
+function CollectionView<T extends { id: string }>({ title, appId, entity, columns, defaults }: {
+  title: string; appId: string; entity: string; columns: Column<T>[]; defaults: Partial<T>;
+}) {
+  const { data, loading, create, remove } = useAppCollection<T>(appId, entity);
+  if (loading) return <div className="py-8 text-center text-muted-foreground">Loading...</div>;
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <CardTitle>{title}</CardTitle>
+        <Button size="sm" onClick={() => create(defaults as any)}><IconPlus size={16} /> Add</Button>
+      </CardHeader>
+      <CardContent>
+        <Table>
+          <TableHeader>
+            <TableRow>
+              {columns.map((col) => <TableHead key={String(col.key)}>{col.label}</TableHead>)}
+              <TableHead className="w-[80px]">Actions</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {data.map((row) => (
+              <TableRow key={row.id}>
+                {columns.map((col) => (
+                  <TableCell key={String(col.key)}>{col.render ? col.render(row) : String(row[col.key] ?? "")}</TableCell>
+                ))}
+                <TableCell>
+                  <Button variant="ghost" size="icon" onClick={() => remove(row.id)}><IconTrash size={16} /></Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </CardContent>
+    </Card>
+  );
 }
 
 export default function App() {
-  const [tab, setTab] = useState<"contacts" | "companies" | "deals">("contacts");
-
   return (
-    <div>
-      <nav>
-        <button onClick={() => setTab("contacts")}>Contacts</button>
-        <button onClick={() => setTab("companies")}>Companies</button>
-        <button onClick={() => setTab("deals")}>Deals</button>
-      </nav>
-      {tab === "contacts" && <ContactsView />}
-      {tab === "companies" && <CompaniesView />}
-      {tab === "deals" && <DealsView />}
+    <div className="container mx-auto p-6">
+      <Tabs defaultValue="contacts">
+        <TabsList>
+          <TabsTrigger value="contacts">Contacts</TabsTrigger>
+          <TabsTrigger value="companies">Companies</TabsTrigger>
+          <TabsTrigger value="deals">Deals</TabsTrigger>
+        </TabsList>
+        <TabsContent value="contacts">
+          <CollectionView<Contact>
+            title="Contacts" appId="crm" entity="contact"
+            defaults={{ first_name: "New", last_name: "Contact" }}
+            columns={[
+              { key: "first_name", label: "Name", render: (c) => <span className="font-medium">{c.first_name} {c.last_name}</span> },
+              { key: "email", label: "Email" },
+            ]}
+          />
+        </TabsContent>
+        <TabsContent value="companies">
+          <CollectionView<Company>
+            title="Companies" appId="crm" entity="company"
+            defaults={{ name: "New Company" }}
+            columns={[
+              { key: "name", label: "Name", render: (c) => <span className="font-medium">{c.name}</span> },
+              { key: "industry", label: "Industry" },
+            ]}
+          />
+        </TabsContent>
+        <TabsContent value="deals">
+          <CollectionView<Deal>
+            title="Deals" appId="crm" entity="deal"
+            defaults={{ title: "New Deal", stage: "lead" }}
+            columns={[
+              { key: "title", label: "Title", render: (d) => <span className="font-medium">{d.title}</span> },
+              { key: "value", label: "Value", render: (d) => <>&#36;{d.value?.toLocaleString()}</> },
+              { key: "stage", label: "Stage", render: (d) => <Badge variant="secondary">{d.stage}</Badge> },
+            ]}
+          />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
+```
 
-function ContactsView() {
-  const { data, loading, create, update, remove } = useAppCollection<Contact>("crm", "contact");
+---
 
-  if (loading) return <div>Loading contacts...</div>;
+## 5. UI & Styling
 
-  return (
-    <div>
-      <h2>Contacts</h2>
-      <button onClick={() => create({ first_name: "New", last_name: "Contact" })}>
-        Add Contact
-      </button>
-      <table>
-        <thead>
-          <tr><th>Name</th><th>Email</th><th>Actions</th></tr>
-        </thead>
-        <tbody>
-          {data.map((c) => (
-            <tr key={c.id}>
-              <td>{c.first_name} {c.last_name}</td>
-              <td>{c.email}</td>
-              <td>
-                <button onClick={() => remove(c.id)}>Delete</button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+Every scaffolded app ships with **Tailwind CSS v4** and **shadcn/ui** pre-configured. Follow these rules for all UI code.
 
-function CompaniesView() {
-  const { data, loading, create, remove } = useAppCollection<Company>("crm", "company");
+### Rules
 
-  if (loading) return <div>Loading companies...</div>;
+- **Always use shadcn/ui components** — never bare `<button>`, `<input>`, `<table>`, `<select>`, or `<dialog>` elements.
+- **Use the shadcn MCP tools** to discover available components and install them before importing. The MCP server (`npx shadcn@latest mcp`) is already configured — use its tools to browse the component catalog, check what's installed, and add new components as needed.
+- **Use `cn()` from `@/lib/utils`** for conditional/composed class names — never string concatenation.
+- **Use Tailwind utility classes** for layout and spacing — never inline `style={{}}`.
 
-  return (
-    <div>
-      <h2>Companies</h2>
-      <button onClick={() => create({ name: "New Company" })}>
-        Add Company
-      </button>
-      <table>
-        <thead>
-          <tr><th>Name</th><th>Industry</th><th>Actions</th></tr>
-        </thead>
-        <tbody>
-          {data.map((c) => (
-            <tr key={c.id}>
-              <td>{c.name}</td>
-              <td>{c.industry}</td>
-              <td>
-                <button onClick={() => remove(c.id)}>Delete</button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+### Common components
 
-function DealsView() {
-  const { data, loading, create, remove } = useAppCollection<Deal>("crm", "deal");
+| Component | Install | Import |
+|-----------|---------|--------|
+| Button | `npx shadcn@latest add button` | `@/components/ui/button` |
+| Card | `npx shadcn@latest add card` | `@/components/ui/card` |
+| Input | `npx shadcn@latest add input` | `@/components/ui/input` |
+| Table | `npx shadcn@latest add table` | `@/components/ui/table` |
+| Dialog | `npx shadcn@latest add dialog` | `@/components/ui/dialog` |
+| Tabs | `npx shadcn@latest add tabs` | `@/components/ui/tabs` |
+| Badge | `npx shadcn@latest add badge` | `@/components/ui/badge` |
+| Select | `npx shadcn@latest add select` | `@/components/ui/select` |
 
-  if (loading) return <div>Loading deals...</div>;
+### Patterns
 
-  return (
-    <div>
-      <h2>Deals</h2>
-      <button onClick={() => create({ title: "New Deal", stage: "lead" })}>
-        Add Deal
-      </button>
-      <table>
-        <thead>
-          <tr><th>Title</th><th>Value</th><th>Stage</th><th>Actions</th></tr>
-        </thead>
-        <tbody>
-          {data.map((d) => (
-            <tr key={d.id}>
-              <td>{d.title}</td>
-              <td>{d.value}</td>
-              <td>{d.stage}</td>
-              <td>
-                <button onClick={() => remove(d.id)}>Delete</button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+**Class composition with `cn()`:**
+```tsx
+import { cn } from "@/lib/utils";
+
+<div className={cn("p-4 rounded-lg", isActive && "bg-primary text-primary-foreground")} />
+```
+
+**Button variants:**
+```tsx
+import { Button } from "@/components/ui/button";
+
+<Button>Default</Button>
+<Button variant="secondary">Secondary</Button>
+<Button variant="destructive">Delete</Button>
+<Button variant="outline">Cancel</Button>
+<Button variant="ghost" size="icon"><IconTrash size={16} /></Button>
 ```

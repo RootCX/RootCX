@@ -3,6 +3,7 @@ use std::path::Path;
 use tokio::fs;
 
 const ICON: &[u8] = include_bytes!("../icons/32x32.png");
+const GLOBALS_CSS: &str = include_str!("../templates/globals.css");
 
 async fn w(path: &Path, content: &str) -> Result<(), String> {
     fs::write(path, content).await.map_err(|e| format!("write {}: {e}", path.display()))
@@ -16,7 +17,7 @@ pub async fn create(root: &Path, name: &str, sdk_path: &Path) -> Result<(), Stri
     name.hash(&mut h);
     let port = 3000 + (h.finish() % 6000) as u16;
 
-    for dir in ["src", "src-tauri/src", "src-tauri/capabilities", "src-tauri/icons", ".rootcx"] {
+    for dir in ["src", "src/lib", "src-tauri/src", "src-tauri/capabilities", "src-tauri/icons", ".rootcx"] {
         fs::create_dir_all(root.join(dir)).await.map_err(|e| e.to_string())?;
     }
     fs::write(root.join("src-tauri/icons/icon.png"), ICON).await.map_err(|e| e.to_string())?;
@@ -34,9 +35,21 @@ pub async fn create(root: &Path, name: &str, sdk_path: &Path) -> Result<(), Stri
   "private": true,
   "type": "module",
   "scripts": {{ "dev": "vite", "build": "vite build", "tauri": "tauri" }},
-  "dependencies": {{ "@rootcx/runtime": "{sdk_dep}", "react": "^19.0.0", "react-dom": "^19.0.0" }},
+  "dependencies": {{
+    "@rootcx/runtime": "{sdk_dep}",
+    "@tailwindcss/vite": "^4.0.0",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.1.0",
+    "@tabler/icons-react": "^3.30.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwind-merge": "^2.5.0",
+    "tailwindcss": "^4.0.0",
+    "tw-animate-css": "^1.4.0"
+  }},
   "devDependencies": {{
     "@tauri-apps/cli": "^2.0.0",
+    "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.0.0",
@@ -53,13 +66,20 @@ pub async fn create(root: &Path, name: &str, sdk_path: &Path) -> Result<(), Stri
 </html>
 "#)).await?;
 
-    w(&root.join("vite.config.ts"), &format!(r#"import {{ defineConfig }} from "vite";
+    w(&root.join("vite.config.ts"), &format!(r#"import path from "path";
+import {{ defineConfig }} from "vite";
 import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({{
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
   clearScreen: false,
   server: {{ port: {port}, strictPort: true }},
+  resolve: {{
+    alias: {{
+      "@": path.resolve(__dirname, "./src"),
+    }},
+  }},
 }});
 "#)).await?;
 
@@ -71,7 +91,11 @@ export default defineConfig({{
     "jsx": "react-jsx",
     "strict": true,
     "esModuleInterop": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
   },
   "include": ["src"]
 }
@@ -79,6 +103,7 @@ export default defineConfig({{
 
     w(&root.join("src/main.tsx"), r#"import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import "./globals.css";
 import App from "./App";
 
 createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictMode>);
@@ -154,6 +179,38 @@ fn main() {{
     {lib_name}_lib::run();
 }}
 "#)).await?;
+
+    w(&root.join("src/globals.css"), GLOBALS_CSS).await?;
+
+    w(&root.join("src/lib/utils.ts"), r#"import { type ClassValue, clsx } from "clsx";
+import { twMerge } from "tailwind-merge";
+
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+"#).await?;
+
+    w(&root.join("components.json"), r#"{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "radix-nova",
+  "rsc": false,
+  "tsx": true,
+  "tailwind": {
+    "config": "",
+    "css": "src/globals.css",
+    "baseColor": "neutral",
+    "cssVariables": true
+  },
+  "iconLibrary": "tabler",
+  "aliases": {
+    "components": "@/components",
+    "utils": "@/lib/utils",
+    "ui": "@/components/ui",
+    "lib": "@/lib",
+    "hooks": "@/hooks"
+  }
+}
+"#).await?;
 
     Ok(())
 }
