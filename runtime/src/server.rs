@@ -12,6 +12,7 @@ pub fn build_router(runtime: SharedRuntime) -> Router {
     Router::new()
         .route("/health", get(routes::health))
         .route("/api/v1/status", get(routes::get_status))
+        .route("/api/v1/audit", get(routes::list_audit_events))
         .route("/api/v1/apps", get(routes::list_apps).post(routes::install_app))
         .route("/api/v1/apps/{app_id}", delete(routes::uninstall_app))
         .route(
