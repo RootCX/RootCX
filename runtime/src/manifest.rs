@@ -39,7 +39,20 @@ pub async fn install_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), Ru
         info!(table = %format!("{}.{}", app_id, entity.entity_name), "table created");
     }
 
-    // 3. Second pass: add intra-app foreign keys
+    // 3. Enable audit tracking on each table
+    for entity in &manifest.data_contract {
+        let table_ref = format!("{}.{}", quote_ident(app_id), quote_ident(&entity.entity_name));
+        let enable = format!(
+            "SELECT rootcx_system.enable_tracking('{}'::regclass)",
+            table_ref
+        );
+        sqlx::query(&enable)
+            .execute(pool)
+            .await
+            .map_err(RuntimeError::Schema)?;
+    }
+
+    // 4. Second pass: add intra-app foreign keys
     for entity in &manifest.data_contract {
         let fk_statements = generate_foreign_keys(app_id, entity, &manifest.data_contract);
         for stmt in &fk_statements {
@@ -50,7 +63,7 @@ pub async fn install_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), Ru
         }
     }
 
-    // 4. Register in rootcx_system.apps
+    // 5. Register in rootcx_system.apps
     register_app(pool, manifest).await?;
 
     info!(

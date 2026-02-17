@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde_json::{json, Value as JsonValue};
@@ -185,6 +186,51 @@ pub async fn delete_record(
         return Err(ApiError::NotFound(format!("record '{id}' not found")));
     }
     Ok(Json(json!({ "message": format!("record '{id}' deleted") })))
+}
+
+pub async fn list_audit_events(
+    State(rt): State<SharedRuntime>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<JsonValue>>, ApiError> {
+    let pool = pool(&rt).await?;
+
+    let limit: i64 = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100)
+        .min(1000)
+        .max(1);
+
+    let mut conditions: Vec<String> = Vec::new();
+    let mut bind_values: Vec<String> = Vec::new();
+
+    if let Some(app_id) = params.get("app_id") {
+        bind_values.push(app_id.clone());
+        conditions.push(format!("table_schema = ${}", bind_values.len()));
+    }
+    if let Some(entity) = params.get("entity") {
+        bind_values.push(entity.clone());
+        conditions.push(format!("table_name = ${}", bind_values.len()));
+    }
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+
+    let query = format!(
+        "SELECT to_jsonb(a.*) AS row FROM rootcx_system.audit_log a {} ORDER BY changed_at DESC LIMIT {}",
+        where_clause, limit
+    );
+
+    let mut q = sqlx::query_as::<_, (JsonValue,)>(&query);
+    for val in &bind_values {
+        q = q.bind(val);
+    }
+
+    let rows: Vec<(JsonValue,)> = q.fetch_all(&pool).await?;
+    Ok(Json(rows.into_iter().map(|(r,)| r).collect()))
 }
 
 fn bind_json_value<'q>(
