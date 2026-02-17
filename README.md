@@ -1,111 +1,55 @@
-# RootCX
+<p align="center">
+  <a href="https://rootcx.com">
+    <img src="https://rootcx.com/logo.svg" width="80" />
+    <h1 align="center">RootCX</h1>
+  </a>
+</p>
 
-Low-code platform: build apps with AI, run them on a shared runtime.
+**Open source studio for developing secure business apps and AI agents.** _Build locally, ship anywhere._
 
-## Architecture
+  <a href="https://rootcx.com"><img alt="Website" src="https://img.shields.io/website?url=https%3A%2F%2Frootcx.com&up_message=rootcx.com&up_color=blue"></a>
+  <a href="https://github.com/rootcx/rootcx/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache%202-blue" alt="License" /></a>
+  <a href="https://discord.gg/rootcx"><img src="https://img.shields.io/discord/1472936179383930950?color=5865F2&label=Discord&logo=discord&logoColor=white" alt="Discord" /></a>
+  <a href="https://github.com/rootcx/rootcx/stargazers"><img src="https://img.shields.io/github/stars/rootcx/rootcx?style=social" alt="Stars" /></a>
 
-```
-studio/          IDE (Tauri + React) — extension-first
-  ui/src/
-    core/          Extension host API (~100 LOC)
-    extensions/    Built-in extensions (each a self-contained directory)
-  src-tauri/       Rust backend — Forge sidecar, PTY, native menu
+## Mission
 
-runtime/         Daemon (Rust, axum on :9100)
-  src/             Postgres lifecycle, manifest engine, REST API
-  client/          Rust HTTP client (used by Studio)
-  sdk/             @rootcx/runtime — React hooks for apps
+**We believe that the future of business software belongs to open source.**
 
-forge/           AI agent (Python, LangGraph on :3100)
+RootCX is an open-source studio for building, deploying and governing fleets of **custom business apps** and **AI agents**.
 
-crates/
-  postgres-mgmt/   Postgres process manager
-  shared-types/    Types shared across Rust crates
-```
+## How it Works
 
-## Studio Extension System
+We orchestrate the best open-source tools into a single layer to provide a seamless experience for both developers and end-users.
 
-Studio is **extension-first**. Every panel, command, and status bar item is an extension — built-in or community. The core is a generic `Registry<T>` primitive (~30 LOC) that powers all contribution types.
+The workflow is simple: **develop locally, then ship anywhere.** You build your apps and AI agents in the Studio on your machine. When you're ready, you can self-host the runtime or use our cloud.
 
-### Core API (`core/`)
+### Architecture
 
-```typescript
-import { views, commands, statusBar, workspace, layout } from "@/core";
+RootCX is built on two core pillars:
 
-views.register("my-panel", { title, icon, defaultZone, component });
-commands.register("my-cmd", { title, handler });
-statusBar.register("my-item", { alignment, priority, component });
-```
+1. **RootCX Studio**: A high-performance, extension-first IDE built with **Rust and Tauri v2**.
+2. **RootCX Runtime**: A secure-by-design backend daemon that manages the **bundled PostgreSQL** lifecycle. It serves as the fleet's brain, automatically generating APIs, AI tools, and a shared **Governance Layer** (Auth/SSO, RBAC, and Audit Logs) for every app and agent.
 
-Adding a new contribution type = one line: `export const themes = new Registry<Theme>()`.
-
-### Extension structure
-
-Each extension is a self-contained directory:
-
-```
-extensions/
-  explorer/          File browser
-    index.ts           activate() — registers views, commands
-    panel.tsx          React component
-  forge/             AI code generation
-  console/           Terminal (xterm.js + PTY)
-  welcome/           Dashboard
-  output/            Build output
-  core-status/       Service status dots
-  run/               F5 / Run Project command
-  activate.ts        Loads all built-in extensions
+```text
+    ┌──────────────────┐          ┌──────────────────┐
+    │  RootCX Studio   │          │  AI Agents/Apps  │
+    │ (Dev Environment)│          │                  |
+    └────────┬─────────┘          └────────┬─────────┘
+             │                             │
+             └────────────┬────────────────┘
+                          │
+                          ▼
+             ┌─────────────────────────────┐
+             │       RootCX Runtime        │
+             │ (DB, API, Auth, RBAC, Audit)│
+             └─────────────────────────────┘
 ```
 
-### Writing an extension
+## License
 
-```typescript
-// extensions/git/index.ts
-import { lazy } from "react";
-import { GitBranch } from "lucide-react";
-import { views, commands } from "@/core/studio";
+RootCX is licensed under [Apache-2.0](LICENSE).
 
-export function activate() {
-  views.register("git", {
-    title: "Git",
-    icon: GitBranch,
-    defaultZone: "sidebar",
-    component: lazy(() => import("./panel")),
-  });
+---
 
-  commands.register("git.commit", {
-    title: "Git: Commit",
-    handler: async () => { /* ... */ },
-  });
-}
-```
-
-## How it works
-
-**Runtime** owns all data. It manages PostgreSQL (:5480), parses app manifests into tables, and exposes a REST API for CRUD on collections.
-
-**Studio** is the IDE. It talks to the Runtime via HTTP, manages the AI Forge sidecar, and provides an extensible workspace.
-
-**Apps** are pure UI. They use `@rootcx/runtime` hooks which call the daemon via `fetch()`.
-
-## API
-
-| Method | Route | Description |
-|--------|-------|-------------|
-| GET | `/health` | Health check |
-| GET | `/api/v1/status` | Runtime status |
-| POST | `/api/v1/apps` | Install app (body: manifest) |
-| GET | `/api/v1/apps` | List apps |
-| DELETE | `/api/v1/apps/:id` | Uninstall app |
-| GET | `/api/v1/apps/:id/collections/:entity` | List records |
-| POST | `/api/v1/apps/:id/collections/:entity` | Create record |
-| GET | `/api/v1/apps/:id/collections/:entity/:rid` | Get record |
-| PATCH | `/api/v1/apps/:id/collections/:entity/:rid` | Update record |
-| DELETE | `/api/v1/apps/:id/collections/:entity/:rid` | Delete record |
-
-## Dev
-
-```bash
-cargo run -p rootcx-runtime   # start daemon on :9100
-cargo tauri dev --manifest-path studio/src-tauri/Cargo.toml  # start Studio
-```
+<p align="center">Built for the era of auditable, open-source intelligence.</p>
