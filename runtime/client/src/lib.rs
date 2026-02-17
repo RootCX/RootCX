@@ -1,6 +1,9 @@
 use rootcx_shared_types::{AppManifest, InstalledApp, OsStatus};
 use serde_json::Value as JsonValue;
 
+pub mod daemon;
+pub use daemon::ensure_runtime;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("HTTP request failed: {0}")]
@@ -8,6 +11,9 @@ pub enum ClientError {
 
     #[error("API error ({status}): {message}")]
     Api { status: u16, message: String },
+
+    #[error("failed to start runtime: {0}")]
+    RuntimeStart(String),
 }
 
 /// HTTP client for the RootCX Runtime daemon.

@@ -89,6 +89,13 @@ pub fn sdk_runtime_dir() -> Result<PathBuf, String> {
         .map_err(|e| format!("SDK not found: {e}"))
 }
 
+pub fn runtime_client_dir() -> Result<PathBuf, String> {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../runtime/client")
+        .canonicalize()
+        .map_err(|e| format!("runtime client crate not found: {e}"))
+}
+
 async fn ensure_instructions() -> Result<(), String> {
     let dir = instructions_dir()?;
     tokio::fs::create_dir_all(&dir)

@@ -9,7 +9,7 @@ async fn w(path: &Path, content: &str) -> Result<(), String> {
     fs::write(path, content).await.map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-pub async fn create(root: &Path, name: &str, sdk_path: &Path) -> Result<(), String> {
+pub async fn create(root: &Path, name: &str, sdk_path: &Path, client_crate_path: &Path) -> Result<(), String> {
     let app_id = name.to_lowercase().replace(' ', "-");
     let lib_name = app_id.replace('-', "_");
     let identifier = format!("com.rootcx.{app_id}");
@@ -114,6 +114,7 @@ createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictM
 }}
 "#)).await?;
 
+    let client_crate_dep = client_crate_path.display();
     w(&root.join("src-tauri/Cargo.toml"), &format!(r#"[package]
 name = "{app_id}"
 version = "0.0.1"
@@ -130,6 +131,8 @@ tauri-build = {{ version = "2", features = [] }}
 tauri = {{ version = "2", features = [] }}
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
+reqwest = {{ version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }}
+rootcx-runtime-client = {{ path = "{client_crate_dep}" }}
 "#)).await?;
 
     w(&root.join("src-tauri/build.rs"), "fn main() { tauri_build::build(); }\n").await?;
@@ -160,14 +163,16 @@ serde_json = "1"
 }
 "#).await?;
 
-    w(&root.join("src-tauri/src/lib.rs"), r#"#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {name}!")
-}
+    w(&root.join("src-tauri/src/lib.rs"), r#"pub fn run() {
+    rootcx_runtime_client::ensure_runtime().expect("failed to start RootCX Runtime");
 
-pub fn run() {
+    let _ = reqwest::blocking::Client::new()
+        .post("http://localhost:9100/api/v1/apps")
+        .header("Content-Type", "application/json")
+        .body(include_str!("../../manifest.json"))
+        .send();
+
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![greet])
         .run(tauri::generate_context!())
         .expect("error while running application");
 }

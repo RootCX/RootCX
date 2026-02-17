@@ -4,8 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 rootcx-shared-types.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

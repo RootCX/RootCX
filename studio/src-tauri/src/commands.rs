@@ -122,7 +122,8 @@ pub async fn sync_manifest(
 #[tauri::command]
 pub async fn scaffold_project(path: String, name: String) -> Result<(), String> {
     let sdk = crate::state::sdk_runtime_dir()?;
-    crate::scaffold::create(std::path::Path::new(&path), &name, &sdk).await
+    let client_crate = crate::state::runtime_client_dir()?;
+    crate::scaffold::create(std::path::Path::new(&path), &name, &sdk, &client_crate).await
 }
 
 #[tauri::command]

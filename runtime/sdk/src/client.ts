@@ -52,6 +52,15 @@ export class RuntimeClient {
     }
   }
 
+  async waitForReady(timeoutMs = 30000): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (await this.isAvailable()) return;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    throw new RuntimeApiError(0, `Runtime not ready after ${timeoutMs}ms`);
+  }
+
   // ── Status ──────────────────────────────────────────
 
   async status(): Promise<OsStatus> {
