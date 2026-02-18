@@ -1,3 +1,4 @@
+pub mod auth;
 mod crud;
 mod deploy;
 mod jobs;

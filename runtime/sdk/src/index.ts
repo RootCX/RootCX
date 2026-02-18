@@ -5,6 +5,9 @@ export type {
   OsStatus,
   InstalledApp,
   AppManifest,
+  AuthUser,
+  LoginResponse,
+  RegisterInput,
 } from "./client";
 
 // Hooks
@@ -16,3 +19,6 @@ export type { UseAppRecordResult } from "./hooks/useAppRecord";
 
 export { useRuntimeStatus } from "./hooks/useRuntimeStatus";
 export type { UseRuntimeStatusResult } from "./hooks/useRuntimeStatus";
+
+export { useAuth } from "./hooks/useAuth";
+export type { UseAuthResult } from "./hooks/useAuth";

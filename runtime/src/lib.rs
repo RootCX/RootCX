@@ -1,4 +1,5 @@
 mod api_error;
+pub mod auth;
 mod error;
 pub mod extensions;
 mod ipc;
@@ -17,6 +18,7 @@ pub use error::RuntimeError;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use auth::AuthConfig;
 use extensions::{builtin_extensions, RuntimeExtension};
 use rootcx_postgres_mgmt::PostgresManager;
 use rootcx_shared_types::{ForgeStatus, OsStatus, PostgresStatus, RuntimeStatus, ServiceState};
@@ -40,10 +42,16 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(pg: PostgresManager, data_dir: PathBuf) -> Self {
+        let auth_config = AuthConfig::load(&data_dir).expect("failed to load auth config");
+        let mut extensions = builtin_extensions();
+        extensions.push(Box::new(extensions::auth::AuthExtension {
+            config: Arc::clone(&auth_config),
+        }));
+
         Self {
             pg,
             pool: None,
-            extensions: builtin_extensions(),
+            extensions,
             secret_manager: None,
             worker_manager: None,
             scheduler: None,

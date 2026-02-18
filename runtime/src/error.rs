@@ -22,4 +22,7 @@ pub enum RuntimeError {
 
     #[error("IPC error: {0}")]
     Ipc(String),
+
+    #[error("auth error: {0}")]
+    Auth(String),
 }
