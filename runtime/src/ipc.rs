@@ -9,7 +9,13 @@ use tokio::sync::oneshot;
 use tokio_util::codec::{FramedRead, LinesCodec};
 use tracing::{error, warn};
 
+use crate::RuntimeError;
+
 const MAX_LINE_LENGTH: usize = 1_048_576;
+
+fn ipc_err(e: impl std::fmt::Display) -> RuntimeError {
+    RuntimeError::Ipc(e.to_string())
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -36,14 +42,11 @@ pub struct IpcWriter { stdin: ChildStdin }
 impl IpcWriter {
     pub fn new(stdin: ChildStdin) -> Self { Self { stdin } }
 
-    pub async fn send(&mut self, msg: &OutboundMessage) -> Result<(), crate::RuntimeError> {
-        let mut line = serde_json::to_string(msg)
-            .map_err(|e| crate::RuntimeError::Ipc(e.to_string()))?;
+    pub async fn send(&mut self, msg: &OutboundMessage) -> Result<(), RuntimeError> {
+        let mut line = serde_json::to_string(msg).map_err(ipc_err)?;
         line.push('\n');
-        self.stdin.write_all(line.as_bytes()).await
-            .map_err(|e| crate::RuntimeError::Ipc(e.to_string()))?;
-        self.stdin.flush().await
-            .map_err(|e| crate::RuntimeError::Ipc(e.to_string()))
+        self.stdin.write_all(line.as_bytes()).await.map_err(ipc_err)?;
+        self.stdin.flush().await.map_err(ipc_err)
     }
 }
 
@@ -71,10 +74,11 @@ impl IpcReader {
     }
 }
 
+#[derive(Default)]
 pub struct PendingRpcs(HashMap<String, oneshot::Sender<Result<JsonValue, String>>>);
 
 impl PendingRpcs {
-    pub fn new() -> Self { Self(HashMap::new()) }
+    pub fn new() -> Self { Self::default() }
 
     pub fn register(&mut self, id: String) -> oneshot::Receiver<Result<JsonValue, String>> {
         let (tx, rx) = oneshot::channel();

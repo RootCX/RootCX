@@ -22,7 +22,7 @@ pub struct SecretManager {
 impl SecretManager {
     pub fn new(data_dir: &Path) -> Result<Self, RuntimeError> {
         let key_bytes = if let Ok(hex) = std::env::var("ROOTCX_MASTER_KEY") {
-            let bytes = hex_decode(&hex)?;
+            let bytes = hex::decode(&hex).map_err(|e| secret_err(e))?;
             if bytes.len() != KEY_LEN {
                 return Err(secret_err(format!("ROOTCX_MASTER_KEY must be {KEY_LEN} bytes")));
             }
@@ -114,8 +114,8 @@ pub async fn bootstrap_secrets_schema(pool: &PgPool) -> Result<(), RuntimeError>
 
 fn load_or_generate_key(path: &Path) -> Result<Vec<u8>, RuntimeError> {
     if path.exists() {
-        let hex = std::fs::read_to_string(path).map_err(|e| secret_err(e))?;
-        let bytes = hex_decode(hex.trim())?;
+        let content = std::fs::read_to_string(path).map_err(|e| secret_err(e))?;
+        let bytes = hex::decode(content.trim()).map_err(|e| secret_err(e))?;
         if bytes.len() != KEY_LEN {
             return Err(secret_err("master.key: wrong length"));
         }
@@ -130,7 +130,7 @@ fn load_or_generate_key(path: &Path) -> Result<Vec<u8>, RuntimeError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| secret_err(e))?;
     }
-    std::fs::write(path, hex_encode(&key)).map_err(|e| secret_err(e))?;
+    std::fs::write(path, hex::encode(&key)).map_err(|e| secret_err(e))?;
 
     #[cfg(unix)]
     {
@@ -140,17 +140,4 @@ fn load_or_generate_key(path: &Path) -> Result<Vec<u8>, RuntimeError> {
 
     info!(path = %path.display(), "master key generated");
     Ok(key)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn hex_decode(hex: &str) -> Result<Vec<u8>, RuntimeError> {
-    if hex.len() % 2 != 0 {
-        return Err(secret_err("hex: odd length"));
-    }
-    (0..hex.len()).step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| secret_err(e)))
-        .collect()
 }

@@ -3455,6 +3455,7 @@ dependencies = [
  "chrono",
  "command-group",
  "futures",
+ "hex",
  "libc",
  "rand 0.8.5",
  "rootcx-postgres-mgmt",
@@ -4977,6 +4978,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

@@ -158,6 +158,7 @@ async fn supervisor_loop(config: WorkerConfig, mut cmd_rx: mpsc::Receiver<Superv
                                 pending_rpcs.resolve(&id, Err(e.to_string()));
                             }
                         }
+                        // Spawn timeout watcher
                         tokio::spawn(async move {
                             let result = match tokio::time::timeout(Duration::from_secs(30), rx).await {
                                 Ok(Ok(r)) => r,
@@ -258,9 +259,30 @@ async fn supervisor_loop(config: WorkerConfig, mut cmd_rx: mpsc::Receiver<Superv
                         } else {
                             BACKOFF_BASE * 2u32.saturating_pow(restart_count - 2)
                         };
+
+                        // Interruptible backoff: stop commands can interrupt the wait
                         if !delay.is_zero() {
                             info!(app_id = %app_id, delay_ms = delay.as_millis() as u64, "backoff");
-                            tokio::time::sleep(delay).await;
+                            tokio::select! {
+                                _ = tokio::time::sleep(delay) => {}
+                                Some(cmd) = cmd_rx.recv() => {
+                                    // Process stop/status during backoff
+                                    match cmd {
+                                        SupervisorCommand::Stop { reply } => {
+                                            status = WorkerStatus::Stopped;
+                                            crash_times.clear();
+                                            info!(app_id = %app_id, "worker stopped during backoff");
+                                            let _ = reply.send(());
+                                            continue;
+                                        }
+                                        SupervisorCommand::GetStatus { reply } => {
+                                            let _ = reply.send(status.clone());
+                                            // Fall through to restart
+                                        }
+                                        _ => {} // Ignore start/rpc/job during backoff
+                                    }
+                                }
+                            }
                         }
 
                         info!(app_id = %app_id, attempt = restart_count, "restarting worker");

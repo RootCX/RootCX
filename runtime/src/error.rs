@@ -22,7 +22,4 @@ pub enum RuntimeError {
 
     #[error("IPC error: {0}")]
     Ipc(String),
-
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
 }
