@@ -254,11 +254,7 @@ async fn supervisor_loop(config: WorkerConfig, mut cmd_rx: mpsc::Receiver<Superv
                             continue;
                         }
 
-                        let delay = if restart_count <= 1 {
-                            Duration::ZERO
-                        } else {
-                            BACKOFF_BASE * 2u32.saturating_pow(restart_count - 2)
-                        };
+                        let delay = backoff_delay(restart_count);
 
                         // Interruptible backoff: stop commands can interrupt the wait
                         if !delay.is_zero() {
@@ -350,6 +346,14 @@ async fn spawn_worker(config: &WorkerConfig) -> Result<(AsyncGroupChild, IpcWrit
     Ok((child, IpcWriter::new(stdin), IpcReader::new(stdout)))
 }
 
+fn backoff_delay(restart_count: u32) -> Duration {
+    if restart_count <= 1 {
+        Duration::ZERO
+    } else {
+        BACKOFF_BASE * 2u32.saturating_pow(restart_count - 2)
+    }
+}
+
 fn which_runtime() -> &'static str {
     static BIN: std::sync::OnceLock<&str> = std::sync::OnceLock::new();
     *BIN.get_or_init(|| {
@@ -361,4 +365,17 @@ fn which_runtime() -> &'static str {
         }
         "bun"
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_delays() {
+        for (count, secs) in [(0, 0), (1, 0), (2, 2), (3, 4), (4, 8)] {
+            assert_eq!(backoff_delay(count), Duration::from_secs(secs), "backoff_delay({count})");
+        }
+        let _ = backoff_delay(34); // saturates without panic
+    }
 }

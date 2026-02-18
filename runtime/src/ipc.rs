@@ -90,3 +90,149 @@ impl PendingRpcs {
         if let Some(tx) = self.0.remove(id) { let _ = tx.send(result); }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── Outbound wire format (IPC contract) ──────────────────────────────
+
+    #[test]
+    fn outbound_messages_carry_type_tag() {
+        let cases: Vec<(OutboundMessage, &str)> = vec![
+            (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), db_url: "d".into() }, "discover"),
+            (OutboundMessage::Rpc { id: "r1".into(), method: "echo".into(), params: json!({}) }, "rpc"),
+            (OutboundMessage::Job { id: "j1".into(), payload: json!({}) }, "job"),
+            (OutboundMessage::Shutdown, "shutdown"),
+        ];
+        for (msg, expected_type) in cases {
+            let v: JsonValue = serde_json::to_value(&msg).unwrap();
+            assert_eq!(v["type"], expected_type, "wrong type tag for {expected_type}");
+        }
+    }
+
+    // ── Inbound deserialization ─────────────────────────────────────────
+
+    #[test]
+    fn inbound_discover_deserialization() {
+        let msg: InboundMessage =
+            serde_json::from_str(r#"{"type":"discover","capabilities":["a","b"]}"#).unwrap();
+        let InboundMessage::Discover { capabilities } = msg else { panic!("expected Discover") };
+        assert_eq!(capabilities, ["a", "b"]);
+    }
+
+    #[test]
+    fn inbound_discover_default_capabilities() {
+        let msg: InboundMessage = serde_json::from_str(r#"{"type":"discover"}"#).unwrap();
+        let InboundMessage::Discover { capabilities } = msg else { panic!("expected Discover") };
+        assert!(capabilities.is_empty());
+    }
+
+    #[test]
+    fn inbound_rpc_response_success() {
+        let msg: InboundMessage =
+            serde_json::from_str(r#"{"type":"rpc_response","id":"1","result":42}"#).unwrap();
+        let InboundMessage::RpcResponse { id, result, error } = msg else { panic!("expected RpcResponse") };
+        assert_eq!(id, "1");
+        assert_eq!(result, Some(json!(42)));
+        assert_eq!(error, None);
+    }
+
+    #[test]
+    fn inbound_rpc_response_error() {
+        let msg: InboundMessage =
+            serde_json::from_str(r#"{"type":"rpc_response","id":"1","error":"not found"}"#).unwrap();
+        let InboundMessage::RpcResponse { error, .. } = msg else { panic!("expected RpcResponse") };
+        assert_eq!(error, Some("not found".into()));
+    }
+
+    #[test]
+    fn inbound_job_result_success() {
+        let msg: InboundMessage =
+            serde_json::from_str(r#"{"type":"job_result","id":"j1","result":"done"}"#).unwrap();
+        let InboundMessage::JobResult { id, result, error } = msg else { panic!("expected JobResult") };
+        assert_eq!(id, "j1");
+        assert_eq!(result, Some(json!("done")));
+        assert_eq!(error, None);
+    }
+
+    #[test]
+    fn inbound_job_result_error() {
+        let msg: InboundMessage =
+            serde_json::from_str(r#"{"type":"job_result","id":"j1","error":"timeout"}"#).unwrap();
+        let InboundMessage::JobResult { error, .. } = msg else { panic!("expected JobResult") };
+        assert_eq!(error, Some("timeout".into()));
+    }
+
+    #[test]
+    fn inbound_log_default_level() {
+        let msg: InboundMessage = serde_json::from_str(r#"{"type":"log","message":"hi"}"#).unwrap();
+        let InboundMessage::Log { level, message } = msg else { panic!("expected Log") };
+        assert_eq!(level, "info");
+        assert_eq!(message, "hi");
+    }
+
+    #[test]
+    fn inbound_log_explicit_level() {
+        let msg: InboundMessage =
+            serde_json::from_str(r#"{"type":"log","level":"error","message":"hi"}"#).unwrap();
+        let InboundMessage::Log { level, message } = msg else { panic!("expected Log") };
+        assert_eq!(level, "error");
+        assert_eq!(message, "hi");
+    }
+
+    #[test]
+    fn inbound_invalid_type_fails() {
+        let result = serde_json::from_str::<InboundMessage>(r#"{"type":"unknown"}"#);
+        assert!(result.is_err());
+    }
+
+    // ── PendingRpcs ─────────────────────────────────────────────────────
+
+    #[test]
+    fn pending_rpcs_register_resolve_ok() {
+        let mut rpcs = PendingRpcs::new();
+        let mut rx = rpcs.register("r1".into());
+        rpcs.resolve("r1", Ok(json!(42)));
+        assert_eq!(rx.try_recv().unwrap(), Ok(json!(42)));
+    }
+
+    #[test]
+    fn pending_rpcs_register_resolve_err() {
+        let mut rpcs = PendingRpcs::new();
+        let mut rx = rpcs.register("r1".into());
+        rpcs.resolve("r1", Err("fail".into()));
+        assert_eq!(rx.try_recv().unwrap(), Err("fail".to_string()));
+    }
+
+    #[test]
+    fn pending_rpcs_resolve_unknown_noop() {
+        let mut rpcs = PendingRpcs::new();
+        rpcs.resolve("nonexistent", Ok(json!(null)));
+        // no panic — passes if we reach here
+    }
+
+    #[test]
+    fn pending_rpcs_register_replaces() {
+        let mut rpcs = PendingRpcs::new();
+        let mut rx1 = rpcs.register("r1".into());
+        let _rx2 = rpcs.register("r1".into());
+        // First sender was dropped when the key was replaced
+        assert!(rx1.try_recv().is_err());
+    }
+
+    #[test]
+    fn pending_rpcs_multiple_independent() {
+        let mut rpcs = PendingRpcs::new();
+        let mut rx_a = rpcs.register("a".into());
+        let mut rx_b = rpcs.register("b".into());
+
+        // resolve "b" first, then "a"
+        rpcs.resolve("b", Ok(json!("beta")));
+        rpcs.resolve("a", Ok(json!("alpha")));
+
+        assert_eq!(rx_a.try_recv().unwrap(), Ok(json!("alpha")));
+        assert_eq!(rx_b.try_recv().unwrap(), Ok(json!("beta")));
+    }
+}
