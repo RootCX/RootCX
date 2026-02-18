@@ -32,13 +32,51 @@ export interface AppManifest {
   dataContract?: unknown[];
 }
 
+export interface AuthUser {
+  id: string;
+  username: string;
+  email: string | null;
+  displayName: string | null;
+  createdAt: string;
+}
+
+export interface LoginResponse {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number;
+  user: AuthUser;
+}
+
+export interface RegisterInput {
+  username: string;
+  password: string;
+  email?: string;
+  displayName?: string;
+}
+
 const DEFAULT_BASE_URL = "http://localhost:9100";
 
 export class RuntimeClient {
   private baseUrl: string;
+  private accessToken: string | null = null;
+  private refreshToken: string | null = null;
 
   constructor(opts?: RuntimeClientOptions) {
     this.baseUrl = opts?.baseUrl ?? DEFAULT_BASE_URL;
+  }
+
+  /** Set tokens (e.g. restored from localStorage). */
+  setTokens(access: string | null, refresh: string | null): void {
+    this.accessToken = access;
+    this.refreshToken = refresh;
+  }
+
+  getAccessToken(): string | null {
+    return this.accessToken;
+  }
+
+  getRefreshToken(): string | null {
+    return this.refreshToken;
   }
 
   // ── Health ──────────────────────────────────────────
@@ -158,6 +196,89 @@ export class RuntimeClient {
     const res = await fetch(url, { method: "DELETE" });
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
+  }
+
+  // ── Auth ───────────────────────────────────────────
+
+  async register(data: RegisterInput): Promise<{ user: AuthUser }> {
+    const res = await fetch(`${this.baseUrl}/api/v1/auth/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async login(username: string, password: string): Promise<LoginResponse> {
+    const res = await fetch(`${this.baseUrl}/api/v1/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    const data: LoginResponse = await res.json();
+    this.accessToken = data.accessToken;
+    this.refreshToken = data.refreshToken;
+    return data;
+  }
+
+  async refresh(): Promise<void> {
+    if (!this.refreshToken) throw new RuntimeApiError(0, "no refresh token");
+    const res = await fetch(`${this.baseUrl}/api/v1/auth/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refreshToken: this.refreshToken }),
+    });
+    if (!res.ok) {
+      this.accessToken = null;
+      this.refreshToken = null;
+      throw new RuntimeApiError(res.status, await res.text());
+    }
+    const data = await res.json();
+    this.accessToken = data.accessToken;
+  }
+
+  async logout(): Promise<void> {
+    if (this.refreshToken) {
+      try {
+        await fetch(`${this.baseUrl}/api/v1/auth/logout`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refreshToken: this.refreshToken }),
+        });
+      } catch {
+        // best-effort
+      }
+    }
+    this.accessToken = null;
+    this.refreshToken = null;
+  }
+
+  async me(): Promise<AuthUser> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/auth/me`);
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  /** Fetch with Authorization header and auto-refresh on 401. */
+  private async authFetch(url: string, init?: RequestInit): Promise<Response> {
+    const doFetch = (token: string | null) => {
+      const headers = new Headers(init?.headers);
+      if (token) headers.set("Authorization", `Bearer ${token}`);
+      return fetch(url, { ...init, headers });
+    };
+
+    let res = await doFetch(this.accessToken);
+    if (res.status === 401 && this.refreshToken) {
+      try {
+        await this.refresh();
+        res = await doFetch(this.accessToken);
+      } catch {
+        // refresh failed, return original 401
+      }
+    }
+    return res;
   }
 }
 

@@ -33,6 +33,10 @@ futures = "0.3"
 tar = "0.4"
 flate2 = "1"
 
+# Auth (JWT + password hashing)
+argon2 = "0.5"
+jsonwebtoken = "9"
+
 # Job Engine
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

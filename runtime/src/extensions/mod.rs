@@ -1,3 +1,4 @@
+pub mod auth;
 mod audit;
 pub mod logs;
 

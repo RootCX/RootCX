@@ -124,3 +124,14 @@ pub struct InstalledApp {
     pub status: String,
     pub entities: Vec<String>,
 }
+
+/// Authenticated user returned by auth endpoints.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthUser {
+    pub id: String,
+    pub username: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    pub created_at: String,
+}
