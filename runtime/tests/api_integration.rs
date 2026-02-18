@@ -5,6 +5,21 @@ mod harness;
 use harness::TestRuntime;
 use serde_json::{json, Value};
 
+/// Build a tar.gz archive in memory from a list of (path, contents) pairs.
+fn make_tar_gz(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    let mut tar = tar::Builder::new(enc);
+    for &(name, data) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(name).unwrap();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, data).unwrap();
+    }
+    tar.into_inner().unwrap().finish().unwrap()
+}
+
 // ── Health & Status ─────────────────────────────────────────────
 
 #[tokio::test]
@@ -470,6 +485,46 @@ async fn audit_filters_by_app_id() {
     let arr = entries.as_array().unwrap();
     assert!(!arr.is_empty());
     assert!(arr.iter().all(|e| e["table_schema"].as_str() == Some("audfa")));
+    rt.shutdown().await;
+}
+
+// ── Deploy ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn deploy_rejects_empty_archive() {
+    let rt = TestRuntime::boot().await;
+    let (s, body) = rt.deploy("dep-empty", &[]).await;
+    assert_eq!(s, 400);
+    assert!(body["error"].as_str().unwrap().contains("empty archive"));
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn deploy_rejects_corrupt_archive() {
+    let rt = TestRuntime::boot().await;
+    let (s, body) = rt.deploy("dep-bad", b"not-a-tar-gz").await;
+    assert_eq!(s, 500);
+    assert!(body["error"].as_str().unwrap().contains("extract archive"));
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn deploy_without_entry_point_fails() {
+    let rt = TestRuntime::boot().await;
+    let archive = make_tar_gz(&[("README.md", b"# no entry point here")]);
+    let (s, body) = rt.deploy("dep-noep", &archive).await;
+    assert_eq!(s, 500);
+    assert!(body["error"].as_str().unwrap().contains("no entry point"));
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn deploy_valid_archive() {
+    let rt = TestRuntime::boot().await;
+    let archive = make_tar_gz(&[("index.ts", b"process.stdin.resume();")]);
+    let (s, body) = rt.deploy("dep-ok", &archive).await;
+    assert_eq!(s, 200);
+    assert!(body["message"].as_str().unwrap().contains("deployed and started"));
     rt.shutdown().await;
 }
 
