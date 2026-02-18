@@ -120,6 +120,14 @@ pub async fn sync_manifest(
 }
 
 #[tauri::command]
+pub async fn deploy_backend(
+    state: State<'_, AppState>,
+    project_path: String,
+) -> Result<String, String> {
+    state.deploy_and_watch(&project_path).await
+}
+
+#[tauri::command]
 pub async fn scaffold_project(path: String, name: String) -> Result<(), String> {
     let sdk = crate::state::sdk_runtime_dir()?;
     let client_crate = crate::state::runtime_client_dir()?;

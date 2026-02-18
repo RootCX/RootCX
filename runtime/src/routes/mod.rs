@@ -1,4 +1,5 @@
 mod crud;
+mod deploy;
 mod jobs;
 mod secrets;
 mod upload;
@@ -81,6 +82,7 @@ pub async fn uninstall_app(axum::extract::State(rt): axum::extract::State<Shared
 // ── Re-exports ────────────────────────────────────────────────────
 
 pub use crud::{list_records, create_record, get_record, update_record, delete_record};
+pub use deploy::deploy_backend;
 pub use jobs::{enqueue_job, get_job, list_jobs};
 pub use secrets::{set_secret, delete_secret, list_secrets};
 pub use upload::upload_file;

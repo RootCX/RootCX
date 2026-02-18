@@ -175,6 +175,45 @@ impl RuntimeClient {
         check_response(resp).await?;
         Ok(())
     }
+
+    // ── Deploy & Workers ─────────────────────────────────────
+
+    pub async fn deploy_app(&self, app_id: &str, archive: Vec<u8>) -> Result<String, ClientError> {
+        let part = reqwest::multipart::Part::bytes(archive)
+            .file_name("backend.tar.gz")
+            .mime_str("application/gzip")
+            .map_err(|e| ClientError::Http(e.into()))?;
+        let form = reqwest::multipart::Form::new().part("archive", part);
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/apps/{}/deploy", self.base_url, app_id))
+            .multipart(form)
+            .send()
+            .await?;
+        Self::extract_message(resp).await
+    }
+
+    pub async fn start_worker(&self, app_id: &str) -> Result<String, ClientError> {
+        self.worker_action(app_id, "start").await
+    }
+
+    pub async fn stop_worker(&self, app_id: &str) -> Result<String, ClientError> {
+        self.worker_action(app_id, "stop").await
+    }
+
+    async fn worker_action(&self, app_id: &str, action: &str) -> Result<String, ClientError> {
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/apps/{}/worker/{}", self.base_url, app_id, action))
+            .send()
+            .await?;
+        Self::extract_message(resp).await
+    }
+
+    async fn extract_message(resp: reqwest::Response) -> Result<String, ClientError> {
+        let body: JsonValue = check_response(resp).await?.json().await?;
+        Ok(body["message"].as_str().unwrap_or("ok").to_string())
+    }
 }
 
 async fn check_response(resp: reqwest::Response) -> Result<reqwest::Response, ClientError> {

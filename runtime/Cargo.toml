@@ -29,6 +29,10 @@ command-group = { version = "5", features = ["with-tokio"] }
 tokio-util = { version = "0.7", features = ["codec", "rt"] }
 futures = "0.3"
 
+# Deploy (tar.gz upload)
+tar = "0.4"
+flate2 = "1"
+
 # Job Engine
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

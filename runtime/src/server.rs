@@ -38,7 +38,9 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .route("/api/v1/apps/{app_id}/jobs", get(routes::list_jobs).post(routes::enqueue_job))
         .route("/api/v1/apps/{app_id}/jobs/{job_id}", get(routes::get_job))
         // File upload (File Handoff pattern)
-        .route("/api/v1/apps/{app_id}/upload", post(routes::upload_file).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)));
+        .route("/api/v1/apps/{app_id}/upload", post(routes::upload_file).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)))
+        // Backend deploy (tar.gz archive)
+        .route("/api/v1/apps/{app_id}/deploy", post(routes::deploy_backend).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)));
 
     // Extension routes (e.g. audit)
     {
