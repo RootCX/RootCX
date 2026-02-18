@@ -10,6 +10,7 @@ use tracing::{error, info, warn};
 
 use crate::secrets::SecretManager;
 use crate::extensions::logs::LogEntry;
+use crate::ipc::RpcCaller;
 use crate::worker::{self, SupervisorHandle, WorkerConfig, WorkerStatus};
 use crate::RuntimeError;
 
@@ -79,8 +80,8 @@ impl WorkerManager {
         }
     }
 
-    pub async fn rpc(&self, app_id: &str, id: String, method: String, params: JsonValue) -> Result<JsonValue, RuntimeError> {
-        self.get_handle(app_id).await?.rpc(id, method, params).await
+    pub async fn rpc(&self, app_id: &str, id: String, method: String, params: JsonValue, caller: Option<RpcCaller>) -> Result<JsonValue, RuntimeError> {
+        self.get_handle(app_id).await?.rpc(id, method, params, caller).await
     }
 
     pub async fn dispatch_job(&self, app_id: &str, job_id: String, payload: JsonValue) -> Result<(), RuntimeError> {

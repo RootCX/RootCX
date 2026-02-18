@@ -42,17 +42,21 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         // Backend deploy (tar.gz archive)
         .route("/api/v1/apps/{app_id}/deploy", post(routes::deploy_backend).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)));
 
-    // Extension routes (e.g. audit)
-    {
+    // Extension routes (e.g. audit, auth)
+    let auth_config = {
         let rt = runtime.lock().await;
         for ext in rt.extensions() {
             if let Some(ext_router) = ext.routes() {
                 router = router.merge(ext_router);
             }
         }
-    }
+        rt.auth_config().clone()
+    };
 
-    let router = router.layer(CorsLayer::permissive()).with_state(runtime);
+    let router = router
+        .layer(axum::Extension(auth_config))
+        .layer(CorsLayer::permissive())
+        .with_state(runtime);
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!(port = port, "runtime HTTP server listening");
     axum::serve(listener, router).await

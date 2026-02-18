@@ -12,7 +12,7 @@ use tracing::{error, info, warn};
 use sqlx::PgPool;
 
 use crate::extensions::logs::{emit_log, spawn_output_reader, LogEntry, LOG_CHANNEL_CAPACITY};
-use crate::ipc::{InboundMessage, IpcEvent, IpcReader, IpcWriter, OutboundMessage, PendingRpcs};
+use crate::ipc::{InboundMessage, IpcEvent, IpcReader, IpcWriter, OutboundMessage, PendingRpcs, RpcCaller};
 use crate::RuntimeError;
 
 const MAX_CRASHES: u32 = 5;
@@ -36,7 +36,7 @@ pub enum WorkerStatus {
 pub enum SupervisorCommand {
     Start,
     Stop { reply: oneshot::Sender<()> },
-    Rpc { id: String, method: String, params: JsonValue, reply: oneshot::Sender<Result<JsonValue, String>> },
+    Rpc { id: String, method: String, params: JsonValue, caller: Option<RpcCaller>, reply: oneshot::Sender<Result<JsonValue, String>> },
     Job { id: String, payload: JsonValue },
     GetStatus { reply: oneshot::Sender<WorkerStatus> },
 }
@@ -73,9 +73,9 @@ impl SupervisorHandle {
         rx.await.map_err(|_| dead())
     }
 
-    pub async fn rpc(&self, id: String, method: String, params: JsonValue) -> Result<JsonValue, RuntimeError> {
+    pub async fn rpc(&self, id: String, method: String, params: JsonValue, caller: Option<RpcCaller>) -> Result<JsonValue, RuntimeError> {
         let (reply, rx) = oneshot::channel();
-        self.send(SupervisorCommand::Rpc { id, method, params, reply }).await?;
+        self.send(SupervisorCommand::Rpc { id, method, params, caller, reply }).await?;
         rx.await.map_err(|_| dead())?.map_err(RuntimeError::Worker)
     }
 
@@ -160,14 +160,14 @@ async fn supervisor_loop(config: WorkerConfig, mut cmd_rx: mpsc::Receiver<Superv
                         let _ = reply.send(());
                     }
 
-                    SupervisorCommand::Rpc { id, method, params, reply } => {
+                    SupervisorCommand::Rpc { id, method, params, caller, reply } => {
                         if status != WorkerStatus::Running {
                             let _ = reply.send(Err("worker not running".into()));
                             continue;
                         }
                         let rx = pending_rpcs.register(id.clone());
                         if let Some(ref mut w) = ipc_writer {
-                            if let Err(e) = w.send(&OutboundMessage::Rpc { id: id.clone(), method, params }).await {
+                            if let Err(e) = w.send(&OutboundMessage::Rpc { id: id.clone(), method, params, caller }).await {
                                 pending_rpcs.resolve(&id, Err(e.to_string()));
                             }
                         }

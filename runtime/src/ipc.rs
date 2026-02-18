@@ -17,11 +17,18 @@ fn ipc_err(e: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::Ipc(e.to_string())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RpcCaller {
+    pub user_id: String,
+    pub username: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutboundMessage {
     Discover { app_id: String, runtime_url: String, db_url: String },
-    Rpc { id: String, method: String, params: JsonValue },
+    Rpc { id: String, method: String, params: JsonValue, caller: Option<RpcCaller> },
     Job { id: String, payload: JsonValue },
     Shutdown,
 }
@@ -108,7 +115,7 @@ mod tests {
     fn outbound_messages_carry_type_tag() {
         let cases: Vec<(OutboundMessage, &str)> = vec![
             (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), db_url: "d".into() }, "discover"),
-            (OutboundMessage::Rpc { id: "r1".into(), method: "echo".into(), params: json!({}) }, "rpc"),
+            (OutboundMessage::Rpc { id: "r1".into(), method: "echo".into(), params: json!({}), caller: None }, "rpc"),
             (OutboundMessage::Job { id: "j1".into(), payload: json!({}) }, "job"),
             (OutboundMessage::Shutdown, "shutdown"),
         ];
