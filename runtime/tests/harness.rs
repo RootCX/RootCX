@@ -114,6 +114,10 @@ impl TestRuntime {
         v
     }
 
+    pub async fn deploy(&self, app_id: &str, data: &[u8]) -> (StatusCode, Value) {
+        self.upload(&format!("/api/v1/apps/{app_id}/deploy"), "backend.tar.gz", "application/gzip", data).await
+    }
+
     pub async fn shutdown(self) {
         self.runtime.lock().await.shutdown().await.expect("shutdown failed");
     }
