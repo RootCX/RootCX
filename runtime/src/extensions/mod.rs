@@ -1,4 +1,5 @@
 mod audit;
+pub mod logs;
 
 use async_trait::async_trait;
 use axum::Router;
@@ -22,5 +23,5 @@ pub trait RuntimeExtension: Send + Sync {
 }
 
 pub fn builtin_extensions() -> Vec<Box<dyn RuntimeExtension>> {
-    vec![Box::new(audit::AuditExtension)]
+    vec![Box::new(audit::AuditExtension), Box::new(logs::LogsExtension)]
 }

@@ -6,12 +6,13 @@ use std::time::{Duration, Instant};
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use serde_json::Value as JsonValue;
 use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{error, info, warn};
 
 use sqlx::PgPool;
 
-use crate::ipc::{InboundMessage, IpcReader, IpcWriter, OutboundMessage, PendingRpcs};
+use crate::extensions::logs::{emit_log, spawn_output_reader, LogEntry, LOG_CHANNEL_CAPACITY};
+use crate::ipc::{InboundMessage, IpcEvent, IpcReader, IpcWriter, OutboundMessage, PendingRpcs};
 use crate::RuntimeError;
 
 const MAX_CRASHES: u32 = 5;
@@ -54,6 +55,7 @@ pub struct WorkerConfig {
 #[derive(Clone)]
 pub struct SupervisorHandle {
     tx: mpsc::Sender<SupervisorCommand>,
+    log_tx: broadcast::Sender<LogEntry>,
 }
 
 impl SupervisorHandle {
@@ -86,15 +88,20 @@ impl SupervisorHandle {
         self.send(SupervisorCommand::GetStatus { reply }).await?;
         rx.await.map_err(|_| dead())
     }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<LogEntry> {
+        self.log_tx.subscribe()
+    }
 }
 
 pub fn spawn_supervisor(config: WorkerConfig) -> SupervisorHandle {
     let (tx, rx) = mpsc::channel(64);
-    tokio::spawn(supervisor_loop(config, rx));
-    SupervisorHandle { tx }
+    let (log_tx, _) = broadcast::channel(LOG_CHANNEL_CAPACITY);
+    tokio::spawn(supervisor_loop(config, rx, log_tx.clone()));
+    SupervisorHandle { tx, log_tx }
 }
 
-async fn supervisor_loop(config: WorkerConfig, mut cmd_rx: mpsc::Receiver<SupervisorCommand>) {
+async fn supervisor_loop(config: WorkerConfig, mut cmd_rx: mpsc::Receiver<SupervisorCommand>, log_tx: broadcast::Sender<LogEntry>) {
     let app_id = config.app_id.clone();
     let mut status = WorkerStatus::Stopped;
     let mut child: Option<AsyncGroupChild> = None;
@@ -103,6 +110,7 @@ async fn supervisor_loop(config: WorkerConfig, mut cmd_rx: mpsc::Receiver<Superv
     let mut pending_rpcs = PendingRpcs::new();
     let mut crash_times: Vec<Instant> = Vec::new();
     let mut restart_count: u32 = 0;
+    let mut output_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
     info!(app_id = %app_id, "supervisor started");
 
@@ -119,16 +127,19 @@ async fn supervisor_loop(config: WorkerConfig, mut cmd_rx: mpsc::Receiver<Superv
                             continue;
                         }
                         match spawn_worker(&config).await {
-                            Ok((c, w, r)) => {
+                            Ok((c, writer, reader, stderr)) => {
                                 child = Some(c);
-                                ipc_writer = Some(w);
-                                ipc_reader = Some(r);
+                                ipc_writer = Some(writer);
+                                ipc_reader = Some(reader);
+                                output_handles.push(spawn_output_reader(stderr, "stderr", log_tx.clone()));
                                 status = WorkerStatus::Running;
                                 restart_count = 0;
                                 info!(app_id = %app_id, "worker started");
+                                emit_log(&log_tx, "system", "worker started");
                             }
                             Err(e) => {
                                 error!(app_id = %app_id, "spawn failed: {e}");
+                                emit_log(&log_tx, "system", format!("spawn failed: {e}"));
                                 status = WorkerStatus::Crashed;
                             }
                         }
@@ -140,10 +151,12 @@ async fn supervisor_loop(config: WorkerConfig, mut cmd_rx: mpsc::Receiver<Superv
                         }
                         ipc_writer = None;
                         ipc_reader = None;
+                        for h in output_handles.drain(..) { h.abort(); }
                         kill_child(&mut child).await;
                         status = WorkerStatus::Stopped;
                         crash_times.clear();
                         info!(app_id = %app_id, "worker stopped");
+                        emit_log(&log_tx, "system", "worker stopped");
                         let _ = reply.send(());
                     }
 
@@ -187,49 +200,55 @@ async fn supervisor_loop(config: WorkerConfig, mut cmd_rx: mpsc::Receiver<Superv
                 }
             }
 
-            msg = async {
+            event = async {
                 match ipc_reader.as_mut() {
                     Some(reader) => reader.recv().await,
                     None => std::future::pending().await,
                 }
             } => {
-                match msg {
-                    Some(InboundMessage::Discover { capabilities }) => {
-                        info!(app_id = %app_id, ?capabilities, "worker discovered");
-                        if let Some(ref mut w) = ipc_writer {
-                            let _ = w.send(&OutboundMessage::Discover {
-                                app_id: config.app_id.clone(),
-                                runtime_url: config.runtime_url.clone(),
-                                db_url: config.db_url.clone(),
-                            }).await;
-                        }
-                    }
-                    Some(InboundMessage::RpcResponse { id, result, error }) => {
-                        pending_rpcs.resolve(&id, match error {
-                            Some(e) => Err(e),
-                            None => Ok(result.unwrap_or(JsonValue::Null)),
-                        });
-                    }
-                    Some(InboundMessage::JobResult { id, result, error }) => {
-                        if let Ok(job_id) = uuid::Uuid::parse_str(&id) {
-                            if let Some(e) = error {
-                                warn!(app_id = %app_id, job_id = %id, "job failed: {e}");
-                                let _ = crate::jobs::fail(&config.pool, job_id, &e).await;
-                            } else {
-                                info!(app_id = %app_id, job_id = %id, "job completed");
-                                let _ = crate::jobs::complete(&config.pool, job_id, result.unwrap_or(JsonValue::Null)).await;
+                match event {
+                    Some(IpcEvent::Message(msg)) => match msg {
+                        InboundMessage::Discover { capabilities } => {
+                            info!(app_id = %app_id, ?capabilities, "worker discovered");
+                            if let Some(ref mut w) = ipc_writer {
+                                let _ = w.send(&OutboundMessage::Discover {
+                                    app_id: config.app_id.clone(),
+                                    runtime_url: config.runtime_url.clone(),
+                                    db_url: config.db_url.clone(),
+                                }).await;
                             }
-                        } else {
-                            warn!(app_id = %app_id, "invalid job id: {id}");
                         }
-                    }
-                    Some(InboundMessage::Log { level, message }) => {
-                        match level.as_str() {
-                            "error" => error!(app_id = %app_id, "[worker] {message}"),
-                            "warn" => warn!(app_id = %app_id, "[worker] {message}"),
-                            "debug" => tracing::debug!(app_id = %app_id, "[worker] {message}"),
-                            _ => info!(app_id = %app_id, "[worker] {message}"),
+                        InboundMessage::RpcResponse { id, result, error } => {
+                            pending_rpcs.resolve(&id, match error {
+                                Some(e) => Err(e),
+                                None => Ok(result.unwrap_or(JsonValue::Null)),
+                            });
                         }
+                        InboundMessage::JobResult { id, result, error } => {
+                            if let Ok(job_id) = uuid::Uuid::parse_str(&id) {
+                                if let Some(e) = error {
+                                    warn!(app_id = %app_id, job_id = %id, "job failed: {e}");
+                                    let _ = crate::jobs::fail(&config.pool, job_id, &e).await;
+                                } else {
+                                    info!(app_id = %app_id, job_id = %id, "job completed");
+                                    let _ = crate::jobs::complete(&config.pool, job_id, result.unwrap_or(JsonValue::Null)).await;
+                                }
+                            } else {
+                                warn!(app_id = %app_id, "invalid job id: {id}");
+                            }
+                        }
+                        InboundMessage::Log { level, message } => {
+                            match level.as_str() {
+                                "error" => error!(app_id = %app_id, "[worker] {message}"),
+                                "warn" => warn!(app_id = %app_id, "[worker] {message}"),
+                                "debug" => tracing::debug!(app_id = %app_id, "[worker] {message}"),
+                                _ => info!(app_id = %app_id, "[worker] {message}"),
+                            }
+                            emit_log(&log_tx, &level, &message);
+                        }
+                    },
+                    Some(IpcEvent::Output(line)) => {
+                        emit_log(&log_tx, "stdout", &line);
                     }
                     None if matches!(status, WorkerStatus::Stopping | WorkerStatus::Stopped) => {
                         continue;
@@ -238,10 +257,12 @@ async fn supervisor_loop(config: WorkerConfig, mut cmd_rx: mpsc::Receiver<Superv
                         if let Some(ref mut c) = child {
                             let exit = AsyncGroupChild::wait(c).await;
                             warn!(app_id = %app_id, ?exit, "worker exited unexpectedly");
+                            emit_log(&log_tx, "system", "worker crashed");
                         }
                         child = None;
                         ipc_writer = None;
                         ipc_reader = None;
+                        for h in output_handles.drain(..) { h.abort(); }
 
                         let now = Instant::now();
                         crash_times.retain(|t| now.duration_since(*t) < CRASH_WINDOW);
@@ -250,6 +271,7 @@ async fn supervisor_loop(config: WorkerConfig, mut cmd_rx: mpsc::Receiver<Superv
 
                         if crash_times.len() as u32 >= MAX_CRASHES {
                             error!(app_id = %app_id, "crash loop ({MAX_CRASHES} in {CRASH_WINDOW:?}), giving up");
+                            emit_log(&log_tx, "system", format!("crash loop ({MAX_CRASHES} crashes in {CRASH_WINDOW:?}), giving up"));
                             status = WorkerStatus::Crashed;
                             continue;
                         }
@@ -268,6 +290,7 @@ async fn supervisor_loop(config: WorkerConfig, mut cmd_rx: mpsc::Receiver<Superv
                                             status = WorkerStatus::Stopped;
                                             crash_times.clear();
                                             info!(app_id = %app_id, "worker stopped during backoff");
+                                            emit_log(&log_tx, "system", "worker stopped");
                                             let _ = reply.send(());
                                             continue;
                                         }
@@ -282,15 +305,19 @@ async fn supervisor_loop(config: WorkerConfig, mut cmd_rx: mpsc::Receiver<Superv
                         }
 
                         info!(app_id = %app_id, attempt = restart_count, "restarting worker");
+                        emit_log(&log_tx, "system", format!("restarting worker (attempt {restart_count})"));
                         match spawn_worker(&config).await {
-                            Ok((c, w, r)) => {
+                            Ok((c, writer, reader, stderr)) => {
                                 child = Some(c);
-                                ipc_writer = Some(w);
-                                ipc_reader = Some(r);
+                                ipc_writer = Some(writer);
+                                ipc_reader = Some(reader);
+                                output_handles.push(spawn_output_reader(stderr, "stderr", log_tx.clone()));
                                 status = WorkerStatus::Running;
+                                emit_log(&log_tx, "system", "worker restarted");
                             }
                             Err(e) => {
                                 error!(app_id = %app_id, "restart failed: {e}");
+                                emit_log(&log_tx, "system", format!("restart failed: {e}"));
                                 status = WorkerStatus::Crashed;
                             }
                         }
@@ -316,7 +343,7 @@ async fn kill_child(child: &mut Option<AsyncGroupChild>) {
     *child = None;
 }
 
-async fn spawn_worker(config: &WorkerConfig) -> Result<(AsyncGroupChild, IpcWriter, IpcReader), RuntimeError> {
+async fn spawn_worker(config: &WorkerConfig) -> Result<(AsyncGroupChild, IpcWriter, IpcReader, tokio::process::ChildStderr), RuntimeError> {
     let bin = which_runtime();
     info!(app_id = %config.app_id, bin, entry = %config.entry_point.display(), "spawning worker");
 
@@ -325,7 +352,7 @@ async fn spawn_worker(config: &WorkerConfig) -> Result<(AsyncGroupChild, IpcWrit
         .current_dir(&config.working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::piped())
         .env("ROOTCX_APP_ID", &config.app_id)
         .env("ROOTCX_RUNTIME_URL", &config.runtime_url)
         .env("ROOTCX_DB_URL", &config.db_url)
@@ -342,8 +369,10 @@ async fn spawn_worker(config: &WorkerConfig) -> Result<(AsyncGroupChild, IpcWrit
         .ok_or_else(|| RuntimeError::Worker("no stdin".into()))?;
     let stdout = child.inner().stdout.take()
         .ok_or_else(|| RuntimeError::Worker("no stdout".into()))?;
+    let stderr = child.inner().stderr.take()
+        .ok_or_else(|| RuntimeError::Worker("no stderr".into()))?;
 
-    Ok((child, IpcWriter::new(stdin), IpcReader::new(stdout)))
+    Ok((child, IpcWriter::new(stdin), IpcReader::new(stdout), stderr))
 }
 
 fn backoff_delay(restart_count: u32) -> Duration {

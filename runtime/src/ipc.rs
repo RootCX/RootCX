@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, ChildStdout};
+use tokio::io::{AsyncRead, AsyncWriteExt, BufReader};
+use tokio::process::ChildStdin;
 use tokio::sync::oneshot;
 use tokio_util::codec::{FramedRead, LinesCodec};
-use tracing::{error, warn};
+use tracing::error;
 
 use crate::RuntimeError;
 
@@ -37,6 +37,12 @@ pub enum InboundMessage {
 
 fn default_level() -> String { "info".into() }
 
+#[derive(Debug)]
+pub enum IpcEvent {
+    Message(InboundMessage),
+    Output(String),
+}
+
 pub struct IpcWriter { stdin: ChildStdin }
 
 impl IpcWriter {
@@ -51,21 +57,21 @@ impl IpcWriter {
 }
 
 pub struct IpcReader {
-    lines: FramedRead<BufReader<ChildStdout>, LinesCodec>,
+    lines: FramedRead<BufReader<Box<dyn AsyncRead + Unpin + Send>>, LinesCodec>,
 }
 
 impl IpcReader {
-    pub fn new(stdout: ChildStdout) -> Self {
-        Self { lines: FramedRead::new(BufReader::new(stdout), LinesCodec::new_with_max_length(MAX_LINE_LENGTH)) }
+    pub fn new(reader: impl AsyncRead + Unpin + Send + 'static) -> Self {
+        Self { lines: FramedRead::new(BufReader::new(Box::new(reader) as Box<dyn AsyncRead + Unpin + Send>), LinesCodec::new_with_max_length(MAX_LINE_LENGTH)) }
     }
 
-    pub async fn recv(&mut self) -> Option<InboundMessage> {
+    pub async fn recv(&mut self) -> Option<IpcEvent> {
         loop {
             match self.lines.next().await {
                 Some(Ok(line)) if line.trim().is_empty() => continue,
                 Some(Ok(line)) => match serde_json::from_str(&line) {
-                    Ok(msg) => return Some(msg),
-                    Err(e) => { warn!(line = %line, "bad IPC message: {e}"); continue; }
+                    Ok(msg) => return Some(IpcEvent::Message(msg)),
+                    Err(_) => return Some(IpcEvent::Output(line)),
                 },
                 Some(Err(e)) => { error!("IPC read error: {e}"); return None; }
                 None => return None,
