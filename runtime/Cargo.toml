@@ -13,9 +13,24 @@ serde.workspace = true
 serde_json.workspace = true
 rootcx-postgres-mgmt.workspace = true
 rootcx-shared-types.workspace = true
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 tower-http = { version = "0.6", features = ["cors"] }
 async-trait = "0.1"
+
+# Secret Vault (AES-256-GCM)
+aes-gcm = "0.10"
+rand = "0.8"
+
+# Process Supervisor
+command-group = { version = "5", features = ["with-tokio"] }
+
+# IPC (JSONL over stdin/stdout)
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+
+# Job Engine
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

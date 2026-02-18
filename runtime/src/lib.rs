@@ -1,18 +1,30 @@
 mod api_error;
 mod error;
 pub mod extensions;
+mod ipc;
+mod jobs;
 mod manifest;
 mod routes;
 mod schema;
+mod scheduler;
+mod secrets;
 pub mod server;
+mod worker;
+mod worker_manager;
 
 pub use error::RuntimeError;
+
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use extensions::{builtin_extensions, RuntimeExtension};
 use rootcx_postgres_mgmt::PostgresManager;
 use rootcx_shared_types::{ForgeStatus, OsStatus, PostgresStatus, RuntimeStatus, ServiceState};
+use secrets::SecretManager;
 use sqlx::PgPool;
+use tokio::sync::Notify;
 use tracing::info;
+use worker_manager::WorkerManager;
 
 const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -20,28 +32,49 @@ pub struct Runtime {
     pg: PostgresManager,
     pool: Option<PgPool>,
     extensions: Vec<Box<dyn RuntimeExtension>>,
+    secret_manager: Option<Arc<SecretManager>>,
+    worker_manager: Option<Arc<WorkerManager>>,
+    scheduler_wake: Option<Arc<Notify>>,
+    data_dir: PathBuf,
 }
 
 impl Runtime {
-    pub fn new(pg: PostgresManager) -> Self {
-        Self { pg, pool: None, extensions: builtin_extensions() }
+    pub fn new(pg: PostgresManager, data_dir: PathBuf) -> Self {
+        Self {
+            pg,
+            pool: None,
+            extensions: builtin_extensions(),
+            secret_manager: None,
+            worker_manager: None,
+            scheduler_wake: None,
+            data_dir,
+        }
     }
 
-    pub async fn boot(&mut self) -> Result<(), RuntimeError> {
+    pub async fn boot(&mut self, api_port: u16) -> Result<(), RuntimeError> {
         info!("runtime boot sequence starting");
 
         self.pg.init_db().await.map_err(RuntimeError::Postgres)?;
         self.pg.start().await.map_err(RuntimeError::Postgres)?;
 
-        let url = format!("postgres://localhost:{}/postgres", self.pg.port());
-        info!(url = %url, "connecting to postgres");
+        let db_url = format!("postgres://localhost:{}/postgres", self.pg.port());
+        info!(url = %db_url, "connecting to postgres");
 
-        let pool = PgPool::connect(&url).await.map_err(RuntimeError::Database)?;
+        let pool = PgPool::connect(&db_url).await.map_err(RuntimeError::Database)?;
         schema::bootstrap(&pool).await?;
 
         for ext in &self.extensions {
             ext.bootstrap(&pool).await?;
         }
+
+        self.secret_manager = Some(Arc::new(SecretManager::new(&self.data_dir)?));
+
+        let apps_dir = self.data_dir.join("apps");
+        std::fs::create_dir_all(&apps_dir)?;
+        let runtime_url = format!("http://127.0.0.1:{api_port}");
+        let wm = Arc::new(WorkerManager::new(apps_dir, runtime_url, db_url));
+        self.scheduler_wake = Some(scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm)));
+        self.worker_manager = Some(wm);
 
         self.pool = Some(pool);
         info!("runtime boot complete");
@@ -50,6 +83,10 @@ impl Runtime {
 
     pub async fn shutdown(&mut self) -> Result<(), RuntimeError> {
         info!("runtime shutting down");
+        if let Some(ref wm) = self.worker_manager { wm.stop_all().await; }
+        self.worker_manager = None;
+        self.scheduler_wake = None;
+
         if let Some(pool) = self.pool.take() {
             pool.close().await;
         }
@@ -77,11 +114,15 @@ impl Runtime {
         }
     }
 
-    pub fn pool(&self) -> Option<&PgPool> {
-        self.pool.as_ref()
-    }
+    pub fn pool(&self) -> Option<&PgPool> { self.pool.as_ref() }
 
-    pub fn extensions(&self) -> &[Box<dyn RuntimeExtension>] {
-        &self.extensions
-    }
+    pub fn extensions(&self) -> &[Box<dyn RuntimeExtension>] { &self.extensions }
+
+    pub fn secret_manager(&self) -> Option<&Arc<SecretManager>> { self.secret_manager.as_ref() }
+
+    pub fn worker_manager(&self) -> Option<&Arc<WorkerManager>> { self.worker_manager.as_ref() }
+
+    pub fn scheduler_wake(&self) -> Option<&Arc<Notify>> { self.scheduler_wake.as_ref() }
+
+    pub fn data_dir(&self) -> &std::path::Path { &self.data_dir }
 }
