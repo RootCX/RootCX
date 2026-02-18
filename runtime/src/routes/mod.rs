@@ -85,3 +85,16 @@ pub use jobs::{enqueue_job, get_job, list_jobs};
 pub use secrets::{set_secret, delete_secret, list_secrets};
 pub use upload::upload_file;
 pub use workers::{start_worker, stop_worker, worker_status, all_worker_statuses, rpc_proxy};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_uuid_rejects_invalid() {
+        for input in ["not-a-uuid", "", "550e8400-e29b-41d4-a716-44665544000g"] {
+            let err = parse_uuid(input).unwrap_err();
+            assert!(format!("{err:?}").contains("invalid UUID"), "input: {input:?}");
+        }
+    }
+}

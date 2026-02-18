@@ -77,3 +77,39 @@ fn bind_json_value<'q>(
         _ => q.bind(val),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn table_formats_qualified_name() {
+        assert_eq!(table("myapp", "contacts"), "\"myapp\".\"contacts\"");
+    }
+
+    #[test]
+    fn table_sanitizes_inputs() {
+        let result = table("my;app", "drop--table");
+        assert!(!result.contains(';'));
+        assert!(!result.contains('-'));
+        assert_eq!(result, "\"myapp\".\"droptable\"");
+    }
+
+    #[test]
+    fn require_object_valid() {
+        assert!(require_object(&json!({"a": 1})).is_ok());
+    }
+
+    #[test]
+    fn require_object_rejects_invalid() {
+        for (label, input) in [
+            ("empty", json!({})),
+            ("array", json!([1, 2])),
+            ("string", json!("hello")),
+            ("null", json!(null)),
+        ] {
+            assert!(require_object(&input).is_err(), "expected error for {label}");
+        }
+    }
+}

@@ -307,3 +307,212 @@ async fn register_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), Runti
     info!(app = %manifest.app_id, "app registered");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rootcx_shared_types::{EntityContract, FieldContract, FieldReference};
+    use serde_json::json;
+
+    // ── helpers ──────────────────────────────────────────────────────
+
+    fn field(name: &str, field_type: &str) -> FieldContract {
+        FieldContract {
+            name: name.to_string(),
+            field_type: field_type.to_string(),
+            required: false,
+            default_value: None,
+            enum_values: None,
+            references: None,
+            is_primary_key: None,
+        }
+    }
+
+    fn entity(name: &str, fields: Vec<FieldContract>) -> EntityContract {
+        EntityContract {
+            entity_name: name.to_string(),
+            fields,
+        }
+    }
+
+    // ── quote_ident ─────────────────────────────────────────────────
+
+    #[test]
+    fn quote_ident_cases() {
+        for (input, expected) in [
+            ("users", "\"users\""),
+            ("users; DROP TABLE--", "\"usersDROPTABLE\""),
+            ("my_table_2", "\"my_table_2\""),
+            ("", "\"\""),
+            ("!@#$%^&*()", "\"\""),
+        ] {
+            assert_eq!(quote_ident(input), expected, "quote_ident({input:?})");
+        }
+    }
+
+    // ── json_to_sql_default ─────────────────────────────────────────
+
+    #[test]
+    fn json_to_sql_defaults() {
+        assert_eq!(json_to_sql_default(&json!(null), "TEXT"), None);
+        assert_eq!(json_to_sql_default(&json!(true), "BOOLEAN"), Some("true".into()));
+        assert_eq!(json_to_sql_default(&json!(42), "DOUBLE PRECISION"), Some("42".into()));
+        assert_eq!(json_to_sql_default(&json!("hello"), "TEXT"), Some("'hello'".into()));
+        assert_eq!(json_to_sql_default(&json!("it's"), "TEXT"), Some("'it''s'".into()));
+        assert_eq!(json_to_sql_default(&json!({"a": 1}), "TEXT"), None);
+
+        let jsonb = json_to_sql_default(&json!({"a": 1}), "JSONB").unwrap();
+        assert!(jsonb.ends_with("::jsonb"), "expected ::jsonb suffix, got: {jsonb}");
+    }
+
+    // ── build_pk_type_map ───────────────────────────────────────────
+
+    #[test]
+    fn build_pk_type_map_implicit_uuid() {
+        let entities = vec![entity("contacts", vec![field("name", "text")])];
+        let map = build_pk_type_map(&entities);
+        assert_eq!(map.get("contacts"), Some(&"UUID"));
+    }
+
+    #[test]
+    fn build_pk_type_map_explicit_pk() {
+        let mut id_field = field("id", "text");
+        id_field.is_primary_key = Some(true);
+        let entities = vec![entity("contacts", vec![id_field])];
+        let map = build_pk_type_map(&entities);
+        assert_eq!(map.get("contacts"), Some(&"TEXT"));
+    }
+
+    // ── field_to_column ─────────────────────────────────────────────
+
+    #[test]
+    fn field_to_column_simple_text() {
+        let pk_types = HashMap::new();
+        let col = field_to_column(&field("name", "text"), &pk_types);
+        assert_eq!(col, "\"name\" TEXT");
+    }
+
+    #[test]
+    fn field_to_column_required() {
+        let pk_types = HashMap::new();
+        let mut f = field("email", "text");
+        f.required = true;
+        let col = field_to_column(&f, &pk_types);
+        assert!(col.contains("NOT NULL"), "expected NOT NULL in: {col}");
+    }
+
+    #[test]
+    fn field_to_column_pk_uuid_default() {
+        let pk_types = HashMap::new();
+        let mut f = field("id", "entity_link");
+        f.is_primary_key = Some(true);
+        let col = field_to_column(&f, &pk_types);
+        assert!(col.contains("PRIMARY KEY"), "expected PRIMARY KEY in: {col}");
+        assert!(col.contains("gen_random_uuid()"), "expected gen_random_uuid() in: {col}");
+    }
+
+    #[test]
+    fn field_to_column_with_default() {
+        let pk_types = HashMap::new();
+        let mut f = field("status", "text");
+        f.default_value = Some(json!("N/A"));
+        let col = field_to_column(&f, &pk_types);
+        assert!(col.contains("DEFAULT 'N/A'"), "expected DEFAULT 'N/A' in: {col}");
+    }
+
+    #[test]
+    fn field_to_column_with_enum() {
+        let pk_types = HashMap::new();
+        let mut f = field("color", "text");
+        f.enum_values = Some(vec!["red".to_string(), "blue".to_string()]);
+        let col = field_to_column(&f, &pk_types);
+        assert!(col.contains("CHECK"), "expected CHECK in: {col}");
+        assert!(col.contains("'red'"), "expected 'red' in: {col}");
+        assert!(col.contains("'blue'"), "expected 'blue' in: {col}");
+    }
+
+    #[test]
+    fn field_to_column_entity_link() {
+        let mut pk_types = HashMap::new();
+        pk_types.insert("accounts".to_string(), "UUID");
+        let mut f = field("account_id", "entity_link");
+        f.references = Some(FieldReference {
+            entity: "accounts".to_string(),
+            field: "id".to_string(),
+        });
+        let col = field_to_column(&f, &pk_types);
+        assert!(col.contains("UUID"), "expected UUID type in: {col}");
+    }
+
+    // ── generate_create_table ───────────────────────────────────────
+
+    #[test]
+    fn generate_create_table_structure() {
+        let e = entity("contacts", vec![field("name", "text")]);
+        let pk_types = build_pk_type_map(&[e.clone()]);
+        let ddl = generate_create_table("myapp", &e, &pk_types);
+
+        assert!(
+            ddl.contains("\"myapp\".\"contacts\""),
+            "expected qualified table name in: {ddl}"
+        );
+        let first_col_line = ddl.lines().nth(1).expect("expected column lines");
+        assert!(
+            first_col_line.contains("UUID PRIMARY KEY"),
+            "expected auto-id UUID PRIMARY KEY in first column: {first_col_line}"
+        );
+        assert!(ddl.contains("\"created_at\""), "expected created_at in: {ddl}");
+        assert!(ddl.contains("\"updated_at\""), "expected updated_at in: {ddl}");
+    }
+
+    // ── generate_foreign_keys ───────────────────────────────────────
+
+    #[test]
+    fn generate_foreign_keys_basic() {
+        let accounts = entity("accounts", vec![field("name", "text")]);
+        let mut fk_field = field("account_id", "entity_link");
+        fk_field.references = Some(FieldReference {
+            entity: "accounts".to_string(),
+            field: "id".to_string(),
+        });
+        let deals = entity("deals", vec![fk_field]);
+        let all = vec![accounts, deals.clone()];
+        let stmts = generate_foreign_keys("myapp", &deals, &all);
+        assert_eq!(stmts.len(), 2, "expected FK + index statements, got: {stmts:?}");
+    }
+
+    #[test]
+    fn generate_foreign_keys_skips_system() {
+        let mut fk_field = field("owner_id", "entity_link");
+        fk_field.references = Some(FieldReference {
+            entity: "system.users".to_string(),
+            field: "id".to_string(),
+        });
+        let deals = entity("deals", vec![fk_field]);
+        let all = vec![deals.clone()];
+        let stmts = generate_foreign_keys("myapp", &deals, &all);
+        assert!(stmts.is_empty(), "system refs should be skipped: {stmts:?}");
+    }
+
+    #[test]
+    fn generate_foreign_keys_skips_cross_app() {
+        let mut fk_field = field("project_id", "entity_link");
+        fk_field.references = Some(FieldReference {
+            entity: "projects".to_string(),
+            field: "id".to_string(),
+        });
+        // "projects" is NOT in all_entities
+        let tasks = entity("tasks", vec![fk_field]);
+        let all = vec![tasks.clone()];
+        let stmts = generate_foreign_keys("myapp", &tasks, &all);
+        assert!(stmts.is_empty(), "cross-app refs should be skipped: {stmts:?}");
+    }
+
+    #[test]
+    fn generate_foreign_keys_no_links() {
+        let e = entity("notes", vec![field("body", "text")]);
+        let all = vec![e.clone()];
+        let stmts = generate_foreign_keys("myapp", &e, &all);
+        assert!(stmts.is_empty(), "no entity_link fields should produce no FK stmts: {stmts:?}");
+    }
+}

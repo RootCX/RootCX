@@ -19,6 +19,15 @@ pub struct SecretManager {
     cipher: Aes256Gcm,
 }
 
+#[cfg(test)]
+impl SecretManager {
+    fn with_key(key: &[u8; 32]) -> Self {
+        Self {
+            cipher: Aes256Gcm::new_from_slice(key).unwrap(),
+        }
+    }
+}
+
 impl SecretManager {
     pub fn new(data_dir: &Path) -> Result<Self, RuntimeError> {
         let key_bytes = if let Ok(hex) = std::env::var("ROOTCX_MASTER_KEY") {
@@ -140,4 +149,53 @@ fn load_or_generate_key(path: &Path) -> Result<Vec<u8>, RuntimeError> {
 
     info!(path = %path.display(), "master key generated");
     Ok(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mgr() -> SecretManager {
+        SecretManager::with_key(&[0xAA; 32])
+    }
+
+    #[test]
+    fn encrypt_decrypt_roundtrip() {
+        let m = mgr();
+        let (nonce, ciphertext) = m.encrypt("hello").unwrap();
+        let decrypted = m.decrypt(&nonce, &ciphertext).unwrap();
+        assert_eq!(decrypted, "hello");
+    }
+
+    #[test]
+    fn decrypt_wrong_nonce_fails() {
+        let m = mgr();
+        let (mut nonce, ciphertext) = m.encrypt("secret").unwrap();
+        nonce[0] ^= 0xFF;
+        assert!(m.decrypt(&nonce, &ciphertext).is_err());
+    }
+
+    #[test]
+    fn decrypt_wrong_ciphertext_fails() {
+        let m = mgr();
+        let (nonce, mut ciphertext) = m.encrypt("secret").unwrap();
+        ciphertext[0] ^= 0xFF;
+        assert!(m.decrypt(&nonce, &ciphertext).is_err());
+    }
+
+    #[test]
+    fn decrypt_bad_nonce_length() {
+        let m = mgr();
+        let bad_nonce = [0u8; 10];
+        let err = m.decrypt(&bad_nonce, &[0u8; 16]).unwrap_err();
+        assert!(err.to_string().contains("bad nonce len"));
+    }
+
+    #[test]
+    fn encrypt_empty_string() {
+        let m = mgr();
+        let (nonce, ciphertext) = m.encrypt("").unwrap();
+        let decrypted = m.decrypt(&nonce, &ciphertext).unwrap();
+        assert_eq!(decrypted, "");
+    }
 }
