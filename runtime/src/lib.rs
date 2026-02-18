@@ -34,6 +34,7 @@ pub struct Runtime {
     pg: PostgresManager,
     pool: Option<PgPool>,
     extensions: Vec<Box<dyn RuntimeExtension>>,
+    auth_config: Arc<auth::AuthConfig>,
     secret_manager: Option<Arc<SecretManager>>,
     worker_manager: Option<Arc<WorkerManager>>,
     scheduler: Option<SchedulerHandle>,
@@ -52,6 +53,7 @@ impl Runtime {
             pg,
             pool: None,
             extensions,
+            auth_config,
             secret_manager: None,
             worker_manager: None,
             scheduler: None,
@@ -122,6 +124,8 @@ impl Runtime {
             forge: ForgeStatus { state: offline, port: None },
         }
     }
+
+    pub fn auth_config(&self) -> &Arc<auth::AuthConfig> { &self.auth_config }
 
     pub fn pool(&self) -> Option<&PgPool> { self.pool.as_ref() }
 

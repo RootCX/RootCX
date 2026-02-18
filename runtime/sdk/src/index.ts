@@ -8,6 +8,7 @@ export type {
   AuthUser,
   LoginResponse,
   RegisterInput,
+  RpcCaller,
 } from "./client";
 
 // Hooks

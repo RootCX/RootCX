@@ -54,6 +54,11 @@ export interface RegisterInput {
   displayName?: string;
 }
 
+export interface RpcCaller {
+  userId: string;
+  username: string;
+}
+
 const DEFAULT_BASE_URL = "http://localhost:9100";
 
 export class RuntimeClient {
@@ -194,6 +199,18 @@ export class RuntimeClient {
   ): Promise<{ message: string }> {
     const url = `${this.baseUrl}/api/v1/apps/${enc(appId)}/collections/${enc(entity)}/${enc(id)}`;
     const res = await fetch(url, { method: "DELETE" });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  // ── RPC ────────────────────────────────────────────
+
+  async rpc(appId: string, method: string, params?: Record<string, unknown>): Promise<unknown> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/rpc`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ method, params: params ?? {} }),
+    });
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }
