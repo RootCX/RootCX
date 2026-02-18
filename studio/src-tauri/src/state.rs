@@ -5,6 +5,7 @@ use crate::forge::{is_forge_available, ForgeManager, FORGE_PORT};
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 use rootcx_runtime_client::RuntimeClient;
 use rootcx_shared_types::{ForgeStatus, OsStatus, ServiceState};
+use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -68,6 +69,8 @@ pub struct AppState {
     watchers: Arc<Mutex<Vec<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>>>>,
     /// The app_id of the currently deployed backend (if any).
     active_app_id: Arc<Mutex<Option<String>>>,
+    app_handle: AppHandle,
+    log_stream_abort: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
 }
 
 fn home_dir() -> Result<PathBuf, String> {
@@ -130,7 +133,7 @@ async fn ensure_config() -> Result<PathBuf, String> {
 }
 
 impl AppState {
-    pub fn from_tauri(_app: &tauri::App) -> Self {
+    pub fn from_tauri(app: &tauri::App) -> Self {
         let forge = if is_forge_available() {
             info!("forge binary found, AI features enabled");
             Some(Arc::new(Mutex::new(ForgeManager::new())))
@@ -143,6 +146,8 @@ impl AppState {
             forge,
             watchers: Arc::new(Mutex::new(Vec::new())),
             active_app_id: Arc::new(Mutex::new(None)),
+            app_handle: app.handle().clone(),
+            log_stream_abort: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -159,12 +164,12 @@ impl AppState {
         }
         info!("connected to runtime daemon at {DAEMON_URL}");
 
-        self.cleanup_stale_session().await;
+        self.reconnect_or_cleanup().await;
 
         Ok(())
     }
 
-    async fn cleanup_stale_session(&self) {
+    async fn reconnect_or_cleanup(&self) {
         let path = match session_file() {
             Ok(p) => p,
             Err(_) => return,
@@ -175,13 +180,73 @@ impl AppState {
         };
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data) {
             if let Some(app_id) = parsed["active_app_id"].as_str() {
-                info!(app_id, "cleaning up orphaned worker from previous session");
-                if let Err(e) = self.client.stop_worker(app_id).await {
-                    warn!(app_id, "orphan cleanup failed (may already be stopped): {e}");
+                // Check if the worker is still running — if so, reconnect to its log stream
+                match self.client.worker_status(app_id).await {
+                    Ok(status) if status == "running" => {
+                        info!(app_id, "reconnecting to running worker from previous session");
+                        *self.active_app_id.lock().await = Some(app_id.to_string());
+                        self.subscribe_to_worker_logs(app_id).await;
+                        return;
+                    }
+                    _ => {
+                        info!(app_id, "cleaning up orphaned worker from previous session");
+                        if let Err(e) = self.client.stop_worker(app_id).await {
+                            warn!(app_id, "orphan cleanup failed (may already be stopped): {e}");
+                        }
+                    }
                 }
             }
         }
         let _ = tokio::fs::remove_file(&path).await;
+    }
+
+    async fn subscribe_to_worker_logs(&self, app_id: &str) {
+        if let Some(handle) = self.log_stream_abort.lock().await.take() {
+            handle.abort();
+        }
+
+        let app_handle = self.app_handle.clone();
+        let _ = app_handle.emit("run-started", ());
+
+        let url = format!("{DAEMON_URL}/api/v1/apps/{app_id}/logs");
+        let abort_store = self.log_stream_abort.clone();
+
+        let task = tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            loop {
+                match client.get(&url).send().await {
+                    Ok(mut resp) if resp.status().is_success() => {
+                        let mut buf = String::new();
+                        loop {
+                            match resp.chunk().await {
+                                Ok(Some(chunk)) => {
+                                    buf.push_str(&String::from_utf8_lossy(&chunk));
+                                    while let Some(pos) = buf.find('\n') {
+                                        let line = buf[..pos].trim_end_matches('\r').to_string();
+                                        buf.drain(..=pos);
+                                        if let Some(data) = line.strip_prefix("data:") {
+                                            if let Ok(entry) = serde_json::from_str::<serde_json::Value>(data.trim_start()) {
+                                                let level = entry["level"].as_str().unwrap_or("info");
+                                                let message = entry["message"].as_str().unwrap_or("");
+                                                let _ = app_handle.emit("run-output", format_log_line(level, message));
+                                            }
+                                        }
+                                    }
+                                }
+                                Ok(None) => break,
+                                Err(e) => { warn!("log stream chunk error: {e}"); break; }
+                            }
+                        }
+                        info!("log stream disconnected, reconnecting...");
+                    }
+                    Ok(resp) => warn!(status = %resp.status(), "log stream request failed"),
+                    Err(e) => warn!("log stream connection failed: {e}"),
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        });
+
+        *abort_store.lock().await = Some(task.abort_handle());
     }
 
     pub async fn start_forge(&self, project_path: &str) -> Result<(), String> {
@@ -277,6 +342,9 @@ impl AppState {
     pub async fn deploy_and_watch(&self, project_path: &str) -> Result<String, String> {
         self.watchers.lock().await.clear();
         let msg = self.deploy_backend(project_path).await?;
+        if let Some(app_id) = self.active_app_id.lock().await.clone() {
+            self.subscribe_to_worker_logs(&app_id).await;
+        }
         self.start_watcher(project_path)?;
         Ok(msg)
     }
@@ -284,11 +352,9 @@ impl AppState {
     fn start_watcher(&self, project_path: &str) -> Result<(), String> {
         let backend_dir = Path::new(project_path).join("backend");
         let (tx, rx) = std::sync::mpsc::channel();
-        let mut debouncer =
-            new_debouncer(std::time::Duration::from_millis(500), tx)
-                .map_err(|e| format!("watcher setup failed: {e}"))?;
-        debouncer
-            .watcher()
+        let mut debouncer = new_debouncer(std::time::Duration::from_millis(500), tx)
+            .map_err(|e| format!("watcher setup failed: {e}"))?;
+        debouncer.watcher()
             .watch(&backend_dir, notify::RecursiveMode::Recursive)
             .map_err(|e| format!("watch failed: {e}"))?;
 
@@ -302,7 +368,12 @@ impl AppState {
                 if events.iter().any(|e| e.kind == DebouncedEventKind::Any) {
                     info!("backend changed, redeploying");
                     match handle.block_on(state.deploy_backend(&project_path)) {
-                        Ok(_) => info!("hot reload success"),
+                        Ok(_) => {
+                            info!("hot reload success");
+                            if let Some(app_id) = handle.block_on(state.active_app_id.lock()).clone() {
+                                handle.block_on(state.subscribe_to_worker_logs(&app_id));
+                            }
+                        }
                         Err(e) => warn!("hot reload failed: {e}"),
                     }
                 }
@@ -316,12 +387,18 @@ impl AppState {
 
     /// Stop the deployed backend worker and clean up session state.
     pub async fn stop_deployed_worker(&self) {
+        // Abort log stream first
+        if let Some(handle) = self.log_stream_abort.lock().await.take() {
+            handle.abort();
+        }
         if let Some(app_id) = self.active_app_id.lock().await.take() {
             info!(app_id, "stopping deployed worker");
             if let Err(e) = self.client.stop_worker(&app_id).await {
                 warn!(app_id, "failed to stop worker: {e}");
             }
         }
+        let _ = self.app_handle.emit("run-output", "\r\n[process exited]\r\n");
+        let _ = self.app_handle.emit("run-exited", Option::<i32>::None);
         if let Ok(path) = session_file() {
             let _ = tokio::fs::remove_file(&path).await;
         }
@@ -354,4 +431,15 @@ impl AppState {
         }
         status
     }
+}
+
+fn format_log_line(level: &str, message: &str) -> String {
+    let (prefix, reset) = match level {
+        "error" | "stderr" => ("\x1b[31m", "\x1b[0m"),
+        "warn"             => ("\x1b[33m", "\x1b[0m"),
+        "system"           => ("\x1b[36m", "\x1b[0m"),
+        "debug"            => ("\x1b[90m", "\x1b[0m"),
+        _                  => ("", ""),
+    };
+    format!("{prefix}{message}{reset}\r\n")
 }

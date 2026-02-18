@@ -5,10 +5,11 @@ use std::sync::Arc;
 use futures::future::join_all;
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 use tracing::{error, info, warn};
 
 use crate::secrets::SecretManager;
+use crate::extensions::logs::LogEntry;
 use crate::worker::{self, SupervisorHandle, WorkerConfig, WorkerStatus};
 use crate::RuntimeError;
 
@@ -58,7 +59,6 @@ impl WorkerManager {
     }
 
     pub async fn stop_app(&self, app_id: &str) -> Result<(), RuntimeError> {
-        // Clone the handle and drop the read lock BEFORE awaiting stop/write.
         let handle = self.workers.read().await.get(app_id).cloned();
         if let Some(h) = handle {
             h.stop().await?;
@@ -89,6 +89,10 @@ impl WorkerManager {
 
     pub async fn worker_status(&self, app_id: &str) -> Result<WorkerStatus, RuntimeError> {
         self.get_handle(app_id).await?.status().await
+    }
+
+    pub async fn subscribe_logs(&self, app_id: &str) -> Result<broadcast::Receiver<LogEntry>, RuntimeError> {
+        Ok(self.get_handle(app_id).await?.subscribe())
     }
 
     pub async fn all_statuses(&self) -> HashMap<String, WorkerStatus> {

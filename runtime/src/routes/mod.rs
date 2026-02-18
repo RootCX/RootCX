@@ -26,7 +26,7 @@ pub(crate) async fn pool(rt: &SharedRuntime) -> Result<PgPool, ApiError> {
     rt.lock().await.pool().cloned().ok_or(ApiError::NotReady)
 }
 
-async fn wm(rt: &SharedRuntime) -> Result<Arc<WorkerManager>, ApiError> {
+pub(crate) async fn wm(rt: &SharedRuntime) -> Result<Arc<WorkerManager>, ApiError> {
     rt.lock().await.worker_manager().cloned().ok_or(ApiError::NotReady)
 }
 

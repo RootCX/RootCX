@@ -201,6 +201,17 @@ impl RuntimeClient {
         self.worker_action(app_id, "stop").await
     }
 
+    /// Get the status of a worker (returns status string like "running", "stopped", etc.)
+    pub async fn worker_status(&self, app_id: &str) -> Result<String, ClientError> {
+        let resp = self
+            .client
+            .get(format!("{}/api/v1/apps/{}/worker/status", self.base_url, app_id))
+            .send()
+            .await?;
+        let body: JsonValue = check_response(resp).await?.json().await?;
+        Ok(body["status"].as_str().unwrap_or("unknown").to_string())
+    }
+
     async fn worker_action(&self, app_id: &str, action: &str) -> Result<String, ClientError> {
         let resp = self
             .client
