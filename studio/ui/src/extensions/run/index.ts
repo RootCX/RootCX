@@ -7,22 +7,22 @@ export function activate() {
     category: "Project",
     handler: async () => {
       layout.showView("console");
+      const pp = workspace.projectPath;
+      if (!pp) return;
 
-      if (!workspace.projectPath) {
-        await invoke("terminal_write", { data: "\r\n\x1b[33m⚠ Open a project first.\x1b[0m\r\n" });
-        return;
-      }
+      try { await invoke("sync_manifest", { projectPath: pp }); } catch { }
 
       try {
-        const config = await invoke<{ command: string }>("read_launch_config", {
-          projectPath: workspace.projectPath,
-        });
+        const entries = await invoke<{ name: string; is_dir: boolean }[]>("read_dir", { path: pp });
+        if (entries.some((e) => e.name === "backend" && e.is_dir))
+          await invoke("deploy_backend", { projectPath: pp });
+      } catch { }
+
+      try {
+        const config = await invoke<{ command: string }>("read_launch_config", { projectPath: pp });
         await invoke("terminal_write", { data: config.command + "\n" });
       } catch {
-        await invoke("init_launch_config", { projectPath: workspace.projectPath });
-        await invoke("terminal_write", {
-          data: "\r\n\x1b[36m✦ Created .rootcx/launch.json — edit it and press Run again.\x1b[0m\r\n",
-        });
+        await invoke("init_launch_config", { projectPath: pp });
       }
     },
   });

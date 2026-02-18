@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::forge::{is_forge_available, ForgeManager, FORGE_PORT};
+use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 use rootcx_runtime_client::RuntimeClient;
 use rootcx_shared_types::{ForgeStatus, OsStatus, ServiceState};
 use tokio::sync::Mutex;
@@ -62,6 +63,9 @@ async fn write_config(path: &Path, contents: &str) -> Result<(), String> {
 pub struct AppState {
     client: RuntimeClient,
     forge: Option<Arc<Mutex<ForgeManager>>>,
+    /// Active file watchers (kept alive by holding the handle).
+    #[allow(dead_code)]
+    watchers: Arc<Mutex<Vec<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>>>>,
 }
 
 fn home_dir() -> Result<PathBuf, String> {
@@ -131,6 +135,7 @@ impl AppState {
         Self {
             client: RuntimeClient::new(DAEMON_URL),
             forge,
+            watchers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -188,6 +193,85 @@ impl AppState {
         if !manifest.data_contract.is_empty() {
             self.client.install_app(&manifest).await.map_err(|e| format!("failed to install app: {e}"))?;
         }
+        Ok(())
+    }
+
+    /// Deploy `backend/` to the runtime. Use `deploy_and_watch` for hot reload.
+    pub async fn deploy_backend(&self, project_path: &str) -> Result<String, String> {
+        let project = Path::new(project_path);
+        let manifest: serde_json::Value = serde_json::from_str(
+            &tokio::fs::read_to_string(project.join("manifest.json"))
+                .await
+                .map_err(|e| format!("failed to read manifest: {e}"))?,
+        )
+        .map_err(|e| format!("invalid manifest: {e}"))?;
+        let app_id = manifest["appId"]
+            .as_str()
+            .ok_or("manifest.json missing appId")?;
+
+        let backend_dir = project.join("backend");
+        if !backend_dir.exists() {
+            return Err("no backend/ directory found in project".into());
+        }
+
+        let archive = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+            let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            let mut tar = tar::Builder::new(enc);
+            tar.append_dir_all(".", &backend_dir)
+                .map_err(|e| format!("tar failed: {e}"))?;
+            tar.into_inner()
+                .map_err(|e| format!("tar finalize failed: {e}"))?
+                .finish()
+                .map_err(|e| format!("gzip failed: {e}"))
+        })
+        .await
+        .map_err(|e| format!("archive task failed: {e}"))??;
+
+        info!(app_id, size = archive.len(), "deploying backend");
+        self.client
+            .deploy_app(app_id, archive)
+            .await
+            .map_err(|e| format!("deploy failed: {e}"))
+    }
+
+    /// Deploy backend + file watcher for hot reload.
+    pub async fn deploy_and_watch(&self, project_path: &str) -> Result<String, String> {
+        self.watchers.lock().await.clear();
+        let msg = self.deploy_backend(project_path).await?;
+        self.start_watcher(project_path)?;
+        Ok(msg)
+    }
+
+    fn start_watcher(&self, project_path: &str) -> Result<(), String> {
+        let backend_dir = Path::new(project_path).join("backend");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut debouncer =
+            new_debouncer(std::time::Duration::from_millis(500), tx)
+                .map_err(|e| format!("watcher setup failed: {e}"))?;
+        debouncer
+            .watcher()
+            .watch(&backend_dir, notify::RecursiveMode::Recursive)
+            .map_err(|e| format!("watch failed: {e}"))?;
+
+        info!(dir = %backend_dir.display(), "watching backend for hot reload");
+
+        let state = self.clone();
+        let project_path = project_path.to_string();
+        let handle = tokio::runtime::Handle::current();
+        std::thread::spawn(move || {
+            while let Ok(Ok(events)) = rx.recv() {
+                if events.iter().any(|e| e.kind == DebouncedEventKind::Any) {
+                    info!("backend changed, redeploying");
+                    match handle.block_on(state.deploy_backend(&project_path)) {
+                        Ok(_) => info!("hot reload success"),
+                        Err(e) => warn!("hot reload failed: {e}"),
+                    }
+                }
+            }
+        });
+
+        let watchers = self.watchers.clone();
+        tokio::spawn(async move { watchers.lock().await.push(debouncer) });
         Ok(())
     }
 

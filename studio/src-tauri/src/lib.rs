@@ -35,6 +35,7 @@ pub fn run() {
             commands::ensure_dir,
             commands::scaffold_project,
             commands::sync_manifest,
+            commands::deploy_backend,
             commands::resolve_instructions,
             commands::sync_view_menu,
             commands::read_launch_config,
