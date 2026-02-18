@@ -58,17 +58,19 @@ async fn main() {
         .init();
 
     let pg_root = resolve_pg_root();
+    let data_dir = data_base_dir().expect("failed to resolve data dir");
+
     let pg = PostgresManager::new(
         pg_root.join("bin"),
-        data_base_dir().expect("failed to resolve data dir").join("data/pg"),
+        data_dir.join("data/pg"),
         PG_PORT,
     ).with_lib_dir(pg_root.join("lib"));
 
-    let runtime = Arc::new(Mutex::new(Runtime::new(pg)));
+    let runtime = Arc::new(Mutex::new(Runtime::new(pg, data_dir)));
 
     {
         let mut rt = runtime.lock().await;
-        if let Err(e) = rt.boot().await {
+        if let Err(e) = rt.boot(API_PORT).await {
             tracing::error!("runtime boot failed: {e}");
             std::process::exit(1);
         }

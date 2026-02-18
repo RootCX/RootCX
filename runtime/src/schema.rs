@@ -28,6 +28,10 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
     .await
     .map_err(RuntimeError::Schema)?;
 
+    // Bootstrap secrets and jobs tables
+    crate::secrets::bootstrap_secrets_schema(pool).await?;
+    crate::jobs::bootstrap_jobs_schema(pool).await?;
+
     info!("rootcx_system schema ready");
     Ok(())
 }

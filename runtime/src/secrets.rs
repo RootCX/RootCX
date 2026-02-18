@@ -1,0 +1,156 @@
+use std::path::Path;
+
+use aes_gcm::aead::{Aead, KeyInit, OsRng};
+use aes_gcm::{Aes256Gcm, Nonce};
+use rand::RngCore;
+use sqlx::PgPool;
+use tracing::{info, warn};
+
+use crate::RuntimeError;
+
+const NONCE_LEN: usize = 12;
+const KEY_LEN: usize = 32;
+
+fn secret_err(msg: impl std::fmt::Display) -> RuntimeError {
+    RuntimeError::Secret(msg.to_string())
+}
+
+pub struct SecretManager {
+    cipher: Aes256Gcm,
+}
+
+impl SecretManager {
+    pub fn new(data_dir: &Path) -> Result<Self, RuntimeError> {
+        let key_bytes = if let Ok(hex) = std::env::var("ROOTCX_MASTER_KEY") {
+            let bytes = hex_decode(&hex)?;
+            if bytes.len() != KEY_LEN {
+                return Err(secret_err(format!("ROOTCX_MASTER_KEY must be {KEY_LEN} bytes")));
+            }
+            info!("master key loaded from env");
+            bytes
+        } else {
+            load_or_generate_key(&data_dir.join("config/master.key"))?
+        };
+
+        let cipher = Aes256Gcm::new_from_slice(&key_bytes)
+            .map_err(|e| secret_err(format!("AES init failed: {e}")))?;
+        Ok(Self { cipher })
+    }
+
+    pub fn encrypt(&self, plaintext: &str) -> Result<(Vec<u8>, Vec<u8>), RuntimeError> {
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let ciphertext = self.cipher
+            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_bytes())
+            .map_err(|e| secret_err(format!("encrypt: {e}")))?;
+        Ok((nonce_bytes.to_vec(), ciphertext))
+    }
+
+    pub fn decrypt(&self, nonce: &[u8], ciphertext: &[u8]) -> Result<String, RuntimeError> {
+        if nonce.len() != NONCE_LEN {
+            return Err(secret_err(format!("bad nonce len: {}", nonce.len())));
+        }
+        let plaintext = self.cipher
+            .decrypt(Nonce::from_slice(nonce), ciphertext)
+            .map_err(|e| secret_err(format!("decrypt: {e}")))?;
+        String::from_utf8(plaintext).map_err(|e| secret_err(e))
+    }
+
+    pub async fn set(&self, pool: &PgPool, app_id: &str, key_name: &str, plaintext: &str) -> Result<(), RuntimeError> {
+        let (nonce, ciphertext) = self.encrypt(plaintext)?;
+        sqlx::query(
+            "INSERT INTO rootcx_system.secrets (app_id, key_name, nonce, ciphertext) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (app_id, key_name) DO UPDATE SET nonce = EXCLUDED.nonce, ciphertext = EXCLUDED.ciphertext",
+        )
+        .bind(app_id).bind(key_name).bind(&nonce).bind(&ciphertext)
+        .execute(pool).await.map_err(|e| secret_err(e))?;
+        info!(app_id, key_name, "secret stored");
+        Ok(())
+    }
+
+    pub async fn get(&self, pool: &PgPool, app_id: &str, key_name: &str) -> Result<Option<String>, RuntimeError> {
+        let row: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
+            "SELECT nonce, ciphertext FROM rootcx_system.secrets WHERE app_id = $1 AND key_name = $2",
+        ).bind(app_id).bind(key_name).fetch_optional(pool).await.map_err(|e| secret_err(e))?;
+
+        row.map(|(n, c)| self.decrypt(&n, &c)).transpose()
+    }
+
+    pub async fn get_all_for_app(&self, pool: &PgPool, app_id: &str) -> Result<Vec<(String, String)>, RuntimeError> {
+        let rows: Vec<(String, Vec<u8>, Vec<u8>)> = sqlx::query_as(
+            "SELECT key_name, nonce, ciphertext FROM rootcx_system.secrets WHERE app_id = $1",
+        ).bind(app_id).fetch_all(pool).await.map_err(|e| secret_err(e))?;
+
+        rows.into_iter()
+            .map(|(k, n, c)| Ok((k, self.decrypt(&n, &c)?)))
+            .collect()
+    }
+
+    pub async fn delete(&self, pool: &PgPool, app_id: &str, key_name: &str) -> Result<bool, RuntimeError> {
+        let r = sqlx::query("DELETE FROM rootcx_system.secrets WHERE app_id = $1 AND key_name = $2")
+            .bind(app_id).bind(key_name).execute(pool).await.map_err(|e| secret_err(e))?;
+        Ok(r.rows_affected() > 0)
+    }
+
+    pub async fn list_keys(&self, pool: &PgPool, app_id: &str) -> Result<Vec<String>, RuntimeError> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT key_name FROM rootcx_system.secrets WHERE app_id = $1 ORDER BY key_name",
+        ).bind(app_id).fetch_all(pool).await.map_err(|e| secret_err(e))?;
+        Ok(rows.into_iter().map(|(k,)| k).collect())
+    }
+}
+
+pub async fn bootstrap_secrets_schema(pool: &PgPool) -> Result<(), RuntimeError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rootcx_system.secrets (
+            app_id TEXT NOT NULL, key_name TEXT NOT NULL,
+            nonce BYTEA NOT NULL, ciphertext BYTEA NOT NULL,
+            PRIMARY KEY (app_id, key_name)
+        )",
+    ).execute(pool).await.map_err(RuntimeError::Schema)?;
+    info!("secrets schema ready");
+    Ok(())
+}
+
+fn load_or_generate_key(path: &Path) -> Result<Vec<u8>, RuntimeError> {
+    if path.exists() {
+        let hex = std::fs::read_to_string(path).map_err(|e| secret_err(e))?;
+        let bytes = hex_decode(hex.trim())?;
+        if bytes.len() != KEY_LEN {
+            return Err(secret_err("master.key: wrong length"));
+        }
+        info!(path = %path.display(), "master key loaded from file");
+        return Ok(bytes);
+    }
+
+    warn!("no master key found, generating");
+    let mut key = vec![0u8; KEY_LEN];
+    OsRng.fill_bytes(&mut key);
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| secret_err(e))?;
+    }
+    std::fs::write(path, hex_encode(&key)).map_err(|e| secret_err(e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+
+    info!(path = %path.display(), "master key generated");
+    Ok(key)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex_decode(hex: &str) -> Result<Vec<u8>, RuntimeError> {
+    if hex.len() % 2 != 0 {
+        return Err(secret_err("hex: odd length"));
+    }
+    (0..hex.len()).step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| secret_err(e)))
+        .collect()
+}
