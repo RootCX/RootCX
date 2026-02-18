@@ -66,6 +66,8 @@ pub struct AppState {
     /// Active file watchers (kept alive by holding the handle).
     #[allow(dead_code)]
     watchers: Arc<Mutex<Vec<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>>>>,
+    /// The app_id of the currently deployed backend (if any).
+    active_app_id: Arc<Mutex<Option<String>>>,
 }
 
 fn home_dir() -> Result<PathBuf, String> {
@@ -84,6 +86,10 @@ pub fn config_path() -> Result<PathBuf, String> {
 
 pub fn instructions_dir() -> Result<PathBuf, String> {
     Ok(config_dir()?.join("instructions"))
+}
+
+fn session_file() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("studio-session.json"))
 }
 
 pub fn sdk_runtime_dir() -> Result<PathBuf, String> {
@@ -136,6 +142,7 @@ impl AppState {
             client: RuntimeClient::new(DAEMON_URL),
             forge,
             watchers: Arc::new(Mutex::new(Vec::new())),
+            active_app_id: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -151,7 +158,30 @@ impl AppState {
             return Err(format!("runtime daemon not reachable at {DAEMON_URL}"));
         }
         info!("connected to runtime daemon at {DAEMON_URL}");
+
+        self.cleanup_stale_session().await;
+
         Ok(())
+    }
+
+    async fn cleanup_stale_session(&self) {
+        let path = match session_file() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let data = match tokio::fs::read_to_string(&path).await {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data) {
+            if let Some(app_id) = parsed["active_app_id"].as_str() {
+                info!(app_id, "cleaning up orphaned worker from previous session");
+                if let Err(e) = self.client.stop_worker(app_id).await {
+                    warn!(app_id, "orphan cleanup failed (may already be stopped): {e}");
+                }
+            }
+        }
+        let _ = tokio::fs::remove_file(&path).await;
     }
 
     pub async fn start_forge(&self, project_path: &str) -> Result<(), String> {
@@ -228,10 +258,19 @@ impl AppState {
         .map_err(|e| format!("archive task failed: {e}"))??;
 
         info!(app_id, size = archive.len(), "deploying backend");
-        self.client
+        let result = self
+            .client
             .deploy_app(app_id, archive)
             .await
-            .map_err(|e| format!("deploy failed: {e}"))
+            .map_err(|e| format!("deploy failed: {e}"))?;
+
+        *self.active_app_id.lock().await = Some(app_id.to_string());
+        if let Ok(path) = session_file() {
+            let data = serde_json::json!({ "active_app_id": app_id });
+            let _ = tokio::fs::write(&path, data.to_string()).await;
+        }
+
+        Ok(result)
     }
 
     /// Deploy backend + file watcher for hot reload.
@@ -275,7 +314,23 @@ impl AppState {
         Ok(())
     }
 
+    /// Stop the deployed backend worker and clean up session state.
+    pub async fn stop_deployed_worker(&self) {
+        if let Some(app_id) = self.active_app_id.lock().await.take() {
+            info!(app_id, "stopping deployed worker");
+            if let Err(e) = self.client.stop_worker(&app_id).await {
+                warn!(app_id, "failed to stop worker: {e}");
+            }
+        }
+        if let Ok(path) = session_file() {
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+        self.watchers.lock().await.clear();
+    }
+
     pub async fn shutdown(&self) {
+        self.stop_deployed_worker().await;
+
         if let Some(ref f) = self.forge {
             if let Err(e) = f.lock().await.stop().await {
                 warn!("forge sidecar stop failed: {e}");

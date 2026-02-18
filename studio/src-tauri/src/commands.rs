@@ -4,6 +4,7 @@ use tauri::{ipc::Channel, State};
 use tokio::sync::Mutex;
 
 use crate::menu::ViewMenuItems;
+use crate::runner::RunnerState;
 use crate::state::AppState;
 use crate::terminal::TerminalState;
 
@@ -125,6 +126,23 @@ pub async fn deploy_backend(
     project_path: String,
 ) -> Result<String, String> {
     state.deploy_and_watch(&project_path).await
+}
+
+#[tauri::command]
+pub async fn run_app(
+    command: String,
+    project_path: String,
+    app_handle: tauri::AppHandle,
+    state: State<'_, Mutex<RunnerState>>,
+) -> Result<(), String> {
+    state.lock().await.run(&command, &project_path, app_handle);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn stop_deployed_worker(state: State<'_, AppState>) -> Result<(), String> {
+    state.stop_deployed_worker().await;
+    Ok(())
 }
 
 #[tauri::command]

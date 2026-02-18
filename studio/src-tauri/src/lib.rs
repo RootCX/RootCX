@@ -2,6 +2,7 @@ mod commands;
 mod forge;
 mod launch;
 mod menu;
+mod runner;
 mod scaffold;
 mod state;
 mod terminal;
@@ -36,6 +37,8 @@ pub fn run() {
             commands::scaffold_project,
             commands::sync_manifest,
             commands::deploy_backend,
+            commands::run_app,
+            commands::stop_deployed_worker,
             commands::resolve_instructions,
             commands::sync_view_menu,
             commands::read_launch_config,
@@ -49,6 +52,7 @@ pub fn run() {
             app.manage(view_menu);
 
             app.manage(tokio::sync::Mutex::new(terminal::TerminalState::default()));
+            app.manage(tokio::sync::Mutex::new(runner::RunnerState::default()));
 
             let app_state = AppState::from_tauri(app);
             let state = app_state.clone();
@@ -77,7 +81,9 @@ pub fn run() {
         .run(|_app, event| {
             if let tauri::RunEvent::Exit = event {
                 let state = _app.state::<AppState>().inner().clone();
+                let runner = _app.state::<tokio::sync::Mutex<runner::RunnerState>>();
                 tauri::async_runtime::block_on(async {
+                    runner.lock().await.stop();
                     state.shutdown().await;
                 });
             }
