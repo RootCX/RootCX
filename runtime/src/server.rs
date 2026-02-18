@@ -5,6 +5,8 @@ use tower_http::cors::CorsLayer;
 
 use crate::routes::{self, SharedRuntime};
 
+const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024; // 50 MB
+
 pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Error> {
     let mut router = Router::new()
         // Health & status
@@ -36,7 +38,7 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .route("/api/v1/apps/{app_id}/jobs", get(routes::list_jobs).post(routes::enqueue_job))
         .route("/api/v1/apps/{app_id}/jobs/{job_id}", get(routes::get_job))
         // File upload (File Handoff pattern)
-        .route("/api/v1/apps/{app_id}/upload", post(routes::upload_file).layer(DefaultBodyLimit::max(50 * 1024 * 1024)));
+        .route("/api/v1/apps/{app_id}/upload", post(routes::upload_file).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)));
 
     // Extension routes (e.g. audit)
     {

@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use futures::future::join_all;
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use tokio::sync::RwLock;
@@ -93,11 +94,10 @@ impl WorkerManager {
     pub async fn all_statuses(&self) -> HashMap<String, WorkerStatus> {
         let handles: Vec<_> = self.workers.read().await
             .iter().map(|(id, h)| (id.clone(), h.clone())).collect();
-        let mut out = HashMap::with_capacity(handles.len());
-        for (id, h) in handles {
-            if let Ok(s) = h.status().await { out.insert(id, s); }
-        }
-        out
+        let futs = handles.into_iter().map(|(id, h)| async move {
+            h.status().await.ok().map(|s| (id, s))
+        });
+        join_all(futs).await.into_iter().flatten().collect()
     }
 }
 

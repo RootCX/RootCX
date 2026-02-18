@@ -20,12 +20,13 @@ async-trait = "0.1"
 # Secret Vault (AES-256-GCM)
 aes-gcm = "0.10"
 rand = "0.8"
+hex = "0.4"
 
 # Process Supervisor
 command-group = { version = "5", features = ["with-tokio"] }
 
 # IPC (JSONL over stdin/stdout)
-tokio-util = { version = "0.7", features = ["codec"] }
+tokio-util = { version = "0.7", features = ["codec", "rt"] }
 futures = "0.3"
 
 # Job Engine
