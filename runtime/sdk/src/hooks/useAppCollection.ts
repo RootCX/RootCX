@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { RuntimeClient } from "../client";
+import { useCallback, useEffect, useState } from "react";
+import { useRuntimeClient } from "../components/RuntimeProvider";
 
 export interface UseAppCollectionResult<T> {
   /** Current records (empty array while loading). */
@@ -28,9 +28,8 @@ export interface UseAppCollectionResult<T> {
 export function useAppCollection<T extends { id?: string } = Record<string, unknown>>(
   appId: string,
   entity: string,
-  baseUrl?: string,
 ): UseAppCollectionResult<T> {
-  const clientRef = useRef(new RuntimeClient({ baseUrl }));
+  const client = useRuntimeClient();
   const [data, setData] = useState<T[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -39,14 +38,14 @@ export function useAppCollection<T extends { id?: string } = Record<string, unkn
     setLoading(true);
     setError(null);
     try {
-      const records = await clientRef.current.listRecords<T>(appId, entity);
+      const records = await client.listRecords<T>(appId, entity);
       setData(records);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [appId, entity]);
+  }, [client, appId, entity]);
 
   useEffect(() => {
     fetchData();
@@ -54,28 +53,28 @@ export function useAppCollection<T extends { id?: string } = Record<string, unkn
 
   const create = useCallback(
     async (record: Record<string, unknown>): Promise<T> => {
-      const created = await clientRef.current.createRecord<T>(appId, entity, record);
+      const created = await client.createRecord<T>(appId, entity, record);
       setData((prev) => [created, ...prev]);
       return created;
     },
-    [appId, entity],
+    [client, appId, entity],
   );
 
   const update = useCallback(
     async (id: string, patch: Record<string, unknown>): Promise<T> => {
-      const updated = await clientRef.current.updateRecord<T>(appId, entity, id, patch);
+      const updated = await client.updateRecord<T>(appId, entity, id, patch);
       setData((prev) => prev.map((r) => (r.id === id ? updated : r)));
       return updated;
     },
-    [appId, entity],
+    [client, appId, entity],
   );
 
   const remove = useCallback(
     async (id: string): Promise<void> => {
-      await clientRef.current.deleteRecord(appId, entity, id);
+      await client.deleteRecord(appId, entity, id);
       setData((prev) => prev.filter((r) => r.id !== id));
     },
-    [appId, entity],
+    [client, appId, entity],
   );
 
   return { data, loading, error, refetch: fetchData, create, update, remove };

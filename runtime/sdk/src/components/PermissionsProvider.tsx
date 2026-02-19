@@ -5,13 +5,12 @@ const PermissionsCtx = createContext<UsePermissionsResult | null>(null);
 
 export interface PermissionsProviderProps {
   appId: string;
-  baseUrl?: string;
   children: ReactNode;
 }
 
 /** Single fetch point — all descendant `Authorized` / `usePermissionsContext` share this data. */
-export function PermissionsProvider({ appId, baseUrl, children }: PermissionsProviderProps) {
-  const perms = usePermissions(appId, { baseUrl });
+export function PermissionsProvider({ appId, children }: PermissionsProviderProps) {
+  const perms = usePermissions(appId);
   return <PermissionsCtx.Provider value={perms}>{children}</PermissionsCtx.Provider>;
 }
 

@@ -1,9 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  type AuthUser,
-  type RegisterInput,
-  RuntimeClient,
-} from "../client";
+import { useCallback, useEffect, useState } from "react";
+import { type AuthUser, type RegisterInput } from "../client";
+import { useRuntimeClient, TOKEN_KEY, REFRESH_KEY } from "../components/RuntimeProvider";
 
 export interface UseAuthResult {
   user: AuthUser | null;
@@ -14,24 +11,15 @@ export interface UseAuthResult {
   logout: () => Promise<void>;
 }
 
-const TOKEN_KEY = "rootcx_access_token";
-const REFRESH_KEY = "rootcx_refresh_token";
-
-export function useAuth(opts?: { baseUrl?: string }): UseAuthResult {
-  const clientRef = useRef(new RuntimeClient({ baseUrl: opts?.baseUrl }));
+export function useAuth(): UseAuthResult {
+  const client = useRuntimeClient();
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // Restore tokens from localStorage on mount
+  // Validate existing session on mount.
+  // Tokens are already restored by RuntimeProvider, so we just call me().
   useEffect(() => {
-    const access = localStorage.getItem(TOKEN_KEY);
-    const refresh = localStorage.getItem(REFRESH_KEY);
-    if (access || refresh) {
-      clientRef.current.setTokens(access, refresh);
-    }
-
-    // Validate existing token
-    clientRef.current
+    client
       .me()
       .then(setUser)
       .catch(() => {
@@ -40,38 +28,38 @@ export function useAuth(opts?: { baseUrl?: string }): UseAuthResult {
         localStorage.removeItem(REFRESH_KEY);
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [client]);
 
   const persistTokens = useCallback(() => {
-    const access = clientRef.current.getAccessToken();
-    const refresh = clientRef.current.getRefreshToken();
+    const access = client.getAccessToken();
+    const refresh = client.getRefreshToken();
     if (access) localStorage.setItem(TOKEN_KEY, access);
     else localStorage.removeItem(TOKEN_KEY);
     if (refresh) localStorage.setItem(REFRESH_KEY, refresh);
     else localStorage.removeItem(REFRESH_KEY);
-  }, []);
+  }, [client]);
 
   const login = useCallback(
     async (username: string, password: string) => {
-      const res = await clientRef.current.login(username, password);
+      const res = await client.login(username, password);
       persistTokens();
       setUser(res.user);
     },
-    [persistTokens],
+    [client, persistTokens],
   );
 
   const register = useCallback(
     async (data: RegisterInput) => {
-      await clientRef.current.register(data);
+      await client.register(data);
     },
-    [],
+    [client],
   );
 
   const logout = useCallback(async () => {
-    await clientRef.current.logout();
+    await client.logout();
     persistTokens();
     setUser(null);
-  }, [persistTokens]);
+  }, [client, persistTokens]);
 
   return {
     user,
