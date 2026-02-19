@@ -397,8 +397,7 @@ impl AppState {
                 warn!(app_id, "failed to stop worker: {e}");
             }
         }
-        let _ = self.app_handle.emit("run-output", "\r\n[process exited]\r\n");
-        let _ = self.app_handle.emit("run-exited", Option::<i32>::None);
+        let _ = self.app_handle.emit("run-output", "\r\n[worker stopped]\r\n");
         if let Ok(path) = session_file() {
             let _ = tokio::fs::remove_file(&path).await;
         }
