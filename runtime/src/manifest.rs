@@ -246,7 +246,7 @@ fn field_to_column(field: &rootcx_shared_types::FieldContract, pk_types: &HashMa
     col_def
 }
 
-fn map_field_type(field_type: &str) -> &'static str {
+pub fn map_field_type(field_type: &str) -> &'static str {
     match field_type {
         "text" => "TEXT",
         "number" => "DOUBLE PRECISION",
@@ -276,6 +276,18 @@ fn json_to_sql_default(val: &serde_json::Value, pg_type: &str) -> Option<String>
             }
         }
     }
+}
+
+/// Fetch field-name → manifest-type map for an entity from the stored manifest.
+pub async fn field_type_map(pool: &PgPool, app_id: &str, entity: &str) -> Result<HashMap<String, String>, crate::RuntimeError> {
+    let Some((json,)): Option<(serde_json::Value,)> = sqlx::query_as("SELECT manifest FROM rootcx_system.apps WHERE id = $1")
+        .bind(app_id).fetch_optional(pool).await.map_err(crate::RuntimeError::Schema)?
+    else { return Ok(HashMap::new()) };
+    let Ok(m) = serde_json::from_value::<AppManifest>(json) else { return Ok(HashMap::new()) };
+    Ok(m.data_contract.iter()
+        .find(|e| e.entity_name == entity)
+        .map(|ec| ec.fields.iter().map(|f| (f.name.clone(), f.field_type.clone())).collect())
+        .unwrap_or_default())
 }
 
 pub fn quote_ident(ident: &str) -> String {
