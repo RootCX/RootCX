@@ -51,8 +51,12 @@ export function useAuth(): UseAuthResult {
   const register = useCallback(
     async (data: RegisterInput) => {
       await client.register(data);
+      // Auto-login after successful registration
+      const res = await client.login(data.username, data.password);
+      persistTokens();
+      setUser(res.user);
     },
-    [client],
+    [client, persistTokens],
   );
 
   const logout = useCallback(async () => {
