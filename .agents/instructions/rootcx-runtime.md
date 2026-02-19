@@ -3,7 +3,7 @@
 You are building apps on the **RootCX Runtime**. Every app needs two things:
 
 1. A **`manifest.json`** that declares the data contract (entities and fields).
-2. **React code** that uses the `@rootcx/runtime` SDK hooks for CRUD.
+2. **React code** that uses the `@rootcx/runtime` SDK hooks for CRUD and `@rootcx/ui` for all UI components.
 
 ---
 
@@ -184,108 +184,142 @@ Use the CRM manifest from Section 1 above.
 
 ### App.tsx
 
-> **Note:** Before writing this component, install the required shadcn components:
-> `npx shadcn@latest add tabs card table button badge`
-
 ```tsx
-import { type ReactNode } from "react";
+import { useState } from "react";
+import { AuthGate } from "@rootcx/runtime";
 import { useAppCollection } from "@rootcx/runtime";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { IconPlus, IconTrash } from "@tabler/icons-react";
+import {
+  AppShell, AppShellSidebar, AppShellMain,
+  Sidebar, SidebarItem,
+  PageHeader, DataTable, FormDialog, StatusBadge, EmptyState,
+  Button, Tabs, TabsList, TabsTrigger, TabsContent,
+  toast, Toaster, ConfirmDialog,
+} from "@rootcx/ui";
+import { IconBuilding, IconUsers, IconCash, IconPlus, IconTrash, IconEdit, IconLogout } from "@tabler/icons-react";
+import type { ColumnDef } from "@tanstack/react-table";
 
 interface Company { id: string; name: string; industry: string; website: string; }
 interface Contact { id: string; first_name: string; last_name: string; email: string; phone: string; company_id: string; }
 interface Deal { id: string; title: string; value: number; stage: string; company_id: string; contact_id: string; }
 
-interface Column<T> {
-  key: keyof T;
-  label: string;
-  render?: (row: T) => ReactNode;
+function CompaniesView() {
+  const { data, loading, create, remove } = useAppCollection<Company>("crm", "company");
+  const [showForm, setShowForm] = useState(false);
+
+  const columns: ColumnDef<Company, unknown>[] = [
+    { accessorKey: "name", header: "Name" },
+    { accessorKey: "industry", header: "Industry" },
+    { accessorKey: "website", header: "Website" },
+  ];
+
+  return (
+    <div className="p-6">
+      <PageHeader
+        title="Companies"
+        actions={<Button onClick={() => setShowForm(true)}><IconPlus className="h-4 w-4" /> Add Company</Button>}
+      />
+      <DataTable
+        data={data}
+        columns={columns}
+        loading={loading}
+        searchable
+        rowActions={[
+          { label: "Delete", icon: <IconTrash className="h-4 w-4" />, onClick: (row) => remove(row.id), destructive: true },
+        ]}
+        emptyState={<EmptyState title="No companies yet" description="Add your first company to get started" />}
+      />
+      <FormDialog
+        open={showForm}
+        onOpenChange={setShowForm}
+        title="Add Company"
+        fields={[
+          { name: "name", label: "Name", type: "text", required: true },
+          { name: "industry", label: "Industry", type: "text" },
+          { name: "website", label: "Website", type: "text" },
+        ]}
+        onSubmit={async (values) => { await create(values as any); toast.success("Company created"); }}
+      />
+    </div>
+  );
 }
 
-function CollectionView<T extends { id: string }>({ title, appId, entity, columns, defaults }: {
-  title: string; appId: string; entity: string; columns: Column<T>[]; defaults: Partial<T>;
-}) {
-  const { data, loading, create, remove } = useAppCollection<T>(appId, entity);
-  if (loading) return <div className="py-8 text-center text-muted-foreground">Loading...</div>;
+function DealsView() {
+  const { data, loading, create, remove } = useAppCollection<Deal>("crm", "deal");
+  const [showForm, setShowForm] = useState(false);
+
+  const columns: ColumnDef<Deal, unknown>[] = [
+    { accessorKey: "title", header: "Title" },
+    { accessorKey: "value", header: "Value", cell: ({ row }) => `$${row.original.value?.toLocaleString() ?? 0}` },
+    { accessorKey: "stage", header: "Stage", cell: ({ row }) => <StatusBadge status={row.original.stage} /> },
+  ];
+
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between">
-        <CardTitle>{title}</CardTitle>
-        <Button size="sm" onClick={() => create(defaults as any)}><IconPlus size={16} /> Add</Button>
-      </CardHeader>
-      <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              {columns.map((col) => <TableHead key={String(col.key)}>{col.label}</TableHead>)}
-              <TableHead className="w-[80px]">Actions</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {data.map((row) => (
-              <TableRow key={row.id}>
-                {columns.map((col) => (
-                  <TableCell key={String(col.key)}>{col.render ? col.render(row) : String(row[col.key] ?? "")}</TableCell>
-                ))}
-                <TableCell>
-                  <Button variant="ghost" size="icon" onClick={() => remove(row.id)}><IconTrash size={16} /></Button>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </CardContent>
-    </Card>
+    <div className="p-6">
+      <PageHeader
+        title="Deals"
+        actions={<Button onClick={() => setShowForm(true)}><IconPlus className="h-4 w-4" /> Add Deal</Button>}
+      />
+      <DataTable
+        data={data}
+        columns={columns}
+        loading={loading}
+        searchable
+        rowActions={[
+          { label: "Delete", icon: <IconTrash className="h-4 w-4" />, onClick: (row) => remove(row.id), destructive: true },
+        ]}
+      />
+      <FormDialog
+        open={showForm}
+        onOpenChange={setShowForm}
+        title="Add Deal"
+        fields={[
+          { name: "title", label: "Title", type: "text", required: true },
+          { name: "value", label: "Value", type: "number" },
+          { name: "stage", label: "Stage", type: "select", options: [
+            { value: "lead", label: "Lead" },
+            { value: "qualified", label: "Qualified" },
+            { value: "proposal", label: "Proposal" },
+            { value: "negotiation", label: "Negotiation" },
+            { value: "closed_won", label: "Closed Won" },
+            { value: "closed_lost", label: "Closed Lost" },
+          ]},
+        ]}
+        onSubmit={async (values) => { await create(values as any); toast.success("Deal created"); }}
+      />
+    </div>
   );
 }
 
 export default function App() {
+  const [view, setView] = useState<"companies" | "deals">("companies");
+
   return (
-    <div className="container mx-auto p-6">
-      <Tabs defaultValue="contacts">
-        <TabsList>
-          <TabsTrigger value="contacts">Contacts</TabsTrigger>
-          <TabsTrigger value="companies">Companies</TabsTrigger>
-          <TabsTrigger value="deals">Deals</TabsTrigger>
-        </TabsList>
-        <TabsContent value="contacts">
-          <CollectionView<Contact>
-            title="Contacts" appId="crm" entity="contact"
-            defaults={{ first_name: "New", last_name: "Contact" }}
-            columns={[
-              { key: "first_name", label: "Name", render: (c) => <span className="font-medium">{c.first_name} {c.last_name}</span> },
-              { key: "email", label: "Email" },
-            ]}
-          />
-        </TabsContent>
-        <TabsContent value="companies">
-          <CollectionView<Company>
-            title="Companies" appId="crm" entity="company"
-            defaults={{ name: "New Company" }}
-            columns={[
-              { key: "name", label: "Name", render: (c) => <span className="font-medium">{c.name}</span> },
-              { key: "industry", label: "Industry" },
-            ]}
-          />
-        </TabsContent>
-        <TabsContent value="deals">
-          <CollectionView<Deal>
-            title="Deals" appId="crm" entity="deal"
-            defaults={{ title: "New Deal", stage: "lead" }}
-            columns={[
-              { key: "title", label: "Title", render: (d) => <span className="font-medium">{d.title}</span> },
-              { key: "value", label: "Value", render: (d) => <>&#36;{d.value?.toLocaleString()}</> },
-              { key: "stage", label: "Stage", render: (d) => <Badge variant="secondary">{d.stage}</Badge> },
-            ]}
-          />
-        </TabsContent>
-      </Tabs>
-    </div>
+    <AuthGate appTitle="CRM">
+      {({ user, logout }) => (
+        <AppShell>
+          <AppShellSidebar>
+            <Sidebar
+              header={<span className="text-sm font-semibold">CRM</span>}
+              footer={
+                <div className="flex items-center justify-between">
+                  <span className="truncate text-sm text-muted-foreground">{user.username}</span>
+                  <Button variant="ghost" size="icon" onClick={() => logout()}>
+                    <IconLogout className="h-4 w-4" />
+                  </Button>
+                </div>
+              }
+            >
+              <SidebarItem icon={<IconBuilding />} label="Companies" active={view === "companies"} onClick={() => setView("companies")} />
+              <SidebarItem icon={<IconCash />} label="Deals" active={view === "deals"} onClick={() => setView("deals")} />
+            </Sidebar>
+          </AppShellSidebar>
+          <AppShellMain>
+            {view === "companies" ? <CompaniesView /> : <DealsView />}
+          </AppShellMain>
+          <Toaster />
+        </AppShell>
+      )}
+    </AuthGate>
   );
 }
 ```
@@ -294,44 +328,133 @@ export default function App() {
 
 ## 5. UI & Styling
 
-Every scaffolded app ships with **Tailwind CSS v4** and **shadcn/ui** pre-configured. Follow these rules for all UI code.
+Every scaffolded app ships with **Tailwind CSS v4** and the **`@rootcx/ui` component library** pre-configured.
 
 ### Rules
 
-- **Always use shadcn/ui components** — never bare `<button>`, `<input>`, `<table>`, `<select>`, or `<dialog>` elements.
-- **Use the shadcn MCP tools** to discover available components and install them before importing. The MCP server (`npx shadcn@latest mcp`) is already configured — use its tools to browse the component catalog, check what's installed, and add new components as needed.
+- **Import all UI components from `@rootcx/ui`** — never create local components that duplicate library functionality.
 - **Use `cn()` from `@/lib/utils`** for conditional/composed class names — never string concatenation.
 - **Use Tailwind utility classes** for layout and spacing — never inline `style={{}}`.
+- **Use `@tabler/icons-react`** for icons (re-exported as a dependency of `@rootcx/ui`).
+- You **can** create custom app-level components in `src/components/` when `@rootcx/ui` doesn't cover a specific need, but **never duplicate** what the library already provides.
 
-### Common components
+### Import patterns
 
-| Component | Install | Import |
-|-----------|---------|--------|
-| Button | `npx shadcn@latest add button` | `@/components/ui/button` |
-| Card | `npx shadcn@latest add card` | `@/components/ui/card` |
-| Input | `npx shadcn@latest add input` | `@/components/ui/input` |
-| Table | `npx shadcn@latest add table` | `@/components/ui/table` |
-| Dialog | `npx shadcn@latest add dialog` | `@/components/ui/dialog` |
-| Tabs | `npx shadcn@latest add tabs` | `@/components/ui/tabs` |
-| Badge | `npx shadcn@latest add badge` | `@/components/ui/badge` |
-| Select | `npx shadcn@latest add select` | `@/components/ui/select` |
-
-### Patterns
-
-**Class composition with `cn()`:**
 ```tsx
-import { cn } from "@/lib/utils";
+// All primitives and high-level components from one package
+import {
+  Button, Input, Label, Card, CardHeader, CardTitle, CardContent,
+  Badge, Select, SelectTrigger, SelectContent, SelectItem, SelectValue,
+  Dialog, DialogContent, DialogHeader, DialogTitle,
+  Tabs, TabsList, TabsTrigger, TabsContent,
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
+  Separator, ScrollArea, Tooltip, TooltipTrigger, TooltipContent, TooltipProvider,
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
+  Popover, PopoverTrigger, PopoverContent,
+  Switch, Textarea,
+} from "@rootcx/ui";
 
-<div className={cn("p-4 rounded-lg", isActive && "bg-primary text-primary-foreground")} />
+// Icons
+import { IconPlus, IconTrash, IconEdit } from "@tabler/icons-react";
+
+// Utility
+import { cn } from "@/lib/utils";
 ```
 
-**Button variants:**
-```tsx
-import { Button } from "@/components/ui/button";
+---
 
-<Button>Default</Button>
-<Button variant="secondary">Secondary</Button>
-<Button variant="destructive">Delete</Button>
-<Button variant="outline">Cancel</Button>
-<Button variant="ghost" size="icon"><IconTrash size={16} /></Button>
+## 6. UI Components
+
+The `@rootcx/ui` library provides everything you need to build production-quality UIs. Here is the full catalog.
+
+### Primitives
+
+| Component | Description |
+|-----------|-------------|
+| `Button` | Variants: default, destructive, outline, secondary, ghost, link. Sizes: default, sm, lg, icon |
+| `Input` | Standard text input with focus ring |
+| `Label` | Form label with Radix accessibility |
+| `Card`, `CardHeader`, `CardTitle`, `CardDescription`, `CardContent` | Card container |
+| `Badge` | Variants: default, secondary, destructive, outline |
+| `Select`, `SelectTrigger`, `SelectContent`, `SelectItem`, `SelectValue` | Radix select dropdown |
+| `Dialog`, `DialogContent`, `DialogHeader`, `DialogFooter`, `DialogTitle`, `DialogDescription` | Modal dialog |
+| `Tabs`, `TabsList`, `TabsTrigger`, `TabsContent` | Tab navigation |
+| `Table`, `TableHeader`, `TableBody`, `TableRow`, `TableHead`, `TableCell` | HTML table with styling |
+| `Separator` | Horizontal/vertical divider |
+| `ScrollArea` | Custom scrollbar container |
+| `Tooltip`, `TooltipTrigger`, `TooltipContent`, `TooltipProvider` | Hover tooltip |
+| `DropdownMenu`, `DropdownMenuTrigger`, `DropdownMenuContent`, `DropdownMenuItem` | Context/action menu |
+| `Popover`, `PopoverTrigger`, `PopoverContent` | Floating panel |
+| `Switch` | Toggle switch |
+| `Textarea` | Multi-line text input |
+
+### Layout
+
+| Component | Props | Description |
+|-----------|-------|-------------|
+| `AppShell` | `defaultOpen`, `sidebarWidth` | Top-level layout: sidebar + main. Wraps `AppShellSidebar` + `AppShellMain` |
+| `AppShellSidebar` | — | Collapsible sidebar area |
+| `AppShellMain` | — | Scrollable main content area |
+| `useSidebar()` | — | Hook returning `{ open, setOpen, toggle }` |
+| `Sidebar` | `header`, `footer` | Nav container with header/footer slots |
+| `SidebarSection` | `title`, `collapsible`, `defaultOpen` | Grouping with optional collapse |
+| `SidebarItem` | `icon`, `label`, `badge`, `active`, `onClick` | Single nav item |
+| `PageHeader` | `title`, `description`, `breadcrumbs`, `actions`, `onBack` | Page title bar with actions slot |
+| `EmptyState` | `icon`, `title`, `description`, `action` | Centered empty placeholder |
+
+### Data
+
+| Component | Props | Description |
+|-----------|-------|-------------|
+| `DataTable` | `data`, `columns`, `loading`, `searchable`, `pagination`, `pageSize`, `selectable`, `rowActions`, `bulkActions`, `emptyState`, `onRowClick` | Full-featured data table with TanStack Table. Handles sorting, search, pagination, selection, row actions, and loading skeletons |
+| `KPICard` | `label`, `value`, `trend`, `icon` | Metric card with optional trend indicator |
+| `StatusBadge` | `status` | Auto-colored badge mapped from status strings (active→green, pending→yellow, error→red, etc.) |
+
+### Forms
+
+| Component | Props | Description |
+|-----------|-------|-------------|
+| `FormDialog` | `open`, `onOpenChange`, `title`, `description`, `fields`, `defaultValues`, `onSubmit`, `submitLabel`, `destructive` | Modal CRUD form driven by field definitions. Handles validation and loading |
+| `FormField` | `field`, `value`, `onChange`, `error` | Standalone label + input + error message |
+| `SearchInput` | `value`, `onChange`, `placeholder`, `debounceMs` | Debounced search input with icon |
+| `FilterBar` | `children` | Composable filter controls container |
+
+### Feedback
+
+| Component | Description |
+|-----------|-------------|
+| `toast.success()`, `toast.error()`, `toast.info()`, `toast.warning()` | Toast notifications (import `{ toast, Toaster }` — place `<Toaster />` in your app root) |
+| `ConfirmDialog` | "Are you sure?" dialog with destructive variant |
+| `LoadingState` | Spinner or skeleton rows (`variant="spinner"` / `variant="skeleton"`) |
+| `ErrorState` | Error message with optional retry button |
+
+### DataTable usage
+
+The `DataTable` is the most powerful component. It replaces 100+ lines of table boilerplate:
+
+```tsx
+import { DataTable, Button, FormDialog, PageHeader, EmptyState, toast } from "@rootcx/ui";
+import type { ColumnDef } from "@tanstack/react-table";
+
+const columns: ColumnDef<Contact, unknown>[] = [
+  { accessorKey: "first_name", header: "First Name" },
+  { accessorKey: "last_name", header: "Last Name" },
+  { accessorKey: "email", header: "Email" },
+];
+
+<DataTable
+  data={contacts}
+  columns={columns}
+  loading={loading}
+  searchable
+  selectable
+  rowActions={[
+    { label: "Edit", icon: <IconEdit className="h-4 w-4" />, onClick: (row) => openEdit(row) },
+    { label: "Delete", icon: <IconTrash className="h-4 w-4" />, onClick: (row) => remove(row.id), destructive: true },
+  ]}
+  bulkActions={[
+    { label: "Delete selected", onClick: (rows) => rows.forEach(r => remove(r.id)), destructive: true },
+  ]}
+  emptyState={<EmptyState title="No contacts" description="Add your first contact" />}
+/>
 ```
