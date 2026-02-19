@@ -1,20 +1,22 @@
 use crate::scaffold::emitter::Emitter;
-use crate::scaffold::types::{AnswerValue, Layer, ScaffoldContext};
-use std::future::Future;
-use std::pin::Pin;
+use crate::scaffold::types::{AnswerValue, Layer, LayerFuture, ScaffoldContext};
 
-const GLOBALS_CSS: &str = include_str!("../../../templates/globals.css");
+const TPL_TSCONFIG: &str = include_str!("../../../templates/scaffold/tsconfig.json");
+const TPL_MAIN_TSX: &str = include_str!("../../../templates/scaffold/main.tsx");
+const TPL_GLOBALS_CSS: &str = include_str!("../../../templates/scaffold/globals.css");
+const TPL_UTILS_TS: &str = include_str!("../../../templates/scaffold/utils.ts");
 
 /// Emits: package.json, index.html, vite.config.ts, tsconfig.json,
-/// src/main.tsx, src/globals.css, src/lib/utils.ts, components.json,
+/// src/main.tsx, src/globals.css, src/lib/utils.ts,
 /// manifest.json, .rootcx/launch.json
 pub struct CoreLayer;
 
 impl Layer for CoreLayer {
-    fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+    fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> LayerFuture<'a> {
         Box::pin(async move {
-            let ScaffoldContext { name, app_id, port, sdk_path, .. } = ctx;
-            let sdk_dep = format!("file:{}", sdk_path.display());
+            let ScaffoldContext { name, app_id, port, .. } = ctx;
+            let sdk_dep = format!("file:{}", ctx.runtime.sdk.display());
+            let ui_dep = format!("file:{}", ctx.runtime.ui.display());
 
             // manifest.json
             let permissions = matches!(ctx.answers.get("permissions"), Some(AnswerValue::Bool(true)));
@@ -46,10 +48,10 @@ impl Layer for CoreLayer {
   "scripts": {{ "dev": "vite", "build": "vite build", "tauri": "tauri" }},
   "dependencies": {{
     "@rootcx/runtime": "{sdk_dep}",
-    "@tailwindcss/vite": "^4.0.0",
-    "class-variance-authority": "^0.7.0",
-    "clsx": "^2.1.0",
+    "@rootcx/ui": "{ui_dep}",
     "@tabler/icons-react": "^3.30.0",
+    "@tailwindcss/vite": "^4.0.0",
+    "clsx": "^2.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^2.5.0",
@@ -94,74 +96,10 @@ export default defineConfig({{
 }});
 "#)).await?;
 
-            // tsconfig.json
-            e.write("tsconfig.json", r#"{
-  "compilerOptions": {
-    "target": "ES2020",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "jsx": "react-jsx",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["./src/*"]
-    }
-  },
-  "include": ["src"]
-}
-"#).await?;
-
-            // src/main.tsx
-            e.write("src/main.tsx", r#"import { StrictMode } from "react";
-import { createRoot } from "react-dom/client";
-import { RuntimeProvider } from "@rootcx/runtime";
-import "./globals.css";
-import App from "./App";
-
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <RuntimeProvider>
-      <App />
-    </RuntimeProvider>
-  </StrictMode>,
-);
-"#).await?;
-
-            e.write("src/globals.css", GLOBALS_CSS).await?;
-
-            // src/lib/utils.ts
-            e.write("src/lib/utils.ts", r#"import { type ClassValue, clsx } from "clsx";
-import { twMerge } from "tailwind-merge";
-
-export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
-}
-"#).await?;
-
-            // components.json (shadcn config)
-            e.write("components.json", r#"{
-  "$schema": "https://ui.shadcn.com/schema.json",
-  "style": "radix-nova",
-  "rsc": false,
-  "tsx": true,
-  "tailwind": {
-    "config": "",
-    "css": "src/globals.css",
-    "baseColor": "neutral",
-    "cssVariables": true
-  },
-  "iconLibrary": "tabler",
-  "aliases": {
-    "components": "@/components",
-    "utils": "@/lib/utils",
-    "ui": "@/components/ui",
-    "lib": "@/lib",
-    "hooks": "@/hooks"
-  }
-}
-"#).await?;
+            e.write("tsconfig.json", TPL_TSCONFIG).await?;
+            e.write("src/main.tsx", TPL_MAIN_TSX).await?;
+            e.write("src/globals.css", TPL_GLOBALS_CSS).await?;
+            e.write("src/lib/utils.ts", TPL_UTILS_TS).await?;
 
             Ok(())
         })
