@@ -146,10 +146,33 @@ pub async fn stop_deployed_worker(state: State<'_, AppState>) -> Result<(), Stri
 }
 
 #[tauri::command]
-pub async fn scaffold_project(path: String, name: String) -> Result<(), String> {
+pub async fn scaffold_project(
+    path: String,
+    name: String,
+    preset_id: Option<String>,
+    answers: Option<std::collections::HashMap<String, crate::scaffold::Answer>>,
+) -> Result<(), String> {
     let sdk = crate::state::sdk_runtime_dir()?;
     let client_crate = crate::state::runtime_client_dir()?;
-    crate::scaffold::create(std::path::Path::new(&path), &name, &sdk, &client_crate).await
+    crate::scaffold::create(
+        std::path::Path::new(&path),
+        &name,
+        &sdk,
+        &client_crate,
+        preset_id.as_deref().unwrap_or("blank"),
+        answers.unwrap_or_default(),
+    )
+    .await
+}
+
+#[tauri::command]
+pub fn list_presets() -> Vec<crate::scaffold::PresetInfo> {
+    crate::scaffold::Registry::new().list()
+}
+
+#[tauri::command]
+pub fn get_preset_questions(preset_id: String) -> Result<Vec<crate::scaffold::Question>, String> {
+    crate::scaffold::Registry::new().questions(&preset_id)
 }
 
 #[tauri::command]

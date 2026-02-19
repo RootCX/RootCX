@@ -1,6 +1,7 @@
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { commands, workspace } from "@/core/studio";
+import { showScaffoldWizard } from "./scaffold-wizard";
 
 async function openFolder() {
   const selected = await open({ directory: true });
@@ -8,10 +9,10 @@ async function openFolder() {
 }
 
 async function createProject() {
-  const path = await save({ title: "Create Project", defaultPath: "my-project" });
-  if (!path) return;
-  await invoke("scaffold_project", { path, name: path.split("/").pop() ?? path });
-  workspace.openProject(path);
+  const result = await showScaffoldWizard();
+  if (!result) return;
+  await invoke("scaffold_project", { ...result });
+  workspace.openProject(result.path);
 }
 
 export function activate() {
