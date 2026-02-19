@@ -3693,7 +3693,6 @@ dependencies = [
  "futures",
  "hex",
  "jsonwebtoken",
- "libc",
  "rand 0.8.5",
  "reqwest 0.12.28",
  "rootcx-postgres-mgmt",
@@ -5271,7 +5270,6 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
- "futures-util",
  "pin-project-lite",
  "tokio",
 ]

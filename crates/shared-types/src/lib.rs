@@ -72,8 +72,6 @@ pub struct AppManifest {
     #[serde(default)]
     pub description: String,
     #[serde(default)]
-    pub routes: Vec<JsonValue>,
-    #[serde(default)]
     pub permissions: Option<PermissionsContract>,
     #[serde(default)]
     pub data_contract: Vec<EntityContract>,
@@ -125,17 +123,6 @@ pub struct InstalledApp {
     pub version: String,
     pub status: String,
     pub entities: Vec<String>,
-}
-
-/// Authenticated user returned by auth endpoints.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthUser {
-    pub id: String,
-    pub username: String,
-    pub email: Option<String>,
-    pub display_name: Option<String>,
-    pub created_at: String,
 }
 
 // ── RBAC / Permissions ───────────────────────────────────────────
