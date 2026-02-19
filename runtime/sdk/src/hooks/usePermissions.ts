@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { RuntimeClient, type EffectivePermissions } from "../client";
+import { useCallback, useEffect, useState } from "react";
+import { type EffectivePermissions } from "../client";
+import { useRuntimeClient } from "../components/RuntimeProvider";
 
 export interface UsePermissionsResult {
   /** Resolved roles for the current user in this app. */
@@ -16,26 +17,16 @@ export interface UsePermissionsResult {
   refetch: () => void;
 }
 
-export function usePermissions(
-  appId: string,
-  opts?: { baseUrl?: string },
-): UsePermissionsResult {
-  const clientRef = useRef(new RuntimeClient({ baseUrl: opts?.baseUrl }));
+export function usePermissions(appId: string): UsePermissionsResult {
+  const client = useRuntimeClient();
   const [data, setData] = useState<EffectivePermissions | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Sync tokens from localStorage so authFetch works
-  useEffect(() => {
-    const access = localStorage.getItem("rootcx_access_token");
-    const refresh = localStorage.getItem("rootcx_refresh_token");
-    clientRef.current.setTokens(access, refresh);
-  }, []);
-
   const fetchPerms = useCallback(() => {
     setLoading(true);
     setError(null);
-    clientRef.current
+    client
       .getPermissions(appId)
       .then((result) => {
         setData(result);
@@ -45,7 +36,7 @@ export function usePermissions(
         setError(err instanceof Error ? err.message : String(err));
         setLoading(false);
       });
-  }, [appId]);
+  }, [client, appId]);
 
   useEffect(() => {
     fetchPerms();

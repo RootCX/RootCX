@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { RuntimeClient } from "../client";
+import { useCallback, useEffect, useState } from "react";
+import { useRuntimeClient } from "../components/RuntimeProvider";
 
 export interface UseAppRecordResult<T> {
   /** The fetched record, or null while loading. */
@@ -27,9 +27,8 @@ export function useAppRecord<T = Record<string, unknown>>(
   appId: string,
   entity: string,
   id: string | null,
-  baseUrl?: string,
 ): UseAppRecordResult<T> {
-  const clientRef = useRef(new RuntimeClient({ baseUrl }));
+  const client = useRuntimeClient();
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -43,14 +42,14 @@ export function useAppRecord<T = Record<string, unknown>>(
     setLoading(true);
     setError(null);
     try {
-      const record = await clientRef.current.getRecord<T>(appId, entity, id);
+      const record = await client.getRecord<T>(appId, entity, id);
       setData(record);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [appId, entity, id]);
+  }, [client, appId, entity, id]);
 
   useEffect(() => {
     fetchData();
@@ -59,18 +58,18 @@ export function useAppRecord<T = Record<string, unknown>>(
   const update = useCallback(
     async (patch: Record<string, unknown>): Promise<T> => {
       if (!id) throw new Error("cannot update: no record id");
-      const updated = await clientRef.current.updateRecord<T>(appId, entity, id, patch);
+      const updated = await client.updateRecord<T>(appId, entity, id, patch);
       setData(updated);
       return updated;
     },
-    [appId, entity, id],
+    [client, appId, entity, id],
   );
 
   const remove = useCallback(async (): Promise<void> => {
     if (!id) throw new Error("cannot delete: no record id");
-    await clientRef.current.deleteRecord(appId, entity, id);
+    await client.deleteRecord(appId, entity, id);
     setData(null);
-  }, [appId, entity, id]);
+  }, [client, appId, entity, id]);
 
   return { data, loading, error, refetch: fetchData, update, remove };
 }

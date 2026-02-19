@@ -15,6 +15,10 @@ export type {
   EffectivePermissions,
 } from "./client";
 
+// Provider
+export { RuntimeProvider, useRuntimeClient } from "./components/RuntimeProvider";
+export type { RuntimeProviderProps } from "./components/RuntimeProvider";
+
 // Hooks
 export { useAppCollection } from "./hooks/useAppCollection";
 export type { UseAppCollectionResult } from "./hooks/useAppCollection";
