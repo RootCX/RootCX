@@ -104,6 +104,18 @@ pub async fn register(
         }
     })?;
 
+    // First non-system user gets admin on every RBAC-enabled app — single atomic query.
+    let promoted = sqlx::query(
+        "INSERT INTO rootcx_system.rbac_assignments (user_id, app_id, role) \
+         SELECT $1, app_id, 'admin' FROM rootcx_system.rbac_roles WHERE name = 'admin' \
+         AND (SELECT COUNT(*) FROM rootcx_system.users WHERE is_system = false) = 1 \
+         ON CONFLICT DO NOTHING",
+    ).bind(row.0).execute(&pool).await?;
+
+    if promoted.rows_affected() > 0 {
+        tracing::info!(user = %row.0, apps = promoted.rows_affected(), "first user promoted to admin");
+    }
+
     Ok((StatusCode::CREATED, Json(json!({ "user": user_response(row) }))))
 }
 

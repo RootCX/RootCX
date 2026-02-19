@@ -29,7 +29,10 @@ impl Layer for CoreLayer {
                         "member": { "description": "Standard user", "inherits": [] }
                     },
                     "defaultRole": "member",
-                    "policies": []
+                    "policies": [
+                        { "role": "admin", "entity": "*", "actions": ["*"] },
+                        { "role": "member", "entity": "*", "actions": ["read"] }
+                    ]
                 });
             }
             e.write_json("manifest.json", &manifest).await?;
