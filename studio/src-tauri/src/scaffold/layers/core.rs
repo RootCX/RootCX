@@ -113,10 +113,17 @@ export default defineConfig({{
             // src/main.tsx
             e.write("src/main.tsx", r#"import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { RuntimeProvider } from "@rootcx/runtime";
 import "./globals.css";
 import App from "./App";
 
-createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictMode>);
+createRoot(document.getElementById("root")!).render(
+  <StrictMode>
+    <RuntimeProvider>
+      <App />
+    </RuntimeProvider>
+  </StrictMode>,
+);
 "#).await?;
 
             e.write("src/globals.css", GLOBALS_CSS).await?;
