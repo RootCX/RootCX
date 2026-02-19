@@ -88,7 +88,7 @@ impl RuntimeExtension for AuditExtension {
         Ok(())
     }
 
-    async fn on_table_created(&self, pool: &PgPool, schema: &str, table: &str) -> Result<(), RuntimeError> {
+    async fn on_table_created(&self, pool: &PgPool, _manifest: &rootcx_shared_types::AppManifest, schema: &str, table: &str) -> Result<(), RuntimeError> {
         let sql = format!(
             "SELECT rootcx_system.enable_tracking('{}.{}'::regclass)",
             quote_ident(schema), quote_ident(table)

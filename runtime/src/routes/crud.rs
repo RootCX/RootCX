@@ -2,8 +2,10 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde_json::Value as JsonValue;
+use uuid::Uuid;
 
 use crate::api_error::ApiError;
+use crate::extensions::rbac::AccessGrant;
 use crate::manifest::quote_ident;
 use super::{SharedRuntime, parse_uuid, pool};
 
@@ -17,48 +19,122 @@ fn require_object(body: &JsonValue) -> Result<&serde_json::Map<String, JsonValue
     Ok(obj)
 }
 
-pub async fn list_records(State(rt): State<SharedRuntime>, Path((app_id, entity)): Path<(String, String)>) -> Result<Json<Vec<JsonValue>>, ApiError> {
+/// Build `"{prefix} owner_id = $N"` clause + return the owner UUID to bind.
+///
+/// Use `" AND"` when appending to an existing WHERE, `" WHERE"` for standalone.
+/// Returns an error if ownership is required but no user identity is present.
+fn owner_predicate(grant: &AccessGrant, param: usize, prefix: &str) -> Result<(String, Option<Uuid>), ApiError> {
+    if grant.ownership_required {
+        match grant.user_id {
+            Some(uid) => Ok((format!("{prefix} owner_id = ${param}"), Some(uid))),
+            None => Err(ApiError::Internal("ownership required but no user identity".into())),
+        }
+    } else {
+        Ok((String::new(), None))
+    }
+}
+
+pub async fn list_records(
+    grant: AccessGrant,
+    State(rt): State<SharedRuntime>,
+    Path((app_id, entity)): Path<(String, String)>,
+) -> Result<Json<Vec<JsonValue>>, ApiError> {
     let pool = pool(&rt).await?;
-    let q = format!("SELECT to_jsonb(t.*) AS row FROM {} t ORDER BY created_at DESC", table(&app_id, &entity));
-    let rows: Vec<(JsonValue,)> = sqlx::query_as(&q).fetch_all(&pool).await?;
+    let tbl = table(&app_id, &entity);
+    let (filter, uid) = owner_predicate(&grant, 1, " WHERE")?;
+    let q = format!("SELECT to_jsonb(t.*) AS row FROM {tbl} t{filter} ORDER BY created_at DESC");
+    let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
+    if let Some(uid) = uid { query = query.bind(uid); }
+    let rows: Vec<(JsonValue,)> = query.fetch_all(&pool).await?;
     Ok(Json(rows.into_iter().map(|(r,)| r).collect()))
 }
 
-pub async fn create_record(State(rt): State<SharedRuntime>, Path((app_id, entity)): Path<(String, String)>, Json(body): Json<JsonValue>) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
+pub async fn create_record(
+    grant: AccessGrant,
+    State(rt): State<SharedRuntime>,
+    Path((app_id, entity)): Path<(String, String)>,
+    Json(body): Json<JsonValue>,
+) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
     let pool = pool(&rt).await?;
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
-    let values: Vec<_> = obj.values().cloned().collect();
-    let (cols, phs): (Vec<_>, Vec<_>) = obj.keys().enumerate().map(|(i, k)| (quote_ident(k), format!("${}", i + 1))).unzip();
-    let q = format!("INSERT INTO {} ({}) VALUES ({}) RETURNING to_jsonb({}.*) AS row", tbl, cols.join(", "), phs.join(", "), tbl);
+
+    let mut cols: Vec<String> = Vec::new();
+    let mut phs: Vec<String> = Vec::new();
+    let mut idx = 1usize;
+
+    let owner_uid = if grant.ownership_required { grant.user_id } else { None };
+    if owner_uid.is_some() {
+        cols.push("\"owner_id\"".into());
+        phs.push(format!("${idx}"));
+        idx += 1;
+    }
+    for k in obj.keys() {
+        cols.push(quote_ident(k));
+        phs.push(format!("${idx}"));
+        idx += 1;
+    }
+
+    let q = format!("INSERT INTO {tbl} ({}) VALUES ({}) RETURNING to_jsonb({tbl}.*) AS row", cols.join(", "), phs.join(", "));
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
-    for v in &values { query = bind_json_value(query, v); }
+    if let Some(uid) = owner_uid { query = query.bind(uid); }
+    for v in obj.values() { query = bind_json_value(query, v); }
+
     let (row,) = query.fetch_one(&pool).await?;
     Ok((StatusCode::CREATED, Json(row)))
 }
 
-pub async fn get_record(State(rt): State<SharedRuntime>, Path((app_id, entity, id)): Path<(String, String, String)>) -> Result<Json<JsonValue>, ApiError> {
+pub async fn get_record(
+    grant: AccessGrant,
+    State(rt): State<SharedRuntime>,
+    Path((app_id, entity, id)): Path<(String, String, String)>,
+) -> Result<Json<JsonValue>, ApiError> {
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt).await?);
-    let q = format!("SELECT to_jsonb(t.*) AS row FROM {} t WHERE t.id = $1", table(&app_id, &entity));
-    sqlx::query_as::<_, (JsonValue,)>(&q).bind(uuid).fetch_optional(&pool).await?
-        .map(|(r,)| Json(r)).ok_or_else(|| ApiError::NotFound(format!("record '{id}' not found")))
+    let tbl = table(&app_id, &entity);
+    let (owner, uid) = owner_predicate(&grant, 2, " AND")?;
+    let q = format!("SELECT to_jsonb(t.*) AS row FROM {tbl} t WHERE t.id = $1{owner}");
+    let mut query = sqlx::query_as::<_, (JsonValue,)>(&q).bind(uuid);
+    if let Some(uid) = uid { query = query.bind(uid); }
+    query.fetch_optional(&pool).await?
+        .map(|(r,)| Json(r))
+        .ok_or_else(|| ApiError::NotFound(format!("record '{id}' not found")))
 }
 
-pub async fn update_record(State(rt): State<SharedRuntime>, Path((app_id, entity, id)): Path<(String, String, String)>, Json(body): Json<JsonValue>) -> Result<Json<JsonValue>, ApiError> {
+pub async fn update_record(
+    grant: AccessGrant,
+    State(rt): State<SharedRuntime>,
+    Path((app_id, entity, id)): Path<(String, String, String)>,
+    Json(body): Json<JsonValue>,
+) -> Result<Json<JsonValue>, ApiError> {
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt).await?);
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
-    let (sets, vals): (Vec<_>, Vec<_>) = obj.iter().enumerate().map(|(i, (k, v))| (format!("{} = ${}", quote_ident(k), i + 1), v.clone())).unzip();
-    let q = format!("UPDATE {} SET {}, \"updated_at\" = now() WHERE id = ${} RETURNING to_jsonb({} .*) AS row", tbl, sets.join(", "), vals.len() + 1, tbl);
+    let (sets, vals): (Vec<_>, Vec<_>) = obj.iter().enumerate()
+        .map(|(i, (k, v))| (format!("{} = ${}", quote_ident(k), i + 1), v.clone())).unzip();
+    let id_param = vals.len() + 1;
+    let (owner, uid) = owner_predicate(&grant, id_param + 1, " AND")?;
+    let q = format!("UPDATE {tbl} SET {}, \"updated_at\" = now() WHERE id = ${id_param}{owner} RETURNING to_jsonb({tbl}.*) AS row", sets.join(", "));
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
     for v in &vals { query = bind_json_value(query, v); }
     query = query.bind(uuid);
-    query.fetch_optional(&pool).await?.map(|(r,)| Json(r)).ok_or_else(|| ApiError::NotFound(format!("record '{id}' not found")))
+    if let Some(uid) = uid { query = query.bind(uid); }
+    query.fetch_optional(&pool).await?
+        .map(|(r,)| Json(r))
+        .ok_or_else(|| ApiError::NotFound(format!("record '{id}' not found")))
 }
 
-pub async fn delete_record(State(rt): State<SharedRuntime>, Path((app_id, entity, id)): Path<(String, String, String)>) -> Result<Json<JsonValue>, ApiError> {
+pub async fn delete_record(
+    grant: AccessGrant,
+    State(rt): State<SharedRuntime>,
+    Path((app_id, entity, id)): Path<(String, String, String)>,
+) -> Result<Json<JsonValue>, ApiError> {
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt).await?);
-    let r = sqlx::query(&format!("DELETE FROM {} WHERE id = $1", table(&app_id, &entity))).bind(uuid).execute(&pool).await?;
+    let tbl = table(&app_id, &entity);
+    let (owner, uid) = owner_predicate(&grant, 2, " AND")?;
+    let q = format!("DELETE FROM {tbl} WHERE id = $1{owner}");
+    let mut query = sqlx::query(&q).bind(uuid);
+    if let Some(uid) = uid { query = query.bind(uid); }
+    let r = query.execute(&pool).await?;
     if r.rows_affected() == 0 { return Err(ApiError::NotFound(format!("record '{id}' not found"))); }
     Ok(Json(serde_json::json!({ "message": format!("record '{id}' deleted") })))
 }
@@ -81,6 +157,7 @@ fn bind_json_value<'q>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extensions::rbac::grant::test_grant;
     use serde_json::json;
 
     #[test]
@@ -91,25 +168,51 @@ mod tests {
     #[test]
     fn table_sanitizes_inputs() {
         let result = table("my;app", "drop--table");
-        assert!(!result.contains(';'));
-        assert!(!result.contains('-'));
+        assert!(!result.contains(';') && !result.contains('-'));
         assert_eq!(result, "\"myapp\".\"droptable\"");
     }
 
     #[test]
-    fn require_object_valid() {
-        assert!(require_object(&json!({"a": 1})).is_ok());
-    }
+    fn require_object_valid() { assert!(require_object(&json!({"a": 1})).is_ok()); }
 
     #[test]
     fn require_object_rejects_invalid() {
-        for (label, input) in [
-            ("empty", json!({})),
-            ("array", json!([1, 2])),
-            ("string", json!("hello")),
-            ("null", json!(null)),
-        ] {
+        for (label, input) in [("empty", json!({})), ("array", json!([1, 2])), ("string", json!("hello")), ("null", json!(null))] {
             assert!(require_object(&input).is_err(), "expected error for {label}");
         }
+    }
+
+    // ── owner_predicate ─────────────────────────────────────────
+
+    #[test]
+    fn owner_predicate_and_prefix() {
+        let uid = Uuid::new_v4();
+        let grant = test_grant(Some(uid), true);
+        let (clause, bound) = owner_predicate(&grant, 3, " AND").unwrap();
+        assert_eq!(clause, " AND owner_id = $3");
+        assert_eq!(bound, Some(uid));
+    }
+
+    #[test]
+    fn owner_predicate_where_prefix() {
+        let uid = Uuid::new_v4();
+        let grant = test_grant(Some(uid), true);
+        let (clause, bound) = owner_predicate(&grant, 1, " WHERE").unwrap();
+        assert_eq!(clause, " WHERE owner_id = $1");
+        assert_eq!(bound, Some(uid));
+    }
+
+    #[test]
+    fn owner_predicate_without_ownership() {
+        let grant = test_grant(Some(Uuid::new_v4()), false);
+        let (clause, bound) = owner_predicate(&grant, 1, " AND").unwrap();
+        assert!(clause.is_empty());
+        assert!(bound.is_none());
+    }
+
+    #[test]
+    fn owner_predicate_errors_on_impossible_state() {
+        let grant = test_grant(None, true);
+        assert!(owner_predicate(&grant, 1, " AND").is_err());
     }
 }

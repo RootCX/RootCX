@@ -19,7 +19,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use auth::AuthConfig;
-use extensions::{builtin_extensions, RuntimeExtension};
+use extensions::rbac::PolicyCache;
+use extensions::{builtin_extensions_with_cache, RuntimeExtension};
 use rootcx_postgres_mgmt::PostgresManager;
 use rootcx_shared_types::{ForgeStatus, OsStatus, PostgresStatus, RuntimeStatus, ServiceState};
 use scheduler::SchedulerHandle;
@@ -35,6 +36,7 @@ pub struct Runtime {
     pool: Option<PgPool>,
     extensions: Vec<Box<dyn RuntimeExtension>>,
     auth_config: Arc<auth::AuthConfig>,
+    rbac_cache: Arc<PolicyCache>,
     secret_manager: Option<Arc<SecretManager>>,
     worker_manager: Option<Arc<WorkerManager>>,
     scheduler: Option<SchedulerHandle>,
@@ -44,16 +46,18 @@ pub struct Runtime {
 impl Runtime {
     pub fn new(pg: PostgresManager, data_dir: PathBuf) -> Self {
         let auth_config = AuthConfig::load(&data_dir).expect("failed to load auth config");
-        let mut extensions = builtin_extensions();
-        extensions.push(Box::new(extensions::auth::AuthExtension {
-            config: Arc::clone(&auth_config),
-        }));
+        let rbac_cache = Arc::new(PolicyCache::default());
+        let extensions = builtin_extensions_with_cache(
+            Arc::clone(&auth_config),
+            Arc::clone(&rbac_cache),
+        );
 
         Self {
             pg,
             pool: None,
             extensions,
             auth_config,
+            rbac_cache,
             secret_manager: None,
             worker_manager: None,
             scheduler: None,
@@ -126,6 +130,8 @@ impl Runtime {
     }
 
     pub fn auth_config(&self) -> &Arc<auth::AuthConfig> { &self.auth_config }
+
+    pub fn rbac_cache(&self) -> &Arc<PolicyCache> { &self.rbac_cache }
 
     pub fn pool(&self) -> Option<&PgPool> { self.pool.as_ref() }
 

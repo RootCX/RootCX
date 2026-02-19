@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -72,7 +74,7 @@ pub struct AppManifest {
     #[serde(default)]
     pub routes: Vec<JsonValue>,
     #[serde(default)]
-    pub permissions: Vec<JsonValue>,
+    pub permissions: Option<PermissionsContract>,
     #[serde(default)]
     pub data_contract: Vec<EntityContract>,
 }
@@ -134,4 +136,37 @@ pub struct AuthUser {
     pub email: Option<String>,
     pub display_name: Option<String>,
     pub created_at: String,
+}
+
+// ── RBAC / Permissions ───────────────────────────────────────────
+
+/// Permissions contract declared in an app's manifest.json.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PermissionsContract {
+    pub roles: HashMap<String, RoleDefinition>,
+    #[serde(default)]
+    pub default_role: Option<String>,
+    pub policies: Vec<PolicyRule>,
+}
+
+/// Definition of a role (optional description + hierarchy via inherits).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleDefinition {
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub inherits: Vec<String>,
+}
+
+/// A single policy rule granting actions on an entity to a role.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyRule {
+    pub role: String,
+    pub entity: String,
+    pub actions: Vec<String>,
+    #[serde(default)]
+    pub ownership: bool,
 }

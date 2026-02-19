@@ -28,7 +28,16 @@ export interface AppManifest {
   version?: string;
   description?: string;
   routes?: unknown[];
-  permissions?: unknown[];
+  permissions?: {
+    roles: Record<string, { description?: string; inherits?: string[] }>;
+    defaultRole?: string;
+    policies: {
+      role: string;
+      entity: string;
+      actions: string[];
+      ownership?: boolean;
+    }[];
+  };
   dataContract?: unknown[];
 }
 
@@ -57,6 +66,30 @@ export interface RegisterInput {
 export interface RpcCaller {
   userId: string;
   username: string;
+}
+
+// ── RBAC types ─────────────────────────────────────
+
+export interface RoleDefinition {
+  name: string;
+  description: string | null;
+  inherits: string[];
+}
+
+export interface RoleAssignment {
+  userId: string;
+  role: string;
+  assignedAt: string;
+}
+
+export interface EntityPermission {
+  actions: string[];
+  ownership: boolean;
+}
+
+export interface EffectivePermissions {
+  roles: string[];
+  permissions: Record<string, EntityPermission>;
 }
 
 const DEFAULT_BASE_URL = "http://localhost:9100";
@@ -145,7 +178,7 @@ export class RuntimeClient {
     entity: string,
   ): Promise<T[]> {
     const url = `${this.baseUrl}/api/v1/apps/${enc(appId)}/collections/${enc(entity)}`;
-    const res = await fetch(url);
+    const res = await this.authFetch(url);
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }
@@ -156,7 +189,7 @@ export class RuntimeClient {
     data: Record<string, unknown>,
   ): Promise<T> {
     const url = `${this.baseUrl}/api/v1/apps/${enc(appId)}/collections/${enc(entity)}`;
-    const res = await fetch(url, {
+    const res = await this.authFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
@@ -171,7 +204,7 @@ export class RuntimeClient {
     id: string,
   ): Promise<T> {
     const url = `${this.baseUrl}/api/v1/apps/${enc(appId)}/collections/${enc(entity)}/${enc(id)}`;
-    const res = await fetch(url);
+    const res = await this.authFetch(url);
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }
@@ -183,7 +216,7 @@ export class RuntimeClient {
     data: Record<string, unknown>,
   ): Promise<T> {
     const url = `${this.baseUrl}/api/v1/apps/${enc(appId)}/collections/${enc(entity)}/${enc(id)}`;
-    const res = await fetch(url, {
+    const res = await this.authFetch(url, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
@@ -198,7 +231,7 @@ export class RuntimeClient {
     id: string,
   ): Promise<{ message: string }> {
     const url = `${this.baseUrl}/api/v1/apps/${enc(appId)}/collections/${enc(entity)}/${enc(id)}`;
-    const res = await fetch(url, { method: "DELETE" });
+    const res = await this.authFetch(url, { method: "DELETE" });
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }
@@ -274,6 +307,49 @@ export class RuntimeClient {
 
   async me(): Promise<AuthUser> {
     const res = await this.authFetch(`${this.baseUrl}/api/v1/auth/me`);
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  // ── RBAC ─────────────────────────────────────────
+
+  async listRoles(appId: string): Promise<RoleDefinition[]> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/roles`);
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async listRoleAssignments(appId: string): Promise<RoleAssignment[]> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/roles/assignments`);
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async assignRole(appId: string, userId: string, role: string): Promise<{ message: string }> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/roles/assign`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, role }),
+    });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async revokeRole(appId: string, userId: string, role: string): Promise<{ message: string }> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/roles/revoke`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, role }),
+    });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async getPermissions(appId: string, userId?: string): Promise<EffectivePermissions> {
+    const path = userId
+      ? `/api/v1/apps/${enc(appId)}/permissions/${enc(userId)}`
+      : `/api/v1/apps/${enc(appId)}/permissions`;
+    const res = await this.authFetch(`${this.baseUrl}${path}`);
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }

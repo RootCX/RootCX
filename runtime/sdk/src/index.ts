@@ -9,6 +9,10 @@ export type {
   LoginResponse,
   RegisterInput,
   RpcCaller,
+  RoleDefinition,
+  RoleAssignment,
+  EntityPermission,
+  EffectivePermissions,
 } from "./client";
 
 // Hooks
@@ -23,3 +27,13 @@ export type { UseRuntimeStatusResult } from "./hooks/useRuntimeStatus";
 
 export { useAuth } from "./hooks/useAuth";
 export type { UseAuthResult } from "./hooks/useAuth";
+
+export { usePermissions } from "./hooks/usePermissions";
+export type { UsePermissionsResult } from "./hooks/usePermissions";
+
+// Components
+export { PermissionsProvider, usePermissionsContext } from "./components/PermissionsProvider";
+export type { PermissionsProviderProps } from "./components/PermissionsProvider";
+
+export { Authorized } from "./components/Authorized";
+export type { AuthorizedProps } from "./components/Authorized";
