@@ -149,7 +149,10 @@ fn bind_json_value<'q>(
         JsonValue::Number(n) => {
             if let Some(i) = n.as_i64() { q.bind(i) } else { q.bind(n.as_f64().unwrap_or(0.0)) }
         }
-        JsonValue::String(s) => q.bind(s.as_str()),
+        JsonValue::String(s) => match s.parse::<Uuid>() {
+            Ok(uuid) => q.bind(uuid),
+            Err(_) => q.bind(s.as_str()),
+        },
         _ => q.bind(val),
     }
 }
