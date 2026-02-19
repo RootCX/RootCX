@@ -593,3 +593,118 @@ async fn install_multiple_entities() {
     assert_eq!(items.as_array().unwrap().len(), 1);
     rt.shutdown().await;
 }
+
+// ── Typed Bindings ─────────────────────────────────────────────
+
+fn typed_manifest() -> Value {
+    json!({
+        "appId": "typed", "name": "typed", "version": "1.0.0",
+        "dataContract": [
+            { "entityName": "parent", "fields": [
+                { "name": "label", "type": "text", "required": true }
+            ]},
+            { "entityName": "child", "fields": [
+                { "name": "ref_id", "type": "entity_link", "references": { "entity": "parent", "field": "id" } },
+                { "name": "label", "type": "text" },
+                { "name": "score", "type": "number" },
+                { "name": "active", "type": "boolean" },
+                { "name": "day", "type": "date" },
+                { "name": "ts", "type": "timestamp" },
+                { "name": "meta", "type": "json" },
+                { "name": "tags", "type": "[text]" },
+                { "name": "vals", "type": "[number]" },
+            ]}
+        ]
+    })
+}
+
+/// Every manifest type round-trips through create → read with correct PG wire types.
+#[tokio::test]
+async fn typed_bindings_create_roundtrip() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&typed_manifest()).await;
+
+    let parent = rt.create("typed", "parent", &json!({"label": "p"})).await;
+    let pid = parent["id"].as_str().unwrap();
+
+    let row = rt.create("typed", "child", &json!({
+        "ref_id": pid,
+        "label": "x",
+        "score": 42.5,
+        "active": true,
+        "day": "2026-03-15",
+        "ts": "2026-03-15T10:30:00Z",
+        "meta": {"k": 1},
+        "tags": ["a", "b"],
+        "vals": [1.1, 2.2],
+    })).await;
+
+    assert_eq!(row["ref_id"], pid);
+    assert_eq!(row["label"], "x");
+    assert_eq!(row["score"], 42.5);
+    assert_eq!(row["active"], true);
+    assert_eq!(row["day"], "2026-03-15");
+    assert!(row["ts"].as_str().unwrap().starts_with("2026-03-15T10:30:00"), "ts={}", row["ts"]);
+    assert_eq!(row["meta"], json!({"k": 1}));
+    assert_eq!(row["tags"], json!(["a", "b"]));
+    assert_eq!(row["vals"], json!([1.1, 2.2]));
+    rt.shutdown().await;
+}
+
+/// Typed fields accept null without PG type errors.
+#[tokio::test]
+async fn typed_bindings_null_values() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&typed_manifest()).await;
+
+    let row = rt.create("typed", "child", &json!({
+        "ref_id": null, "label": null, "score": null,
+        "active": null, "day": null, "ts": null,
+        "meta": null, "tags": null, "vals": null,
+    })).await;
+
+    for field in ["ref_id", "label", "score", "active", "day", "ts", "meta", "tags", "vals"] {
+        assert!(row[field].is_null(), "{field} should be null, got: {}", row[field]);
+    }
+    rt.shutdown().await;
+}
+
+/// Update path uses the same manifest-driven binding as create.
+#[tokio::test]
+async fn typed_bindings_update() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&typed_manifest()).await;
+
+    let id = rt.create("typed", "child", &json!({"label": "old"})).await["id"]
+        .as_str().unwrap().to_string();
+
+    let (s, updated) = rt.patch_json(
+        &format!("/api/v1/apps/typed/collections/child/{id}"),
+        &json!({"day": "2026-12-25", "ts": "2026-12-25T00:00:00Z", "score": 99.9}),
+    ).await;
+    assert_eq!(s, 200);
+    assert_eq!(updated["day"], "2026-12-25");
+    assert!(updated["ts"].as_str().unwrap().starts_with("2026-12-25T00:00:00"), "ts={}", updated["ts"]);
+    assert_eq!(updated["score"], 99.9);
+    rt.shutdown().await;
+}
+
+/// A text field containing a date-like string must NOT be cast to DATE.
+/// Guards against regression to type-guessing.
+#[tokio::test]
+async fn typed_bindings_text_not_cast_as_date() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&json!({
+        "appId": "txtdate", "name": "txtdate", "version": "1.0.0",
+        "dataContract": [{ "entityName": "notes", "fields": [
+            { "name": "body", "type": "text", "required": true },
+        ]}]
+    })).await;
+
+    // "2026-01-01" and a valid UUID as plain text — neither should trigger type conversion
+    for val in ["2026-01-01", "550e8400-e29b-41d4-a716-446655440000", "2026-01-01T00:00:00Z"] {
+        let row = rt.create("txtdate", "notes", &json!({"body": val})).await;
+        assert_eq!(row["body"], val, "text field should preserve literal string");
+    }
+    rt.shutdown().await;
+}
