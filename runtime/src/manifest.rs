@@ -40,7 +40,7 @@ pub async fn install_app(
 
     for ext in extensions {
         for entity in &manifest.data_contract {
-            ext.on_table_created(pool, app_id, &entity.entity_name).await?;
+            ext.on_table_created(pool, manifest, app_id, &entity.entity_name).await?;
         }
     }
 
@@ -55,6 +55,10 @@ pub async fn install_app(
     }
 
     register_app(pool, manifest).await?;
+
+    for ext in extensions {
+        ext.on_app_installed(pool, manifest).await?;
+    }
 
     info!(
         app = %app_id,

@@ -42,19 +42,20 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         // Backend deploy (tar.gz archive)
         .route("/api/v1/apps/{app_id}/deploy", post(routes::deploy_backend).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)));
 
-    // Extension routes (e.g. audit, auth)
-    let auth_config = {
+    // Extension routes (e.g. audit, auth, rbac)
+    let (auth_config, rbac_cache) = {
         let rt = runtime.lock().await;
         for ext in rt.extensions() {
             if let Some(ext_router) = ext.routes() {
                 router = router.merge(ext_router);
             }
         }
-        rt.auth_config().clone()
+        (rt.auth_config().clone(), rt.rbac_cache().clone())
     };
 
     let router = router
         .layer(axum::Extension(auth_config))
+        .layer(axum::Extension(rbac_cache))
         .layer(CorsLayer::permissive())
         .with_state(runtime);
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
