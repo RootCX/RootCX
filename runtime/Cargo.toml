@@ -26,7 +26,7 @@ hex = "0.4"
 command-group = { version = "5", features = ["with-tokio"] }
 
 # IPC (JSONL over stdin/stdout)
-tokio-util = { version = "0.7", features = ["codec", "rt"] }
+tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
 
 # Deploy (tar.gz upload)
@@ -40,9 +40,6 @@ jsonwebtoken = "9"
 # Job Engine
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
