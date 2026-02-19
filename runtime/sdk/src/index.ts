@@ -41,3 +41,6 @@ export type { PermissionsProviderProps } from "./components/PermissionsProvider"
 
 export { Authorized } from "./components/Authorized";
 export type { AuthorizedProps } from "./components/Authorized";
+
+export { AuthGate } from "./components/AuthGate";
+export type { AuthGateProps, AuthFormSlotProps } from "./components/AuthGate";
