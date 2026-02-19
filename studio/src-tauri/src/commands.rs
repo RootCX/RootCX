@@ -73,11 +73,7 @@ pub async fn read_dir(path: String) -> Result<Vec<DirEntry>, String> {
         });
     }
 
-    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-    });
+    entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase()));
 
     Ok(entries)
 }
@@ -152,13 +148,10 @@ pub async fn scaffold_project(
     preset_id: Option<String>,
     answers: Option<std::collections::HashMap<String, crate::scaffold::Answer>>,
 ) -> Result<(), String> {
-    let sdk = crate::state::sdk_runtime_dir()?;
-    let client_crate = crate::state::runtime_client_dir()?;
     crate::scaffold::create(
         std::path::Path::new(&path),
         &name,
-        &sdk,
-        &client_crate,
+        crate::scaffold::RuntimePaths::resolve()?,
         preset_id.as_deref().unwrap_or("blank"),
         answers.unwrap_or_default(),
     )

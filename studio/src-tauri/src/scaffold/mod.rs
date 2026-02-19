@@ -12,14 +12,13 @@ use std::path::Path;
 use types::{AnswerValue, ScaffoldContext};
 
 pub use registry::PresetRegistry as Registry;
-pub use types::{AnswerValue as Answer, PresetInfo, Question};
+pub use types::{AnswerValue as Answer, PresetInfo, Question, RuntimePaths};
 
 /// Orchestrates scaffold: resolve preset → build context → run layers.
 pub async fn create(
     root: &Path,
     name: &str,
-    sdk_path: &Path,
-    client_crate_path: &Path,
+    runtime: RuntimePaths,
     preset_id: &str,
     answers: HashMap<String, AnswerValue>,
 ) -> Result<(), String> {
@@ -40,8 +39,7 @@ pub async fn create(
         lib_name,
         identifier,
         port,
-        sdk_path: sdk_path.to_path_buf(),
-        client_crate_path: client_crate_path.to_path_buf(),
+        runtime,
         answers,
     };
 

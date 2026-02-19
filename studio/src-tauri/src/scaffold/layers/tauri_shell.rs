@@ -1,7 +1,5 @@
 use crate::scaffold::emitter::Emitter;
-use crate::scaffold::types::{Layer, ScaffoldContext};
-use std::future::Future;
-use std::pin::Pin;
+use crate::scaffold::types::{Layer, LayerFuture, ScaffoldContext};
 
 const ICON: &[u8] = include_bytes!("../../../icons/32x32.png");
 
@@ -9,10 +7,10 @@ const ICON: &[u8] = include_bytes!("../../../icons/32x32.png");
 pub struct TauriLayer;
 
 impl Layer for TauriLayer {
-    fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+    fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> LayerFuture<'a> {
         Box::pin(async move {
-            let ScaffoldContext { name, app_id, lib_name, identifier, port, client_crate_path, .. } = ctx;
-            let client_dep = client_crate_path.display();
+            let ScaffoldContext { name, app_id, lib_name, identifier, port, .. } = ctx;
+            let client_dep = ctx.runtime.client_crate.display();
 
             e.write_bytes("src-tauri/icons/icon.png", ICON).await?;
 

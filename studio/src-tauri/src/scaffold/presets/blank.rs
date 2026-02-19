@@ -50,7 +50,6 @@ impl Preset for BlankPreset {
         let mut layers: Vec<Box<dyn Layer>> = vec![
             Box::new(CoreLayer),
             Box::new(TauriLayer),
-            Box::new(UiKitLayer),
             Box::new(AuthLayer { include_auth: auth }),
         ];
         if backend {

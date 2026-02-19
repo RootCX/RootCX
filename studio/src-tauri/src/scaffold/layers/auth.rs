@@ -1,7 +1,5 @@
 use crate::scaffold::emitter::Emitter;
-use crate::scaffold::types::{Layer, ScaffoldContext};
-use std::future::Future;
-use std::pin::Pin;
+use crate::scaffold::types::{Layer, LayerFuture, ScaffoldContext};
 
 /// Emits: src/App.tsx with login/register flow using @rootcx/runtime auth.
 /// When `include_auth` is false, emits a simple hello-world App instead.
@@ -10,10 +8,9 @@ pub struct AuthLayer {
 }
 
 impl Layer for AuthLayer {
-    fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
-        let include_auth = self.include_auth;
+    fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> LayerFuture<'a> {
         Box::pin(async move {
-            let content = if include_auth {
+            let content = if self.include_auth {
                 auth_app(&ctx.name)
             } else {
                 simple_app(&ctx.name)
@@ -24,10 +21,12 @@ impl Layer for AuthLayer {
 }
 
 fn simple_app(name: &str) -> String {
-    format!(r#"export default function App() {{
+    format!(r#"import {{ PageHeader }} from "@rootcx/ui";
+
+export default function App() {{
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background">
-      <h1 className="text-4xl font-bold">{name}</h1>
+    <div className="p-6">
+      <PageHeader title="{name}" description="Get started by editing src/App.tsx" />
     </div>
   );
 }}
@@ -36,23 +35,35 @@ fn simple_app(name: &str) -> String {
 
 fn auth_app(name: &str) -> String {
     format!(r#"import {{ AuthGate }} from "@rootcx/runtime";
+import {{ AppShell, AppShellSidebar, AppShellMain, Sidebar, SidebarItem, PageHeader, Button }} from "@rootcx/ui";
+import {{ IconLogout, IconHome }} from "@tabler/icons-react";
 
 export default function App() {{
   return (
     <AuthGate appTitle="{name}">
       {{({{ user, logout }}) => (
-        <div className="flex min-h-screen items-center justify-center bg-background px-4">
-          <div className="w-full max-w-sm rounded-lg border bg-card p-6 shadow-sm text-center space-y-4">
-            <h2 className="text-2xl font-semibold tracking-tight">{name}</h2>
-            <p className="text-sm text-muted-foreground">Signed in as {{user.username}}</p>
-            <button
-              className="inline-flex h-10 w-full items-center justify-center rounded-md border bg-background px-4 py-2 text-sm font-medium hover:bg-muted"
-              onClick={{() => logout()}}
+        <AppShell>
+          <AppShellSidebar>
+            <Sidebar
+              header={{<span className="text-sm font-semibold">{name}</span>}}
+              footer={{
+                <div className="flex items-center justify-between">
+                  <span className="truncate text-sm text-muted-foreground">{{user.username}}</span>
+                  <Button variant="ghost" size="icon" onClick={{() => logout()}}>
+                    <IconLogout className="h-4 w-4" />
+                  </Button>
+                </div>
+              }}
             >
-              Sign out
-            </button>
-          </div>
-        </div>
+              <SidebarItem icon={{<IconHome />}} label="Home" active />
+            </Sidebar>
+          </AppShellSidebar>
+          <AppShellMain>
+            <div className="p-6">
+              <PageHeader title="Home" description="Welcome to {name}" />
+            </div>
+          </AppShellMain>
+        </AppShell>
       )}}
     </AuthGate>
   );

@@ -4,6 +4,27 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 
+/// Boxed async return type for Layer::emit — eliminates Future/Pin imports from every layer file.
+pub type LayerFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
+/// Paths to the shared runtime crates/packages consumed during scaffold.
+pub struct RuntimePaths {
+    pub sdk: PathBuf,
+    pub ui: PathBuf,
+    pub client_crate: PathBuf,
+}
+
+impl RuntimePaths {
+    pub fn resolve() -> Result<Self, String> {
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        Ok(Self {
+            sdk: base.join("../../runtime/sdk").canonicalize().map_err(|e| format!("SDK not found: {e}"))?,
+            ui: base.join("../../runtime/ui").canonicalize().map_err(|e| format!("UI library not found: {e}"))?,
+            client_crate: base.join("../../runtime/client").canonicalize().map_err(|e| format!("runtime client crate not found: {e}"))?,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresetInfo {
     pub id: &'static str,
@@ -73,8 +94,7 @@ pub struct ScaffoldContext {
     pub lib_name: String,
     pub identifier: String,
     pub port: u16,
-    pub sdk_path: PathBuf,
-    pub client_crate_path: PathBuf,
+    pub runtime: RuntimePaths,
     pub answers: HashMap<String, AnswerValue>,
 }
 
@@ -89,5 +109,5 @@ pub trait Layer: Send + Sync {
         &'a self,
         ctx: &'a ScaffoldContext,
         emitter: &'a super::emitter::Emitter,
-    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+    ) -> LayerFuture<'a>;
 }

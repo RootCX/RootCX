@@ -95,19 +95,6 @@ fn session_file() -> Result<PathBuf, String> {
     Ok(config_dir()?.join("studio-session.json"))
 }
 
-pub fn sdk_runtime_dir() -> Result<PathBuf, String> {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../runtime/sdk")
-        .canonicalize()
-        .map_err(|e| format!("SDK not found: {e}"))
-}
-
-pub fn runtime_client_dir() -> Result<PathBuf, String> {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../runtime/client")
-        .canonicalize()
-        .map_err(|e| format!("runtime client crate not found: {e}"))
-}
 
 async fn ensure_instructions() -> Result<(), String> {
     let dir = instructions_dir()?;
@@ -221,9 +208,10 @@ impl AppState {
                             match resp.chunk().await {
                                 Ok(Some(chunk)) => {
                                     buf.push_str(&String::from_utf8_lossy(&chunk));
-                                    while let Some(pos) = buf.find('\n') {
-                                        let line = buf[..pos].trim_end_matches('\r').to_string();
-                                        buf.drain(..=pos);
+                                    let mut consumed = 0;
+                                    while let Some(pos) = buf[consumed..].find('\n') {
+                                        let end = consumed + pos;
+                                        let line = buf[consumed..end].trim_end_matches('\r');
                                         if let Some(data) = line.strip_prefix("data:") {
                                             if let Ok(entry) = serde_json::from_str::<serde_json::Value>(data.trim_start()) {
                                                 let level = entry["level"].as_str().unwrap_or("info");
@@ -231,6 +219,10 @@ impl AppState {
                                                 let _ = app_handle.emit("run-output", format_log_line(level, message));
                                             }
                                         }
+                                        consumed = end + 1;
+                                    }
+                                    if consumed > 0 {
+                                        buf.drain(..consumed);
                                     }
                                 }
                                 Ok(None) => break,
