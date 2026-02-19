@@ -35,6 +35,8 @@ pub fn run() {
             commands::write_file,
             commands::ensure_dir,
             commands::scaffold_project,
+            commands::list_presets,
+            commands::get_preset_questions,
             commands::sync_manifest,
             commands::deploy_backend,
             commands::run_app,
