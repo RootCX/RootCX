@@ -1,12 +1,13 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 
 use crate::api_error::ApiError;
 use crate::extensions::rbac::AccessGrant;
-use crate::manifest::quote_ident;
+use crate::manifest::{field_type_map, map_field_type, quote_ident};
 use super::{SharedRuntime, parse_uuid, pool};
 
 fn table(app_id: &str, entity: &str) -> String {
@@ -19,10 +20,6 @@ fn require_object(body: &JsonValue) -> Result<&serde_json::Map<String, JsonValue
     Ok(obj)
 }
 
-/// Build `"{prefix} owner_id = $N"` clause + return the owner UUID to bind.
-///
-/// Use `" AND"` when appending to an existing WHERE, `" WHERE"` for standalone.
-/// Returns an error if ownership is required but no user identity is present.
 fn owner_predicate(grant: &AccessGrant, param: usize, prefix: &str) -> Result<(String, Option<Uuid>), ApiError> {
     if grant.ownership_required {
         match grant.user_id {
@@ -58,6 +55,7 @@ pub async fn create_record(
     let pool = pool(&rt).await?;
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
+    let types = field_type_map(&pool, &app_id, &entity).await?;
 
     let mut cols: Vec<String> = Vec::new();
     let mut phs: Vec<String> = Vec::new();
@@ -78,7 +76,7 @@ pub async fn create_record(
     let q = format!("INSERT INTO {tbl} ({}) VALUES ({}) RETURNING to_jsonb({tbl}.*) AS row", cols.join(", "), phs.join(", "));
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
     if let Some(uid) = owner_uid { query = query.bind(uid); }
-    for v in obj.values() { query = bind_json_value(query, v); }
+    for (k, v) in obj.iter() { query = bind_typed(query, v, types.get(k.as_str())); }
 
     let (row,) = query.fetch_one(&pool).await?;
     Ok((StatusCode::CREATED, Json(row)))
@@ -109,13 +107,15 @@ pub async fn update_record(
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt).await?);
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
-    let (sets, vals): (Vec<_>, Vec<_>) = obj.iter().enumerate()
-        .map(|(i, (k, v))| (format!("{} = ${}", quote_ident(k), i + 1), v.clone())).unzip();
-    let id_param = vals.len() + 1;
+    let types = field_type_map(&pool, &app_id, &entity).await?;
+    let entries: Vec<(&str, &JsonValue)> = obj.iter().map(|(k, v)| (k.as_str(), v)).collect();
+    let sets: Vec<String> = entries.iter().enumerate()
+        .map(|(i, (k, _))| format!("{} = ${}", quote_ident(k), i + 1)).collect();
+    let id_param = entries.len() + 1;
     let (owner, uid) = owner_predicate(&grant, id_param + 1, " AND")?;
     let q = format!("UPDATE {tbl} SET {}, \"updated_at\" = now() WHERE id = ${id_param}{owner} RETURNING to_jsonb({tbl}.*) AS row", sets.join(", "));
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
-    for v in &vals { query = bind_json_value(query, v); }
+    for (k, v) in &entries { query = bind_typed(query, v, types.get(*k)); }
     query = query.bind(uuid);
     if let Some(uid) = uid { query = query.bind(uid); }
     query.fetch_optional(&pool).await?
@@ -139,19 +139,27 @@ pub async fn delete_record(
     Ok(Json(serde_json::json!({ "message": format!("record '{id}' deleted") })))
 }
 
-fn bind_json_value<'q>(
-    q: sqlx::query::QueryAs<'q, sqlx::Postgres, (JsonValue,), sqlx::postgres::PgArguments>,
-    val: &'q JsonValue,
-) -> sqlx::query::QueryAs<'q, sqlx::Postgres, (JsonValue,), sqlx::postgres::PgArguments> {
+type QA<'q> = sqlx::query::QueryAs<'q, sqlx::Postgres, (JsonValue,), sqlx::postgres::PgArguments>;
+
+/// Bind a JSON value as the native PG type derived from `map_field_type`.
+fn bind_typed<'q>(q: QA<'q>, val: &'q JsonValue, manifest_type: Option<&String>) -> QA<'q> {
+    let pg = manifest_type.map(|t| map_field_type(t));
     match val {
         JsonValue::Null => q.bind(None::<String>),
         JsonValue::Bool(b) => q.bind(b),
         JsonValue::Number(n) => {
             if let Some(i) = n.as_i64() { q.bind(i) } else { q.bind(n.as_f64().unwrap_or(0.0)) }
         }
-        JsonValue::String(s) => match s.parse::<Uuid>() {
-            Ok(uuid) => q.bind(uuid),
-            Err(_) => q.bind(s.as_str()),
+        JsonValue::String(s) => match pg {
+            Some("UUID") => q.bind(s.parse::<Uuid>().ok()),
+            Some("DATE") => q.bind(s.parse::<NaiveDate>().ok()),
+            Some("TIMESTAMPTZ") => q.bind(s.parse::<DateTime<Utc>>().ok()),
+            _ => q.bind(s.as_str()),
+        },
+        JsonValue::Array(arr) => match pg {
+            Some("TEXT[]") => q.bind(arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
+            Some("DOUBLE PRECISION[]") => q.bind(arr.iter().filter_map(|v| v.as_f64()).collect::<Vec<_>>()),
+            _ => q.bind(val),
         },
         _ => q.bind(val),
     }
@@ -162,11 +170,6 @@ mod tests {
     use super::*;
     use crate::extensions::rbac::grant::test_grant;
     use serde_json::json;
-
-    #[test]
-    fn table_formats_qualified_name() {
-        assert_eq!(table("myapp", "contacts"), "\"myapp\".\"contacts\"");
-    }
 
     #[test]
     fn table_sanitizes_inputs() {
@@ -185,24 +188,18 @@ mod tests {
         }
     }
 
-    // ── owner_predicate ─────────────────────────────────────────
-
     #[test]
-    fn owner_predicate_and_prefix() {
-        let uid = Uuid::new_v4();
-        let grant = test_grant(Some(uid), true);
-        let (clause, bound) = owner_predicate(&grant, 3, " AND").unwrap();
-        assert_eq!(clause, " AND owner_id = $3");
-        assert_eq!(bound, Some(uid));
-    }
-
-    #[test]
-    fn owner_predicate_where_prefix() {
-        let uid = Uuid::new_v4();
-        let grant = test_grant(Some(uid), true);
-        let (clause, bound) = owner_predicate(&grant, 1, " WHERE").unwrap();
-        assert_eq!(clause, " WHERE owner_id = $1");
-        assert_eq!(bound, Some(uid));
+    fn owner_predicate_with_prefix() {
+        for (param, prefix, expected) in [
+            (3, " AND", " AND owner_id = $3"),
+            (1, " WHERE", " WHERE owner_id = $1"),
+        ] {
+            let uid = Uuid::new_v4();
+            let grant = test_grant(Some(uid), true);
+            let (clause, bound) = owner_predicate(&grant, param, prefix).unwrap();
+            assert_eq!(clause, expected, "prefix={prefix:?}");
+            assert_eq!(bound, Some(uid));
+        }
     }
 
     #[test]
