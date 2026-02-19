@@ -145,7 +145,17 @@ type QA<'q> = sqlx::query::QueryAs<'q, sqlx::Postgres, (JsonValue,), sqlx::postg
 fn bind_typed<'q>(q: QA<'q>, val: &'q JsonValue, manifest_type: Option<&String>) -> QA<'q> {
     let pg = manifest_type.map(|t| map_field_type(t));
     match val {
-        JsonValue::Null => q.bind(None::<String>),
+        JsonValue::Null => match pg {
+            Some("UUID") => q.bind(None::<Uuid>),
+            Some("DATE") => q.bind(None::<NaiveDate>),
+            Some("TIMESTAMPTZ") => q.bind(None::<DateTime<Utc>>),
+            Some("BOOLEAN") => q.bind(None::<bool>),
+            Some("DOUBLE PRECISION") => q.bind(None::<f64>),
+            Some("JSONB") => q.bind(None::<JsonValue>),
+            Some("TEXT[]") => q.bind(None::<Vec<String>>),
+            Some("DOUBLE PRECISION[]") => q.bind(None::<Vec<f64>>),
+            _ => q.bind(None::<String>),
+        },
         JsonValue::Bool(b) => q.bind(b),
         JsonValue::Number(n) => {
             if let Some(i) = n.as_i64() { q.bind(i) } else { q.bind(n.as_f64().unwrap_or(0.0)) }
