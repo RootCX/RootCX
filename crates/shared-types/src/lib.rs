@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-/// Status of the RootCX operating system, exposed to frontends.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OsStatus {
     pub runtime: RuntimeStatus,
@@ -12,7 +11,6 @@ pub struct OsStatus {
 }
 
 impl OsStatus {
-    /// Returns a status where all services are offline.
     pub fn offline() -> Self {
         Self {
             runtime: RuntimeStatus {
@@ -61,7 +59,6 @@ pub enum ServiceState {
     Error,
 }
 
-/// Root structure of an app's manifest.json.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppManifest {
@@ -81,7 +78,6 @@ fn default_version() -> String {
     "0.0.1".to_string()
 }
 
-/// One entity within an app's dataContract (e.g. "deal", "quote").
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntityContract {
@@ -89,7 +85,6 @@ pub struct EntityContract {
     pub fields: Vec<FieldContract>,
 }
 
-/// A single field definition within an entity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FieldContract {
@@ -108,14 +103,12 @@ pub struct FieldContract {
     pub is_primary_key: Option<bool>,
 }
 
-/// Foreign key reference for entity_link fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldReference {
     pub entity: String,
     pub field: String,
 }
 
-/// Summary of an installed app (returned by list_apps).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledApp {
     pub id: String,
@@ -125,9 +118,6 @@ pub struct InstalledApp {
     pub entities: Vec<String>,
 }
 
-// ── RBAC / Permissions ───────────────────────────────────────────
-
-/// Permissions contract declared in an app's manifest.json.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionsContract {
@@ -137,7 +127,6 @@ pub struct PermissionsContract {
     pub policies: Vec<PolicyRule>,
 }
 
-/// Definition of a role (optional description + hierarchy via inherits).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoleDefinition {
@@ -147,7 +136,6 @@ pub struct RoleDefinition {
     pub inherits: Vec<String>,
 }
 
-/// A single policy rule granting actions on an entity to a role.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PolicyRule {
@@ -156,4 +144,18 @@ pub struct PolicyRule {
     pub actions: Vec<String>,
     #[serde(default)]
     pub ownership: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaChange {
+    pub entity: String,
+    pub change_type: String,
+    pub column: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaVerification {
+    pub compliant: bool,
+    pub changes: Vec<SchemaChange>,
 }

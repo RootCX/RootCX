@@ -18,11 +18,9 @@ use crate::auth::identity::Identity;
 use crate::secrets::SecretManager;
 use crate::worker_manager::WorkerManager;
 use crate::Runtime;
-use rootcx_shared_types::{AppManifest, InstalledApp, OsStatus};
+use rootcx_shared_types::{AppManifest, InstalledApp, OsStatus, SchemaVerification};
 
 pub type SharedRuntime = Arc<Mutex<Runtime>>;
-
-// ── Shared helpers ────────────────────────────────────────────────
 
 pub(crate) async fn pool(rt: &SharedRuntime) -> Result<PgPool, ApiError> {
     rt.lock().await.pool().cloned().ok_or(ApiError::NotReady)
@@ -43,8 +41,6 @@ async fn pool_and_secrets(rt: &SharedRuntime) -> Result<(PgPool, Arc<SecretManag
 fn parse_uuid(id: &str) -> Result<sqlx::types::Uuid, ApiError> {
     id.parse::<sqlx::types::Uuid>().map_err(|_| ApiError::BadRequest(format!("invalid UUID: '{id}'")))
 }
-
-// ── Core routes ───────────────────────────────────────────────────
 
 pub async fn health() -> Json<JsonValue> { Json(json!({ "status": "ok" })) }
 
@@ -81,7 +77,15 @@ pub async fn uninstall_app(_identity: Identity, axum::extract::State(rt): axum::
     Ok(Json(json!({ "message": format!("app '{}' uninstalled", app_id) })))
 }
 
-// ── Re-exports ────────────────────────────────────────────────────
+pub async fn verify_schema(
+    _identity: Identity,
+    axum::extract::State(rt): axum::extract::State<SharedRuntime>,
+    Json(manifest): Json<AppManifest>,
+) -> Result<Json<SchemaVerification>, ApiError> {
+    let pool = pool(&rt).await?;
+    let pk_types = crate::manifest::build_pk_type_map(&manifest.data_contract);
+    Ok(Json(crate::schema_sync::verify_all(&pool, &manifest.app_id, &manifest.data_contract, &pk_types).await?))
+}
 
 pub use crud::{list_records, create_record, get_record, update_record, delete_record};
 pub use deploy::deploy_backend;

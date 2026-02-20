@@ -35,8 +35,10 @@ pub async fn install_app(
             .await
             .map_err(RuntimeError::Schema)?;
 
-        info!(table = %format!("{}.{}", app_id, entity.entity_name), "table created");
+        info!(table = %format!("{}.{}", app_id, entity.entity_name), "table ensured");
     }
+
+    crate::schema_sync::sync_schema(pool, app_id, &manifest.data_contract, &pk_types).await?;
 
     for ext in extensions {
         for entity in &manifest.data_contract {
@@ -95,7 +97,6 @@ fn generate_create_table(
 
     let mut columns: Vec<String> = Vec::new();
 
-    // Auto-add id if not defined
     let has_id = entity.fields.iter().any(|f| f.name == "id");
     if !has_id {
         columns.push("\"id\" UUID PRIMARY KEY DEFAULT gen_random_uuid()".to_string());
@@ -108,7 +109,6 @@ fn generate_create_table(
         columns.push(field_to_column(field, pk_types));
     }
 
-    // Always add system timestamps
     columns.push("\"created_at\" TIMESTAMPTZ NOT NULL DEFAULT now()".to_string());
     columns.push("\"updated_at\" TIMESTAMPTZ NOT NULL DEFAULT now()".to_string());
 
@@ -137,7 +137,6 @@ fn generate_foreign_keys(
             None => continue,
         };
 
-        // Skip system / cross-app references
         if refs.entity.starts_with("system.") {
             continue;
         }
@@ -152,7 +151,6 @@ fn generate_foreign_keys(
             app_id, entity.entity_name, field.name, refs.entity
         );
 
-        // FK via DO block (idempotent)
         stmts.push(format!(
             "DO $$ BEGIN \
                ALTER TABLE {} ADD CONSTRAINT {} \
@@ -165,7 +163,6 @@ fn generate_foreign_keys(
             target_table
         ));
 
-        // Index on FK column
         let idx_name = format!("idx_{}_{}_{}", app_id, entity.entity_name, field.name);
         stmts.push(format!(
             "CREATE INDEX IF NOT EXISTS {} ON {} ({})",
@@ -178,7 +175,7 @@ fn generate_foreign_keys(
     stmts
 }
 
-fn build_pk_type_map(entities: &[EntityContract]) -> HashMap<String, &'static str> {
+pub(crate) fn build_pk_type_map(entities: &[EntityContract]) -> HashMap<String, &'static str> {
     let mut map = HashMap::new();
     for entity in entities {
         let pk_field = entity.fields.iter().find(|f| {
@@ -262,7 +259,7 @@ pub fn map_field_type(field_type: &str) -> &'static str {
     }
 }
 
-fn json_to_sql_default(val: &serde_json::Value, pg_type: &str) -> Option<String> {
+pub(crate) fn json_to_sql_default(val: &serde_json::Value, pg_type: &str) -> Option<String> {
     match val {
         serde_json::Value::Null => None,
         serde_json::Value::Bool(b) => Some(b.to_string()),
@@ -278,7 +275,6 @@ fn json_to_sql_default(val: &serde_json::Value, pg_type: &str) -> Option<String>
     }
 }
 
-/// Fetch field-name → manifest-type map for an entity from the stored manifest.
 pub async fn field_type_map(pool: &PgPool, app_id: &str, entity: &str) -> Result<HashMap<String, String>, crate::RuntimeError> {
     let Some((json,)): Option<(serde_json::Value,)> = sqlx::query_as("SELECT manifest FROM rootcx_system.apps WHERE id = $1")
         .bind(app_id).fetch_optional(pool).await.map_err(crate::RuntimeError::Schema)?
@@ -330,8 +326,6 @@ mod tests {
     use rootcx_shared_types::{EntityContract, FieldContract, FieldReference};
     use serde_json::json;
 
-    // ── helpers ──────────────────────────────────────────────────────
-
     fn field(name: &str, field_type: &str) -> FieldContract {
         FieldContract {
             name: name.to_string(),
@@ -351,8 +345,6 @@ mod tests {
         }
     }
 
-    // ── quote_ident ─────────────────────────────────────────────────
-
     #[test]
     fn quote_ident_cases() {
         for (input, expected) in [
@@ -366,8 +358,6 @@ mod tests {
         }
     }
 
-    // ── json_to_sql_default ─────────────────────────────────────────
-
     #[test]
     fn json_to_sql_defaults() {
         assert_eq!(json_to_sql_default(&json!(null), "TEXT"), None);
@@ -380,8 +370,6 @@ mod tests {
         let jsonb = json_to_sql_default(&json!({"a": 1}), "JSONB").unwrap();
         assert!(jsonb.ends_with("::jsonb"), "expected ::jsonb suffix, got: {jsonb}");
     }
-
-    // ── build_pk_type_map ───────────────────────────────────────────
 
     #[test]
     fn build_pk_type_map_implicit_uuid() {
@@ -398,8 +386,6 @@ mod tests {
         let map = build_pk_type_map(&entities);
         assert_eq!(map.get("contacts"), Some(&"TEXT"));
     }
-
-    // ── field_to_column ─────────────────────────────────────────────
 
     #[test]
     fn field_to_column_simple_text() {
@@ -460,8 +446,6 @@ mod tests {
         assert!(col.contains("UUID"), "expected UUID type in: {col}");
     }
 
-    // ── generate_create_table ───────────────────────────────────────
-
     #[test]
     fn generate_create_table_structure() {
         let e = entity("contacts", vec![field("name", "text")]);
@@ -480,8 +464,6 @@ mod tests {
         assert!(ddl.contains("\"created_at\""), "expected created_at in: {ddl}");
         assert!(ddl.contains("\"updated_at\""), "expected updated_at in: {ddl}");
     }
-
-    // ── generate_foreign_keys ───────────────────────────────────────
 
     #[test]
     fn generate_foreign_keys_basic() {

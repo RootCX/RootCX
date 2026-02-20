@@ -1,5 +1,3 @@
-//! Test harness: boots an isolated Runtime (Postgres + Axum) per test.
-
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -22,6 +20,14 @@ pub struct TestRuntime {
 
 impl TestRuntime {
     pub async fn boot() -> Self {
+        Self::boot_inner(false).await
+    }
+
+    pub async fn boot_with_auth() -> Self {
+        Self::boot_inner(true).await
+    }
+
+    async fn boot_inner(require_auth: bool) -> Self {
         let pg_root = find_pg_root(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"))
             .expect("bundled PostgreSQL not found");
         let tmp = TempDir::new().unwrap();
@@ -31,7 +37,8 @@ impl TestRuntime {
 
         let pg = PostgresManager::new(pg_root.join("bin"), data_dir.join("data/pg"), pg_port)
             .with_lib_dir(pg_root.join("lib"));
-        let runtime = Arc::new(Mutex::new(Runtime::new(pg, data_dir)));
+        let auth_required = if require_auth { Some(true) } else { None };
+        let runtime = Arc::new(Mutex::new(Runtime::with_auth_mode(pg, data_dir, auth_required)));
         runtime.lock().await.boot(api_port).await.expect("boot failed");
 
         let rt = Arc::clone(&runtime);
@@ -45,21 +52,27 @@ impl TestRuntime {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        let creds = json!({"username":"testadmin","password":"testpass123"});
-        client.post(format!("{base_url}/api/v1/auth/register")).json(&creds).send().await.ok();
-        let res = client.post(format!("{base_url}/api/v1/auth/login")).json(&creds).send().await.unwrap();
-        let body: Value = res.json().await.unwrap();
-        let token = body["accessToken"].as_str().unwrap().to_string();
+        let token = if require_auth {
+            let creds = json!({"username":"testadmin","password":"testpass123"});
+            client.post(format!("{base_url}/api/v1/auth/register")).json(&creds).send().await.ok();
+            let res = client.post(format!("{base_url}/api/v1/auth/login")).json(&creds).send().await.unwrap();
+            let body: Value = res.json().await.unwrap();
+            body["accessToken"].as_str().unwrap().to_string()
+        } else {
+            String::new()
+        };
 
         Self { base_url, pg_port, client, runtime, token, _tmp: tmp }
     }
 
     pub fn url(&self, path: &str) -> String { format!("{}{path}", self.base_url) }
 
-    // ── HTTP helpers ──────────────────────────────────────────────
+    fn maybe_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if self.token.is_empty() { req } else { req.bearer_auth(&self.token) }
+    }
 
     pub async fn get(&self, path: &str) -> Response {
-        self.client.get(self.url(path)).bearer_auth(&self.token).send().await.unwrap()
+        self.maybe_auth(self.client.get(self.url(path))).send().await.unwrap()
     }
 
     pub async fn get_json(&self, path: &str) -> (StatusCode, Value) {
@@ -69,25 +82,25 @@ impl TestRuntime {
     }
 
     pub async fn post_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
-        let r = self.client.post(self.url(path)).bearer_auth(&self.token).json(body).send().await.unwrap();
+        let r = self.maybe_auth(self.client.post(self.url(path))).json(body).send().await.unwrap();
         let s = r.status();
         (s, r.json().await.unwrap_or(Value::Null))
     }
 
     pub async fn patch_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
-        let r = self.client.patch(self.url(path)).bearer_auth(&self.token).json(body).send().await.unwrap();
+        let r = self.maybe_auth(self.client.patch(self.url(path))).json(body).send().await.unwrap();
         let s = r.status();
         (s, r.json().await.unwrap_or(Value::Null))
     }
 
     pub async fn delete(&self, path: &str) -> StatusCode {
-        self.client.delete(self.url(path)).bearer_auth(&self.token).send().await.unwrap().status()
+        self.maybe_auth(self.client.delete(self.url(path))).send().await.unwrap().status()
     }
 
     pub async fn upload(&self, path: &str, name: &str, mime: &str, data: &[u8]) -> (StatusCode, Value) {
         let part = multipart::Part::bytes(data.to_vec()).file_name(name.to_string()).mime_str(mime).unwrap();
         let form = multipart::Form::new().part("file", part);
-        let r = self.client.post(self.url(path)).bearer_auth(&self.token).multipart(form).send().await.unwrap();
+        let r = self.maybe_auth(self.client.post(self.url(path))).multipart(form).send().await.unwrap();
         let s = r.status();
         (s, r.json().await.unwrap_or(Value::Null))
     }
@@ -103,8 +116,6 @@ impl TestRuntime {
     pub async fn delete_unauthed(&self, path: &str) -> StatusCode {
         self.client.delete(self.url(path)).send().await.unwrap().status()
     }
-
-    // ── Domain helpers ────────────────────────────────────────────
 
     pub async fn install(&self, app_id: &str, entity: &str) {
         let manifest = json!({

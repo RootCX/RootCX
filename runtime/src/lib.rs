@@ -6,6 +6,7 @@ mod ipc;
 mod jobs;
 mod manifest;
 mod routes;
+mod schema_sync;
 mod schema;
 mod scheduler;
 mod secrets;
@@ -45,7 +46,12 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(pg: PostgresManager, data_dir: PathBuf) -> Self {
-        let auth_config = AuthConfig::load(&data_dir).expect("failed to load auth config");
+        Self::with_auth_mode(pg, data_dir, None)
+    }
+
+    pub fn with_auth_mode(pg: PostgresManager, data_dir: PathBuf, auth_required: Option<bool>) -> Self {
+        let auth_config = AuthConfig::load(&data_dir, auth_required)
+            .expect("failed to load auth config");
         let rbac_cache = Arc::new(PolicyCache::default());
         let extensions = builtin_extensions_with_cache(
             Arc::clone(&auth_config),

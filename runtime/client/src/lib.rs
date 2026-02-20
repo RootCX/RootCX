@@ -1,4 +1,6 @@
-use rootcx_shared_types::{AppManifest, InstalledApp, OsStatus};
+use std::sync::Arc;
+
+use rootcx_shared_types::{AppManifest, InstalledApp, OsStatus, SchemaVerification};
 use serde_json::Value as JsonValue;
 
 pub mod daemon;
@@ -16,11 +18,11 @@ pub enum ClientError {
     RuntimeStart(String),
 }
 
-/// HTTP client for the RootCX Runtime daemon.
 #[derive(Clone)]
 pub struct RuntimeClient {
     base_url: String,
     client: reqwest::Client,
+    token: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 impl RuntimeClient {
@@ -28,10 +30,43 @@ impl RuntimeClient {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             client: reqwest::Client::new(),
+            token: Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
-    /// Check if the daemon is reachable.
+    pub async fn authenticate(&self, username: &str, password: &str) -> Result<(), ClientError> {
+        let creds = serde_json::json!({ "username": username, "password": password });
+
+        let _ = self
+            .client
+            .post(format!("{}/api/v1/auth/register", self.base_url))
+            .json(&creds)
+            .send()
+            .await;
+
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/auth/login", self.base_url))
+            .json(&creds)
+            .send()
+            .await?;
+        let body: JsonValue = check_response(resp).await?.json().await?;
+        let token = body["accessToken"].as_str().ok_or_else(|| ClientError::Api {
+            status: 0,
+            message: "missing accessToken in login response".into(),
+        })?;
+        *self.token.write().unwrap() = Some(token.to_string());
+        Ok(())
+    }
+
+    fn authed(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(ref t) = *self.token.read().unwrap() {
+            req.bearer_auth(t)
+        } else {
+            req
+        }
+    }
+
     pub async fn is_available(&self) -> bool {
         self.client
             .get(format!("{}/health", self.base_url))
@@ -40,21 +75,17 @@ impl RuntimeClient {
             .is_ok()
     }
 
-    /// Get the runtime status.
     pub async fn status(&self) -> Result<OsStatus, ClientError> {
         let resp = self
-            .client
-            .get(format!("{}/api/v1/status", self.base_url))
+            .authed(self.client.get(format!("{}/api/v1/status", self.base_url)))
             .send()
             .await?;
         check_response(resp).await?.json().await.map_err(Into::into)
     }
 
-    /// Install an app from a manifest.
     pub async fn install_app(&self, manifest: &AppManifest) -> Result<String, ClientError> {
         let resp = self
-            .client
-            .post(format!("{}/api/v1/apps", self.base_url))
+            .authed(self.client.post(format!("{}/api/v1/apps", self.base_url)))
             .json(manifest)
             .send()
             .await?;
@@ -62,45 +93,38 @@ impl RuntimeClient {
         Ok(body["message"].as_str().unwrap_or("ok").to_string())
     }
 
-    /// List all installed apps.
     pub async fn list_apps(&self) -> Result<Vec<InstalledApp>, ClientError> {
         let resp = self
-            .client
-            .get(format!("{}/api/v1/apps", self.base_url))
+            .authed(self.client.get(format!("{}/api/v1/apps", self.base_url)))
             .send()
             .await?;
         check_response(resp).await?.json().await.map_err(Into::into)
     }
 
-    /// Uninstall an app by ID.
     pub async fn uninstall_app(&self, app_id: &str) -> Result<(), ClientError> {
         let resp = self
-            .client
-            .delete(format!("{}/api/v1/apps/{}", self.base_url, app_id))
+            .authed(self.client.delete(format!("{}/api/v1/apps/{}", self.base_url, app_id)))
             .send()
             .await?;
         check_response(resp).await?;
         Ok(())
     }
 
-    /// List records in a collection.
     pub async fn list_records(
         &self,
         app_id: &str,
         entity: &str,
     ) -> Result<Vec<JsonValue>, ClientError> {
         let resp = self
-            .client
-            .get(format!(
+            .authed(self.client.get(format!(
                 "{}/api/v1/apps/{}/collections/{}",
                 self.base_url, app_id, entity
-            ))
+            )))
             .send()
             .await?;
         check_response(resp).await?.json().await.map_err(Into::into)
     }
 
-    /// Create a record in a collection.
     pub async fn create_record(
         &self,
         app_id: &str,
@@ -108,18 +132,16 @@ impl RuntimeClient {
         data: &JsonValue,
     ) -> Result<JsonValue, ClientError> {
         let resp = self
-            .client
-            .post(format!(
+            .authed(self.client.post(format!(
                 "{}/api/v1/apps/{}/collections/{}",
                 self.base_url, app_id, entity
-            ))
+            )))
             .json(data)
             .send()
             .await?;
         check_response(resp).await?.json().await.map_err(Into::into)
     }
 
-    /// Get a record by ID.
     pub async fn get_record(
         &self,
         app_id: &str,
@@ -127,17 +149,15 @@ impl RuntimeClient {
         id: &str,
     ) -> Result<JsonValue, ClientError> {
         let resp = self
-            .client
-            .get(format!(
+            .authed(self.client.get(format!(
                 "{}/api/v1/apps/{}/collections/{}/{}",
                 self.base_url, app_id, entity, id
-            ))
+            )))
             .send()
             .await?;
         check_response(resp).await?.json().await.map_err(Into::into)
     }
 
-    /// Update a record by ID (partial update).
     pub async fn update_record(
         &self,
         app_id: &str,
@@ -146,18 +166,16 @@ impl RuntimeClient {
         data: &JsonValue,
     ) -> Result<JsonValue, ClientError> {
         let resp = self
-            .client
-            .patch(format!(
+            .authed(self.client.patch(format!(
                 "{}/api/v1/apps/{}/collections/{}/{}",
                 self.base_url, app_id, entity, id
-            ))
+            )))
             .json(data)
             .send()
             .await?;
         check_response(resp).await?.json().await.map_err(Into::into)
     }
 
-    /// Delete a record by ID.
     pub async fn delete_record(
         &self,
         app_id: &str,
@@ -165,18 +183,27 @@ impl RuntimeClient {
         id: &str,
     ) -> Result<(), ClientError> {
         let resp = self
-            .client
-            .delete(format!(
+            .authed(self.client.delete(format!(
                 "{}/api/v1/apps/{}/collections/{}/{}",
                 self.base_url, app_id, entity, id
-            ))
+            )))
             .send()
             .await?;
         check_response(resp).await?;
         Ok(())
     }
 
-    // ── Deploy & Workers ─────────────────────────────────────
+    pub async fn verify_schema(
+        &self,
+        manifest: &AppManifest,
+    ) -> Result<SchemaVerification, ClientError> {
+        let resp = self
+            .authed(self.client.post(format!("{}/api/v1/apps/schema/verify", self.base_url)))
+            .json(manifest)
+            .send()
+            .await?;
+        check_response(resp).await?.json().await.map_err(Into::into)
+    }
 
     pub async fn deploy_app(&self, app_id: &str, archive: Vec<u8>) -> Result<String, ClientError> {
         let part = reqwest::multipart::Part::bytes(archive)
@@ -185,8 +212,10 @@ impl RuntimeClient {
             .map_err(|e| ClientError::Http(e.into()))?;
         let form = reqwest::multipart::Form::new().part("archive", part);
         let resp = self
-            .client
-            .post(format!("{}/api/v1/apps/{}/deploy", self.base_url, app_id))
+            .authed(self.client.post(format!(
+                "{}/api/v1/apps/{}/deploy",
+                self.base_url, app_id
+            )))
             .multipart(form)
             .send()
             .await?;
@@ -201,11 +230,12 @@ impl RuntimeClient {
         self.worker_action(app_id, "stop").await
     }
 
-    /// Get the status of a worker (returns status string like "running", "stopped", etc.)
     pub async fn worker_status(&self, app_id: &str) -> Result<String, ClientError> {
         let resp = self
-            .client
-            .get(format!("{}/api/v1/apps/{}/worker/status", self.base_url, app_id))
+            .authed(self.client.get(format!(
+                "{}/api/v1/apps/{}/worker/status",
+                self.base_url, app_id
+            )))
             .send()
             .await?;
         let body: JsonValue = check_response(resp).await?.json().await?;
@@ -214,8 +244,10 @@ impl RuntimeClient {
 
     async fn worker_action(&self, app_id: &str, action: &str) -> Result<String, ClientError> {
         let resp = self
-            .client
-            .post(format!("{}/api/v1/apps/{}/worker/{}", self.base_url, app_id, action))
+            .authed(self.client.post(format!(
+                "{}/api/v1/apps/{}/worker/{}",
+                self.base_url, app_id, action
+            )))
             .send()
             .await?;
         Self::extract_message(resp).await
