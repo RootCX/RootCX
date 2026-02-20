@@ -9,8 +9,13 @@ import {
 } from "@opencode-ai/sdk";
 import { invoke } from "@tauri-apps/api/core";
 
-const BASE_URL = "http://127.0.0.1:4096";
-const client = createOpencodeClient({ baseUrl: BASE_URL });
+let BASE_URL = "http://127.0.0.1:4096";
+let client = createOpencodeClient({ baseUrl: BASE_URL });
+
+export function setForgePort(port: number) {
+  BASE_URL = `http://127.0.0.1:${port}`;
+  client = createOpencodeClient({ baseUrl: BASE_URL });
+}
 
 export interface ProviderInfo {
   id: string;
@@ -378,6 +383,14 @@ export async function startForProject(projectPath: string): Promise<void> {
   startedProject = projectPath;
   try {
     await invoke("start_forge", { projectPath });
+    const status = await invoke<{ port?: number }>("get_forge_status");
+    if (status.port) {
+      setForgePort(status.port);
+      if (eventStream) {
+        eventStream = null;
+        connectEvents();
+      }
+    }
   } catch {
     startedProject = null;
   }

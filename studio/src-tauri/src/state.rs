@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::forge::{is_forge_available, ForgeManager, FORGE_PORT};
+use crate::forge::{is_forge_available, ForgeManager};
 use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
 use rootcx_runtime_client::RuntimeClient;
 use rootcx_shared_types::{ForgeStatus, OsStatus, ServiceState};
@@ -414,10 +414,11 @@ impl AppState {
             .unwrap_or_else(|_| OsStatus::offline());
 
         if let Some(ref f) = self.forge {
-            let running = f.lock().await.is_running().await;
+            let fg = f.lock().await;
+            let running = fg.is_running().await;
             status.forge = ForgeStatus {
                 state: if running { ServiceState::Online } else { ServiceState::Offline },
-                port: if running { Some(FORGE_PORT) } else { None },
+                port: if running { Some(fg.port()) } else { None },
             };
         }
         status
