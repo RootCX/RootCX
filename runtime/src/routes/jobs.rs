@@ -6,9 +6,10 @@ use axum::Json;
 use serde_json::{json, Value as JsonValue};
 
 use crate::api_error::ApiError;
+use crate::auth::identity::Identity;
 use super::{SharedRuntime, parse_uuid, pool};
 
-pub async fn enqueue_job(State(rt): State<SharedRuntime>, Path(app_id): Path<String>, Json(body): Json<JsonValue>) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
+pub async fn enqueue_job(_identity: Identity, State(rt): State<SharedRuntime>, Path(app_id): Path<String>, Json(body): Json<JsonValue>) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
     let pool = pool(&rt).await?;
     let payload = body.get("payload").cloned().unwrap_or(json!({}));
     let job_id = crate::jobs::enqueue(&pool, &app_id, payload, None).await?;

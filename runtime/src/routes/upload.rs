@@ -5,6 +5,7 @@ use serde_json::{json, Value as JsonValue};
 use tokio::io::AsyncWriteExt;
 
 use crate::api_error::ApiError;
+use crate::auth::identity::Identity;
 use super::SharedRuntime;
 
 const ALLOWED_EXTENSIONS: &[&str] = &[
@@ -12,7 +13,7 @@ const ALLOWED_EXTENSIONS: &[&str] = &[
     "svg", "xlsx", "xls", "doc", "docx", "zip", "gz", "parquet",
 ];
 
-pub async fn upload_file(State(rt): State<SharedRuntime>, Path(app_id): Path<String>, mut multipart: Multipart) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
+pub async fn upload_file(_identity: Identity, State(rt): State<SharedRuntime>, Path(app_id): Path<String>, mut multipart: Multipart) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
     let data_dir = rt.lock().await.data_dir().to_path_buf();
     let uploads_dir = data_dir.join("uploads").join(&app_id);
     tokio::fs::create_dir_all(&uploads_dir).await.map_err(|e| ApiError::Internal(e.to_string()))?;

@@ -14,6 +14,7 @@ use sqlx::PgPool;
 use tokio::sync::Mutex;
 
 use crate::api_error::ApiError;
+use crate::auth::identity::Identity;
 use crate::secrets::SecretManager;
 use crate::worker_manager::WorkerManager;
 use crate::Runtime;
@@ -51,7 +52,7 @@ pub async fn get_status(axum::extract::State(rt): axum::extract::State<SharedRun
     Ok(Json(rt.lock().await.status().await))
 }
 
-pub async fn install_app(axum::extract::State(rt): axum::extract::State<SharedRuntime>, Json(manifest): Json<AppManifest>) -> Result<Json<JsonValue>, ApiError> {
+pub async fn install_app(_identity: Identity, axum::extract::State(rt): axum::extract::State<SharedRuntime>, Json(manifest): Json<AppManifest>) -> Result<Json<JsonValue>, ApiError> {
     let g = rt.lock().await;
     let pool = g.pool().cloned().ok_or(ApiError::NotReady)?;
     crate::manifest::install_app(&pool, &manifest, g.extensions()).await?;
@@ -73,7 +74,7 @@ pub async fn list_apps(axum::extract::State(rt): axum::extract::State<SharedRunt
     }).collect()))
 }
 
-pub async fn uninstall_app(axum::extract::State(rt): axum::extract::State<SharedRuntime>, axum::extract::Path(app_id): axum::extract::Path<String>) -> Result<Json<JsonValue>, ApiError> {
+pub async fn uninstall_app(_identity: Identity, axum::extract::State(rt): axum::extract::State<SharedRuntime>, axum::extract::Path(app_id): axum::extract::Path<String>) -> Result<Json<JsonValue>, ApiError> {
     if let Ok(w) = wm(&rt).await { let _ = w.stop_app(&app_id).await; }
     let pool = pool(&rt).await?;
     crate::manifest::uninstall_app(&pool, &app_id).await?;
