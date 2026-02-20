@@ -1,7 +1,6 @@
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-pub fn run(home: PathBuf, pg_root: PathBuf) {
+pub fn run(home: PathBuf, pg_root: PathBuf, bun_bin: PathBuf) {
     let bin_dir = home.join("bin");
     let res_dir = home.join("resources");
     let log_dir = home.join("logs");
@@ -28,9 +27,18 @@ pub fn run(home: PathBuf, pg_root: PathBuf) {
     }
     copy_recursive(&pg_root, &pg_dest).expect("failed to copy PG resources");
 
+    let bun_dest = res_dir.join("bun");
+    std::fs::copy(&bun_bin, &bun_dest).expect("failed to copy Bun binary");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&bun_dest, std::fs::Permissions::from_mode(0o755));
+    }
+
     println!("Installed to {}", home.display());
     println!("  binary:   {}", target.display());
     println!("  postgres: {}", pg_dest.display());
+    println!("  bun:      {}", bun_dest.display());
     println!("  logs:     {}", log_dir.display());
 }
 
