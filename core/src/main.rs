@@ -15,29 +15,42 @@ fn rootcx_home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").expect("HOME not set")).join(".rootcx")
 }
 
-/// Scan `dir` for a subdirectory containing `bin/pg_ctl`.
-fn find_pg_root(dir: &std::path::Path) -> Option<PathBuf> {
-    std::fs::read_dir(dir).ok()?.flatten().find_map(|e| {
-        let p = e.path();
-        p.is_dir().then(|| p.join("bin/pg_ctl").exists().then_some(p)).flatten()
-    })
-}
-
-/// Resolve PG resources: $ROOTCX_PG_RESOURCES → exe-relative → CARGO_MANIFEST_DIR.
-fn resolve_pg_root() -> PathBuf {
+/// Search candidate paths, return first match. Panics with `label` if none found.
+fn resolve_resource(env_var: &str, suffix: &str, check: fn(&PathBuf) -> bool, label: &str) -> PathBuf {
     let candidates: Vec<PathBuf> = std::iter::empty()
-        .chain(std::env::var("ROOTCX_PG_RESOURCES").ok().map(PathBuf::from))
-        .chain(std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("../resources"))))
-        .chain(std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("resources"))))
-        .chain(Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources")))
+        .chain(std::env::var(env_var).ok().map(PathBuf::from))
+        .chain(std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("../resources").join(suffix))))
+        .chain(std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("resources").join(suffix))))
+        .chain(Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join(suffix)))
         .collect();
 
-    for dir in &candidates {
-        if let Some(found) = find_pg_root(dir) {
-            return found;
+    for p in &candidates {
+        if check(p) {
+            return p.clone();
         }
     }
-    panic!("bundled PostgreSQL not found in any search path");
+    panic!("bundled {label} not found in any search path");
+}
+
+fn resolve_pg_root() -> PathBuf {
+    // PG is a directory with a bin/pg_ctl inside; scan for the first matching subdir
+    let resources = resolve_resource("ROOTCX_PG_RESOURCES", "", |p| p.is_dir(), "PostgreSQL resources dir");
+    std::fs::read_dir(&resources)
+        .ok()
+        .and_then(|rd| {
+            rd.flatten().find_map(|e| {
+                let p = e.path();
+                (p.is_dir() && p.join("bin/pg_ctl").exists()).then_some(p)
+            })
+        })
+        .unwrap_or_else(|| {
+            // env override points directly to a pg root
+            if resources.join("bin/pg_ctl").exists() { resources } else { panic!("bundled PostgreSQL not found") }
+        })
+}
+
+fn resolve_bun_bin() -> PathBuf {
+    resolve_resource("ROOTCX_BUN_BIN", "bun", |p| p.is_file(), "Bun")
 }
 
 fn pid_path() -> PathBuf {
@@ -47,7 +60,7 @@ fn pid_path() -> PathBuf {
 #[tokio::main]
 async fn main() {
     if std::env::args().nth(1).as_deref() == Some("install") {
-        install::run(rootcx_home(), resolve_pg_root());
+        install::run(rootcx_home(), resolve_pg_root(), resolve_bun_bin());
         return;
     }
 
@@ -58,12 +71,13 @@ async fn main() {
         .init();
 
     let pg_root = resolve_pg_root();
+    let bun_bin = resolve_bun_bin();
     let data_dir = data_base_dir().expect("failed to resolve data dir");
 
     let pg =
         PostgresManager::new(pg_root.join("bin"), data_dir.join("data/pg"), PG_PORT).with_lib_dir(pg_root.join("lib"));
 
-    let runtime = Arc::new(Mutex::new(Runtime::new(pg, data_dir)));
+    let runtime = Arc::new(Mutex::new(Runtime::new(pg, data_dir, bun_bin)));
 
     {
         let mut rt = runtime.lock().await;

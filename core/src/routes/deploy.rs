@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Stdio;
 
 use axum::Json;
@@ -5,7 +6,7 @@ use axum::extract::{Multipart, Path as AxumPath, State};
 use serde_json::{Value as JsonValue, json};
 use tracing::info;
 
-use super::{SharedRuntime, pool_and_secrets, wm};
+use super::SharedRuntime;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 
@@ -16,7 +17,15 @@ pub async fn deploy_backend(
     AxumPath(app_id): AxumPath<String>,
     mut multipart: Multipart,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let app_dir = rt.lock().await.data_dir().join("apps").join(&app_id);
+    let (app_dir, bun_bin, pool, secrets, wm) = {
+        let g = rt.lock().await;
+        let app_dir = g.data_dir().join("apps").join(&app_id);
+        let bun_bin = g.bun_bin().to_path_buf();
+        let pool = g.pool().cloned().ok_or(ApiError::NotReady)?;
+        let secrets = g.secret_manager().cloned().ok_or(ApiError::NotReady)?;
+        let wm = g.worker_manager().cloned().ok_or(ApiError::NotReady)?;
+        (app_dir, bun_bin, pool, secrets, wm)
+    };
 
     let mut field = multipart
         .next_field()
@@ -45,11 +54,10 @@ pub async fn deploy_backend(
     info!(app_id = %app_id, dir = %app_dir.display(), "backend deployed");
 
     if app_dir.join("package.json").exists() {
-        install_deps(&app_dir).await?;
+        install_deps(&bun_bin, &app_dir).await?;
     }
 
-    let (pool, secrets) = pool_and_secrets(&rt).await?;
-    let w = wm(&rt).await?;
+    let w = wm;
     let _ = w.stop_app(&app_id).await;
     w.start_app(&pool, &secrets, &app_id).await?;
 
@@ -70,28 +78,22 @@ fn safe_unpack(bytes: &[u8], dest: &std::path::Path) -> Result<(), ApiError> {
     Ok(())
 }
 
-async fn install_deps(dir: &std::path::Path) -> Result<(), ApiError> {
-    let bin = if which("bun") { "bun" } else { "npm" };
-    info!(bin, dir = %dir.display(), "installing dependencies");
-    let out = tokio::process::Command::new(bin)
+async fn install_deps(bun_bin: &Path, dir: &Path) -> Result<(), ApiError> {
+    info!(bin = %bun_bin.display(), dir = %dir.display(), "installing dependencies");
+    let out = tokio::process::Command::new(bun_bin)
         .arg("install")
         .current_dir(dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
         .await
-        .map_err(|e| ApiError::Internal(format!("{bin} install: {e}")))?;
+        .map_err(|e| ApiError::Internal(format!("{} install: {e}", bun_bin.display())))?;
     if !out.status.success() {
-        return Err(ApiError::Internal(format!("{bin} install: {}", String::from_utf8_lossy(&out.stderr))));
+        return Err(ApiError::Internal(format!(
+            "{} install: {}",
+            bun_bin.display(),
+            String::from_utf8_lossy(&out.stderr)
+        )));
     }
     Ok(())
-}
-
-fn which(bin: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(bin)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
 }

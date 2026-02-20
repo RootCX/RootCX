@@ -28,8 +28,9 @@ impl TestRuntime {
     }
 
     async fn boot_inner(require_auth: bool) -> Self {
-        let pg_root = find_pg_root(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources"))
-            .expect("bundled PostgreSQL not found");
+        let resources = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+        let pg_root = find_pg_root(&resources).expect("bundled PostgreSQL not found");
+        let bun_bin = resolve_bun_bin(&resources);
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().to_path_buf();
         let pg_port = free_port();
@@ -38,7 +39,7 @@ impl TestRuntime {
         let pg = PostgresManager::new(pg_root.join("bin"), data_dir.join("data/pg"), pg_port)
             .with_lib_dir(pg_root.join("lib"));
         let auth_required = if require_auth { Some(true) } else { None };
-        let runtime = Arc::new(Mutex::new(Runtime::with_auth_mode(pg, data_dir, auth_required)));
+        let runtime = Arc::new(Mutex::new(Runtime::with_auth_mode(pg, data_dir, bun_bin, auth_required)));
         runtime.lock().await.boot(api_port).await.expect("boot failed");
 
         let rt = Arc::clone(&runtime);
@@ -168,4 +169,10 @@ fn find_pg_root(dir: &std::path::Path) -> Option<PathBuf> {
         let p = e.path();
         (p.is_dir() && p.join("bin/pg_ctl").exists()).then_some(p)
     })
+}
+
+fn resolve_bun_bin(resources: &std::path::Path) -> PathBuf {
+    let candidate = resources.join("bun");
+    assert!(candidate.is_file(), "bundled Bun not found at {}", candidate.display());
+    candidate
 }

@@ -42,14 +42,20 @@ pub struct Runtime {
     worker_manager: Option<Arc<WorkerManager>>,
     scheduler: Option<SchedulerHandle>,
     data_dir: PathBuf,
+    bun_bin: PathBuf,
 }
 
 impl Runtime {
-    pub fn new(pg: PostgresManager, data_dir: PathBuf) -> Self {
-        Self::with_auth_mode(pg, data_dir, None)
+    pub fn new(pg: PostgresManager, data_dir: PathBuf, bun_bin: PathBuf) -> Self {
+        Self::with_auth_mode(pg, data_dir, bun_bin, None)
     }
 
-    pub fn with_auth_mode(pg: PostgresManager, data_dir: PathBuf, auth_required: Option<bool>) -> Self {
+    pub fn with_auth_mode(
+        pg: PostgresManager,
+        data_dir: PathBuf,
+        bun_bin: PathBuf,
+        auth_required: Option<bool>,
+    ) -> Self {
         let auth_config = AuthConfig::load(&data_dir, auth_required).expect("failed to load auth config");
         let rbac_cache = Arc::new(PolicyCache::default());
         let extensions = builtin_extensions_with_cache(Arc::clone(&auth_config), Arc::clone(&rbac_cache));
@@ -64,6 +70,7 @@ impl Runtime {
             worker_manager: None,
             scheduler: None,
             data_dir,
+            bun_bin,
         }
     }
 
@@ -88,7 +95,7 @@ impl Runtime {
         let apps_dir = self.data_dir.join("apps");
         std::fs::create_dir_all(&apps_dir).map_err(|e| RuntimeError::Worker(format!("create apps dir: {e}")))?;
         let runtime_url = format!("http://127.0.0.1:{api_port}");
-        let wm = Arc::new(WorkerManager::new(apps_dir, runtime_url));
+        let wm = Arc::new(WorkerManager::new(apps_dir, runtime_url, self.bun_bin.clone()));
         self.scheduler = Some(scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm)));
         self.worker_manager = Some(wm);
 
@@ -161,6 +168,10 @@ impl Runtime {
 
     pub fn scheduler_wake(&self) -> Option<&Arc<tokio::sync::Notify>> {
         self.scheduler.as_ref().map(|s| &s.wake)
+    }
+
+    pub fn bun_bin(&self) -> &std::path::Path {
+        &self.bun_bin
     }
 
     pub fn data_dir(&self) -> &std::path::Path {

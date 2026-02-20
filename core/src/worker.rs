@@ -62,6 +62,7 @@ pub struct WorkerConfig {
     pub env: HashMap<String, String>,
     pub runtime_url: String,
     pub pool: PgPool,
+    pub js_runtime: PathBuf,
 }
 
 #[derive(Clone)]
@@ -365,8 +366,8 @@ async fn kill_child(child: &mut Option<AsyncGroupChild>) {
 async fn spawn_worker(
     config: &WorkerConfig,
 ) -> Result<(AsyncGroupChild, IpcWriter, IpcReader, tokio::process::ChildStderr), RuntimeError> {
-    let bin = which_runtime();
-    info!(app_id = %config.app_id, bin, entry = %config.entry_point.display(), "spawning worker");
+    let bin = &config.js_runtime;
+    info!(app_id = %config.app_id, bin = %bin.display(), entry = %config.entry_point.display(), "spawning worker");
 
     let mut cmd = Command::new(bin);
     cmd.arg(&config.entry_point)
@@ -392,24 +393,6 @@ async fn spawn_worker(
 
 fn backoff_delay(restart_count: u32) -> Duration {
     if restart_count <= 1 { Duration::ZERO } else { BACKOFF_BASE * 2u32.saturating_pow(restart_count - 2) }
-}
-
-fn which_runtime() -> &'static str {
-    static BIN: std::sync::OnceLock<&str> = std::sync::OnceLock::new();
-    BIN.get_or_init(|| {
-        for bin in ["bun", "node"] {
-            if std::process::Command::new("which")
-                .arg(bin)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .is_ok_and(|s| s.success())
-            {
-                return bin;
-            }
-        }
-        "bun"
-    })
 }
 
 #[cfg(test)]
