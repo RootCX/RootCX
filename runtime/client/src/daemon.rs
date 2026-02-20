@@ -13,15 +13,15 @@ fn rootcx_home() -> PathBuf {
 }
 
 fn is_healthy() -> bool {
-    reqwest::blocking::get(HEALTH_URL)
-        .map(|r| r.status().is_success())
-        .unwrap_or(false)
+    reqwest::blocking::get(HEALTH_URL).map(|r| r.status().is_success()).unwrap_or(false)
 }
 
 fn poll_health(timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if is_healthy() { return true; }
+        if is_healthy() {
+            return true;
+        }
         std::thread::sleep(POLL_INTERVAL);
     }
     false
@@ -33,18 +33,16 @@ fn process_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(unix))]
-fn process_alive(_pid: u32) -> bool { false }
+fn process_alive(_pid: u32) -> bool {
+    false
+}
 
 fn read_pid() -> Option<u32> {
-    std::fs::read_to_string(rootcx_home().join("runtime.pid"))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+    std::fs::read_to_string(rootcx_home().join("runtime.pid")).ok()?.trim().parse().ok()
 }
 
 fn runtime_binary() -> Option<PathBuf> {
-    let bin = rootcx_home().join("bin/rootcx-runtime");
+    let bin = rootcx_home().join("bin/rootcx-core");
     bin.exists().then_some(bin)
 }
 
@@ -52,25 +50,28 @@ fn err(msg: impl Into<String>) -> ClientError {
     ClientError::RuntimeStart(msg.into())
 }
 
-/// Ensure the RootCX Runtime daemon is running.
-/// Checks health, then PID liveness, then spawns if needed.
 pub fn ensure_runtime() -> Result<(), ClientError> {
-    if is_healthy() { return Ok(()); }
-
-    if let Some(pid) = read_pid() {
-        if process_alive(pid) {
-            return if poll_health(EXISTING_TIMEOUT) { Ok(()) }
-            else { Err(err(format!("process {pid} alive but not healthy after {EXISTING_TIMEOUT:?}"))) };
-        }
+    if is_healthy() {
+        return Ok(());
     }
 
-    let binary = runtime_binary()
-        .ok_or_else(|| err("~/.rootcx/bin/rootcx-runtime not found — run `rootcx-runtime install`"))?;
+    if let Some(pid) = read_pid()
+        && process_alive(pid) {
+            return if poll_health(EXISTING_TIMEOUT) {
+                Ok(())
+            } else {
+                Err(err(format!("process {pid} alive but not healthy after {EXISTING_TIMEOUT:?}")))
+            };
+        }
+
+    let binary =
+        runtime_binary().ok_or_else(|| err("~/.rootcx/bin/rootcx-core not found — run `rootcx-core install`"))?;
 
     let log_dir = rootcx_home().join("logs");
     let _ = std::fs::create_dir_all(&log_dir);
     let log = std::fs::OpenOptions::new()
-        .create(true).append(true)
+        .create(true)
+        .append(true)
         .open(log_dir.join("runtime.log"))
         .map_err(|e| err(format!("log file: {e}")))?;
 
@@ -81,6 +82,5 @@ pub fn ensure_runtime() -> Result<(), ClientError> {
         .spawn()
         .map_err(|e| err(format!("spawn: {e}")))?;
 
-    if poll_health(SPAWN_TIMEOUT) { Ok(()) }
-    else { Err(err(format!("not healthy within {SPAWN_TIMEOUT:?}"))) }
+    if poll_health(SPAWN_TIMEOUT) { Ok(()) } else { Err(err(format!("not healthy within {SPAWN_TIMEOUT:?}"))) }
 }

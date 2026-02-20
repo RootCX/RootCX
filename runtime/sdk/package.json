@@ -1,7 +1,7 @@
 {
   "name": "@rootcx/runtime",
   "version": "0.1.0",
-  "description": "RootCX Runtime SDK — React hooks for app collections backed by the Runtime daemon",
+  "description": "RootCX Core SDK — React hooks for app collections backed by the Core daemon",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

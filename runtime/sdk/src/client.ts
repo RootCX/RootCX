@@ -1,9 +1,3 @@
-/**
- * Low-level HTTP client for the RootCX Runtime daemon.
- *
- * All methods talk to `http://localhost:{port}/api/v1/...`.
- */
-
 export interface RuntimeClientOptions {
   baseUrl?: string;
 }
@@ -63,12 +57,6 @@ export interface RegisterInput {
   displayName?: string;
 }
 
-export interface RpcCaller {
-  userId: string;
-  username: string;
-}
-
-// ── RBAC types ─────────────────────────────────────
 
 export interface RoleDefinition {
   name: string;
@@ -117,7 +105,6 @@ export class RuntimeClient {
     return this.refreshToken;
   }
 
-  // ── Health ──────────────────────────────────────────
 
   async isAvailable(): Promise<boolean> {
     try {
@@ -137,7 +124,6 @@ export class RuntimeClient {
     throw new RuntimeApiError(0, `Runtime not ready after ${timeoutMs}ms`);
   }
 
-  // ── Status ──────────────────────────────────────────
 
   async status(): Promise<OsStatus> {
     const res = await fetch(`${this.baseUrl}/api/v1/status`);
@@ -145,7 +131,6 @@ export class RuntimeClient {
     return res.json();
   }
 
-  // ── Apps management ─────────────────────────────────
 
   async installApp(manifest: AppManifest): Promise<{ message: string }> {
     const res = await fetch(`${this.baseUrl}/api/v1/apps`, {
@@ -171,7 +156,6 @@ export class RuntimeClient {
     return res.json();
   }
 
-  // ── Collections CRUD ────────────────────────────────
 
   async listRecords<T = Record<string, unknown>>(
     appId: string,
@@ -236,7 +220,6 @@ export class RuntimeClient {
     return res.json();
   }
 
-  // ── RPC ────────────────────────────────────────────
 
   async rpc(appId: string, method: string, params?: Record<string, unknown>): Promise<unknown> {
     const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/rpc`, {
@@ -248,7 +231,6 @@ export class RuntimeClient {
     return res.json();
   }
 
-  // ── Auth ───────────────────────────────────────────
 
   async register(data: RegisterInput): Promise<{ user: AuthUser }> {
     const res = await fetch(`${this.baseUrl}/api/v1/auth/register`, {
@@ -297,9 +279,7 @@ export class RuntimeClient {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ refreshToken: this.refreshToken }),
         });
-      } catch {
-        // best-effort
-      }
+      } catch { /* ignore */ }
     }
     this.accessToken = null;
     this.refreshToken = null;
@@ -311,7 +291,6 @@ export class RuntimeClient {
     return res.json();
   }
 
-  // ── RBAC ─────────────────────────────────────────
 
   async listRoles(appId: string): Promise<RoleDefinition[]> {
     const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/roles`);

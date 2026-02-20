@@ -3670,17 +3670,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rootcx-postgres-mgmt"
-version = "0.1.0"
-dependencies = [
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "rootcx-runtime"
+name = "rootcx-core"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
@@ -3712,7 +3702,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "rootcx-runtime-client"
+name = "rootcx-postgres-mgmt"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rootcx-runtime"
 version = "0.1.0"
 dependencies = [
  "libc",
@@ -3741,7 +3741,7 @@ dependencies = [
  "notify-debouncer-mini",
  "portable-pty",
  "reqwest 0.12.28",
- "rootcx-runtime-client",
+ "rootcx-runtime",
  "rootcx-shared-types",
  "serde",
  "serde_json",

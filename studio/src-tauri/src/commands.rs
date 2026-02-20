@@ -1,6 +1,6 @@
 use rootcx_shared_types::OsStatus;
 use serde::Serialize;
-use tauri::{ipc::Channel, State};
+use tauri::{State, ipc::Channel};
 use tokio::sync::Mutex;
 
 use crate::menu::ViewMenuItems;
@@ -41,9 +41,7 @@ pub async fn save_forge_config(
     contents: String,
     project_path: Option<String>,
 ) -> Result<(), String> {
-    state
-        .save_forge_config(&contents, project_path.as_deref())
-        .await
+    state.save_forge_config(&contents, project_path.as_deref()).await
 }
 
 #[derive(Serialize)]
@@ -57,9 +55,7 @@ pub struct DirEntry {
 pub async fn read_dir(path: String) -> Result<Vec<DirEntry>, String> {
     validate_fs_path(&path)?;
     let mut entries = Vec::new();
-    let mut rd = tokio::fs::read_dir(&path)
-        .await
-        .map_err(|e| format!("failed to read directory: {e}"))?;
+    let mut rd = tokio::fs::read_dir(&path).await.map_err(|e| format!("failed to read directory: {e}"))?;
 
     while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -67,11 +63,7 @@ pub async fn read_dir(path: String) -> Result<Vec<DirEntry>, String> {
             continue;
         }
         let metadata = entry.metadata().await.map_err(|e| e.to_string())?;
-        entries.push(DirEntry {
-            name,
-            path: entry.path().to_string_lossy().to_string(),
-            is_dir: metadata.is_dir(),
-        });
+        entries.push(DirEntry { name, path: entry.path().to_string_lossy().to_string(), is_dir: metadata.is_dir() });
     }
 
     entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase()));
@@ -116,7 +108,9 @@ fn normalize_lexical(path: &std::path::Path) -> std::path::PathBuf {
     let mut out = PathBuf::new();
     for comp in path.components() {
         match comp {
-            Component::ParentDir => { out.pop(); }
+            Component::ParentDir => {
+                out.pop();
+            }
             Component::CurDir => {}
             _ => out.push(comp),
         }
@@ -127,25 +121,19 @@ fn normalize_lexical(path: &std::path::Path) -> std::path::PathBuf {
 #[tauri::command]
 pub async fn read_file(path: String) -> Result<String, String> {
     validate_fs_path(&path)?;
-    tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|e| format!("failed to read file: {e}"))
+    tokio::fs::read_to_string(&path).await.map_err(|e| format!("failed to read file: {e}"))
 }
 
 #[tauri::command]
 pub async fn write_file(path: String, contents: String) -> Result<(), String> {
     validate_fs_path(&path)?;
-    tokio::fs::write(&path, contents.as_bytes())
-        .await
-        .map_err(|e| format!("failed to write file: {e}"))
+    tokio::fs::write(&path, contents.as_bytes()).await.map_err(|e| format!("failed to write file: {e}"))
 }
 
 #[tauri::command]
 pub async fn ensure_dir(path: String) -> Result<(), String> {
     validate_fs_path(&path)?;
-    tokio::fs::create_dir_all(&path)
-        .await
-        .map_err(|e| format!("failed to create directory: {e}"))
+    tokio::fs::create_dir_all(&path).await.map_err(|e| format!("failed to create directory: {e}"))
 }
 
 #[tauri::command]
@@ -157,18 +145,12 @@ pub async fn verify_schema(
 }
 
 #[tauri::command]
-pub async fn sync_manifest(
-    state: State<'_, AppState>,
-    project_path: String,
-) -> Result<(), String> {
+pub async fn sync_manifest(state: State<'_, AppState>, project_path: String) -> Result<(), String> {
     state.sync_manifest(&project_path).await
 }
 
 #[tauri::command]
-pub async fn deploy_backend(
-    state: State<'_, AppState>,
-    project_path: String,
-) -> Result<String, String> {
+pub async fn deploy_backend(state: State<'_, AppState>, project_path: String) -> Result<String, String> {
     state.deploy_and_watch(&project_path).await
 }
 
@@ -260,19 +242,12 @@ pub async fn spawn_terminal(
 }
 
 #[tauri::command]
-pub async fn terminal_write(
-    data: String,
-    state: State<'_, Mutex<TerminalState>>,
-) -> Result<(), String> {
+pub async fn terminal_write(data: String, state: State<'_, Mutex<TerminalState>>) -> Result<(), String> {
     state.lock().await.write(data.as_bytes()).await
 }
 
 #[tauri::command]
-pub async fn terminal_resize(
-    rows: u16,
-    cols: u16,
-    state: State<'_, Mutex<TerminalState>>,
-) -> Result<(), String> {
+pub async fn terminal_resize(rows: u16, cols: u16, state: State<'_, Mutex<TerminalState>>) -> Result<(), String> {
     state.lock().await.resize(rows, cols).await
 }
 

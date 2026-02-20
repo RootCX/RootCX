@@ -32,12 +32,7 @@ impl PostgresManager {
 
     /// Create a manager with explicit paths (used by Tauri).
     pub fn new(bin_dir: PathBuf, data_dir: PathBuf, port: u16) -> Self {
-        Self {
-            bin_dir,
-            lib_dir: None,
-            data_dir,
-            port,
-        }
+        Self { bin_dir, lib_dir: None, data_dir, port }
     }
 
     /// Set the bundled dylib directory. Enables DYLD_LIBRARY_PATH injection.
@@ -65,10 +60,7 @@ impl PostgresManager {
 
         tokio::fs::create_dir_all(&self.data_dir)
             .await
-            .map_err(|e| PgError::InitDb {
-                data_dir: self.data_dir.clone(),
-                source: e,
-            })?;
+            .map_err(|e| PgError::InitDb { data_dir: self.data_dir.clone(), source: e })?;
 
         info!(data_dir = %self.data_dir.display(), "running initdb");
 
@@ -82,10 +74,7 @@ impl PostgresManager {
             .arg("--auth=trust")
             .output()
             .await
-            .map_err(|e| PgError::InitDb {
-                data_dir: self.data_dir.clone(),
-                source: e,
-            })?;
+            .map_err(|e| PgError::InitDb { data_dir: self.data_dir.clone(), source: e })?;
 
         if !output.status.success() {
             return Err(PgError::InitDbFailed {
@@ -167,13 +156,7 @@ impl PostgresManager {
 
     /// Check if the postmaster PID file exists and the process is alive.
     pub async fn is_running(&self) -> bool {
-        let output = self
-            .pg_command("pg_ctl")
-            .arg("status")
-            .arg("-D")
-            .arg(&self.data_dir)
-            .output()
-            .await;
+        let output = self.pg_command("pg_ctl").arg("status").arg("-D").arg(&self.data_dir).output().await;
 
         match output {
             Ok(o) => o.status.success(),
@@ -216,10 +199,7 @@ pub fn data_base_dir() -> Result<PathBuf, PgError> {
     #[cfg(target_os = "macos")]
     {
         if let Some(home) = std::env::var_os("HOME") {
-            return Ok(PathBuf::from(home)
-                .join("Library")
-                .join("Application Support")
-                .join("RootCX"));
+            return Ok(PathBuf::from(home).join("Library").join("Application Support").join("RootCX"));
         }
     }
 
@@ -229,10 +209,7 @@ pub fn data_base_dir() -> Result<PathBuf, PgError> {
             return Ok(PathBuf::from(xdg).join("RootCX"));
         }
         if let Some(home) = std::env::var_os("HOME") {
-            return Ok(PathBuf::from(home)
-                .join(".local")
-                .join("share")
-                .join("RootCX"));
+            return Ok(PathBuf::from(home).join(".local").join("share").join("RootCX"));
         }
     }
 

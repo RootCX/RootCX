@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::sync::Arc;
 
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::Mutex;
 
 #[derive(Default)]
@@ -22,9 +22,7 @@ impl TerminalState {
         self.master = None;
 
         let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
-        let pair = native_pty_system()
-            .openpty(size)
-            .map_err(|e| e.to_string())?;
+        let pair = native_pty_system().openpty(size).map_err(|e| e.to_string())?;
 
         let mut cmd = CommandBuilder::new_default_prog();
         if let Some(dir) = cwd {
@@ -40,7 +38,6 @@ impl TerminalState {
         self.writer = Some(Arc::new(Mutex::new(writer)));
         self.master = Some(Arc::new(Mutex::new(pair.master)));
 
-        // Background read loop → Channel
         tokio::task::spawn_blocking(move || {
             let mut buf = [0u8; 4096];
             loop {
@@ -67,10 +64,6 @@ impl TerminalState {
 
     pub async fn resize(&self, rows: u16, cols: u16) -> Result<(), String> {
         let master = self.master.as_ref().ok_or("no terminal session")?;
-        master
-            .lock()
-            .await
-            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-            .map_err(|e| e.to_string())
+        master.lock().await.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).map_err(|e| e.to_string())
     }
 }

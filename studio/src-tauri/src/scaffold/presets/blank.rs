@@ -28,10 +28,7 @@ impl Preset for BlankPreset {
                 label: "Include role-based permissions?".into(),
                 question_type: QuestionType::Bool,
                 default: Some(AnswerValue::Bool(false)),
-                depends_on: Some(DependsOn {
-                    key: "auth".into(),
-                    equals: AnswerValue::Bool(true),
-                }),
+                depends_on: Some(DependsOn { key: "auth".into(), equals: AnswerValue::Bool(true) }),
             },
             Question {
                 key: "backend".into(),
@@ -47,11 +44,8 @@ impl Preset for BlankPreset {
         let auth = matches!(answers.get("auth"), Some(AnswerValue::Bool(true)) | None);
         let backend = matches!(answers.get("backend"), Some(AnswerValue::Bool(true)) | None);
 
-        let mut layers: Vec<Box<dyn Layer>> = vec![
-            Box::new(CoreLayer),
-            Box::new(TauriLayer),
-            Box::new(AuthLayer { include_auth: auth }),
-        ];
+        let mut layers: Vec<Box<dyn Layer>> =
+            vec![Box::new(CoreLayer), Box::new(TauriLayer), Box::new(AuthLayer { include_auth: auth })];
         if backend {
             layers.push(Box::new(BackendLayer));
         }
