@@ -42,14 +42,10 @@ pub async fn deploy_backend(
         .map_err(|e| ApiError::Internal(format!("create app dir: {e}")))?;
 
     let dir = app_dir.clone();
-    tokio::task::spawn_blocking(move || {
-        tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]))
-            .unpack(&dir)
-            .map_err(|e| ApiError::Internal(format!("extract archive: {e}")))
-    })
-    .await
-    .map_err(|e| ApiError::Internal(format!("extract task: {e}")))?
-    ?;
+    tokio::task::spawn_blocking(move || safe_unpack(&bytes, &dir))
+        .await
+        .map_err(|e| ApiError::Internal(format!("extract task: {e}")))?
+        ?;
 
     info!(app_id = %app_id, dir = %app_dir.display(), "backend deployed");
 
@@ -63,6 +59,20 @@ pub async fn deploy_backend(
     w.start_app(&pool, &secrets, &app_id).await?;
 
     Ok(Json(json!({ "message": format!("app '{app_id}' deployed and started") })))
+}
+
+fn safe_unpack(bytes: &[u8], dest: &std::path::Path) -> Result<(), ApiError> {
+    let tar_err = |e| ApiError::Internal(format!("extract archive: {e}"));
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(bytes));
+    for entry in archive.entries().map_err(tar_err)? {
+        let mut entry = entry.map_err(tar_err)?;
+        let path = entry.path().map_err(tar_err)?;
+        if path.is_absolute() || path.components().any(|c| c == std::path::Component::ParentDir) {
+            return Err(ApiError::BadRequest(format!("unsafe archive entry: {}", path.display())));
+        }
+        entry.unpack_in(dest).map_err(tar_err)?;
+    }
+    Ok(())
 }
 
 async fn install_deps(dir: &std::path::Path) -> Result<(), ApiError> {

@@ -5,13 +5,22 @@ mod harness;
 use harness::TestRuntime;
 use serde_json::{json, Value};
 
-/// Build a tar.gz archive in memory from a list of (path, contents) pairs.
 fn make_tar_gz(files: &[(&str, &[u8])]) -> Vec<u8> {
+    make_tar_gz_raw(files, false)
+}
+
+fn make_tar_gz_raw(files: &[(&str, &[u8])], allow_unsafe: bool) -> Vec<u8> {
     let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     let mut tar = tar::Builder::new(enc);
     for &(name, data) in files {
         let mut header = tar::Header::new_gnu();
-        header.set_path(name).unwrap();
+        if allow_unsafe {
+            // Write path bytes directly to bypass tar crate's path validation
+            let name_bytes = name.as_bytes();
+            header.as_gnu_mut().unwrap().name[..name_bytes.len()].copy_from_slice(name_bytes);
+        } else {
+            header.set_path(name).unwrap();
+        }
         header.set_size(data.len() as u64);
         header.set_mode(0o644);
         header.set_cksum();
@@ -553,6 +562,28 @@ async fn deploy_valid_archive() {
     let (s, body) = rt.deploy("dep-ok", &archive).await;
     assert_eq!(s, 200);
     assert!(body["message"].as_str().unwrap().contains("deployed and started"));
+    rt.shutdown().await;
+}
+
+// ── Security: Deploy path traversal ────────────────────────────
+
+#[tokio::test]
+async fn deploy_rejects_path_traversal() {
+    let rt = TestRuntime::boot().await;
+    let archive = make_tar_gz_raw(&[("../../../etc/evil.txt", b"pwned")], true);
+    let (s, body) = rt.deploy("dep-traversal", &archive).await;
+    assert!(s == 400, "expected 400, got {s}: {body}");
+    assert!(body["error"].as_str().unwrap().contains("unsafe archive entry"));
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn deploy_rejects_absolute_path() {
+    let rt = TestRuntime::boot().await;
+    let archive = make_tar_gz_raw(&[("/tmp/evil.txt", b"pwned")], true);
+    let (s, body) = rt.deploy("dep-abs", &archive).await;
+    assert!(s == 400, "expected 400, got {s}: {body}");
+    assert!(body["error"].as_str().unwrap().contains("unsafe archive entry"));
     rt.shutdown().await;
 }
 
