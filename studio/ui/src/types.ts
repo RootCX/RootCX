@@ -1,4 +1,3 @@
-/** Mirrors rootcx-shared-types::OsStatus */
 export interface OsStatus {
   runtime: RuntimeStatus;
   postgres: PostgresStatus;
@@ -27,3 +26,15 @@ export type ServiceState =
   | "starting"
   | "stopping"
   | "error";
+
+export interface SchemaChange {
+  entity: string;
+  change_type: string;
+  column: string;
+  detail: string | null;
+}
+
+export interface SchemaVerification {
+  compliant: boolean;
+  changes: SchemaChange[];
+}

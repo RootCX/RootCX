@@ -63,7 +63,6 @@ pub async fn read_dir(path: String) -> Result<Vec<DirEntry>, String> {
 
     while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
         let name = entry.file_name().to_string_lossy().to_string();
-        // Skip hidden files/dirs
         if name.starts_with('.') {
             continue;
         }
@@ -86,8 +85,6 @@ pub fn sync_view_menu(hidden: Vec<String>, state: State<'_, ViewMenuItems>) {
         let _ = item.set_checked(!hidden.contains(id));
     }
 }
-
-// ── Filesystem ──
 
 fn validate_fs_path(path: &str) -> Result<(), String> {
     let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
@@ -149,6 +146,14 @@ pub async fn ensure_dir(path: String) -> Result<(), String> {
     tokio::fs::create_dir_all(&path)
         .await
         .map_err(|e| format!("failed to create directory: {e}"))
+}
+
+#[tauri::command]
+pub async fn verify_schema(
+    state: State<'_, AppState>,
+    project_path: String,
+) -> Result<rootcx_shared_types::SchemaVerification, String> {
+    state.verify_schema(&project_path).await
 }
 
 #[tauri::command]
@@ -230,8 +235,6 @@ pub async fn resolve_instructions() -> Result<Vec<String>, String> {
     Ok(files)
 }
 
-// ── Launch config ──
-
 #[tauri::command]
 pub fn read_launch_config(project_path: String) -> Result<crate::launch::LaunchConfig, String> {
     crate::launch::read(std::path::Path::new(&project_path))
@@ -241,8 +244,6 @@ pub fn read_launch_config(project_path: String) -> Result<crate::launch::LaunchC
 pub fn init_launch_config(project_path: String) -> Result<(), String> {
     crate::launch::init(std::path::Path::new(&project_path))
 }
-
-// ── Terminal ──
 
 #[tauri::command]
 pub async fn spawn_terminal(

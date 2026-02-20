@@ -5,12 +5,16 @@ use serde::{Deserialize, Serialize};
 const DIR: &str = ".rootcx";
 const FILE: &str = "launch.json";
 const TEMPLATE: &str = r#"{
+  "preLaunch": ["verify_schema", "sync_manifest", "deploy_backend"],
   "command": "echo hello world"
 }
 "#;
 
 #[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LaunchConfig {
+    #[serde(default)]
+    pub pre_launch: Vec<String>,
     pub command: String,
 }
 
@@ -81,5 +85,21 @@ mod tests {
         std::fs::write(dir.join(FILE), r#"{"command":"echo hello; rm -rf /"}"#).unwrap();
         assert!(read(&tmp).is_err());
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn deserialize_with_pre_launch() {
+        let json = r#"{"preLaunch":["verify_schema","sync_manifest"],"command":"cargo tauri dev"}"#;
+        let config: LaunchConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.pre_launch, vec!["verify_schema", "sync_manifest"]);
+        assert_eq!(config.command, "cargo tauri dev");
+    }
+
+    #[test]
+    fn deserialize_without_pre_launch() {
+        let json = r#"{"command":"cargo tauri dev"}"#;
+        let config: LaunchConfig = serde_json::from_str(json).unwrap();
+        assert!(config.pre_launch.is_empty(), "should default to empty vec");
+        assert_eq!(config.command, "cargo tauri dev");
     }
 }

@@ -11,12 +11,9 @@ use tracing::{info, warn};
 
 const DAEMON_URL: &str = "http://localhost:9100";
 
-// ── Embedded instruction files ──
-
 const ROOTCX_RUNTIME_INSTRUCTIONS: &str =
     include_str!("../../../.agents/instructions/rootcx-runtime.md");
 
-/// Default MCP servers always injected into the OpenCode config.
 fn default_mcp_servers() -> serde_json::Value {
     serde_json::json!({
         "shadcn": {
@@ -27,7 +24,6 @@ fn default_mcp_servers() -> serde_json::Value {
     })
 }
 
-/// Enrich config JSON with default MCP servers and instruction paths.
 fn enrich_config(config: &str) -> Result<String, String> {
     let mut obj: serde_json::Value =
         serde_json::from_str(config).map_err(|e| format!("invalid config JSON: {e}"))?;
@@ -67,7 +63,6 @@ pub struct AppState {
     /// Active file watchers (kept alive by holding the handle).
     #[allow(dead_code)]
     watchers: Arc<Mutex<Vec<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>>>>,
-    /// The app_id of the currently deployed backend (if any).
     active_app_id: Arc<Mutex<Option<String>>>,
     app_handle: AppHandle,
     log_stream_abort: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
@@ -95,7 +90,6 @@ fn session_file() -> Result<PathBuf, String> {
     Ok(config_dir()?.join("studio-session.json"))
 }
 
-
 async fn ensure_instructions() -> Result<(), String> {
     let dir = instructions_dir()?;
     tokio::fs::create_dir_all(&dir)
@@ -117,6 +111,13 @@ async fn ensure_config() -> Result<PathBuf, String> {
     };
     write_config(&path, &raw).await?;
     Ok(path)
+}
+
+async fn read_manifest(project_path: &str) -> Result<rootcx_shared_types::AppManifest, String> {
+    let contents = tokio::fs::read_to_string(Path::new(project_path).join("manifest.json"))
+        .await
+        .map_err(|e| format!("failed to read manifest: {e}"))?;
+    serde_json::from_str(&contents).map_err(|e| format!("invalid manifest: {e}"))
 }
 
 impl AppState {
@@ -271,19 +272,23 @@ impl AppState {
         Ok(())
     }
 
+    pub async fn verify_schema(&self, project_path: &str) -> Result<rootcx_shared_types::SchemaVerification, String> {
+        let manifest = read_manifest(project_path).await?;
+        if manifest.data_contract.is_empty() {
+            return Ok(rootcx_shared_types::SchemaVerification { compliant: true, changes: vec![] });
+        }
+        self.client.verify_schema(&manifest).await
+            .map_err(|e| format!("verify failed: {e}"))
+    }
+
     pub async fn sync_manifest(&self, project_path: &str) -> Result<(), String> {
-        let contents = tokio::fs::read_to_string(Path::new(project_path).join("manifest.json"))
-            .await
-            .map_err(|e| format!("failed to read manifest: {e}"))?;
-        let manifest: rootcx_shared_types::AppManifest =
-            serde_json::from_str(&contents).map_err(|e| format!("invalid manifest: {e}"))?;
+        let manifest = read_manifest(project_path).await?;
         if !manifest.data_contract.is_empty() {
             self.client.install_app(&manifest).await.map_err(|e| format!("failed to install app: {e}"))?;
         }
         Ok(())
     }
 
-    /// Deploy `backend/` to the runtime. Use `deploy_and_watch` for hot reload.
     pub async fn deploy_backend(&self, project_path: &str) -> Result<String, String> {
         let project = Path::new(project_path);
         let manifest: serde_json::Value = serde_json::from_str(
@@ -330,7 +335,6 @@ impl AppState {
         Ok(result)
     }
 
-    /// Deploy backend + file watcher for hot reload.
     pub async fn deploy_and_watch(&self, project_path: &str) -> Result<String, String> {
         self.watchers.lock().await.clear();
         let msg = self.deploy_backend(project_path).await?;
@@ -377,9 +381,7 @@ impl AppState {
         Ok(())
     }
 
-    /// Stop the deployed backend worker and clean up session state.
     pub async fn stop_deployed_worker(&self) {
-        // Abort log stream first
         if let Some(handle) = self.log_stream_abort.lock().await.take() {
             handle.abort();
         }
