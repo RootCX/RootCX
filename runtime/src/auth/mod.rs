@@ -16,10 +16,25 @@ pub struct AuthConfig {
     pub decoding_key: DecodingKey,
     pub access_ttl: Duration,
     pub refresh_ttl: Duration,
+    // anonymous access when true; tokens still validated if provided
+    pub public: bool,
 }
 
 impl AuthConfig {
-    pub fn load(data_dir: &Path) -> Result<Arc<Self>, RuntimeError> {
+    pub fn load(data_dir: &Path, auth_required: Option<bool>) -> Result<Arc<Self>, RuntimeError> {
+        let public = match auth_required {
+            Some(required) => !required,
+            None => std::env::var("ROOTCX_AUTH")
+                .map(|v| v != "required")
+                .unwrap_or(true),
+        };
+
+        if public {
+            info!("auth mode: public (set ROOTCX_AUTH=required to enforce)");
+        } else {
+            info!("auth mode: required");
+        }
+
         let secret = if let Ok(s) = std::env::var("ROOTCX_JWT_SECRET") {
             info!("JWT secret loaded from env");
             s.into_bytes()
@@ -32,6 +47,7 @@ impl AuthConfig {
             decoding_key: DecodingKey::from_secret(&secret),
             access_ttl: Duration::from_secs(15 * 60),      // 15 min
             refresh_ttl: Duration::from_secs(30 * 24 * 3600), // 30 days
+            public,
         }))
     }
 }

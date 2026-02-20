@@ -1,8 +1,6 @@
-//! Integration tests for the RootCX Runtime API.
-//! Replaces `test-e2e.sh`. Run: `cargo test --test api_integration`
-
 mod harness;
 use harness::TestRuntime;
+use rootcx_shared_types::SchemaVerification;
 use serde_json::{json, Value};
 
 fn make_tar_gz(files: &[(&str, &[u8])]) -> Vec<u8> {
@@ -29,8 +27,6 @@ fn make_tar_gz_raw(files: &[(&str, &[u8])], allow_unsafe: bool) -> Vec<u8> {
     tar.into_inner().unwrap().finish().unwrap()
 }
 
-// ── Security: Worker env isolation ──────────────────────────────
-
 #[tokio::test]
 async fn worker_does_not_receive_db_url() {
     let src = include_str!("../src/worker.rs");
@@ -39,8 +35,6 @@ async fn worker_does_not_receive_db_url() {
         "worker.rs must not pass ROOTCX_DB_URL to worker processes"
     );
 }
-
-// ── Security: JWT not in localStorage ───────────────────────────
 
 #[tokio::test]
 async fn sdk_does_not_persist_access_token_to_localstorage() {
@@ -56,11 +50,9 @@ async fn sdk_does_not_persist_access_token_to_localstorage() {
     );
 }
 
-// ── Security: Auth on management endpoints ─────────────────────
-
 #[tokio::test]
 async fn mgmt_endpoints_reject_unauthenticated() {
-    let rt = TestRuntime::boot().await;
+    let rt = TestRuntime::boot_with_auth().await;
     let manifest = json!({
         "appId": "authtest", "name": "authtest", "version": "1.0.0",
         "dataContract": [{ "entityName": "items", "fields": [
@@ -68,23 +60,16 @@ async fn mgmt_endpoints_reject_unauthenticated() {
         ]}]
     });
 
-    // Install (POST /api/v1/apps)
     assert_eq!(rt.post_json_unauthed("/api/v1/apps", &manifest).await, 401);
-    // Uninstall (DELETE /api/v1/apps/{id})
     assert_eq!(rt.delete_unauthed("/api/v1/apps/authtest").await, 401);
-    // Secrets
     assert_eq!(rt.post_json_unauthed("/api/v1/apps/authtest/secrets", &json!({"key":"K","value":"V"})).await, 401);
     assert_eq!(rt.get_unauthed("/api/v1/apps/authtest/secrets").await, 401);
     assert_eq!(rt.delete_unauthed("/api/v1/apps/authtest/secrets/K").await, 401);
-    // Jobs
     assert_eq!(rt.post_json_unauthed("/api/v1/apps/authtest/jobs", &json!({"payload":{}})).await, 401);
-    // Workers
     assert_eq!(rt.post_json_unauthed("/api/v1/apps/authtest/worker/start", &json!({})).await, 401);
     assert_eq!(rt.post_json_unauthed("/api/v1/apps/authtest/worker/stop", &json!({})).await, 401);
     rt.shutdown().await;
 }
-
-// ── Health & Status ─────────────────────────────────────────────
 
 #[tokio::test]
 async fn health_check() {
@@ -104,8 +89,6 @@ async fn status_returns_online() {
     assert_eq!(body["postgres"]["port"], rt.pg_port);
     rt.shutdown().await;
 }
-
-// ── App Management ──────────────────────────────────────────────
 
 #[tokio::test]
 async fn install_and_list_apps() {
@@ -141,8 +124,6 @@ async fn uninstall_app() {
     assert!(body.as_array().unwrap().is_empty());
     rt.shutdown().await;
 }
-
-// ── CRUD ────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn crud_create_list() {
@@ -234,8 +215,6 @@ async fn crud_empty_body() {
     rt.shutdown().await;
 }
 
-// ── Secrets ─────────────────────────────────────────────────────
-
 #[tokio::test]
 async fn secrets_crud() {
     let rt = TestRuntime::boot().await;
@@ -272,8 +251,6 @@ async fn secrets_missing_fields() {
     assert_eq!(s2, 400);
     rt.shutdown().await;
 }
-
-// ── Jobs ────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn jobs_enqueue_and_get() {
@@ -313,8 +290,6 @@ async fn jobs_list() {
     rt.shutdown().await;
 }
 
-// ── File Upload ─────────────────────────────────────────────────
-
 #[tokio::test]
 async fn upload_file() {
     let rt = TestRuntime::boot().await;
@@ -340,8 +315,6 @@ async fn upload_rejects_bad_extension() {
     rt.shutdown().await;
 }
 
-// ── Workers ─────────────────────────────────────────────────────
-
 #[tokio::test]
 async fn worker_status_unstarted() {
     let rt = TestRuntime::boot().await;
@@ -362,8 +335,6 @@ async fn all_worker_statuses() {
     rt.shutdown().await;
 }
 
-// ── RPC ─────────────────────────────────────────────────────────
-
 #[tokio::test]
 async fn rpc_missing_method() {
     let rt = TestRuntime::boot().await;
@@ -372,8 +343,6 @@ async fn rpc_missing_method() {
     assert_eq!(s, 400);
     rt.shutdown().await;
 }
-
-// ── Audit ───────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn audit_trail() {
@@ -390,8 +359,6 @@ async fn audit_trail() {
     rt.shutdown().await;
 }
 
-// ── Jobs lifecycle (Phase 4) ────────────────────────────────────
-
 #[tokio::test]
 async fn job_list_with_status_filter() {
     let rt = TestRuntime::boot().await;
@@ -399,7 +366,6 @@ async fn job_list_with_status_filter() {
 
     rt.post_json("/api/v1/apps/jfilt/jobs", &json!({"payload":{"x":1}})).await;
 
-    // Poll until the job fails (no worker running) instead of a hard sleep
     for _ in 0..30 {
         let (s, body) = rt.get_json("/api/v1/apps/jfilt/jobs?status=failed").await;
         if s == 200 && body.as_array().map_or(false, |a| !a.is_empty()) {
@@ -431,8 +397,6 @@ async fn job_invalid_uuid() {
     assert!(body["error"].as_str().unwrap().contains("invalid UUID"));
     rt.shutdown().await;
 }
-
-// ── CRUD edge cases (Phase 4) ──────────────────────────────────
 
 #[tokio::test]
 async fn crud_create_with_null_fields() {
@@ -478,8 +442,6 @@ async fn crud_create_has_timestamps() {
     rt.shutdown().await;
 }
 
-// ── Secrets (Phase 4) ──────────────────────────────────────────
-
 #[tokio::test]
 async fn secrets_overwrite_existing() {
     let rt = TestRuntime::boot().await;
@@ -491,8 +453,6 @@ async fn secrets_overwrite_existing() {
     assert_eq!(keys.as_array().unwrap().len(), 1);
     rt.shutdown().await;
 }
-
-// ── Audit lifecycle (Phase 4) ──────────────────────────────────
 
 #[tokio::test]
 async fn audit_trail_update() {
@@ -552,8 +512,6 @@ async fn audit_filters_by_app_id() {
     rt.shutdown().await;
 }
 
-// ── Deploy ────────────────────────────────────────────────────
-
 #[tokio::test]
 async fn deploy_rejects_empty_archive() {
     let rt = TestRuntime::boot().await;
@@ -592,8 +550,6 @@ async fn deploy_valid_archive() {
     rt.shutdown().await;
 }
 
-// ── Security: Deploy path traversal ────────────────────────────
-
 #[tokio::test]
 async fn deploy_rejects_path_traversal() {
     let rt = TestRuntime::boot().await;
@@ -614,8 +570,6 @@ async fn deploy_rejects_absolute_path() {
     rt.shutdown().await;
 }
 
-// ── Workers/RPC (Phase 4) ─────────────────────────────────────
-
 #[tokio::test]
 async fn rpc_on_unstarted_worker() {
     let rt = TestRuntime::boot().await;
@@ -625,8 +579,6 @@ async fn rpc_on_unstarted_worker() {
     assert!(body["error"].as_str().unwrap().contains("no worker"));
     rt.shutdown().await;
 }
-
-// ── App management (Phase 4) ───────────────────────────────────
 
 #[tokio::test]
 async fn install_empty_data_contract() {
@@ -666,21 +618,17 @@ async fn install_multiple_entities() {
         ]
     })).await;
 
-    // Create records in both entities independently
     let (s1, _) = rt.post_json("/api/v1/apps/multi/collections/orders", &json!({"total": 42})).await;
     assert_eq!(s1, 201);
     let (s2, _) = rt.post_json("/api/v1/apps/multi/collections/items", &json!({"label": "widget"})).await;
     assert_eq!(s2, 201);
 
-    // List each entity independently
     let (_, orders) = rt.get_json("/api/v1/apps/multi/collections/orders").await;
     assert_eq!(orders.as_array().unwrap().len(), 1);
     let (_, items) = rt.get_json("/api/v1/apps/multi/collections/items").await;
     assert_eq!(items.as_array().unwrap().len(), 1);
     rt.shutdown().await;
 }
-
-// ── Typed Bindings ─────────────────────────────────────────────
 
 fn typed_manifest() -> Value {
     json!({
@@ -704,7 +652,6 @@ fn typed_manifest() -> Value {
     })
 }
 
-/// Every manifest type round-trips through create → read with correct PG wire types.
 #[tokio::test]
 async fn typed_bindings_create_roundtrip() {
     let rt = TestRuntime::boot().await;
@@ -737,7 +684,6 @@ async fn typed_bindings_create_roundtrip() {
     rt.shutdown().await;
 }
 
-/// Typed fields accept null without PG type errors.
 #[tokio::test]
 async fn typed_bindings_null_values() {
     let rt = TestRuntime::boot().await;
@@ -755,7 +701,6 @@ async fn typed_bindings_null_values() {
     rt.shutdown().await;
 }
 
-/// Update path uses the same manifest-driven binding as create.
 #[tokio::test]
 async fn typed_bindings_update() {
     let rt = TestRuntime::boot().await;
@@ -775,8 +720,6 @@ async fn typed_bindings_update() {
     rt.shutdown().await;
 }
 
-/// A text field containing a date-like string must NOT be cast to DATE.
-/// Guards against regression to type-guessing.
 #[tokio::test]
 async fn typed_bindings_text_not_cast_as_date() {
     let rt = TestRuntime::boot().await;
@@ -787,10 +730,376 @@ async fn typed_bindings_text_not_cast_as_date() {
         ]}]
     })).await;
 
-    // "2026-01-01" and a valid UUID as plain text — neither should trigger type conversion
     for val in ["2026-01-01", "550e8400-e29b-41d4-a716-446655440000", "2026-01-01T00:00:00Z"] {
         let row = rt.create("txtdate", "notes", &json!({"body": val})).await;
         assert_eq!(row["body"], val, "text field should preserve literal string");
     }
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn schema_sync_adds_column() {
+    let rt = TestRuntime::boot().await;
+
+    rt.install_manifest(&json!({
+        "appId": "ssadd", "name": "ssadd", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+        ]}]
+    })).await;
+
+    rt.create("ssadd", "items", &json!({"name": "first"})).await;
+
+    rt.install_manifest(&json!({
+        "appId": "ssadd", "name": "ssadd", "version": "1.1.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "email", "type": "text" },
+        ]}]
+    })).await;
+
+    let row = rt.create("ssadd", "items", &json!({"name": "second", "email": "a@b.com"})).await;
+    assert_eq!(row["email"], "a@b.com");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn schema_sync_drops_column() {
+    let rt = TestRuntime::boot().await;
+
+    rt.install_manifest(&json!({
+        "appId": "ssdrop", "name": "ssdrop", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "legacy", "type": "text" },
+        ]}]
+    })).await;
+
+    rt.create("ssdrop", "items", &json!({"name": "one", "legacy": "old"})).await;
+
+    rt.install_manifest(&json!({
+        "appId": "ssdrop", "name": "ssdrop", "version": "1.1.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+        ]}]
+    })).await;
+
+    let (s, rows) = rt.get_json("/api/v1/apps/ssdrop/collections/items").await;
+    assert_eq!(s, 200);
+    let arr = rows.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert!(arr[0].get("legacy").is_none(), "legacy column should be gone");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn schema_sync_changes_type() {
+    let rt = TestRuntime::boot().await;
+
+    rt.install_manifest(&json!({
+        "appId": "sstype", "name": "sstype", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "score", "type": "text" },
+        ]}]
+    })).await;
+
+    rt.create("sstype", "items", &json!({"name": "a", "score": "42"})).await;
+
+    rt.install_manifest(&json!({
+        "appId": "sstype", "name": "sstype", "version": "1.1.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "score", "type": "number" },
+        ]}]
+    })).await;
+
+    let row = rt.create("sstype", "items", &json!({"name": "b", "score": 99.5})).await;
+    assert_eq!(row["score"], 99.5);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn schema_sync_changes_nullability() {
+    let rt = TestRuntime::boot().await;
+
+    rt.install_manifest(&json!({
+        "appId": "ssnull", "name": "ssnull", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "email", "type": "text" },
+        ]}]
+    })).await;
+
+    rt.create("ssnull", "items", &json!({"name": "a"})).await;
+
+    let (_, rows) = rt.get_json("/api/v1/apps/ssnull/collections/items").await;
+    let id = rows[0]["id"].as_str().unwrap();
+    rt.delete(&format!("/api/v1/apps/ssnull/collections/items/{id}")).await;
+
+    rt.install_manifest(&json!({
+        "appId": "ssnull", "name": "ssnull", "version": "1.1.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "email", "type": "text", "required": true },
+        ]}]
+    })).await;
+
+    let (s, _) = rt.post_json("/api/v1/apps/ssnull/collections/items", &json!({"name": "b"})).await;
+    assert_eq!(s, 500, "missing required field should fail");
+
+    let (s, _) = rt.post_json("/api/v1/apps/ssnull/collections/items", &json!({"name": "c", "email": "c@d.com"})).await;
+    assert_eq!(s, 201);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn schema_sync_changes_enum() {
+    let rt = TestRuntime::boot().await;
+
+    rt.install_manifest(&json!({
+        "appId": "ssenum", "name": "ssenum", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "status", "type": "text", "enum_values": ["draft", "active"] },
+        ]}]
+    })).await;
+
+    rt.create("ssenum", "items", &json!({"name": "a", "status": "draft"})).await;
+
+    rt.install_manifest(&json!({
+        "appId": "ssenum", "name": "ssenum", "version": "1.1.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "status", "type": "text", "enum_values": ["draft", "active", "archived"] },
+        ]}]
+    })).await;
+
+    let row = rt.create("ssenum", "items", &json!({"name": "b", "status": "archived"})).await;
+    assert_eq!(row["status"], "archived");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn schema_sync_idempotent() {
+    let rt = TestRuntime::boot().await;
+
+    let manifest = json!({
+        "appId": "ssidem", "name": "ssidem", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "score", "type": "number" },
+        ]}]
+    });
+
+    rt.install_manifest(&manifest).await;
+    rt.create("ssidem", "items", &json!({"name": "a", "score": 10})).await;
+
+    rt.install_manifest(&manifest).await;
+
+    let (s, rows) = rt.get_json("/api/v1/apps/ssidem/collections/items").await;
+    assert_eq!(s, 200);
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!(rows[0]["name"], "a");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn schema_sync_preserves_data() {
+    let rt = TestRuntime::boot().await;
+
+    rt.install_manifest(&json!({
+        "appId": "sspres", "name": "sspres", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "score", "type": "number" },
+        ]}]
+    })).await;
+
+    rt.create("sspres", "items", &json!({"name": "a", "score": 1})).await;
+    rt.create("sspres", "items", &json!({"name": "b", "score": 2})).await;
+    rt.create("sspres", "items", &json!({"name": "c", "score": 3})).await;
+
+    rt.install_manifest(&json!({
+        "appId": "sspres", "name": "sspres", "version": "1.1.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "score", "type": "number" },
+            { "name": "email", "type": "text" },
+        ]}]
+    })).await;
+
+    let (s, rows) = rt.get_json("/api/v1/apps/sspres/collections/items").await;
+    assert_eq!(s, 200);
+    let arr = rows.as_array().unwrap();
+    assert_eq!(arr.len(), 3);
+    for row in arr {
+        assert!(row["email"].is_null(), "email should be null for old records");
+    }
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn schema_sync_multiple_entities() {
+    let rt = TestRuntime::boot().await;
+
+    rt.install_manifest(&json!({
+        "appId": "ssmulti", "name": "ssmulti", "version": "1.0.0",
+        "dataContract": [
+            { "entityName": "contacts", "fields": [
+                { "name": "name", "type": "text", "required": true },
+                { "name": "phone", "type": "text" },
+            ]},
+            { "entityName": "notes", "fields": [
+                { "name": "body", "type": "text", "required": true },
+                { "name": "legacy", "type": "text" },
+            ]},
+        ]
+    })).await;
+
+    rt.create("ssmulti", "contacts", &json!({"name": "alice", "phone": "123"})).await;
+    rt.create("ssmulti", "notes", &json!({"body": "hello", "legacy": "x"})).await;
+
+    rt.install_manifest(&json!({
+        "appId": "ssmulti", "name": "ssmulti", "version": "1.1.0",
+        "dataContract": [
+            { "entityName": "contacts", "fields": [
+                { "name": "name", "type": "text", "required": true },
+                { "name": "phone", "type": "text" },
+                { "name": "email", "type": "text" },
+            ]},
+            { "entityName": "notes", "fields": [
+                { "name": "body", "type": "text", "required": true },
+            ]},
+        ]
+    })).await;
+
+    let row = rt.create("ssmulti", "contacts", &json!({"name": "bob", "email": "b@c.com"})).await;
+    assert_eq!(row["email"], "b@c.com");
+
+    let (_, rows) = rt.get_json("/api/v1/apps/ssmulti/collections/notes").await;
+    assert!(rows[0].get("legacy").is_none(), "legacy should be dropped from notes");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn verify_schema_compliant() {
+    let rt = TestRuntime::boot().await;
+    let manifest = json!({
+        "appId": "vsc", "name": "vsc", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+        ]}]
+    });
+    rt.install_manifest(&manifest).await;
+
+    let (s, body) = rt.post_json("/api/v1/apps/schema/verify", &manifest).await;
+    assert_eq!(s, 200);
+    let result: SchemaVerification = serde_json::from_value(body).unwrap();
+    assert!(result.compliant, "same manifest should be compliant");
+    assert!(result.changes.is_empty());
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn verify_schema_detects_new_column() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&json!({
+        "appId": "vsnc", "name": "vsnc", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+        ]}]
+    })).await;
+
+    let v2 = json!({
+        "appId": "vsnc", "name": "vsnc", "version": "1.1.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "email", "type": "text" },
+        ]}]
+    });
+    let (s, body) = rt.post_json("/api/v1/apps/schema/verify", &v2).await;
+    assert_eq!(s, 200);
+    let result: SchemaVerification = serde_json::from_value(body).unwrap();
+    assert!(!result.compliant);
+    assert_eq!(result.changes.len(), 1);
+    assert_eq!(result.changes[0].change_type, "add_column");
+    assert_eq!(result.changes[0].column, "email");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn verify_schema_detects_drop() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&json!({
+        "appId": "vsd", "name": "vsd", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "legacy", "type": "text" },
+        ]}]
+    })).await;
+
+    let v2 = json!({
+        "appId": "vsd", "name": "vsd", "version": "1.1.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+        ]}]
+    });
+    let (s, body) = rt.post_json("/api/v1/apps/schema/verify", &v2).await;
+    assert_eq!(s, 200);
+    let result: SchemaVerification = serde_json::from_value(body).unwrap();
+    assert!(!result.compliant);
+    assert!(result.changes.iter().any(|c| c.change_type == "drop_column" && c.column == "legacy"));
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn verify_schema_detects_type_change() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&json!({
+        "appId": "vstc", "name": "vstc", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "score", "type": "text" },
+        ]}]
+    })).await;
+
+    let v2 = json!({
+        "appId": "vstc", "name": "vstc", "version": "1.1.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "score", "type": "number" },
+        ]}]
+    });
+    let (s, body) = rt.post_json("/api/v1/apps/schema/verify", &v2).await;
+    assert_eq!(s, 200);
+    let result: SchemaVerification = serde_json::from_value(body).unwrap();
+    assert!(!result.compliant);
+    assert!(result.changes.iter().any(|c| c.change_type == "alter_type" && c.column == "score"));
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn verify_schema_no_table_is_compliant() {
+    let rt = TestRuntime::boot().await;
+    let manifest = json!({
+        "appId": "vsnt", "name": "vsnt", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true },
+        ]}]
+    });
+    let (s, body) = rt.post_json("/api/v1/apps/schema/verify", &manifest).await;
+    assert_eq!(s, 200);
+    let result: SchemaVerification = serde_json::from_value(body).unwrap();
+    assert!(result.compliant, "no table means CREATE TABLE will handle it, so compliant");
+    assert!(result.changes.is_empty());
     rt.shutdown().await;
 }
