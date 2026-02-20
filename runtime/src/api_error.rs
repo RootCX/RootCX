@@ -27,9 +27,23 @@ impl IntoResponse for ApiError {
 }
 
 impl From<sqlx::Error> for ApiError {
-    fn from(e: sqlx::Error) -> Self { Self::Internal(e.to_string()) }
+    fn from(e: sqlx::Error) -> Self {
+        tracing::error!("database error: {e}");
+        Self::Internal("internal database error".into())
+    }
 }
 
 impl From<crate::RuntimeError> for ApiError {
-    fn from(e: crate::RuntimeError) -> Self { Self::Internal(e.to_string()) }
+    fn from(e: crate::RuntimeError) -> Self {
+        match &e {
+            // Worker/Job/IPC errors are user-facing (e.g., "no worker for app 'x'")
+            crate::RuntimeError::Worker(_)
+            | crate::RuntimeError::Job(_)
+            | crate::RuntimeError::Ipc(_) => Self::Internal(e.to_string()),
+            _ => {
+                tracing::error!("runtime error: {e}");
+                Self::Internal("internal error".into())
+            }
+        }
+    }
 }
