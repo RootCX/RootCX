@@ -1,6 +1,8 @@
 use crate::scaffold::emitter::Emitter;
 use crate::scaffold::types::{Layer, LayerFuture, ScaffoldContext};
 
+const SCAFFOLD_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' http://127.0.0.1:9100; img-src 'self' data:";
+
 const ICON: &[u8] = include_bytes!("../../../icons/32x32.png");
 
 /// Emits: src-tauri/* (Cargo.toml, tauri.conf.json, lib.rs, main.rs, icons, capabilities)
@@ -48,7 +50,7 @@ rootcx-runtime-client = {{ path = "{client_dep}" }}
   }},
   "app": {{
     "windows": [{{ "title": "{name}", "width": 900, "height": 600 }}],
-    "security": {{ "csp": null }}
+    "security": {{ "csp": "{SCAFFOLD_CSP}" }}
   }},
   "bundle": {{ "active": true, "icon": ["icons/icon.png"] }}
 }}
@@ -86,5 +88,27 @@ fn main() {{
 
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scaffold_csp_enforces_restrictions() {
+        assert!(SCAFFOLD_CSP.contains("default-src 'self'"));
+        assert!(SCAFFOLD_CSP.contains("script-src 'self'"));
+        assert!(!SCAFFOLD_CSP.contains("unsafe-eval"));
+    }
+
+    #[test]
+    fn studio_csp_enforces_restrictions() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tauri.conf.json")).unwrap();
+        let csp = conf["app"]["security"]["csp"].as_str().expect("csp must not be null");
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("script-src 'self'"));
+        assert!(!csp.contains("unsafe-eval"));
     }
 }
