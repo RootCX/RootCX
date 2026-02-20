@@ -14,6 +14,14 @@ use types::{AnswerValue, ScaffoldContext};
 pub use registry::PresetRegistry as Registry;
 pub use types::{AnswerValue as Answer, PresetInfo, Question, RuntimePaths};
 
+fn sanitize_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == ' ')
+        .collect::<String>()
+        .to_lowercase()
+        .replace(' ', "-")
+}
+
 /// Orchestrates scaffold: resolve preset → build context → run layers.
 pub async fn create(
     root: &Path,
@@ -26,7 +34,8 @@ pub async fn create(
     let preset = registry.get(preset_id)?;
     let layers = preset.layers(&answers);
 
-    let app_id = name.to_lowercase().replace(' ', "-");
+    let name = sanitize_name(name);
+    let app_id = name.clone();
     let lib_name = app_id.replace('-', "_");
     let identifier = format!("com.rootcx.{app_id}");
     let mut h = std::hash::DefaultHasher::new();
@@ -48,4 +57,18 @@ pub async fn create(
         layer.emit(&ctx, &emitter).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_name_strips_dangerous_chars() {
+        assert_eq!(sanitize_name("My App"), "my-app");
+        assert_eq!(sanitize_name("evil</title><script>"), "eviltitlescript");
+        assert_eq!(sanitize_name("test\"inject"), "testinject");
+        assert_eq!(sanitize_name("a{b}c"), "abc");
+        assert_eq!(sanitize_name("hello-world"), "hello-world");
+    }
 }
