@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use sqlx::PgPool;
+use sqlx::{Connection, PgPool};
 use tracing::info;
 
 use crate::manifest::{json_to_sql_default, map_field_type, quote_ident};
@@ -458,6 +458,8 @@ pub async fn sync_schema(
     entities: &[EntityContract],
     pk_types: &HashMap<String, &'static str>,
 ) -> Result<(), RuntimeError> {
+    let mut has_type_changes = false;
+
     for entity in entities {
         let db_columns = introspect_table(pool, app_id, &entity.entity_name).await?;
 
@@ -475,6 +477,8 @@ pub async fn sync_schema(
             continue;
         }
 
+        has_type_changes |= diff.changes.iter().any(|c| matches!(c, ColumnDiff::AlterType { .. }));
+
         let stmts = generate_ddl(&diff);
         info!(
             table = %format!("{}.{}", app_id, entity.entity_name),
@@ -484,6 +488,18 @@ pub async fn sync_schema(
         );
 
         apply_ddl(pool, &stmts).await?;
+    }
+
+    // Invalidate sqlx prepared-statement caches after column type changes
+    // to prevent stale parameter-type bindings (e.g. f64 sent as TEXT).
+    if has_type_changes {
+        let mut conns = Vec::new();
+        while let Some(conn) = pool.try_acquire() {
+            conns.push(conn);
+        }
+        for conn in &mut conns {
+            conn.clear_cached_statements().await.ok();
+        }
     }
 
     Ok(())
