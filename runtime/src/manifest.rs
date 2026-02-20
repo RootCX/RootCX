@@ -14,52 +14,49 @@ pub async fn install_app(
 ) -> Result<(), RuntimeError> {
     let app_id = &manifest.app_id;
 
-    if manifest.data_contract.is_empty() {
-        info!(app = %app_id, "no dataContract, skipping table creation");
-        register_app(pool, manifest).await?;
-        return Ok(());
-    }
+    if !manifest.data_contract.is_empty() {
+        let pk_types = build_pk_type_map(&manifest.data_contract);
 
-    let pk_types = build_pk_type_map(&manifest.data_contract);
-
-    sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(app_id)))
-        .execute(pool)
-        .await
-        .map_err(RuntimeError::Schema)?;
-    info!(app = %app_id, "schema created");
-
-    for entity in &manifest.data_contract {
-        let ddl = generate_create_table(app_id, entity, &pk_types);
-        sqlx::query(&ddl)
+        sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(app_id)))
             .execute(pool)
             .await
             .map_err(RuntimeError::Schema)?;
 
-        info!(table = %format!("{}.{}", app_id, entity.entity_name), "table ensured");
-    }
-
-    crate::schema_sync::sync_schema(pool, app_id, &manifest.data_contract, &pk_types).await?;
-
-    for ext in extensions {
         for entity in &manifest.data_contract {
-            ext.on_table_created(pool, manifest, app_id, &entity.entity_name).await?;
-        }
-    }
-
-    for entity in &manifest.data_contract {
-        let fk_statements = generate_foreign_keys(app_id, entity, &manifest.data_contract);
-        for stmt in &fk_statements {
-            sqlx::query(stmt)
+            let ddl = generate_create_table(app_id, entity, &pk_types);
+            sqlx::query(&ddl)
                 .execute(pool)
                 .await
                 .map_err(RuntimeError::Schema)?;
+            info!(table = %format!("{}.{}", app_id, entity.entity_name), "table ensured");
         }
+
+        crate::schema_sync::sync_schema(pool, app_id, &manifest.data_contract, &pk_types).await?;
     }
 
+    crate::schema_sync::drop_orphaned_tables(pool, app_id, &manifest.data_contract).await?;
     register_app(pool, manifest).await?;
 
-    for ext in extensions {
-        ext.on_app_installed(pool, manifest).await?;
+    if !manifest.data_contract.is_empty() {
+        for ext in extensions {
+            for entity in &manifest.data_contract {
+                ext.on_table_created(pool, manifest, app_id, &entity.entity_name).await?;
+            }
+        }
+
+        for entity in &manifest.data_contract {
+            let fk_statements = generate_foreign_keys(app_id, entity, &manifest.data_contract);
+            for stmt in &fk_statements {
+                sqlx::query(stmt)
+                    .execute(pool)
+                    .await
+                    .map_err(RuntimeError::Schema)?;
+            }
+        }
+
+        for ext in extensions {
+            ext.on_app_installed(pool, manifest).await?;
+        }
     }
 
     info!(

@@ -26,6 +26,8 @@ export function MigrationDialogPortal() {
 }
 
 const CHANGE_META: Record<string, { icon: string; color: string; label: (c: SchemaChange) => string }> = {
+  create_table:  { icon: "+", color: "text-green-500",  label: (c) => `Create table "${c.entity}" (${c.detail ?? ""})` },
+  drop_table:    { icon: "-", color: "text-red-500",    label: (c) => `Drop table "${c.entity}"` },
   add_column:    { icon: "+", color: "text-green-500",  label: (c) => `Add column "${c.column}" (${c.detail ?? "unknown"})` },
   drop_column:   { icon: "-", color: "text-red-500",    label: (c) => `Drop column "${c.column}"` },
   alter_type:    { icon: "~", color: "text-yellow-500", label: (c) => `Change type of "${c.column}" (${c.detail ?? ""})` },
