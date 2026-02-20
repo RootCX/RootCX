@@ -29,6 +29,17 @@ fn make_tar_gz_raw(files: &[(&str, &[u8])], allow_unsafe: bool) -> Vec<u8> {
     tar.into_inner().unwrap().finish().unwrap()
 }
 
+// ── Security: Worker env isolation ──────────────────────────────
+
+#[tokio::test]
+async fn worker_does_not_receive_db_url() {
+    let src = include_str!("../src/worker.rs");
+    assert!(
+        !src.contains("ROOTCX_DB_URL"),
+        "worker.rs must not pass ROOTCX_DB_URL to worker processes"
+    );
+}
+
 // ── Security: Auth on management endpoints ─────────────────────
 
 #[tokio::test]

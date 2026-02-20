@@ -48,7 +48,6 @@ pub struct WorkerConfig {
     pub working_dir: PathBuf,
     pub env: HashMap<String, String>,
     pub runtime_url: String,
-    pub db_url: String,
     pub pool: PgPool,
 }
 
@@ -214,7 +213,6 @@ async fn supervisor_loop(config: WorkerConfig, mut cmd_rx: mpsc::Receiver<Superv
                                 let _ = w.send(&OutboundMessage::Discover {
                                     app_id: config.app_id.clone(),
                                     runtime_url: config.runtime_url.clone(),
-                                    db_url: config.db_url.clone(),
                                 }).await;
                             }
                         }
@@ -354,9 +352,7 @@ async fn spawn_worker(config: &WorkerConfig) -> Result<(AsyncGroupChild, IpcWrit
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("ROOTCX_APP_ID", &config.app_id)
-        .env("ROOTCX_RUNTIME_URL", &config.runtime_url)
-        .env("ROOTCX_DB_URL", &config.db_url)
-        .env("ROOTCX_DB_POOL_MAX", "5");
+        .env("ROOTCX_RUNTIME_URL", &config.runtime_url);
 
     for (k, v) in &config.env {
         cmd.env(k, v);
