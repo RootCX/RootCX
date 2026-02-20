@@ -4,8 +4,6 @@ use std::time::Duration;
 use tokio::process::{Child, Command};
 use tracing::{info, warn};
 
-pub const FORGE_PORT: u16 = 4096;
-const HEALTH_URL: &str = "http://127.0.0.1:4096/global/health";
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 
 static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
@@ -18,11 +16,17 @@ static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
 /// Manages the AI Forge sidecar process.
 pub struct ForgeManager {
     child: Option<Child>,
+    port: u16,
 }
 
 impl ForgeManager {
     pub fn new() -> Self {
-        Self { child: None }
+        let port = free_port();
+        Self { child: None, port }
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
     }
 
     /// Start the AI Forge sidecar in the given directory.
@@ -38,23 +42,27 @@ impl ForgeManager {
         // Stop any running instance first.
         self.stop().await?;
 
+        let port = self.port;
+        let health_url = format!("http://127.0.0.1:{port}/global/health");
+
         // Kill stale processes on the port before starting.
-        if health_check().await {
-            warn!("stale forge process detected on port {FORGE_PORT}, killing it");
-            kill_listeners_on_port(FORGE_PORT).await;
+        if health_check_url(&health_url).await {
+            warn!("stale forge process detected on port {port}, killing it");
+            kill_listeners_on_port(port).await;
 
             for _ in 0..10 {
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                if !health_check().await {
+                if !health_check_url(&health_url).await {
                     break;
                 }
             }
         }
 
-        info!(?cwd, ?config_path, "starting forge sidecar");
+        info!(?cwd, ?config_path, port, "starting forge sidecar");
 
+        let port_str = port.to_string();
         let mut cmd = Command::new("opencode");
-        cmd.args(["serve", "--port", "4096", "--hostname", "127.0.0.1"])
+        cmd.args(["serve", "--port", &port_str, "--hostname", "127.0.0.1"])
             .current_dir(cwd)
             .stdout(std::process::Stdio::inherit())
             .stderr(std::process::Stdio::inherit())
@@ -70,10 +78,9 @@ impl ForgeManager {
 
         self.child = Some(child);
 
-        // Wait for health check (up to 15 seconds — forge may need to initialize)
         for i in 0..30 {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            if health_check().await {
+            if health_check_url(&health_url).await {
                 info!("forge sidecar healthy after {}ms", (i + 1) * 500);
                 return Ok(());
             }
@@ -115,15 +122,21 @@ impl ForgeManager {
         Ok(())
     }
 
-    /// Check if the sidecar is responding to health checks.
     pub async fn is_running(&self) -> bool {
-        health_check().await
+        let url = format!("http://127.0.0.1:{}/global/health", self.port);
+        health_check_url(&url).await
     }
 }
 
-/// HTTP health check against the Forge port.
-async fn health_check() -> bool {
-    HTTP.get(HEALTH_URL).send().await.is_ok()
+async fn health_check_url(url: &str) -> bool {
+    HTTP.get(url).send().await.is_ok()
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .unwrap_or(4096)
 }
 
 /// Kill any processes listening on the given port (macOS/Linux).
@@ -184,4 +197,17 @@ pub fn is_forge_available() -> bool {
 pub enum ForgeError {
     #[error("failed to spawn forge sidecar: {0}")]
     SpawnFailed(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forge_uses_random_port() {
+        let fm1 = ForgeManager::new();
+        let fm2 = ForgeManager::new();
+        assert_ne!(fm1.port(), 0);
+        assert_ne!(fm2.port(), 0);
+    }
 }
