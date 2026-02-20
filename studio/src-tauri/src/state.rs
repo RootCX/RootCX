@@ -274,18 +274,13 @@ impl AppState {
 
     pub async fn verify_schema(&self, project_path: &str) -> Result<rootcx_shared_types::SchemaVerification, String> {
         let manifest = read_manifest(project_path).await?;
-        if manifest.data_contract.is_empty() {
-            return Ok(rootcx_shared_types::SchemaVerification { compliant: true, changes: vec![] });
-        }
         self.client.verify_schema(&manifest).await
             .map_err(|e| format!("verify failed: {e}"))
     }
 
     pub async fn sync_manifest(&self, project_path: &str) -> Result<(), String> {
         let manifest = read_manifest(project_path).await?;
-        if !manifest.data_contract.is_empty() {
-            self.client.install_app(&manifest).await.map_err(|e| format!("failed to install app: {e}"))?;
-        }
+        self.client.install_app(&manifest).await.map_err(|e| format!("failed to install app: {e}"))?;
         Ok(())
     }
 

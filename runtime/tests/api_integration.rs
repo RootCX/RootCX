@@ -1088,7 +1088,7 @@ async fn verify_schema_detects_type_change() {
 }
 
 #[tokio::test]
-async fn verify_schema_no_table_is_compliant() {
+async fn verify_schema_no_table_detects_create() {
     let rt = TestRuntime::boot().await;
     let manifest = json!({
         "appId": "vsnt", "name": "vsnt", "version": "1.0.0",
@@ -1099,7 +1099,7 @@ async fn verify_schema_no_table_is_compliant() {
     let (s, body) = rt.post_json("/api/v1/apps/schema/verify", &manifest).await;
     assert_eq!(s, 200);
     let result: SchemaVerification = serde_json::from_value(body).unwrap();
-    assert!(result.compliant, "no table means CREATE TABLE will handle it, so compliant");
-    assert!(result.changes.is_empty());
+    assert!(!result.compliant, "missing table should be detected as create_table change");
+    assert!(result.changes.iter().any(|c| c.change_type == "create_table" && c.entity == "items"));
     rt.shutdown().await;
 }

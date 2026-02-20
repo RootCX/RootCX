@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use sqlx::{Connection, PgPool};
 use tracing::info;
@@ -104,8 +104,8 @@ pub fn compute_diff(
 
     let db_map: HashMap<&str, &DbColumn> =
         db_columns.iter().map(|c| (c.name.as_str(), c)).collect();
-    let manifest_map: HashMap<&str, &FieldContract> =
-        manifest_fields.iter().map(|f| (f.name.as_str(), f)).collect();
+    let manifest_names: HashSet<&str> =
+        manifest_fields.iter().map(|f| f.name.as_str()).collect();
 
     for field in manifest_fields {
         if PROTECTED_COLUMNS.contains(&field.name.as_str()) {
@@ -203,7 +203,7 @@ pub fn compute_diff(
         if PROTECTED_COLUMNS.contains(&db_col.name.as_str()) {
             continue;
         }
-        if !manifest_map.contains_key(db_col.name.as_str()) {
+        if !manifest_names.contains(db_col.name.as_str()) {
             changes.push(ColumnDiff::Drop {
                 column_name: db_col.name.clone(),
             });
@@ -230,154 +230,80 @@ fn generate_using_clause(col_name: &str, to: &str) -> String {
 }
 
 pub fn generate_ddl(diff: &TableDiff) -> Vec<String> {
-    let fq_table = format!(
+    let fq = format!(
         "{}.{}",
         quote_ident(&diff.schema_name),
         quote_ident(&diff.table_name)
     );
-    let mut stmts = Vec::new();
-
+    // Phase ordering: drop constraints → alter types → add columns → nullability → defaults → add constraints → drop columns
+    let mut phases: [Vec<String>; 7] = Default::default();
     for change in &diff.changes {
-        let names = match change {
-            ColumnDiff::DropCheckConstraint {
-                constraint_names, ..
-            } => constraint_names,
-            ColumnDiff::ReplaceCheckConstraint {
-                old_constraint_names,
-                ..
-            } => old_constraint_names,
-            _ => continue,
-        };
-        for name in names {
-            stmts.push(format!(
-                "ALTER TABLE {fq_table} DROP CONSTRAINT IF EXISTS {}",
-                quote_ident(name)
-            ));
-        }
+        emit_ddl_phases(&fq, &diff.table_name, change, &mut phases);
     }
+    phases.into_iter().flatten().collect()
+}
 
-    for change in &diff.changes {
-        if let ColumnDiff::AlterType {
-            column_name,
-            to_type,
-            ..
-        } = change
-        {
+fn emit_check_sql(fq: &str, table: &str, col_name: &str, values: &[String]) -> String {
+    let col = quote_ident(col_name);
+    let list: Vec<String> = values.iter().map(|v| format!("'{}'", v.replace('\'', "''"))).collect();
+    format!(
+        "ALTER TABLE {fq} ADD CONSTRAINT {} CHECK ({col} IN ({}))",
+        quote_ident(&format!("chk_{table}_{col_name}")),
+        list.join(", ")
+    )
+}
+
+fn emit_ddl_phases(fq: &str, table: &str, change: &ColumnDiff, p: &mut [Vec<String>; 7]) {
+    match change {
+        ColumnDiff::Add { field, pg_type } => {
+            let col = quote_ident(&field.name);
+            p[2].push(format!("ALTER TABLE {fq} ADD COLUMN IF NOT EXISTS {col} {pg_type}"));
+            if field.required {
+                p[3].push(format!("ALTER TABLE {fq} ALTER COLUMN {col} SET NOT NULL"));
+            }
+            if let Some(ref val) = field.default_value {
+                if let Some(sql) = json_to_sql_default(val, pg_type) {
+                    p[4].push(format!("ALTER TABLE {fq} ALTER COLUMN {col} SET DEFAULT {sql}"));
+                }
+            }
+            if let Some(ref vals) = field.enum_values {
+                if !vals.is_empty() {
+                    p[5].push(emit_check_sql(fq, table, &field.name, vals));
+                }
+            }
+        }
+        ColumnDiff::Drop { column_name } => {
+            p[6].push(format!("ALTER TABLE {fq} DROP COLUMN IF EXISTS {} CASCADE", quote_ident(column_name)));
+        }
+        ColumnDiff::AlterType { column_name, to_type, .. } => {
             let col = quote_ident(column_name);
             let using = generate_using_clause(column_name, to_type);
-            stmts.push(format!(
-                "ALTER TABLE {fq_table} ALTER COLUMN {col} TYPE {to_type}{using}"
-            ));
+            p[1].push(format!("ALTER TABLE {fq} ALTER COLUMN {col} TYPE {to_type}{using}"));
+        }
+        ColumnDiff::SetNotNull { column_name } => {
+            p[3].push(format!("ALTER TABLE {fq} ALTER COLUMN {} SET NOT NULL", quote_ident(column_name)));
+        }
+        ColumnDiff::DropNotNull { column_name } => {
+            p[3].push(format!("ALTER TABLE {fq} ALTER COLUMN {} DROP NOT NULL", quote_ident(column_name)));
+        }
+        ColumnDiff::SetDefault { column_name, default_sql } => {
+            p[4].push(format!("ALTER TABLE {fq} ALTER COLUMN {} SET DEFAULT {default_sql}", quote_ident(column_name)));
+        }
+        ColumnDiff::DropDefault { column_name } => {
+            p[4].push(format!("ALTER TABLE {fq} ALTER COLUMN {} DROP DEFAULT", quote_ident(column_name)));
+        }
+        ColumnDiff::ReplaceCheckConstraint { column_name, old_constraint_names, new_values } => {
+            for name in old_constraint_names {
+                p[0].push(format!("ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS {}", quote_ident(name)));
+            }
+            p[5].push(emit_check_sql(fq, table, column_name, new_values));
+        }
+        ColumnDiff::DropCheckConstraint { constraint_names, .. } => {
+            for name in constraint_names {
+                p[0].push(format!("ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS {}", quote_ident(name)));
+            }
         }
     }
-
-    for change in &diff.changes {
-        if let ColumnDiff::Add { field, pg_type } = change {
-            let col = quote_ident(&field.name);
-            stmts.push(format!(
-                "ALTER TABLE {fq_table} ADD COLUMN IF NOT EXISTS {col} {pg_type}"
-            ));
-        }
-    }
-
-    for change in &diff.changes {
-        match change {
-            ColumnDiff::SetNotNull { column_name } => {
-                stmts.push(format!(
-                    "ALTER TABLE {fq_table} ALTER COLUMN {} SET NOT NULL",
-                    quote_ident(column_name)
-                ));
-            }
-            ColumnDiff::DropNotNull { column_name } => {
-                stmts.push(format!(
-                    "ALTER TABLE {fq_table} ALTER COLUMN {} DROP NOT NULL",
-                    quote_ident(column_name)
-                ));
-            }
-            ColumnDiff::Add { field, .. } if field.required => {
-                stmts.push(format!(
-                    "ALTER TABLE {fq_table} ALTER COLUMN {} SET NOT NULL",
-                    quote_ident(&field.name)
-                ));
-            }
-            _ => {}
-        }
-    }
-
-    for change in &diff.changes {
-        match change {
-            ColumnDiff::SetDefault {
-                column_name,
-                default_sql,
-            } => {
-                stmts.push(format!(
-                    "ALTER TABLE {fq_table} ALTER COLUMN {} SET DEFAULT {default_sql}",
-                    quote_ident(column_name)
-                ));
-            }
-            ColumnDiff::DropDefault { column_name } => {
-                stmts.push(format!(
-                    "ALTER TABLE {fq_table} ALTER COLUMN {} DROP DEFAULT",
-                    quote_ident(column_name)
-                ));
-            }
-            ColumnDiff::Add { field, pg_type } => {
-                if let Some(ref val) = field.default_value {
-                    if let Some(sql) = json_to_sql_default(val, pg_type) {
-                        stmts.push(format!(
-                            "ALTER TABLE {fq_table} ALTER COLUMN {} SET DEFAULT {sql}",
-                            quote_ident(&field.name)
-                        ));
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    for change in &diff.changes {
-        let (col_name, values) = match change {
-            ColumnDiff::ReplaceCheckConstraint {
-                column_name,
-                new_values,
-                ..
-            } => (column_name, new_values),
-            ColumnDiff::Add { field, .. } => {
-                if let Some(ref vals) = field.enum_values {
-                    if !vals.is_empty() {
-                        (&field.name, vals)
-                    } else {
-                        continue;
-                    }
-                } else {
-                    continue;
-                }
-            }
-            _ => continue,
-        };
-        let col = quote_ident(col_name);
-        let values_list: Vec<String> = values
-            .iter()
-            .map(|v| format!("'{}'", v.replace('\'', "''")))
-            .collect();
-        let constraint_name = format!("chk_{}_{}", diff.table_name, col_name);
-        stmts.push(format!(
-            "ALTER TABLE {fq_table} ADD CONSTRAINT {} CHECK ({col} IN ({}))",
-            quote_ident(&constraint_name),
-            values_list.join(", ")
-        ));
-    }
-
-    for change in &diff.changes {
-        if let ColumnDiff::Drop { column_name } = change {
-            stmts.push(format!(
-                "ALTER TABLE {fq_table} DROP COLUMN IF EXISTS {} CASCADE",
-                quote_ident(column_name)
-            ));
-        }
-    }
-
-    stmts
 }
 
 pub async fn introspect_table(
@@ -435,6 +361,39 @@ pub async fn introspect_table(
             check_constraints: checks,
         })
         .collect())
+}
+
+pub async fn list_tables_in_schema(
+    pool: &PgPool,
+    schema_name: &str,
+) -> Result<Vec<String>, RuntimeError> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT c.relname FROM pg_class c \
+         JOIN pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = $1 AND c.relkind = 'r' \
+         ORDER BY c.relname",
+    )
+    .bind(schema_name)
+    .fetch_all(pool)
+    .await
+    .map_err(RuntimeError::Schema)?;
+
+    Ok(rows.into_iter().map(|(name,)| name).collect())
+}
+
+pub(crate) fn find_orphaned_tables(
+    db_tables: &[String],
+    manifest_entities: &[EntityContract],
+) -> Vec<String> {
+    let manifest_names: HashSet<&str> = manifest_entities
+        .iter()
+        .map(|e| e.entity_name.as_str())
+        .collect();
+    db_tables
+        .iter()
+        .filter(|t| !manifest_names.contains(t.as_str()))
+        .cloned()
+        .collect()
 }
 
 async fn apply_ddl(pool: &PgPool, statements: &[String]) -> Result<(), RuntimeError> {
@@ -530,12 +489,50 @@ pub async fn verify_all(
     for entity in entities {
         let db_columns = introspect_table(pool, app_id, &entity.entity_name).await?;
         if db_columns.is_empty() {
+            changes.push(SchemaChange {
+                entity: entity.entity_name.clone(),
+                change_type: "create_table".to_string(),
+                column: String::new(),
+                detail: Some(format!("{} fields", entity.fields.len())),
+            });
             continue;
         }
         let diff = compute_diff(app_id, &entity.entity_name, &db_columns, &entity.fields, pk_types);
         changes.extend(diff.changes.iter().map(|c| column_diff_to_schema_change(&entity.entity_name, c)));
     }
+
+    let db_tables = list_tables_in_schema(pool, app_id).await?;
+    for table in find_orphaned_tables(&db_tables, entities) {
+        changes.push(SchemaChange {
+            entity: table,
+            change_type: "drop_table".to_string(),
+            column: String::new(),
+            detail: None,
+        });
+    }
+
     Ok(SchemaVerification { compliant: changes.is_empty(), changes })
+}
+
+pub async fn drop_orphaned_tables(
+    pool: &PgPool,
+    app_id: &str,
+    manifest_entities: &[EntityContract],
+) -> Result<(), RuntimeError> {
+    let db_tables = list_tables_in_schema(pool, app_id).await?;
+    for table in find_orphaned_tables(&db_tables, manifest_entities) {
+        let stmt = format!(
+            "DROP TABLE IF EXISTS {}.{} CASCADE",
+            quote_ident(app_id),
+            quote_ident(&table)
+        );
+        info!(table = %format!("{}.{}", app_id, table), "dropping orphaned table");
+        sqlx::query(&stmt)
+            .execute(pool)
+            .await
+            .map_err(RuntimeError::Schema)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1055,5 +1052,58 @@ mod tests {
             assert_eq!(sc.column, expected_col, "diff: {diff:?}");
             assert_eq!(sc.detail.as_deref(), expected_detail, "diff: {diff:?}");
         }
+    }
+
+    fn mentity(name: &str, fields: Vec<FieldContract>) -> EntityContract {
+        EntityContract {
+            entity_name: name.to_string(),
+            fields,
+        }
+    }
+
+    #[test]
+    fn compute_diff_empty_db_produces_adds_for_all_fields() {
+        let fields = vec![mfield("name", "text"), mfield("email", "text")];
+        let diff = compute_diff("app", "tbl", &[], &fields, &empty_pk_types());
+        assert_eq!(diff.changes.len(), 2);
+        assert!(
+            diff.changes
+                .iter()
+                .all(|c| matches!(c, ColumnDiff::Add { .. })),
+            "all changes should be Add: {:?}",
+            diff.changes
+        );
+    }
+
+    #[test]
+    fn find_orphaned_tables_detects_removed_entity() {
+        let db_tables = vec!["tasks".to_string(), "notes".to_string()];
+        let entities = vec![mentity("tasks", vec![mfield("name", "text")])];
+        let orphans = find_orphaned_tables(&db_tables, &entities);
+        assert_eq!(orphans, vec!["notes"]);
+    }
+
+    #[test]
+    fn find_orphaned_tables_no_orphans() {
+        let db_tables = vec!["tasks".to_string()];
+        let entities = vec![mentity("tasks", vec![mfield("name", "text")])];
+        let orphans = find_orphaned_tables(&db_tables, &entities);
+        assert!(orphans.is_empty());
+    }
+
+    #[test]
+    fn find_orphaned_tables_empty_manifest() {
+        let db_tables = vec!["tasks".to_string(), "notes".to_string()];
+        let entities: Vec<EntityContract> = vec![];
+        let orphans = find_orphaned_tables(&db_tables, &entities);
+        assert_eq!(orphans, vec!["tasks", "notes"]);
+    }
+
+    #[test]
+    fn find_orphaned_tables_empty_db() {
+        let db_tables: Vec<String> = vec![];
+        let entities = vec![mentity("tasks", vec![mfield("name", "text")])];
+        let orphans = find_orphaned_tables(&db_tables, &entities);
+        assert!(orphans.is_empty());
     }
 }
