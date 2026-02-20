@@ -1,5 +1,5 @@
 [package]
-name = "rootcx-runtime-client"
+name = "rootcx-runtime"
 version.workspace = true
 edition.workspace = true
 

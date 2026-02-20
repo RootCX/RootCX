@@ -7,7 +7,7 @@ node_modules/
 dist/
 
 # PostgreSQL bundled binaries
-runtime/resources/
+core/resources/
 
 # OS
 .DS_Store

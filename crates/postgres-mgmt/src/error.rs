@@ -3,10 +3,7 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 pub enum PgError {
     #[error("initdb failed (data_dir={data_dir}): {source}")]
-    InitDb {
-        data_dir: PathBuf,
-        source: std::io::Error,
-    },
+    InitDb { data_dir: PathBuf, source: std::io::Error },
 
     #[error("initdb exited with status {status}: {stderr}")]
     InitDbFailed { status: i32, stderr: String },

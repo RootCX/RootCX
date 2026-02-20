@@ -42,15 +42,7 @@ pub async fn create(
     name.hash(&mut h);
     let port = 3000 + (h.finish() % 6000) as u16;
 
-    let ctx = ScaffoldContext {
-        name: name.to_string(),
-        app_id,
-        lib_name,
-        identifier,
-        port,
-        runtime,
-        answers,
-    };
+    let ctx = ScaffoldContext { name: name.to_string(), app_id, lib_name, identifier, port, runtime, answers };
 
     let emitter = Emitter::new(root.to_path_buf());
     for layer in &layers {

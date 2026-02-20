@@ -6,14 +6,9 @@ use tracing::{info, warn};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
 
-static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    reqwest::Client::builder()
-        .timeout(HEALTH_TIMEOUT)
-        .build()
-        .expect("failed to build http client")
-});
+static HTTP: LazyLock<reqwest::Client> =
+    LazyLock::new(|| reqwest::Client::builder().timeout(HEALTH_TIMEOUT).build().expect("failed to build http client"));
 
-/// Manages the AI Forge sidecar process.
 pub struct ForgeManager {
     child: Option<Child>,
     port: u16,
@@ -29,23 +24,16 @@ impl ForgeManager {
         self.port
     }
 
-    /// Start the AI Forge sidecar in the given directory.
-    ///
-    /// If a process is already running, it is stopped first.
-    /// If a stale process from a previous run is listening on the port,
-    /// kill it first so the new instance starts cleanly.
     pub async fn start(
         &mut self,
         cwd: &std::path::Path,
         config_path: Option<&std::path::Path>,
     ) -> Result<(), ForgeError> {
-        // Stop any running instance first.
         self.stop().await?;
 
         let port = self.port;
         let health_url = format!("http://127.0.0.1:{port}/global/health");
 
-        // Kill stale processes on the port before starting.
         if health_check_url(&health_url).await {
             warn!("stale forge process detected on port {port}, killing it");
             kill_listeners_on_port(port).await;
@@ -72,9 +60,7 @@ impl ForgeManager {
             cmd.env("OPENCODE_CONFIG", path);
         }
 
-        let child = cmd
-            .spawn()
-            .map_err(|e| ForgeError::SpawnFailed(e.to_string()))?;
+        let child = cmd.spawn().map_err(|e| ForgeError::SpawnFailed(e.to_string()))?;
 
         self.child = Some(child);
 
@@ -90,14 +76,12 @@ impl ForgeManager {
         Ok(())
     }
 
-    /// Graceful stop: SIGTERM → wait up to 3s → SIGKILL.
     pub async fn stop(&mut self) -> Result<(), ForgeError> {
         if let Some(mut child) = self.child.take() {
             info!("stopping forge sidecar (graceful)");
 
             #[cfg(unix)]
             if let Some(pid) = child.id() {
-                // SAFETY: pid is a valid process ID obtained from Child::id().
                 unsafe {
                     libc::kill(pid as i32, libc::SIGTERM);
                 }
@@ -133,19 +117,11 @@ async fn health_check_url(url: &str) -> bool {
 }
 
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .map(|a| a.port())
-        .unwrap_or(4096)
+    std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map(|a| a.port()).unwrap_or(4096)
 }
 
-/// Kill any processes listening on the given port (macOS/Linux).
 async fn kill_listeners_on_port(port: u16) {
-    let output = match tokio::process::Command::new("lsof")
-        .args(["-ti", &format!(":{port}")])
-        .output()
-        .await
-    {
+    let output = match tokio::process::Command::new("lsof").args(["-ti", &format!(":{port}")]).output().await {
         Ok(o) => o,
         Err(e) => {
             warn!("lsof failed: {e}");
@@ -153,32 +129,25 @@ async fn kill_listeners_on_port(port: u16) {
         }
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let pids: Vec<&str> = stdout.lines().collect();
+    let pids: Vec<i32> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
 
     if pids.is_empty() {
         return;
     }
 
-    info!(pids = ?pids, "killing stale forge processes on port {port}");
+    info!(?pids, "killing stale forge processes on port {port}");
 
-    for pid_str in &pids {
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(pid, libc::SIGTERM);
-            }
+    #[cfg(unix)]
+    {
+        for &pid in &pids {
+            unsafe { libc::kill(pid, libc::SIGTERM); }
         }
-    }
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    for pid_str in &pids {
-        if let Ok(pid) = pid_str.trim().parse::<i32>() {
-            #[cfg(unix)]
-            unsafe {
-                libc::kill(pid, libc::SIGKILL);
-            }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        for &pid in &pids {
+            unsafe { libc::kill(pid, libc::SIGKILL); }
         }
     }
 }

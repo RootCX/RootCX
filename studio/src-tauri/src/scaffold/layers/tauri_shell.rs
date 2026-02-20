@@ -16,7 +16,10 @@ impl Layer for TauriLayer {
 
             e.write_bytes("src-tauri/icons/icon.png", ICON).await?;
 
-            e.write("src-tauri/Cargo.toml", &format!(r#"[package]
+            e.write(
+                "src-tauri/Cargo.toml",
+                &format!(
+                    r#"[package]
 name = "{app_id}"
 version = "0.0.1"
 edition = "2021"
@@ -33,12 +36,18 @@ tauri = {{ version = "2", features = [] }}
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 reqwest = {{ version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }}
-rootcx-runtime-client = {{ path = "{client_dep}" }}
-"#)).await?;
+rootcx-runtime = {{ path = "{client_dep}" }}
+"#
+                ),
+            )
+            .await?;
 
             e.write("src-tauri/build.rs", "fn main() { tauri_build::build(); }\n").await?;
 
-            e.write("src-tauri/tauri.conf.json", &format!(r#"{{
+            e.write(
+                "src-tauri/tauri.conf.json",
+                &format!(
+                    r#"{{
   "productName": "{name}",
   "version": "0.0.1",
   "identifier": "{identifier}",
@@ -54,18 +63,27 @@ rootcx-runtime-client = {{ path = "{client_dep}" }}
   }},
   "bundle": {{ "active": true, "icon": ["icons/icon.png"] }}
 }}
-"#)).await?;
+"#
+                ),
+            )
+            .await?;
 
-            e.write("src-tauri/capabilities/default.json", r#"{
+            e.write(
+                "src-tauri/capabilities/default.json",
+                r#"{
   "identifier": "default",
   "description": "Default capabilities",
   "windows": ["main"],
   "permissions": ["core:default"]
 }
-"#).await?;
+"#,
+            )
+            .await?;
 
-            e.write("src-tauri/src/lib.rs", r#"pub fn run() {
-    rootcx_runtime_client::ensure_runtime().expect("failed to start RootCX Runtime");
+            e.write(
+                "src-tauri/src/lib.rs",
+                r#"pub fn run() {
+    rootcx_runtime::ensure_runtime().expect("failed to start RootCX Runtime");
 
     let _ = reqwest::blocking::Client::new()
         .post("http://localhost:9100/api/v1/apps")
@@ -77,14 +95,22 @@ rootcx-runtime-client = {{ path = "{client_dep}" }}
         .run(tauri::generate_context!())
         .expect("error while running application");
 }
-"#).await?;
+"#,
+            )
+            .await?;
 
-            e.write("src-tauri/src/main.rs", &format!(r#"#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+            e.write(
+                "src-tauri/src/main.rs",
+                &format!(
+                    r#"#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {{
     {lib_name}_lib::run();
 }}
-"#)).await?;
+"#
+                ),
+            )
+            .await?;
 
             Ok(())
         })
@@ -104,8 +130,7 @@ mod tests {
 
     #[test]
     fn studio_csp_enforces_restrictions() {
-        let conf: serde_json::Value =
-            serde_json::from_str(include_str!("../../../tauri.conf.json")).unwrap();
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../../../tauri.conf.json")).unwrap();
         let csp = conf["app"]["security"]["csp"].as_str().expect("csp must not be null");
         assert!(csp.contains("default-src 'self'"));
         assert!(csp.contains("script-src 'self'"));

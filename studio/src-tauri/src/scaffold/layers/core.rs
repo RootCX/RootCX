@@ -36,7 +36,10 @@ impl Layer for CoreLayer {
             e.write_json("manifest.json", &manifest).await?;
             e.write(".rootcx/launch.json", "{\n  \"preLaunch\": [\"verify_schema\", \"sync_manifest\", \"deploy_backend\"],\n  \"command\": \"cargo tauri dev\"\n}\n").await?;
 
-            e.write("package.json", &format!(r#"{{
+            e.write(
+                "package.json",
+                &format!(
+                    r#"{{
   "name": "{app_id}",
   "private": true,
   "type": "module",
@@ -63,7 +66,10 @@ impl Layer for CoreLayer {
     "vite": "^6.0.0"
   }}
 }}
-"#)).await?;
+"#
+                ),
+            )
+            .await?;
 
             e.write("index.html", &format!(r#"<!DOCTYPE html>
 <html lang="en">
@@ -72,7 +78,10 @@ impl Layer for CoreLayer {
 </html>
 "#)).await?;
 
-            e.write("vite.config.ts", &format!(r#"import path from "path";
+            e.write(
+                "vite.config.ts",
+                &format!(
+                    r#"import path from "path";
 import {{ defineConfig }} from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
@@ -87,7 +96,10 @@ export default defineConfig({{
     }},
   }},
 }});
-"#)).await?;
+"#
+                ),
+            )
+            .await?;
 
             e.write("tsconfig.json", TPL_TSCONFIG).await?;
             e.write("src/main.tsx", TPL_MAIN_TSX).await?;

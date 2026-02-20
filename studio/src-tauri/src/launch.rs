@@ -20,10 +20,8 @@ pub struct LaunchConfig {
 
 pub fn read(project: &Path) -> Result<LaunchConfig, String> {
     let path = project.join(DIR).join(FILE);
-    let data = std::fs::read_to_string(&path)
-        .map_err(|_| format!("{} not found", path.display()))?;
-    let config: LaunchConfig = serde_json::from_str(&data)
-        .map_err(|e| format!("invalid launch.json: {e}"))?;
+    let data = std::fs::read_to_string(&path).map_err(|_| format!("{} not found", path.display()))?;
+    let config: LaunchConfig = serde_json::from_str(&data).map_err(|e| format!("invalid launch.json: {e}"))?;
     validate_command(&config.command)?;
     Ok(config)
 }

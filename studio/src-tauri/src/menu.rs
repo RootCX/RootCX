@@ -23,15 +23,8 @@ pub fn setup(app: &mut App) -> tauri::Result<ViewMenuItems> {
         .quit()
         .build()?;
 
-    let edit_menu = SubmenuBuilder::new(app, "Edit")
-        .undo()
-        .redo()
-        .separator()
-        .cut()
-        .copy()
-        .paste()
-        .select_all()
-        .build()?;
+    let edit_menu =
+        SubmenuBuilder::new(app, "Edit").undo().redo().separator().cut().copy().paste().select_all().build()?;
 
     let mut items = HashMap::with_capacity(VIEWS.len());
     let mut view_builder = SubmenuBuilder::with_id(app, "view", "View");
@@ -47,10 +40,7 @@ pub fn setup(app: &mut App) -> tauri::Result<ViewMenuItems> {
         .item(&MenuItem::with_id(app, "run", "Run", true, Some("F5"))?)
         .build()?;
 
-    let window_menu = SubmenuBuilder::new(app, "Window")
-        .minimize()
-        .close_window()
-        .build()?;
+    let window_menu = SubmenuBuilder::new(app, "Window").minimize().close_window().build()?;
 
     let menu = MenuBuilder::new(app)
         .item(&app_menu)
