@@ -126,12 +126,12 @@ pub async fn deploy_backend(
 
 #[tauri::command]
 pub async fn run_app(
-    command: String,
     project_path: String,
     app_handle: tauri::AppHandle,
     state: State<'_, Mutex<RunnerState>>,
 ) -> Result<(), String> {
-    state.lock().await.run(&command, &project_path, app_handle);
+    let config = crate::launch::read(std::path::Path::new(&project_path))?;
+    state.lock().await.run(&config.command, &project_path, app_handle);
     Ok(())
 }
 

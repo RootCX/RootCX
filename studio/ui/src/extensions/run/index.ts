@@ -24,8 +24,7 @@ export function activate() {
       } catch { }
 
       try {
-        const config = await invoke<{ command: string }>("read_launch_config", { projectPath: pp });
-        await invoke("run_app", { command: config.command, projectPath: pp });
+        await invoke("run_app", { projectPath: pp });
       } catch {
         await invoke("init_launch_config", { projectPath: pp });
       }
