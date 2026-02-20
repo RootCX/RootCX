@@ -37,6 +37,7 @@ pub fn run() {
             commands::scaffold_project,
             commands::list_presets,
             commands::get_preset_questions,
+            commands::verify_schema,
             commands::sync_manifest,
             commands::deploy_backend,
             commands::run_app,

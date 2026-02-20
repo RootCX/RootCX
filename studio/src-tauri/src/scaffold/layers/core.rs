@@ -6,9 +6,6 @@ const TPL_MAIN_TSX: &str = include_str!("../../../templates/scaffold/main.tsx");
 const TPL_GLOBALS_CSS: &str = include_str!("../../../templates/scaffold/globals.css");
 const TPL_UTILS_TS: &str = include_str!("../../../templates/scaffold/utils.ts");
 
-/// Emits: package.json, index.html, vite.config.ts, tsconfig.json,
-/// src/main.tsx, src/globals.css, src/lib/utils.ts,
-/// manifest.json, .rootcx/launch.json
 pub struct CoreLayer;
 
 impl Layer for CoreLayer {
@@ -18,7 +15,6 @@ impl Layer for CoreLayer {
             let sdk_dep = format!("file:{}", ctx.runtime.sdk.display());
             let ui_dep = format!("file:{}", ctx.runtime.ui.display());
 
-            // manifest.json
             let permissions = matches!(ctx.answers.get("permissions"), Some(AnswerValue::Bool(true)));
             let mut manifest = serde_json::json!({
                 "appId": app_id, "name": name, "version": "0.0.1",
@@ -38,9 +34,8 @@ impl Layer for CoreLayer {
                 });
             }
             e.write_json("manifest.json", &manifest).await?;
-            e.write(".rootcx/launch.json", "{\n  \"command\": \"cargo tauri dev\"\n}\n").await?;
+            e.write(".rootcx/launch.json", "{\n  \"preLaunch\": [\"verify_schema\", \"sync_manifest\", \"deploy_backend\"],\n  \"command\": \"cargo tauri dev\"\n}\n").await?;
 
-            // package.json
             e.write("package.json", &format!(r#"{{
   "name": "{app_id}",
   "private": true,
@@ -70,7 +65,6 @@ impl Layer for CoreLayer {
 }}
 "#)).await?;
 
-            // index.html
             e.write("index.html", &format!(r#"<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>{name}</title></head>
@@ -78,7 +72,6 @@ impl Layer for CoreLayer {
 </html>
 "#)).await?;
 
-            // vite.config.ts
             e.write("vite.config.ts", &format!(r#"import path from "path";
 import {{ defineConfig }} from "vite";
 import react from "@vitejs/plugin-react";
