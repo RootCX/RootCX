@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { type AuthUser, type RegisterInput } from "../client";
-import { useRuntimeClient, TOKEN_KEY, REFRESH_KEY } from "../components/RuntimeProvider";
+import { useRuntimeClient, REFRESH_KEY } from "../components/RuntimeProvider";
 
 export interface UseAuthResult {
   user: AuthUser | null;
@@ -24,17 +24,13 @@ export function useAuth(): UseAuthResult {
       .then(setUser)
       .catch(() => {
         setUser(null);
-        localStorage.removeItem(TOKEN_KEY);
         localStorage.removeItem(REFRESH_KEY);
       })
       .finally(() => setLoading(false));
   }, [client]);
 
   const persistTokens = useCallback(() => {
-    const access = client.getAccessToken();
     const refresh = client.getRefreshToken();
-    if (access) localStorage.setItem(TOKEN_KEY, access);
-    else localStorage.removeItem(TOKEN_KEY);
     if (refresh) localStorage.setItem(REFRESH_KEY, refresh);
     else localStorage.removeItem(REFRESH_KEY);
   }, [client]);
