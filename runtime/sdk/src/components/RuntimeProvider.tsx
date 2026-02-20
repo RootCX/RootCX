@@ -1,6 +1,7 @@
 import { createContext, useContext, useRef, type ReactNode } from "react";
 import { RuntimeClient } from "../client";
 
+/** @deprecated Access tokens are now kept in memory only. */
 export const TOKEN_KEY = "rootcx_access_token";
 export const REFRESH_KEY = "rootcx_refresh_token";
 
@@ -16,10 +17,11 @@ export function RuntimeProvider({ baseUrl, children }: RuntimeProviderProps) {
   const clientRef = useRef<RuntimeClient | null>(null);
   if (!clientRef.current) {
     const client = new RuntimeClient({ baseUrl });
-    const access = localStorage.getItem(TOKEN_KEY);
+    // Clear legacy access token — now kept in memory only
+    localStorage.removeItem(TOKEN_KEY);
     const refresh = localStorage.getItem(REFRESH_KEY);
-    if (access || refresh) {
-      client.setTokens(access, refresh);
+    if (refresh) {
+      client.setTokens(null, refresh);
     }
     clientRef.current = client;
   }

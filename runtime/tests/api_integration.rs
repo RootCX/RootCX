@@ -40,6 +40,22 @@ async fn worker_does_not_receive_db_url() {
     );
 }
 
+// ── Security: JWT not in localStorage ───────────────────────────
+
+#[tokio::test]
+async fn sdk_does_not_persist_access_token_to_localstorage() {
+    let auth_hook = include_str!("../../runtime/sdk/src/hooks/useAuth.ts");
+    assert!(
+        !auth_hook.contains("localStorage.setItem(TOKEN_KEY"),
+        "useAuth must not persist access tokens to localStorage"
+    );
+    let provider = include_str!("../../runtime/sdk/src/components/RuntimeProvider.tsx");
+    assert!(
+        !provider.contains("localStorage.getItem(TOKEN_KEY)"),
+        "RuntimeProvider must not restore access tokens from localStorage"
+    );
+}
+
 // ── Security: Auth on management endpoints ─────────────────────
 
 #[tokio::test]
