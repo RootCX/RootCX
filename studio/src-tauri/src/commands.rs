@@ -31,6 +31,7 @@ pub async fn get_forge_status(state: State<'_, AppState>) -> Result<rootcx_share
 
 #[tauri::command]
 pub async fn start_forge(state: State<'_, AppState>, project_path: String) -> Result<(), String> {
+    validate_fs_path(&project_path)?;
     state.start_forge(&project_path).await
 }
 
@@ -54,6 +55,7 @@ pub struct DirEntry {
 
 #[tauri::command]
 pub async fn read_dir(path: String) -> Result<Vec<DirEntry>, String> {
+    validate_fs_path(&path)?;
     let mut entries = Vec::new();
     let mut rd = tokio::fs::read_dir(&path)
         .await
@@ -87,8 +89,47 @@ pub fn sync_view_menu(hidden: Vec<String>, state: State<'_, ViewMenuItems>) {
 
 // ── Filesystem ──
 
+fn validate_fs_path(path: &str) -> Result<(), String> {
+    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let raw = std::path::Path::new(path);
+
+    if !raw.is_absolute() {
+        return Err("path must be absolute".into());
+    }
+
+    // Falls back to lexical normalization for paths that don't exist yet
+    let resolved = std::fs::canonicalize(raw).unwrap_or_else(|_| normalize_lexical(raw));
+
+    if !resolved.starts_with(&home) {
+        return Err("path must be under home directory".into());
+    }
+
+    let rel = resolved.strip_prefix(&home).unwrap();
+    const BLOCKED: &[&str] = &[".ssh", ".gnupg", ".aws", ".config/gcloud", ".kube"];
+    if BLOCKED.iter().any(|b| rel.starts_with(b)) {
+        let first = rel.components().next().and_then(|c| c.as_os_str().to_str()).unwrap_or("");
+        return Err(format!("access to ~/{first} is blocked"));
+    }
+
+    Ok(())
+}
+
+fn normalize_lexical(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::ParentDir => { out.pop(); }
+            Component::CurDir => {}
+            _ => out.push(comp),
+        }
+    }
+    out
+}
+
 #[tauri::command]
 pub async fn read_file(path: String) -> Result<String, String> {
+    validate_fs_path(&path)?;
     tokio::fs::read_to_string(&path)
         .await
         .map_err(|e| format!("failed to read file: {e}"))
@@ -96,6 +137,7 @@ pub async fn read_file(path: String) -> Result<String, String> {
 
 #[tauri::command]
 pub async fn write_file(path: String, contents: String) -> Result<(), String> {
+    validate_fs_path(&path)?;
     tokio::fs::write(&path, contents.as_bytes())
         .await
         .map_err(|e| format!("failed to write file: {e}"))
@@ -103,6 +145,7 @@ pub async fn write_file(path: String, contents: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn ensure_dir(path: String) -> Result<(), String> {
+    validate_fs_path(&path)?;
     tokio::fs::create_dir_all(&path)
         .await
         .map_err(|e| format!("failed to create directory: {e}"))
@@ -148,6 +191,7 @@ pub async fn scaffold_project(
     preset_id: Option<String>,
     answers: Option<std::collections::HashMap<String, crate::scaffold::Answer>>,
 ) -> Result<(), String> {
+    validate_fs_path(&path)?;
     crate::scaffold::create(
         std::path::Path::new(&path),
         &name,
@@ -208,6 +252,9 @@ pub async fn spawn_terminal(
     channel: Channel<Vec<u8>>,
     state: State<'_, Mutex<TerminalState>>,
 ) -> Result<(), String> {
+    if let Some(ref dir) = cwd {
+        validate_fs_path(dir)?;
+    }
     state.lock().await.spawn(cwd.as_deref(), rows, cols, channel)
 }
 
@@ -226,4 +273,43 @@ pub async fn terminal_resize(
     state: State<'_, Mutex<TerminalState>>,
 ) -> Result<(), String> {
     state.lock().await.resize(rows, cols).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fs_path_blocks_sensitive_dirs() {
+        let home = std::env::var("HOME").unwrap();
+        for dir in [".ssh", ".gnupg", ".aws", ".kube"] {
+            let path = format!("{home}/{dir}/id_rsa");
+            assert!(validate_fs_path(&path).is_err(), "should block: {path}");
+        }
+    }
+
+    #[test]
+    fn fs_path_blocks_outside_home() {
+        assert!(validate_fs_path("/etc/passwd").is_err());
+        assert!(validate_fs_path("/tmp/evil").is_err());
+    }
+
+    #[test]
+    fn fs_path_blocks_relative() {
+        assert!(validate_fs_path("relative/path").is_err());
+    }
+
+    #[test]
+    fn fs_path_allows_project_dirs() {
+        let home = std::env::var("HOME").unwrap();
+        assert!(validate_fs_path(&format!("{home}/workspace/project/src/main.rs")).is_ok());
+        assert!(validate_fs_path(&format!("{home}/Documents/file.txt")).is_ok());
+    }
+
+    #[test]
+    fn fs_path_blocks_dotdot_traversal_to_sensitive_dirs() {
+        let home = std::env::var("HOME").unwrap();
+        let traversal = format!("{home}/workspace/../.ssh/id_rsa");
+        assert!(validate_fs_path(&traversal).is_err(), "should block ../ traversal to .ssh");
+    }
 }
