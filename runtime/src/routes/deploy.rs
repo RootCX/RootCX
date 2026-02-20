@@ -6,10 +6,12 @@ use serde_json::{json, Value as JsonValue};
 use tracing::info;
 
 use crate::api_error::ApiError;
+use crate::auth::identity::Identity;
 use super::{SharedRuntime, pool_and_secrets, wm};
 
 /// POST /api/v1/apps/{app_id}/deploy — upload tar.gz, extract, install deps, start worker.
 pub async fn deploy_backend(
+    _identity: Identity,
     State(rt): State<SharedRuntime>,
     AxumPath(app_id): AxumPath<String>,
     mut multipart: Multipart,

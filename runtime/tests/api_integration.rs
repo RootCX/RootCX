@@ -20,6 +20,34 @@ fn make_tar_gz(files: &[(&str, &[u8])]) -> Vec<u8> {
     tar.into_inner().unwrap().finish().unwrap()
 }
 
+// ── Security: Auth on management endpoints ─────────────────────
+
+#[tokio::test]
+async fn mgmt_endpoints_reject_unauthenticated() {
+    let rt = TestRuntime::boot().await;
+    let manifest = json!({
+        "appId": "authtest", "name": "authtest", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "label", "type": "text", "required": true }
+        ]}]
+    });
+
+    // Install (POST /api/v1/apps)
+    assert_eq!(rt.post_json_unauthed("/api/v1/apps", &manifest).await, 401);
+    // Uninstall (DELETE /api/v1/apps/{id})
+    assert_eq!(rt.delete_unauthed("/api/v1/apps/authtest").await, 401);
+    // Secrets
+    assert_eq!(rt.post_json_unauthed("/api/v1/apps/authtest/secrets", &json!({"key":"K","value":"V"})).await, 401);
+    assert_eq!(rt.get_unauthed("/api/v1/apps/authtest/secrets").await, 401);
+    assert_eq!(rt.delete_unauthed("/api/v1/apps/authtest/secrets/K").await, 401);
+    // Jobs
+    assert_eq!(rt.post_json_unauthed("/api/v1/apps/authtest/jobs", &json!({"payload":{}})).await, 401);
+    // Workers
+    assert_eq!(rt.post_json_unauthed("/api/v1/apps/authtest/worker/start", &json!({})).await, 401);
+    assert_eq!(rt.post_json_unauthed("/api/v1/apps/authtest/worker/stop", &json!({})).await, 401);
+    rt.shutdown().await;
+}
+
 // ── Health & Status ─────────────────────────────────────────────
 
 #[tokio::test]
