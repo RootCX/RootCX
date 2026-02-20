@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "core",
     "runtime/client",
+    "crates/platform",
     "crates/postgres-mgmt",
     "crates/shared-types",
     "studio/src-tauri",
@@ -37,6 +38,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 
 # Internal crates
 rootcx-core = { path = "core" }
+rootcx-platform = { path = "crates/platform" }
 rootcx-runtime = { path = "runtime/client" }
 rootcx-postgres-mgmt = { path = "crates/postgres-mgmt" }
 rootcx-shared-types = { path = "crates/shared-types" }

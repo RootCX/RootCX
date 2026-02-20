@@ -8,3 +8,4 @@ tokio.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
+rootcx-platform.workspace = true

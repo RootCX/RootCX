@@ -3685,6 +3685,7 @@ dependencies = [
  "jsonwebtoken",
  "rand 0.8.5",
  "reqwest 0.12.28",
+ "rootcx-platform",
  "rootcx-postgres-mgmt",
  "rootcx-shared-types",
  "serde",
@@ -3702,9 +3703,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootcx-platform"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rootcx-postgres-mgmt"
 version = "0.1.0"
 dependencies = [
+ "rootcx-platform",
  "serde",
  "thiserror 2.0.18",
  "tokio",
@@ -3715,8 +3727,8 @@ dependencies = [
 name = "rootcx-runtime"
 version = "0.1.0"
 dependencies = [
- "libc",
  "reqwest 0.12.28",
+ "rootcx-platform",
  "rootcx-shared-types",
  "serde",
  "serde_json",
@@ -3736,11 +3748,11 @@ name = "rootcx-studio"
 version = "0.1.0"
 dependencies = [
  "flate2",
- "libc",
  "notify",
  "notify-debouncer-mini",
  "portable-pty",
  "reqwest 0.12.28",
+ "rootcx-platform",
  "rootcx-runtime",
  "rootcx-shared-types",
  "serde",

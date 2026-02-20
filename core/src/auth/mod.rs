@@ -72,11 +72,7 @@ fn load_or_generate_jwt_key(path: &Path) -> Result<Vec<u8>, RuntimeError> {
     }
     std::fs::write(path, hex::encode(&key)).map_err(err)?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
+    let _ = rootcx_platform::fs::set_private(path);
 
     info!(path = %path.display(), "JWT key generated");
     Ok(key)

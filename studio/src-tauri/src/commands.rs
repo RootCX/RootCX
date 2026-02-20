@@ -79,7 +79,7 @@ pub fn sync_view_menu(hidden: Vec<String>, state: State<'_, ViewMenuItems>) {
 }
 
 fn validate_fs_path(path: &str) -> Result<(), String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let home = rootcx_platform::dirs::home_dir().map_err(|e| e.to_string())?;
     let raw = std::path::Path::new(path);
 
     if !raw.is_absolute() {
@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn fs_path_blocks_sensitive_dirs() {
-        let home = std::env::var("HOME").unwrap();
+        let home = rootcx_platform::dirs::home_dir().unwrap().to_string_lossy().to_string();
         for dir in [".ssh", ".gnupg", ".aws", ".kube"] {
             let path = format!("{home}/{dir}/id_rsa");
             assert!(validate_fs_path(&path).is_err(), "should block: {path}");
@@ -277,14 +277,14 @@ mod tests {
 
     #[test]
     fn fs_path_allows_project_dirs() {
-        let home = std::env::var("HOME").unwrap();
+        let home = rootcx_platform::dirs::home_dir().unwrap().to_string_lossy().to_string();
         assert!(validate_fs_path(&format!("{home}/workspace/project/src/main.rs")).is_ok());
         assert!(validate_fs_path(&format!("{home}/Documents/file.txt")).is_ok());
     }
 
     #[test]
     fn fs_path_blocks_dotdot_traversal_to_sensitive_dirs() {
-        let home = std::env::var("HOME").unwrap();
+        let home = rootcx_platform::dirs::home_dir().unwrap().to_string_lossy().to_string();
         let traversal = format!("{home}/workspace/../.ssh/id_rsa");
         assert!(validate_fs_path(&traversal).is_err(), "should block ../ traversal to .ssh");
     }

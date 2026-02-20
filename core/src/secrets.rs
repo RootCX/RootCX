@@ -160,11 +160,7 @@ fn load_or_generate_key(path: &Path) -> Result<Vec<u8>, RuntimeError> {
     }
     std::fs::write(path, hex::encode(&key)).map_err(secret_err)?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
+    let _ = rootcx_platform::fs::set_private(path);
 
     info!(path = %path.display(), "master key generated");
     Ok(key)
