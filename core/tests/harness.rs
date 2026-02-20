@@ -28,9 +28,9 @@ impl TestRuntime {
     }
 
     async fn boot_inner(require_auth: bool) -> Self {
-        let resources = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+        let resources = rootcx_platform::dirs::resources_dir(env!("CARGO_MANIFEST_DIR"));
         let pg_root = find_pg_root(&resources).expect("bundled PostgreSQL not found");
-        let bun_bin = resolve_bun_bin(&resources);
+        let bun_bin = rootcx_platform::bin::binary_path(&resources, "bun");
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().to_path_buf();
         let pg_port = free_port();
@@ -167,12 +167,6 @@ fn free_port() -> u16 {
 fn find_pg_root(dir: &std::path::Path) -> Option<PathBuf> {
     std::fs::read_dir(dir).ok()?.flatten().find_map(|e| {
         let p = e.path();
-        (p.is_dir() && p.join("bin/pg_ctl").exists()).then_some(p)
+        (p.is_dir() && rootcx_platform::bin::binary_path(&p.join("bin"), "pg_ctl").exists()).then_some(p)
     })
-}
-
-fn resolve_bun_bin(resources: &std::path::Path) -> PathBuf {
-    let candidate = resources.join("bun");
-    assert!(candidate.is_file(), "bundled Bun not found at {}", candidate.display());
-    candidate
 }

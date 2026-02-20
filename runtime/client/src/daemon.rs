@@ -9,7 +9,7 @@ const SPAWN_TIMEOUT: Duration = Duration::from_secs(30);
 const EXISTING_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn rootcx_home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").expect("HOME not set")).join(".rootcx")
+    rootcx_platform::dirs::rootcx_home().expect("could not determine home directory")
 }
 
 fn is_healthy() -> bool {
@@ -27,22 +27,12 @@ fn poll_health(timeout: Duration) -> bool {
     false
 }
 
-#[cfg(unix)]
-fn process_alive(pid: u32) -> bool {
-    unsafe { libc::kill(pid as i32, 0) == 0 }
-}
-
-#[cfg(not(unix))]
-fn process_alive(_pid: u32) -> bool {
-    false
-}
-
 fn read_pid() -> Option<u32> {
     std::fs::read_to_string(rootcx_home().join("runtime.pid")).ok()?.trim().parse().ok()
 }
 
 fn runtime_binary() -> Option<PathBuf> {
-    let bin = rootcx_home().join("bin/rootcx-core");
+    let bin = rootcx_platform::bin::binary_path(&rootcx_home().join("bin"), "rootcx-core");
     bin.exists().then_some(bin)
 }
 
@@ -56,7 +46,7 @@ pub fn ensure_runtime() -> Result<(), ClientError> {
     }
 
     if let Some(pid) = read_pid()
-        && process_alive(pid) {
+        && rootcx_platform::process::process_alive(pid) {
             return if poll_health(EXISTING_TIMEOUT) {
                 Ok(())
             } else {

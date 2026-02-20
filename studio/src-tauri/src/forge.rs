@@ -36,7 +36,7 @@ impl ForgeManager {
 
         if health_check_url(&health_url).await {
             warn!("stale forge process detected on port {port}, killing it");
-            kill_listeners_on_port(port).await;
+            rootcx_platform::process::kill_listeners_on_port(port).await;
 
             for _ in 0..10 {
                 tokio::time::sleep(Duration::from_millis(200)).await;
@@ -49,7 +49,7 @@ impl ForgeManager {
         info!(?cwd, ?config_path, port, "starting forge sidecar");
 
         let port_str = port.to_string();
-        let mut cmd = Command::new("opencode");
+        let mut cmd = Command::new(rootcx_platform::bin::binary_name("opencode"));
         cmd.args(["serve", "--port", &port_str, "--hostname", "127.0.0.1"])
             .current_dir(cwd)
             .stdout(std::process::Stdio::inherit())
@@ -78,27 +78,13 @@ impl ForgeManager {
 
     pub async fn stop(&mut self) -> Result<(), ForgeError> {
         if let Some(mut child) = self.child.take() {
-            info!("stopping forge sidecar (graceful)");
-
-            #[cfg(unix)]
             if let Some(pid) = child.id() {
-                unsafe {
-                    libc::kill(pid as i32, libc::SIGTERM);
+                rootcx_platform::process::kill_gracefully(pid, Duration::from_secs(3)).await;
+                if matches!(child.try_wait(), Ok(Some(_))) {
+                    info!("forge sidecar exited gracefully");
+                    return Ok(());
                 }
-                for _ in 0..30 {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    match child.try_wait() {
-                        Ok(Some(_)) => {
-                            info!("forge sidecar exited gracefully");
-                            return Ok(());
-                        }
-                        Ok(None) => continue,
-                        Err(_) => break,
-                    }
-                }
-                warn!("forge sidecar did not exit after SIGTERM, sending SIGKILL");
             }
-
             let _ = child.kill().await;
             let _ = child.wait().await;
             info!("forge sidecar stopped");
@@ -120,41 +106,9 @@ fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map(|a| a.port()).unwrap_or(4096)
 }
 
-async fn kill_listeners_on_port(port: u16) {
-    let output = match tokio::process::Command::new("lsof").args(["-ti", &format!(":{port}")]).output().await {
-        Ok(o) => o,
-        Err(e) => {
-            warn!("lsof failed: {e}");
-            return;
-        }
-    };
-
-    let pids: Vec<i32> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|s| s.trim().parse().ok())
-        .collect();
-
-    if pids.is_empty() {
-        return;
-    }
-
-    info!(?pids, "killing stale forge processes on port {port}");
-
-    #[cfg(unix)]
-    {
-        for &pid in &pids {
-            unsafe { libc::kill(pid, libc::SIGTERM); }
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        for &pid in &pids {
-            unsafe { libc::kill(pid, libc::SIGKILL); }
-        }
-    }
-}
-
 /// Check if the `opencode` binary is available in PATH.
 pub fn is_forge_available() -> bool {
-    std::process::Command::new("opencode")
+    std::process::Command::new(rootcx_platform::bin::binary_name("opencode"))
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

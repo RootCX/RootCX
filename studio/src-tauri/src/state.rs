@@ -61,13 +61,8 @@ pub struct AppState {
     log_stream_abort: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
 }
 
-fn home_dir() -> Result<PathBuf, String> {
-    std::env::var("HOME").map(PathBuf::from).map_err(|_| "HOME not set".to_string())
-}
-
-pub fn config_dir() -> Result<PathBuf, String> {
-    Ok(home_dir()?.join(".config/rootcx"))
-}
+fn home_dir() -> Result<PathBuf, String> { rootcx_platform::dirs::home_dir().map_err(|e| e.to_string()) }
+pub fn config_dir() -> Result<PathBuf, String> { rootcx_platform::dirs::config_dir().map_err(|e| e.to_string()) }
 
 pub fn config_path() -> Result<PathBuf, String> {
     Ok(config_dir()?.join("config.json"))
