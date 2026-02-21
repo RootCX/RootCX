@@ -1,0 +1,82 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --color-background: #0a0a0a;
+  --color-foreground: #f4f4f5;
+  --color-muted: #27272a;
+  --color-muted-foreground: #a1a1aa;
+  --color-card: #141414;
+  --color-card-foreground: #f4f4f5;
+  --color-border: #262626;
+  --color-input: #262626;
+  --color-ring: #3b82f6;
+  --color-primary: #3b82f6;
+  --color-primary-foreground: #ffffff;
+  --color-accent: #1e1e2e;
+  --color-accent-foreground: #f4f4f5;
+  --color-destructive: #ef4444;
+  --color-destructive-foreground: #f4f4f5;
+
+  --color-sidebar: #111111;
+  --color-panel: #0d0d0d;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background: var(--color-background);
+    color: var(--color-foreground);
+    @apply antialiased;
+    font-feature-settings: "kern" 1, "liga" 1;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2a2a2a;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3a3a3a;
+  }
+
+  /* Selection */
+  ::selection {
+    background: rgba(59, 130, 246, 0.25);
+    color: #f4f4f5;
+  }
+
+  /* Inline code in prose */
+  p code,
+  li code,
+  td code {
+    font-family: var(--font-mono);
+    font-size: 0.8em;
+  }
+}
+
+/* Prose-like heading anchors */
+h1, h2, h3, h4 {
+  scroll-margin-top: 80px;
+}
