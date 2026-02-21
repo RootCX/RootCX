@@ -76,10 +76,18 @@ export default function QuickStart() {
                         Install Studio
                     </h2>
                     <p className="text-muted-foreground leading-7">
-                        Download the latest RootCX Studio for your platform from the GitHub Releases page. Studio bundles the Core daemon, so no separate install is needed.
+                        We recommend downloading the RootCX Studio installer for your specific operating system:
                     </p>
-                    <p className="text-muted-foreground leading-7">
-                        Alternatively, to run just the daemon headlessly:
+                    <ul className="list-disc list-inside text-muted-foreground leading-7 space-y-1 ml-2">
+                        <li><strong>Windows:</strong> Download the <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">.exe</code> installer.</li>
+                        <li><strong>macOS:</strong> Download the <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">.dmg</code> image.</li>
+                        <li><strong>Linux:</strong> Download the <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">.tar.gz</code> archive.</li>
+                    </ul>
+                    <p className="text-muted-foreground leading-7 mt-2">
+                        Studio bundles the Core daemon, so no separate install is needed. Once installed and opened, the daemon starts PostgreSQL on port <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">5480</code> and the HTTP API on port <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">9100</code>. By default, Studio manages this for you.
+                    </p>
+                    <p className="text-muted-foreground leading-7 mt-4 border-t border-border pt-4">
+                        Alternatively, to run just the daemon headlessly (e.g., on a server):
                     </p>
                     <TerminalBlock commands={[
                         "# macOS (Apple Silicon)",
@@ -88,7 +96,7 @@ export default function QuickStart() {
                         "./rootcx-core start",
                     ]} />
                     <p className="text-muted-foreground leading-7">
-                        The daemon starts PostgreSQL on port <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">5480</code> and the HTTP API on port <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">9100</code>. Verify it is healthy:
+                        Verify it is healthy:
                     </p>
                     <TerminalBlock commands="curl http://localhost:9100/health" />
                     <CodeBlock language="json" code={`{ "status": "ok" }`} />
@@ -255,9 +263,9 @@ curl -X POST http://localhost:9100/api/v1/auth/login \\
                         Deploy custom logic
                     </h2>
                     <p className="text-muted-foreground leading-7">
-                        To add business logic beyond CRUD, deploy a Worker — a TypeScript/JavaScript package. Create <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">worker/index.ts</code>:
+                        To add business logic beyond CRUD, deploy a Backend — a TypeScript/JavaScript package. Create <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">backend/index.ts</code>:
                     </p>
-                    <CodeBlock language="typescript" filename="worker/index.ts" code={`export async function handleRpc(
+                    <CodeBlock language="typescript" filename="backend/index.ts" code={`export async function handleRpc(
   method: string,
   params: Record<string, unknown>,
   caller?: { userId: string; username: string }
@@ -276,11 +284,11 @@ export async function handleJob(payload: Record<string, unknown>) {
   return { processed: true };
 }`} />
                     <p className="text-muted-foreground leading-7">Package it as a tar.gz and deploy:</p>
-                    <TerminalBlock commands={`tar -czf worker.tar.gz -C worker .
+                    <TerminalBlock commands={`tar -czf backend.tar.gz -C backend .
 
 curl -X POST http://localhost:9100/api/v1/apps/crm/deploy \\
-  -H 'Content-Type: application/octet-stream' \\
-  --data-binary @worker.tar.gz`} />
+  -H "Authorization: Bearer <$ADMIN_TOKEN>" \\
+  --data-binary @backend.tar.gz`} />
                     <p className="text-muted-foreground leading-7">Then invoke your RPC:</p>
                     <TerminalBlock commands={`curl -X POST http://localhost:9100/api/v1/apps/crm/rpc \\
   -H 'Content-Type: application/json' \\
@@ -295,10 +303,10 @@ curl -X POST http://localhost:9100/api/v1/apps/crm/deploy \\
                     </h2>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         {[
-                            { href: "/architecture", title: "Architecture", desc: "Understand how Core, Studio, and Workers fit together." },
+                            { href: "/architecture", title: "Architecture", desc: "Understand how Core, Studio, and Backends fit together." },
                             { href: "/concepts/manifest", title: "App Manifest", desc: "Deep-dive into all manifest options and field types." },
                             { href: "/modules/authentication", title: "Authentication", desc: "Configure auth modes, JWT settings, and user management." },
-                            { href: "/modules/workers", title: "Workers & RPC", desc: "Learn the full worker lifecycle, IPC protocol, and job handling." },
+                            { href: "/modules/backend", title: "Backend & RPC", desc: "Learn the full backend lifecycle, IPC protocol, and job handling." },
                         ].map((item, i) => (
                             <Link key={i} href={item.href} className="group flex flex-col gap-1.5 rounded-lg border border-border bg-[#111] hover:bg-[#141414] hover:border-primary/40 transition-all p-4">
                                 <span className="font-medium text-foreground group-hover:text-primary transition-colors text-sm">{item.title} →</span>

@@ -51,6 +51,9 @@ export default function DataManagementPage() {
               enforcement, and validation at startup.
             </p>
             <p className="text-muted-foreground leading-7">
+              Crucially, in addition to the HTTP REST API, RootCX <strong>automatically generates native tools</strong> for these endpoints and exposes them directly to built-in AI workflows. It also spins up an <strong>MCP server</strong> (Model Context Protocol) exposing the same tools, allowing any external AI agent to securely interact with the internal software you have built.
+            </p>
+            <p className="text-muted-foreground leading-7">
               Every request to a data endpoint is authenticated via the{" "}
               <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">Authorization: Bearer</code>{" "}
               header. The authenticated user's ID is extracted from the JWT and used to scope all read and write
@@ -104,26 +107,29 @@ export default function DataManagementPage() {
 
             <h3 className="text-lg font-semibold text-foreground mt-2">Example Manifest Entity</h3>
             <CodeBlock
-              language="yaml"
-              code={`app:
-  id: my-app
-  name: My Application
-
-entities:
-  - name: posts
-    fields:
-      - name: title
-        type: text
-        required: true
-      - name: body
-        type: text
-      - name: published
-        type: boolean
-        default: false
-      - name: tags
-        type: json
-      - name: published_at
-        type: date`}
+              language="json"
+              code={`{
+  "appId": "my-app",
+  "name": "My Application",
+  "version": "1.0.0",
+  "permissions": {
+    "defaultRole": "member",
+    "roles": [{ "name": "member" }],
+    "policies": []
+  },
+  "dataContract": [
+    {
+      "entityName": "posts",
+      "fields": [
+        { "name": "title", "type": "text", "required": true },
+        { "name": "body", "type": "text" },
+        { "name": "published", "type": "boolean", "defaultValue": "false" },
+        { "name": "tags", "type": "json" },
+        { "name": "published_at", "type": "date" }
+      ]
+    }
+  ]
+}`}
             />
           </section>
 

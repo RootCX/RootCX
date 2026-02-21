@@ -529,7 +529,7 @@ curl -f http://localhost:9100/health
                         {[
                             { href: "/concepts/manifest", title: "App Manifest", desc: "The JSON document the runtime reads to provision your application's data model and RBAC." },
                             { href: "/self-hosting/config", title: "Configuration", desc: "All environment variables and config file options for the runtime." },
-                            { href: "/modules/workers", title: "Workers & RPC", desc: "How the Worker Manager loads and dispatches JavaScript worker scripts." },
+                            { href: "/modules/backend", title: "Backend & RPC", desc: "How Core loads and dispatches JavaScript backend processes." },
                             { href: "/modules/jobs", title: "Job Queue", desc: "How the Scheduler and job queue interact with the Worker Manager." },
                         ].map(({ href, title, desc }) => (
                             <Link key={href} href={href} className="group rounded-lg border border-border bg-white/[0.02] p-4 transition-colors hover:border-border/80 hover:bg-white/[0.04]">

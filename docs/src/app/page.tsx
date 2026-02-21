@@ -42,21 +42,30 @@ export default function Home() {
                         What is RootCX?
                     </h1>
                     <p className="text-lg text-muted-foreground max-w-2xl leading-relaxed">
-                        An open-source, local-first platform for building custom internal software and AI agents — with a built-in database, automatic APIs, a governance layer, and a Studio IDE.
+                        An open-source, local-first platform for building custom internal software and AI agents — with a built-in database, automatic APIs, native tools for AI/MCP, an enterprise governance layer, and a Studio IDE.
                     </p>
                 </header>
 
                 {/* Intro */}
                 <section className="flex flex-col gap-4 -mt-2">
                     <p className="text-muted-foreground leading-7">
-                        RootCX bundles everything your team needs to build, ship, and govern business applications and AI agents — without relying on third-party hosted infrastructure. You define your data model in a simple JSON manifest, and RootCX takes care of the rest: schema creation, CRUD APIs, role-based access control, audit logging, secret management, and a background worker system for custom logic.
+                        RootCX bundles everything your team needs to build, ship, and govern business applications and AI agents — without relying on third-party hosted infrastructure. You define your data model in a simple JSON manifest, and RootCX takes care of the rest: schema creation, CRUD APIs, role-based access control, audit logging, secret management, and a background backend system for custom logic.
                     </p>
                     <p className="text-muted-foreground leading-7">
-                        The platform ships as a single self-contained binary (<code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">rootcx-core</code>) that embeds a fully managed PostgreSQL 18 instance. Alongside it, the <strong className="text-foreground font-medium">RootCX Studio</strong> desktop IDE lets you design schemas, write backend logic, deploy workers, and inspect data — all from one place.
+                        The platform ships as a single self-contained binary (<code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">rootcx-core</code>) that embeds a fully managed PostgreSQL 18 instance. Alongside it, the <strong className="text-foreground font-medium">RootCX Studio</strong> desktop IDE lets you describe your intent, automatically scaffolding schemas, backend logic, and providing a cohesive, rich UI out of the box.
                     </p>
                     <p className="text-muted-foreground leading-7">
-                        Whether you are building a lightweight CRM, a fleet management tool, a document approval workflow, or a custom AI agent that processes jobs asynchronously, RootCX gives you a productive and secure foundation you own entirely.
+                        <strong>Scale your business with an interconnected fleet.</strong> RootCX is built to power not just one, but tens, hundreds, or thousands of interconnected applications within your enterprise. All applications connect to the same core database, sharing data securely through different namespaces. This allows you to perform highly optimized cross-joins using performant SQL, and enables seamless interoperability between your custom software and AI Agents via MCP and APIs.
                     </p>
+
+                    <div className="mt-4">
+                        <Link
+                            href="/quickstart"
+                            className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-white transition-opacity hover:opacity-90"
+                        >
+                            Quick Start <ArrowRight className="h-4 w-4" />
+                        </Link>
+                    </div>
                 </section>
 
                 {/* How it works */}
@@ -64,30 +73,33 @@ export default function Home() {
                     <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">
                         How it works
                     </h2>
+                    <p className="text-muted-foreground leading-7">
+                        RootCX transforms your intent into enterprise-ready software. Instead of doing the heavy lifting manually, the Studio scaffolds the entire stack for you — delivering a rich, cohesive UI and a robust foundation instantly.
+                    </p>
                     <div className="grid grid-cols-1 gap-0 rounded-xl border border-border overflow-hidden">
                         {[
                             {
                                 step: "01",
-                                title: "Define your app manifest",
-                                desc: "Write a JSON file describing your data model, relationships, roles, and permissions. This is the single source of truth for your application.",
-                                icon: <Database className="h-5 w-5" />,
+                                title: "Describe your intent",
+                                desc: "Use the Studio AI Forge or write a JSON manifest describing your application's data model, roles, and business needs. RootCX understands your intent.",
+                                icon: <Bot className="h-5 w-5" />,
                             },
                             {
                                 step: "02",
-                                title: "Install to the runtime",
-                                desc: "RootCX Core reads your manifest, creates the PostgreSQL schema, applies RBAC policies, and registers audit triggers — all automatically.",
+                                title: "Automatic App Generation",
+                                desc: "The Studio does the heavy lifting, instantly scaffolding an up-and-running application with a rich, consistent UI and enterprise-grade architecture.",
                                 icon: <Zap className="h-5 w-5" />,
                             },
                             {
                                 step: "03",
-                                title: "Deploy your backend logic",
-                                desc: "Upload a Bun/Node.js package containing custom RPCs and job handlers. RootCX spawns and supervises the worker process, routing calls through a secure IPC channel.",
-                                icon: <Terminal className="h-5 w-5" />,
+                                title: "Core & Foundation Provisioning",
+                                desc: "RootCX Core automatically provisions the PostgreSQL schema, applies RBAC policies, registers audit triggers, and exposes native tools to AI/MCP workflows.",
+                                icon: <Database className="h-5 w-5" />,
                             },
                             {
                                 step: "04",
-                                title: "Connect your frontend",
-                                desc: "Use the @rootcx/runtime React SDK or call the REST API directly. Authentication, permissions, and data access are enforced server-side.",
+                                title: "Extend & Connect",
+                                desc: "Deploy custom isolated backend processes, connect other apps within your fleet via native APIs, or use MCP to let any AI agent securely interact with your internal software built.",
                                 icon: <Code className="h-5 w-5" />,
                             },
                         ].map((s, i) => (
@@ -115,10 +127,10 @@ export default function Home() {
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         {[
                             {
-                                href: "/concepts/runtime",
-                                title: "Engine & Runtime",
-                                desc: "A Rust daemon that manages PostgreSQL, APIs, and worker processes.",
-                                icon: <Blocks className="h-4 w-4" />,
+                                href: "/architecture",
+                                title: "Self-hosted Core",
+                                desc: "A Rust daemon that manages PostgreSQL, APIs, and the isolated backend process.",
+                                icon: <Database className="h-4 w-4" />,
                             },
                             {
                                 href: "/modules/authentication",
@@ -141,13 +153,13 @@ export default function Home() {
                             {
                                 href: "/modules/secrets",
                                 title: "Secret Vault",
-                                desc: "AES-256-GCM encrypted secrets injected into worker environments.",
+                                desc: "AES-256-GCM encrypted secrets injected into the backend process.",
                                 icon: <Settings className="h-4 w-4" />,
                             },
                             {
-                                href: "/modules/workers",
-                                title: "Workers & RPC",
-                                desc: "Deploy custom TypeScript/JavaScript logic and invoke it via secure RPC calls.",
+                                href: "/modules/backend",
+                                title: "Backend & RPC",
+                                desc: "Deploy custom TypeScript/JavaScript logic as a mutualized isolated process.",
                                 icon: <Code className="h-4 w-4" />,
                             },
                             {
@@ -187,8 +199,8 @@ export default function Home() {
                                 <p className="text-sm text-muted-foreground">The fastest way to build internal software</p>
                             </div>
                         </div>
-                        <p className="text-muted-foreground leading-7 text-sm">
-                            RootCX was designed for a world where AI writes most of the code. The <strong className="text-foreground font-medium">AI Forge</strong> panel in Studio connects to <strong className="text-foreground font-medium">OpenCode</strong> — an open-source AI coding engine — and lets you build workers, schemas, and business logic through conversation. Connect Anthropic Claude, OpenAI, GitHub Copilot, or any local model. No vendor lock-in.
+                        <p className="text-muted-foreground leading-relaxed">
+                            RootCX was designed for a world where AI writes most of the code. The <strong className="text-foreground font-medium">AI Forge</strong> panel in Studio connects to <strong className="text-foreground font-medium">OpenCode</strong> — an open-source AI coding engine — and lets you build backend logic, schemas, and endpoints through conversation. Connect Anthropic Claude, OpenAI, GitHub Copilot, or any local model. No vendor lock-in.
                         </p>
                         <div className="flex flex-wrap gap-2">
                             <Link

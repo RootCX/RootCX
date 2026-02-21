@@ -300,14 +300,14 @@ export default function EditorPage() {
 
                 {/* Example */}
                 <section className="flex flex-col gap-4" id="example">
-                    <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">Example: Worker in the Editor</h2>
+                    <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">Example: Backend in the Editor</h2>
                     <p className="text-muted-foreground leading-7">
-                        Here is a representative worker file as it appears with full TypeScript syntax highlighting in Studio:
+                        Here is a representative backend file as it appears with full TypeScript syntax highlighting in Studio:
                     </p>
                     <CodeBlock language="typescript" filename="index.ts" code={`import type { Env } from "./types";
 
 /**
- * Handle RPC calls from the RootCX runtime.
+ * Handle RPC calls from the RootCX Core.
  * @param method - The RPC method name
  * @param params - Arbitrary JSON parameters
  * @param caller - Authenticated caller info (if auth enabled)

@@ -36,7 +36,7 @@ export const navigation: NavSection[] = [
             { title: "Audit Logs", href: "/modules/audit" },
             { title: "Secret Vault", href: "/modules/secrets" },
             { title: "Job Queue", href: "/modules/jobs" },
-            { title: "Workers & RPC", href: "/modules/workers" },
+            { title: "Backend & RPC", href: "/modules/backend" },
             { title: "Real-time Logs", href: "/modules/logs" },
         ],
     },

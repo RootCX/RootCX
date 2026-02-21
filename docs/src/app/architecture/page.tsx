@@ -24,21 +24,34 @@ export default function Architecture() {
                 <div className="flex items-center gap-1.5 text-xs text-muted-foreground font-medium">
                     <Link href="/" className="hover:text-foreground transition-colors">RootCX</Link>
                     <ChevronRight className="h-3 w-3" />
-                    <span className="text-foreground">Architecture</span>
+                    <span className="text-foreground">How it works</span>
                 </div>
 
                 <header className="flex flex-col gap-4">
-                    <h1 className="text-4xl font-semibold tracking-tight lg:text-5xl">Architecture</h1>
+                    <h1 className="text-4xl font-semibold tracking-tight lg:text-5xl">How it works</h1>
                     <p className="text-lg text-muted-foreground max-w-2xl leading-relaxed">
-                        A deep look at how RootCX is structured — the daemon, Studio, worker processes, and the data layer.
+                        Understand the principles and high-level architecture of RootCX, starting from the core vision down to the technical implementation.
                     </p>
                 </header>
 
+                {/* Principles */}
+                <section className="flex flex-col gap-4" id="principles">
+                    <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">Principles</h2>
+                    <p className="text-muted-foreground leading-7">
+                        RootCX is designed for one outcome: <strong>building interconnected fleets of enterprise applications instantly</strong>. We achieve this by turning your intent into working software via the Studio, relying on a unified data layer, and making everything extensible.
+                    </p>
+                    <ul className="list-disc list-inside text-muted-foreground leading-7 space-y-2 ml-2">
+                        <li><strong>Intent to software:</strong> You describe what you need (roles, schemas, logic) using AI or a manifest, and RootCX automatically provisions APIs, databases, and UI.</li>
+                        <li><strong>Shared core, isolated apps:</strong> A single, high-performance daemon manages PostgreSQL and core services. Applications are isolated through namespaces and dedicated backend processes but can share data effortlessly.</li>
+                        <li><strong>Radical extensibility:</strong> Everything in RootCX — from authentication to audit logging — is an Extension. This enables Native Modules to plug seamlessly into the ecosystem, exposing functionalities dynamically to both Studio and AI Agents.</li>
+                    </ul>
+                </section>
+
                 {/* Overview */}
                 <section className="flex flex-col gap-4" id="overview">
-                    <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">Overview</h2>
+                    <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">High-level architecture</h2>
                     <p className="text-muted-foreground leading-7">
-                        RootCX is built around two primary tiers: a <strong className="text-foreground font-medium">Runtime tier</strong> managed by the Core daemon, and a <strong className="text-foreground font-medium">Development tier</strong> used by Studio and application code. Both communicate over a local HTTP API.
+                        RootCX is built around two primary tiers: a <strong className="text-foreground font-medium">Runtime tier</strong> managed by the Core daemon, and a <strong className="text-foreground font-medium">Development tier</strong> used by Studio and application code.
                     </p>
                     <CodeBlock language="text" code={`┌─────────────────────────────────────────────────────────────┐
 │                   Development Tier                          │
