@@ -27,7 +27,7 @@ const ZONE_IDS: ZoneId[] = ["sidebar", "editor", "bottom", "right"];
 export function buildDefaultState(
   views: { id: string; defaultZone: ZoneId }[],
 ): LayoutState {
-  const zones = Object.fromEntries(ZONE_IDS.map((z) => [z, []])) as Record<ZoneId, string[]>;
+  const zones = Object.fromEntries(ZONE_IDS.map((z) => [z, []])) as unknown as Record<ZoneId, string[]>;
   for (const v of views) zones[v.defaultZone].push(v.id);
   const active = Object.fromEntries(ZONE_IDS.map((z) => [z, zones[z][0] ?? null])) as Record<ZoneId, string | null>;
   const hidden = new Set<string>();

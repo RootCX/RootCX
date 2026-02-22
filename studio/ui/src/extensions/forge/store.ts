@@ -6,7 +6,7 @@ import {
   type Permission,
   type Event,
   type Config,
-} from "@opencode-ai/sdk";
+} from "@opencode-ai/sdk/client";
 import { invoke } from "@tauri-apps/api/core";
 
 let BASE_URL = "http://127.0.0.1:4096";
@@ -184,7 +184,7 @@ function handleEvent(event: Event) {
       break;
     }
     case "permission.updated": {
-      const perm = event.properties.permission;
+      const perm = event.properties;
       if (perm.sessionID !== state.sessionId) break;
       state = { ...state, permissions: [...state.permissions, perm] };
       emit();
@@ -261,7 +261,9 @@ export async function selectSession(sessionId: string) {
   try {
     const result = await client.session.messages({ path: { id: sessionId } });
     if (result.data) {
-      state = { ...state, messages: result.data };
+      const messages = result.data.map((m) => m.info);
+      const parts = new Map(result.data.map((m) => [m.info.id, m.parts]));
+      state = { ...state, messages, parts };
       emit();
     }
   } catch { /* ignore */ }

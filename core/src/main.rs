@@ -4,86 +4,114 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rootcx_core::{Runtime, server};
+use rootcx_platform::service::ServiceConfig;
 use rootcx_postgres_mgmt::{PostgresManager, data_base_dir};
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
-const PG_PORT: u16 = 5480;
+const PG_PORT:  u16 = 5480;
 const API_PORT: u16 = 9100;
 
-fn resources_dir() -> PathBuf {
-    rootcx_platform::dirs::resources_dir(env!("CARGO_MANIFEST_DIR"))
+pub(crate) const SVC_NAME:  &str = "rootcx-core";
+pub(crate) const SVC_LABEL: &str = "com.rootcx.core";
+pub(crate) const SVC_DESC:  &str = "RootCX Core Runtime Daemon";
+
+pub(crate) fn die(msg: impl std::fmt::Display) -> ! { eprintln!("error: {msg}"); std::process::exit(1) }
+
+fn home() -> PathBuf {
+    rootcx_platform::dirs::rootcx_home().unwrap_or_else(|e| die(e))
 }
 
-fn resolve_pg_root() -> PathBuf {
-    let res = resources_dir();
-    std::fs::read_dir(&res).expect("cannot read resources dir").flatten()
+fn resources() -> PathBuf {
+    rootcx_platform::dirs::resources_dir(env!("CARGO_MANIFEST_DIR"))
+        .unwrap_or_else(|e| die(e))
+}
+
+fn resolve_pg() -> PathBuf {
+    let res = resources();
+    std::fs::read_dir(&res)
+        .unwrap_or_else(|e| die(format!("resources {}: {e}", res.display())))
+        .flatten()
         .find_map(|e| {
             let p = e.path();
-            (p.is_dir() && rootcx_platform::bin::binary_path(&p.join("bin"), "pg_ctl").exists()).then_some(p)
+            (p.is_dir() && rootcx_platform::bin::binary_path(&p.join("bin"), "pg_ctl").exists())
+                .then_some(p)
         })
-        .unwrap_or_else(|| panic!("no PostgreSQL bundle in {}", res.display()))
+        .unwrap_or_else(|| die(format!("no PostgreSQL bundle in {}", res.display())))
 }
 
-fn resolve_bun_bin() -> PathBuf {
-    let p = rootcx_platform::bin::binary_path(&resources_dir(), "bun");
-    assert!(p.is_file(), "Bun not found at {}", p.display());
+fn resolve_bun() -> PathBuf {
+    let p = rootcx_platform::bin::binary_path(&resources(), "bun");
+    if !p.is_file() { die(format!("Bun not found at {}", p.display())) }
     p
 }
 
-fn rootcx_home() -> PathBuf {
-    rootcx_platform::dirs::rootcx_home().expect("cannot determine home directory")
+fn service_config() -> ServiceConfig {
+    let h = home();
+    ServiceConfig {
+        name: SVC_NAME, label: SVC_LABEL, description: SVC_DESC,
+        binary:   rootcx_platform::bin::binary_path(&h.join("bin"), SVC_NAME),
+        args:     &["--daemon"],
+        log_file: h.join("logs/runtime.log"),
+    }
 }
 
-fn pid_path() -> PathBuf { rootcx_home().join("runtime.pid") }
+fn handle_service(sub: &str) {
+    let cfg = service_config();
+    match sub {
+        "status" => println!("{}", rootcx_platform::service::status(&cfg).unwrap_or_else(|e| die(e))),
+        "start"  => { rootcx_platform::service::start(&cfg).unwrap_or_else(|e| die(e)); println!("started"); }
+        "stop"   => { rootcx_platform::service::stop(&cfg).unwrap_or_else(|e| die(e)); println!("stopped"); }
+        "uninstall" => { rootcx_platform::service::uninstall(&cfg).unwrap_or_else(|e| die(e)); println!("uninstalled"); }
+        _ => { eprintln!("usage: rootcx-core service <status|start|stop|uninstall>"); std::process::exit(1); }
+    }
+}
 
 #[tokio::main]
 async fn main() {
-    if std::env::args().nth(1).as_deref() == Some("install") {
-        install::run(rootcx_home(), resolve_pg_root(), resolve_bun_bin());
-        return;
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(String::as_str) {
+        Some("install") => {
+            install::run(home(), resolve_pg(), resolve_bun(), args.iter().any(|a| a == "--service"));
+            return;
+        }
+        Some("service") => {
+            handle_service(args.get(2).map(String::as_str).unwrap_or("status"));
+            return;
+        }
+        _ => {}
     }
 
-    let daemon = std::env::args().any(|a| a == "--daemon");
+    let daemon   = args.iter().any(|a| a == "--daemon");
+    let pid_file = home().join("runtime.pid");
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    let pg_root = resolve_pg_root();
-    let bun_bin = resolve_bun_bin();
-    let data_dir = data_base_dir().expect("failed to resolve data dir");
+    let pg_root  = resolve_pg();
+    let data_dir = data_base_dir().unwrap_or_else(|e| die(e));
+    let pg = PostgresManager::new(pg_root.join("bin"), data_dir.join("data/pg"), PG_PORT)
+        .with_lib_dir(pg_root.join("lib"));
+    let rt = Arc::new(Mutex::new(Runtime::new(pg, data_dir, resolve_bun())));
 
-    let pg =
-        PostgresManager::new(pg_root.join("bin"), data_dir.join("data/pg"), PG_PORT).with_lib_dir(pg_root.join("lib"));
-    let runtime = Arc::new(Mutex::new(Runtime::new(pg, data_dir, bun_bin)));
+    rt.lock().await.boot(API_PORT).await.unwrap_or_else(|e| {
+        tracing::error!("boot: {e}"); std::process::exit(1);
+    });
 
-    {
-        let mut rt = runtime.lock().await;
-        if let Err(e) = rt.boot(API_PORT).await {
-            tracing::error!("runtime boot failed: {e}");
-            std::process::exit(1);
-        }
-    }
+    if daemon { let _ = std::fs::write(&pid_file, std::process::id().to_string()); }
 
-    if daemon {
-        let _ = std::fs::write(pid_path(), std::process::id().to_string());
-        tracing::info!("daemon PID file: {}", pid_path().display());
-    }
-
-    let rt_clone = Arc::clone(&runtime);
+    let (rt2, pf2) = (Arc::clone(&rt), pid_file.clone());
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
-        tracing::info!("shutdown signal received");
-        if daemon { let _ = std::fs::remove_file(pid_path()); }
-        let mut rt = rt_clone.lock().await;
-        let _ = rt.shutdown().await;
+        if daemon { let _ = std::fs::remove_file(&pf2); }
+        rt2.lock().await.shutdown().await.ok();
         std::process::exit(0);
     });
 
-    if let Err(e) = server::serve(runtime, API_PORT).await {
-        tracing::error!("HTTP server error: {e}");
-        if daemon { let _ = std::fs::remove_file(pid_path()); }
+    if let Err(e) = server::serve(rt, API_PORT).await {
+        tracing::error!("server: {e}");
+        if daemon { let _ = std::fs::remove_file(&pid_file); }
         std::process::exit(1);
     }
 }
