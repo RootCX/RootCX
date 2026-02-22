@@ -11,47 +11,47 @@ export interface NavSection {
 
 export const navigation: NavSection[] = [
     {
-        title: "Getting Started",
+        title: "1. Introduction",
         items: [
             { title: "What is RootCX?", href: "/" },
-            { title: "Quick Start", href: "/quickstart" },
-            { title: "Architecture", href: "/architecture" },
+            { title: "Quickstart", href: "/quickstart" },
+            { title: "How it Works", href: "/architecture" },
         ],
     },
     {
-        title: "Core Concepts",
+        title: "2. The Studio",
         items: [
-            { title: "App Manifest", href: "/concepts/manifest" },
-            { title: "Data Contract", href: "/concepts/data-contract" },
-            { title: "Engine & Runtime", href: "/concepts/runtime" },
-            { title: "Roles & Permissions", href: "/concepts/permissions" },
-        ],
-    },
-    {
-        title: "Native Modules",
-        items: [
-            { title: "Data Management", href: "/modules/data" },
-            { title: "Authentication", href: "/modules/authentication" },
-            { title: "RBAC", href: "/modules/rbac" },
-            { title: "Audit Logs", href: "/modules/audit" },
-            { title: "Secret Vault", href: "/modules/secrets" },
-            { title: "Job Queue", href: "/modules/jobs" },
-            { title: "Backend & RPC", href: "/modules/backend" },
-            { title: "Real-time Logs", href: "/modules/logs" },
-        ],
-    },
-    {
-        title: "Studio IDE",
-        items: [
-            { title: "Overview", href: "/studio" },
+            { title: "Studio Overview", href: "/studio" },
             { title: "Code Editor", href: "/studio/editor" },
             { title: "AI Forge", href: "/studio/forge" },
         ],
     },
     {
-        title: "Building with AI",
+        title: "3. The Core",
         items: [
-            { title: "Overview", href: "/ai" },
+            { title: "Engine & Runtime", href: "/concepts/runtime" },
+            { title: "App Manifest", href: "/concepts/manifest" },
+            { title: "Data Contract", href: "/concepts/data-contract" },
+            { title: "Roles & Permissions", href: "/concepts/permissions" },
+        ],
+    },
+    {
+        title: "4. Built-in Features",
+        items: [
+            { title: "Authentication", href: "/modules/authentication" },
+            { title: "RBAC (Access Control)", href: "/modules/rbac" },
+            { title: "Data Management", href: "/modules/data" },
+            { title: "Backend & RPC", href: "/modules/backend" },
+            { title: "Job Queue", href: "/modules/jobs" },
+            { title: "Secret Vault", href: "/modules/secrets" },
+            { title: "Real-time Logs", href: "/modules/logs" },
+            { title: "Audit Trail", href: "/modules/audit" },
+        ],
+    },
+    {
+        title: "5. AI Integration",
+        items: [
+            { title: "AI Overview", href: "/ai" },
             { title: "LLM Providers", href: "/ai/providers" },
             { title: "Agents", href: "/ai/agents" },
             { title: "MCP Servers", href: "/ai/mcp" },
@@ -59,16 +59,11 @@ export const navigation: NavSection[] = [
         ],
     },
     {
-        title: "API Reference",
+        title: "6. Reference & Ops",
         items: [
             { title: "REST API", href: "/api-reference" },
             { title: "React SDK", href: "/sdk" },
-        ],
-    },
-    {
-        title: "Self-Hosting",
-        items: [
-            { title: "Overview", href: "/self-hosting" },
+            { title: "Self-Hosting", href: "/self-hosting" },
             { title: "Configuration", href: "/self-hosting/config" },
         ],
     },

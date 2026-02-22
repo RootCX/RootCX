@@ -6,22 +6,20 @@ import { PropertiesTable } from "@/components/docs/PropertiesTable";
 import { ChevronRight } from "lucide-react";
 import Link from "next/link";
 
-const tocItems = [
+const toc = [
+  { id: "outcomes", title: "Key Outcomes" },
   { id: "overview", title: "Overview" },
   { id: "backend-structure", title: "Backend Structure" },
-  { id: "discovery", title: "Discovery Handshake" },
   { id: "rpc-calls", title: "RPC Calls" },
-  { id: "job-handling", title: "Job Handling" },
   { id: "deployment", title: "Deployment" },
-  { id: "lifecycle", title: "Backend Lifecycle" },
-  { id: "ipc-protocol", title: "IPC Protocol" },
+  { id: "lifecycle", title: "Lifecycle" },
   { id: "environment", title: "Environment" },
   { id: "crash-recovery", title: "Crash Recovery" },
 ];
 
 export default function BackendPage() {
   return (
-    <DocsLayout toc={tocItems}>
+    <DocsLayout toc={toc}>
       <div className="flex flex-col gap-10">
 
         {/* Breadcrumb */}
@@ -37,38 +35,42 @@ export default function BackendPage() {
         <div className="flex flex-col gap-3">
           <h1 className="text-4xl font-bold tracking-tight">Backend & RPC</h1>
           <p className="text-lg text-muted-foreground leading-7">
-            Deploy TypeScript/JavaScript business logic and invoke it through a secure IPC channel.
+            Deploy custom TypeScript/JavaScript business logic as managed processes and invoke it through RPC calls proxied by the Core daemon.
           </p>
         </div>
+
+        {/* Outcomes */}
+        <section className="flex flex-col gap-4" id="outcomes">
+          <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">Key Outcomes</h2>
+          <ul className="flex flex-col gap-2 text-muted-foreground text-sm leading-7">
+            {[
+              "Zero infrastructure: Deploy standalone code without configuring servers, managing ports, or setting up containers. Core handles execution inside an isolated child process.",
+              "Direct Core integration: Backends communicate over stdin/stdout IPC with no network overhead, acting as native extensions of the Core daemon.",
+              "Universal execution: Run AI inference, schedule background jobs, handle webhooks, and process complex transactions safely on the server side.",
+            ].map((item, i) => (
+              <li key={i} className="flex items-start gap-2">
+                <span className="mt-2 flex-shrink-0 w-1.5 h-1.5 rounded-full bg-primary/60" />
+                <span dangerouslySetInnerHTML={{ __html: item.replace(/^([^:]+:)/, '<strong>$1</strong>') }} />
+              </li>
+            ))}
+          </ul>
+        </section>
 
         {/* Overview */}
         <section className="flex flex-col gap-4" id="overview">
           <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">Overview</h2>
           <p className="text-muted-foreground leading-7">
-            Why do you need a Backend? Applications are more than just a UI connecting to a database. They often contain critical, secure business logic that must execute server-side—such as processing payments, sending personalized emails, integrating with third-party APIs, or running AI inference tasks. Your application's custom logic lives in this <strong>Backend</strong> code.
+            Applications need more than a UI connected to a database. Payment processing, email delivery, third-party API integration, and AI inference all require server-side logic that cannot run in a browser. A <strong>Backend</strong> is where that logic lives. You write standard TypeScript or JavaScript, package it into a tarball, and upload it to Core with a single API call.
           </p>
           <p className="text-muted-foreground leading-7">
-            When you build a Backend, you upload it (deploy it) directly to the RootCX Core. The Core then takes charge of starting a secure, <strong>isolated process</strong> to run your backend code. You can think of the RootCX Core as a powerful, mutualized backend infrastructure that manages and hosts the dedicated backend processes for all your fleet applications.
+            Core spawns your backend as an <strong>isolated child process</strong> running under Bun. All communication between Core and the process happens over a <strong className="text-foreground font-medium">JSON-line IPC channel</strong> on stdin/stdout. On startup, Core sends a discovery message and the process responds with the capabilities it supports (RPC, jobs, or both). Once the handshake completes, the backend is ready to receive work.
           </p>
           <p className="text-muted-foreground leading-7">
-            Core communicates with your isolated backend process over a <strong className="text-foreground font-medium">secure IPC channel</strong> using
-            JSON-line messages sent over stdin/stdout. From outside the system, clients interact through two
-            surfaces:
+            From outside the system, clients interact through two surfaces: <strong className="text-foreground font-medium">RPC</strong> for synchronous request/response calls proxied through Core, and <strong className="text-foreground font-medium">Jobs</strong> for asynchronous tasks dispatched from the job queue. Core manages the full process lifecycle, including environment injection, crash recovery, and automatic restarts.
           </p>
-          <ul className="flex flex-col gap-2 text-muted-foreground leading-7 list-none pl-0">
-            <li className="flex items-start gap-2">
-              <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-muted-foreground/50 shrink-0" />
-              <span><strong className="text-foreground font-medium">RPC</strong> — synchronous request/response calls proxied through Core to your backend. Useful for read-heavy operations or user-facing features that need an immediate response.</span>
-            </li>
-            <li className="flex items-start gap-2">
-              <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-muted-foreground/50 shrink-0" />
-              <span><strong className="text-foreground font-medium">Jobs</strong> — asynchronous tasks enqueued via the Job Queue module and dispatched to the backend's <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">handleJob</code> export. Ideal for long-running work.</span>
-            </li>
-          </ul>
           <Callout variant="info">
-            Backends run as child processes of Core, not as separate services you need to deploy independently.
-            Deploying your backend is a single API call that uploads a tarball. Core manages the process lifecycle,
-            environment injection, and crash recovery automatically.
+            Backends run as child processes of Core, not as separate services. Deploying is a single API call
+            that uploads a tarball. Core handles dependency installation, process management, and crash recovery automatically.
           </Callout>
         </section>
 
@@ -174,7 +176,7 @@ async function sendInviteEmail(email: string, fromUsername: string) {
 }
 
 async function fetchDigestData(userId: string) {
-  // Query the runtime API using ROOTCX_RUNTIME_URL
+  // Query the Core API using ROOTCX_RUNTIME_URL
   const res = await fetch(
     \`\${RUNTIME_URL}/api/v1/apps/\${APP_ID}/posts?limit=10\`
   );
@@ -186,102 +188,25 @@ async function sendDigestEmail(data: unknown) {
 }`} />
         </section>
 
-        {/* Discovery */}
-        <section className="flex flex-col gap-4" id="discovery">
-          <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">Discovery Handshake</h2>
-          <p className="text-muted-foreground leading-7">
-            When Core starts a worker process, the first message it sends over stdin is a{" "}
-            <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">discover</code> message. The worker must
-            respond with its own <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">discover</code> message
-            declaring which capabilities it supports. Core waits up to 5 seconds for the discover response before
-            marking the worker as failed.
-          </p>
-          <CodeBlock language="json" code={`// Core → Worker (sent on stdin immediately after process start)
-{
-  "type":       "discover",
-  "appId":      "my-app",
-  "runtimeUrl": "http://localhost:3000"
-}
-
-// Worker → Core (must be written to stdout within 5 seconds)
-{
-  "type":         "discover",
-  "capabilities": ["rpc", "jobs"]
-}`} />
-          <p className="text-muted-foreground leading-7">
-            The <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">capabilities</code> array tells Core
-            which message types the worker is prepared to handle:
-          </p>
-          <div className="overflow-x-auto rounded-lg border border-border">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border bg-muted/30">
-                  <th className="text-left px-4 py-3 font-medium text-foreground">Capability</th>
-                  <th className="text-left px-4 py-3 font-medium text-foreground">Required Export</th>
-                  <th className="text-left px-4 py-3 font-medium text-foreground">Description</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr className="border-b border-border">
-                  <td className="px-4 py-3"><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">rpc</code></td>
-                  <td className="px-4 py-3"><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">handleRpc</code></td>
-                  <td className="px-4 py-3 text-muted-foreground">Worker can handle synchronous RPC method calls</td>
-                </tr>
-                <tr>
-                  <td className="px-4 py-3"><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">jobs</code></td>
-                  <td className="px-4 py-3"><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">handleJob</code></td>
-                  <td className="px-4 py-3 text-muted-foreground">Worker can process asynchronous background jobs from the queue</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <p className="text-muted-foreground leading-7">
-            The RootCX IPC runtime handles the discover handshake automatically if you use the official SDK. When
-            writing a raw worker, you must listen to{" "}
-            <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">process.stdin</code> for newline-delimited
-            JSON and write responses to <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">process.stdout</code>.
-          </p>
-        </section>
-
         {/* RPC Calls */}
         <section className="flex flex-col gap-4" id="rpc-calls">
           <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">RPC Calls</h2>
           <p className="text-muted-foreground leading-7">
-            RPC (Remote Procedure Call) allows clients to invoke named methods on your worker synchronously through
-            Core. Core acts as a proxy, forwarding the request to the worker over IPC and waiting for the response
-            before replying to the HTTP client.
+            RPC (Remote Procedure Call) allows clients to invoke named methods on your backend synchronously through
+            Core. Core proxies the request over IPC to the backend process and waits for the response before replying
+            to the HTTP client. RPC calls time out after <strong className="text-foreground font-medium">30 seconds</strong> — long-running
+            operations should be offloaded to the job queue instead.
           </p>
           <CodeBlock language="bash" code={`POST /api/v1/apps/{appId}/rpc
 Content-Type: application/json
-Authorization: Bearer <token>
-
-{
-  "method": "summarize",
-  "params": {
-    "text": "RootCX is a backend platform that generates APIs from manifests..."
-  }
-}
-
-# Success response
-HTTP 200
-{
-  "result": {
-    "summary": "RootCX generates APIs automatically from application manifests."
-  }
-}
-
-# Error response (worker threw)
-HTTP 500
-{
-  "error": "Unknown RPC method: summarize"
-}`} />
+Authorization: Bearer <token>`} />
           <PropertiesTable
             properties={[
               {
                 name: "method",
                 type: "string",
                 required: true,
-                description: "The method name passed as the first argument to handleRpc. Routing between methods is done inside your worker using a switch statement or similar.",
+                description: "The method name passed as the first argument to handleRpc. Routing between methods is done inside your backend using a switch statement or similar.",
               },
               {
                 name: "params",
@@ -289,8 +214,35 @@ HTTP 500
                 required: false,
                 description: "Arbitrary JSON object passed as the second argument to handleRpc. Defaults to an empty object.",
               },
+              {
+                name: "id",
+                type: "string",
+                required: false,
+                description: "Optional correlation ID. Echoed back in the response for client-side request tracking.",
+              },
             ]}
           />
+          <CodeBlock language="bash" code={`# Call the summarize RPC method
+curl -X POST http://localhost:9100/api/v1/apps/my-app/rpc \\
+  -H "Authorization: Bearer <token>" \\
+  -H "Content-Type: application/json" \\
+  -d '{"method": "summarize", "params": {"text": "Hello world"}}'
+
+# Response (HTTP 200)
+{
+  "id": "...",
+  "result": {
+    "summary": "RootCX generates APIs automatically from application manifests."
+  },
+  "error": null
+}
+
+# Error response (worker threw)
+{
+  "id": "...",
+  "result": null,
+  "error": "Unknown RPC method: summarize"
+}`} />
           <h3 className="text-lg font-semibold text-foreground mt-2">Caller Context</h3>
           <p className="text-muted-foreground leading-7">
             If the request includes a valid JWT, Core decodes it and passes a{" "}
@@ -305,255 +257,72 @@ HTTP 500
     username: string;  // Username from the users table
   }
 ) {
-  // Personalize the response using caller.userId
   console.log(\`RPC call from \${caller.username}: \${method}\`);
 }`} />
-          <h3 className="text-lg font-semibold text-foreground mt-2">Timeout</h3>
-          <p className="text-muted-foreground leading-7">
-            RPC calls time out after <strong className="text-foreground font-medium">30 seconds</strong>. If the worker does not respond
-            within the timeout window, Core returns{" "}
-            <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">HTTP 504 Gateway Timeout</code> to the
-            client. Long-running operations should be offloaded to the job queue instead.
-          </p>
-          <CodeBlock language="bash" code={`# Call the summarize RPC method
-curl -X POST https://your-runtime.com/api/v1/apps/my-app/rpc \\
-  -H "Authorization: Bearer <token>" \\
-  -H "Content-Type: application/json" \\
-  -d '{"method": "summarize", "params": {"text": "Hello world"}}'`} />
-        </section>
-
-        {/* Job Handling */}
-        <section className="flex flex-col gap-4" id="job-handling">
-          <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">Job Handling</h2>
-          <p className="text-muted-foreground leading-7">
-            When the job scheduler picks up a pending job, it sends a{" "}
-            <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">job</code> IPC message to the worker. The
-            worker processes it and responds with a{" "}
-            <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">jobResult</code> message containing either
-            a result or an error.
-          </p>
-          <CodeBlock language="json" code={`// Core → Worker
-{
-  "type":    "job",
-  "id":      "3f2a1b4c-8e9d-4c2a-b1f3-7a6d5e4c3b2a",
-  "payload": {
-    "type":   "send-email",
-    "to":     "user@example.com",
-    "subject":"Welcome"
-  }
-}
-
-// Worker → Core (success)
-{
-  "type":   "jobResult",
-  "id":     "3f2a1b4c-8e9d-4c2a-b1f3-7a6d5e4c3b2a",
-  "result": { "messageId": "msg_xyz789", "accepted": true },
-  "error":  null
-}
-
-// Worker → Core (failure)
-{
-  "type":   "jobResult",
-  "id":     "3f2a1b4c-8e9d-4c2a-b1f3-7a6d5e4c3b2a",
-  "result": null,
-  "error":  "SMTP connection refused: mail.example.com:587"
-}`} />
-          <p className="text-muted-foreground leading-7">
-            Core maps the <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">jobResult</code> message back
-            to the database row and updates the job's status, result, and error fields atomically. The{" "}
-            <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">id</code> field is used to correlate
-            responses when multiple jobs are in-flight concurrently.
-          </p>
         </section>
 
         {/* Deployment */}
         <section className="flex flex-col gap-4" id="deployment">
           <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">Deployment</h2>
           <p className="text-muted-foreground leading-7">
-            Deploy your worker by uploading a <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">.tar.gz</code> archive
-            of your worker directory to the deploy endpoint. Core extracts it, installs dependencies, and starts the
-            worker automatically.
+            Deploy your backend by uploading a <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">.tar.gz</code> archive
+            to the deploy endpoint as <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">multipart/form-data</code> with
+            the field name <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">archive</code>. The maximum upload size
+            is <strong className="text-foreground font-medium">50 MB</strong>. Core extracts the archive, runs{" "}
+            <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">bun install</code> if a{" "}
+            <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">package.json</code> is present, and starts the
+            backend process automatically.
           </p>
           <CodeBlock language="bash" code={`POST /api/v1/apps/{appId}/deploy
-Content-Type: application/octet-stream
-Body: <binary tar.gz content>`} />
-          <h3 className="text-lg font-semibold text-foreground mt-2">Deploy Steps</h3>
-          <div className="flex flex-col gap-3">
-            {[
-              { step: "1", title: "Upload", body: "Core receives the tar.gz body and writes it to a temporary file." },
-              { step: "2", title: "Extract", body: "The archive is extracted to ~/.rootcx/apps/{appId}/ , replacing any previously deployed code." },
-              { step: "3", title: "Install", body: "If a package.json is present at the root of the extracted directory, Core runs bun install to install dependencies." },
-              { step: "4", title: "Start", body: "Core spawns the worker process with bun run index.ts and waits for the discover handshake." },
-              { step: "5", title: "Ready", body: "Once the handshake completes, Core responds HTTP 200 and the worker begins accepting RPC calls and jobs." },
-            ].map(({ step, title, body }) => (
-              <div key={step} className="flex gap-4 rounded-lg border border-border p-4">
-                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-muted text-xs font-bold text-foreground">
-                  {step}
-                </div>
-                <div className="flex flex-col gap-1">
-                  <span className="text-sm font-semibold text-foreground">{title}</span>
-                  <span className="text-sm text-muted-foreground leading-6">{body}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-          <CodeBlock language="bash" code={`# Package your worker
-tar -czf worker.tar.gz -C ./my-worker .
+Content-Type: multipart/form-data`} />
+          <CodeBlock language="bash" code={`# Package your backend
+tar -czf worker.tar.gz -C ./my-backend .
 
 # Deploy to Core
-curl -X POST https://your-runtime.com/api/v1/apps/my-app/deploy \\
+curl -X POST http://localhost:9100/api/v1/apps/my-app/deploy \\
   -H "Authorization: Bearer <token>" \\
-  -H "Content-Type: application/octet-stream" \\
-  --data-binary @worker.tar.gz
+  -F "archive=@worker.tar.gz"
 
-# Response
-{ "ok": true, "status": "running", "pid": 12345 }`} />
+# Response (HTTP 200)
+{ "message": "app 'my-app' deployed and started" }`} />
           <Callout variant="info">
-            Deployment replaces the running worker atomically. Core stops the old worker, extracts the new code,
-            installs dependencies, and starts the new worker before responding to the deploy request. Downtime is
-            typically under 2 seconds.
+            Deployment replaces any previously deployed code atomically. Core stops the old process, extracts the new
+            archive, installs dependencies, and starts the new process before responding.
           </Callout>
         </section>
 
-        {/* Worker Lifecycle */}
+        {/* Lifecycle */}
         <section className="flex flex-col gap-4" id="lifecycle">
-          <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">Worker Lifecycle</h2>
+          <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">Lifecycle</h2>
           <p className="text-muted-foreground leading-7">
-            Beyond deployment, you can control the worker process directly through the lifecycle endpoints.
+            Beyond deployment, you can control the backend process directly through lifecycle endpoints.
           </p>
-          <h3 className="text-lg font-semibold text-foreground mt-2">Start Worker</h3>
-          <CodeBlock language="bash" code={`POST /api/v1/apps/{appId}/worker/start
-
-curl -X POST https://your-runtime.com/api/v1/apps/my-app/worker/start \\
+          <h3 className="text-lg font-semibold text-foreground mt-2">Start</h3>
+          <CodeBlock language="bash" code={`curl -X POST http://localhost:9100/api/v1/apps/my-app/worker/start \\
   -H "Authorization: Bearer <token>"
 
-# Response
-{ "ok": true, "status": "running", "pid": 12345 }`} />
-          <h3 className="text-lg font-semibold text-foreground mt-2">Stop Worker</h3>
-          <CodeBlock language="bash" code={`POST /api/v1/apps/{appId}/worker/stop
-
-curl -X POST https://your-runtime.com/api/v1/apps/my-app/worker/stop \\
+# Response (HTTP 200)
+{ "message": "worker 'my-app' started" }`} />
+          <h3 className="text-lg font-semibold text-foreground mt-2">Stop</h3>
+          <CodeBlock language="bash" code={`curl -X POST http://localhost:9100/api/v1/apps/my-app/worker/stop \\
   -H "Authorization: Bearer <token>"
 
-# Response
-{ "ok": true, "status": "stopped" }`} />
-          <h3 className="text-lg font-semibold text-foreground mt-2">Worker Status</h3>
-          <CodeBlock language="bash" code={`GET /api/v1/apps/{appId}/worker/status
-
-curl https://your-runtime.com/api/v1/apps/my-app/worker/status \\
+# Response (HTTP 200)
+{ "message": "worker 'my-app' stopped" }`} />
+          <h3 className="text-lg font-semibold text-foreground mt-2">Status</h3>
+          <CodeBlock language="bash" code={`curl http://localhost:9100/api/v1/apps/my-app/worker/status \\
   -H "Authorization: Bearer <token>"
 
-# Running worker
-{
-  "status":         "running",
-  "pid":            12345,
-  "uptime_seconds": 3600,
-  "restarts":       0
-}
-
-# Stopped worker
-{
-  "status":         "stopped",
-  "pid":            null,
-  "uptime_seconds": null,
-  "restarts":       2
-}
-
-# Crashed worker (exceeded crash threshold)
-{
-  "status":         "crashed",
-  "pid":            null,
-  "uptime_seconds": null,
-  "restarts":       5
-}`} />
-        </section>
-
-        {/* IPC Protocol */}
-        <section className="flex flex-col gap-4" id="ipc-protocol">
-          <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">IPC Protocol</h2>
-          <p className="text-muted-foreground leading-7">
-            All communication between Core and your worker happens over{" "}
-            <strong className="text-foreground font-medium">newline-delimited JSON</strong> (NDJSON) on stdin/stdout. Each message is a
-            single JSON object terminated by a newline character{" "}
-            <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">\n</code>. Messages must not contain
-            embedded newlines.
-          </p>
-          <h3 className="text-lg font-semibold text-foreground mt-2">Outbound (Core to Worker)</h3>
-          <div className="overflow-x-auto rounded-lg border border-border">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border bg-muted/30">
-                  <th className="text-left px-4 py-3 font-medium text-foreground">Type</th>
-                  <th className="text-left px-4 py-3 font-medium text-foreground">Fields</th>
-                  <th className="text-left px-4 py-3 font-medium text-foreground">Description</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr className="border-b border-border">
-                  <td className="px-4 py-3"><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">discover</code></td>
-                  <td className="px-4 py-3 text-muted-foreground">appId, runtimeUrl</td>
-                  <td className="px-4 py-3 text-muted-foreground">Initial handshake sent on process start</td>
-                </tr>
-                <tr className="border-b border-border">
-                  <td className="px-4 py-3"><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">rpc</code></td>
-                  <td className="px-4 py-3 text-muted-foreground">id, method, params, caller</td>
-                  <td className="px-4 py-3 text-muted-foreground">Proxied RPC method call from an HTTP client</td>
-                </tr>
-                <tr className="border-b border-border">
-                  <td className="px-4 py-3"><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">job</code></td>
-                  <td className="px-4 py-3 text-muted-foreground">id, payload</td>
-                  <td className="px-4 py-3 text-muted-foreground">Background job dispatched from the scheduler</td>
-                </tr>
-                <tr>
-                  <td className="px-4 py-3"><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">shutdown</code></td>
-                  <td className="px-4 py-3 text-muted-foreground">—</td>
-                  <td className="px-4 py-3 text-muted-foreground">Graceful shutdown signal. Worker should flush in-progress work and exit within 5 seconds.</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <h3 className="text-lg font-semibold text-foreground mt-2">Inbound (Worker to Core)</h3>
-          <div className="overflow-x-auto rounded-lg border border-border">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border bg-muted/30">
-                  <th className="text-left px-4 py-3 font-medium text-foreground">Type</th>
-                  <th className="text-left px-4 py-3 font-medium text-foreground">Fields</th>
-                  <th className="text-left px-4 py-3 font-medium text-foreground">Description</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr className="border-b border-border">
-                  <td className="px-4 py-3"><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">discover</code></td>
-                  <td className="px-4 py-3 text-muted-foreground">capabilities[]</td>
-                  <td className="px-4 py-3 text-muted-foreground">Response to the initial handshake. Declares supported capabilities.</td>
-                </tr>
-                <tr className="border-b border-border">
-                  <td className="px-4 py-3"><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">rpcResponse</code></td>
-                  <td className="px-4 py-3 text-muted-foreground">id, result, error</td>
-                  <td className="px-4 py-3 text-muted-foreground">Response to an rpc message. Exactly one of result or error is non-null.</td>
-                </tr>
-                <tr className="border-b border-border">
-                  <td className="px-4 py-3"><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">jobResult</code></td>
-                  <td className="px-4 py-3 text-muted-foreground">id, result, error</td>
-                  <td className="px-4 py-3 text-muted-foreground">Response to a job message. Written to the jobs table by Core.</td>
-                </tr>
-                <tr>
-                  <td className="px-4 py-3"><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">log</code></td>
-                  <td className="px-4 py-3 text-muted-foreground">level, message</td>
-                  <td className="px-4 py-3 text-muted-foreground">Explicit log message routed to the broadcast channel. stdout/stderr are also captured automatically.</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+# Response (HTTP 200)
+{ "app_id": "my-app", "status": "running" }`} />
         </section>
 
         {/* Environment */}
         <section className="flex flex-col gap-4" id="environment">
           <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">Environment</h2>
           <p className="text-muted-foreground leading-7">
-            Core injects environment variables into the worker process before it starts. Two variables are always set
-            automatically. All other environment variables come from your application's secrets (Secrets module).
+            Core injects environment variables into the backend process before it starts. Two variables are always
+            present. All additional variables come from your application's secrets configured through the Secrets module.
           </p>
           <div className="overflow-x-auto rounded-lg border border-border">
             <table className="w-full text-sm">
@@ -566,11 +335,11 @@ curl https://your-runtime.com/api/v1/apps/my-app/worker/status \\
               <tbody>
                 <tr className="border-b border-border">
                   <td className="px-4 py-3"><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">ROOTCX_APP_ID</code></td>
-                  <td className="px-4 py-3 text-muted-foreground">The application ID. Use this to scope requests to the correct app when calling back to the runtime API.</td>
+                  <td className="px-4 py-3 text-muted-foreground">The application ID. Use this to scope API requests to the correct app.</td>
                 </tr>
                 <tr className="border-b border-border">
                   <td className="px-4 py-3"><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">ROOTCX_RUNTIME_URL</code></td>
-                  <td className="px-4 py-3 text-muted-foreground">The base URL of the Core runtime. Use this to make authenticated API calls back to Core from within the worker.</td>
+                  <td className="px-4 py-3 text-muted-foreground">The base URL of the Core API. Use this to make API calls back to Core from within the backend.</td>
                 </tr>
                 <tr>
                   <td className="px-4 py-3"><code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">YOUR_SECRET_NAME</code></td>
@@ -579,13 +348,12 @@ curl https://your-runtime.com/api/v1/apps/my-app/worker/status \\
               </tbody>
             </table>
           </div>
-          <CodeBlock language="typescript" code={`// Accessing environment variables in your worker
+          <CodeBlock language="typescript" code={`// Accessing environment variables in your backend
 const RUNTIME_URL    = process.env.ROOTCX_RUNTIME_URL!;
 const APP_ID         = process.env.ROOTCX_APP_ID!;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY!;  // Set via Secrets module
-const SMTP_PASSWORD  = process.env.SMTP_PASSWORD!;   // Set via Secrets module
 
-// Call back to the runtime API
+// Call back to the Core API
 async function getEntity(entityName: string, id: string) {
   const res = await fetch(
     \`\${RUNTIME_URL}/api/v1/apps/\${APP_ID}/\${entityName}/\${id}\`
@@ -599,8 +367,8 @@ async function getEntity(entityName: string, id: string) {
         <section className="flex flex-col gap-4" id="crash-recovery">
           <h2 className="text-2xl font-semibold tracking-tight border-b border-border pb-3">Crash Recovery</h2>
           <p className="text-muted-foreground leading-7">
-            Core monitors the worker process and automatically restarts it if it exits unexpectedly. The restart
-            policy uses a crash rate limiter to prevent a broken worker from consuming all system resources in a tight
+            Core monitors the backend process and automatically restarts it if it exits unexpectedly. The restart
+            policy uses a crash rate limiter to prevent a broken backend from consuming system resources in a tight
             restart loop.
           </p>
           <ul className="flex flex-col gap-2 text-muted-foreground leading-7 list-none pl-0">
@@ -610,29 +378,27 @@ async function getEntity(entityName: string, id: string) {
             </li>
             <li className="flex items-start gap-2">
               <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-muted-foreground/50 shrink-0" />
-              <span>Between restarts, Core applies <strong className="text-foreground font-medium">exponential backoff</strong>: 500 ms, 1 s, 2 s, 4 s, 8 s.</span>
+              <span>Between restarts, Core applies <strong className="text-foreground font-medium">exponential backoff</strong> with a 2-second base delay (2s, 4s, 8s, 16s, ...).</span>
             </li>
             <li className="flex items-start gap-2">
               <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-muted-foreground/50 shrink-0" />
-              <span>If the threshold is exceeded, the worker enters the <strong className="text-foreground font-medium">Crashed</strong> state and will not be restarted automatically. You must fix the issue and redeploy or manually start the worker.</span>
+              <span>If the crash threshold is exceeded, the backend enters the <strong className="text-foreground font-medium">crashed</strong> state and stops restarting automatically. You must fix the issue and redeploy or manually start the process.</span>
             </li>
             <li className="flex items-start gap-2">
               <span className="mt-1.5 h-1.5 w-1.5 rounded-full bg-muted-foreground/50 shrink-0" />
-              <span>While a worker is in the Crashed state, RPC calls return <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">503 Service Unavailable</code> and jobs accumulate in the pending queue.</span>
+              <span>While in the crashed state, RPC calls return <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">503 Service Unavailable</code> and jobs accumulate in the pending queue.</span>
             </li>
           </ul>
           <Callout variant="warning">
-            If your worker crashes during a job, Core resets the job from{" "}
+            If your backend crashes during a job, Core resets the job from{" "}
             <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">running</code> back to{" "}
             <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">pending</code> after a 60-second timeout.
-            The job will be re-dispatched once the worker recovers, incrementing the{" "}
-            <code className="rounded bg-white/5 px-1.5 py-0.5 font-mono text-xs text-foreground">attempts</code> counter. Ensure your job
-            handlers are idempotent or guard against double-execution using the attempts counter.
+            The job will be re-dispatched once the backend recovers. Ensure your job handlers are idempotent.
           </Callout>
         </section>
 
         <PageNav href="/modules/backend" />
-      </div >
-    </DocsLayout >
+      </div>
+    </DocsLayout>
   );
 }
