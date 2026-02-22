@@ -3,6 +3,7 @@ pub mod dirs;
 pub mod env;
 pub mod fs;
 pub mod process;
+pub mod service;
 pub mod shell;
 
 #[derive(Debug, thiserror::Error)]

@@ -10,14 +10,10 @@ mod terminal;
 use state::AppState;
 use tauri::{Emitter, Manager};
 use tracing::error;
-use tracing_subscriber::EnvFilter;
 
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .init();
-
     tauri::Builder::default()
+        .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -58,7 +54,14 @@ pub fn run() {
             let state = app_state.clone();
             app.manage(app_state);
 
+            // Start daemon + boot in background so the UI opens immediately
             tauri::async_runtime::spawn(async move {
+                if let Err(e) = tokio::task::spawn_blocking(rootcx_runtime::ensure_runtime)
+                    .await
+                    .unwrap_or_else(|e| Err(rootcx_runtime::ClientError::RuntimeStart(e.to_string())))
+                {
+                    error!("failed to start core daemon: {e}");
+                }
                 if let Err(e) = state.boot().await {
                     error!("runtime boot failed: {e}");
                 }

@@ -91,7 +91,7 @@ function MessageView({
         msg.role === "assistant" &&
         msg.error && (
           <span className="text-red-400">
-            {msg.error.name}: {"message" in msg.error.data ? msg.error.data.message : "Unknown error"}
+            {msg.error.name}: {"message" in msg.error.data ? String(msg.error.data.message) : "Unknown error"}
           </span>
         )
       )}
