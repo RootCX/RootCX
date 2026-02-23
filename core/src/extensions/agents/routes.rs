@@ -125,21 +125,27 @@ pub async fn invoke_agent(
         "_dataContract": data_contract,
     });
 
+    let user_id_str = identity.user_id.to_string();
     let caller = Some(RpcCaller {
-        user_id: identity.user_id.to_string(),
+        user_id: user_id_str.clone(),
         username: identity.username.clone(),
     });
 
     let agent_token = jwt::encode_access(&auth_cfg, agent_user_id(&app_id), &format!("agent:{app_id}"))
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
+    let persist_ctx = if memory_enabled {
+        Some((pool.clone(), app_id.clone(), user_id_str, body.message.clone()))
+    } else { None };
+    let sid = session_id.clone();
+
     let invoke_id = uuid::Uuid::new_v4().to_string();
     let stream_rx = wm
         .agent_invoke(
             &app_id,
             invoke_id,
-            session_id.clone(),
-            body.message.clone(),
+            session_id,
+            body.message,
             system_prompt,
             agent_config,
             agent_token,
@@ -147,11 +153,6 @@ pub async fn invoke_agent(
             caller,
         )
         .await?;
-
-    let persist_ctx = if memory_enabled {
-        Some((pool.clone(), app_id.clone(), identity.user_id.to_string(), body.message))
-    } else { None };
-    let sid = session_id.clone();
 
     let stream = futures::stream::unfold(
         (stream_rx, persist_ctx),
@@ -252,11 +253,10 @@ async fn load_system_prompt(
     config: &JsonValue,
     data_dir: &std::path::Path,
 ) -> Result<String, ApiError> {
-    let default_path = "./agent/system.md".to_string();
     let prompt_path = config
         .get("systemPrompt")
         .and_then(|p| p.as_str())
-        .unwrap_or(&default_path);
+        .unwrap_or("./agent/system.md");
     let full_path = data_dir.join("apps").join(app_id).join(prompt_path.trim_start_matches("./"));
     tokio::fs::read_to_string(&full_path).await.map_err(|e| {
         ApiError::Internal(format!("failed to read system prompt at {}: {e}", full_path.display()))
@@ -277,7 +277,7 @@ async fn persist_session(
     ]);
     sqlx::query(
         "INSERT INTO rootcx_system.agent_sessions (id, app_id, user_id, messages)
-         VALUES ($1::uuid, $2, $3, $4)
+         VALUES ($1::uuid, $2, $3::uuid, $4)
          ON CONFLICT (id) DO UPDATE SET
              messages = rootcx_system.agent_sessions.messages || $4,
              updated_at = now()",
