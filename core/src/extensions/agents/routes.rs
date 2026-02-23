@@ -8,6 +8,7 @@ use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use sqlx::PgPool;
+use tracing::error;
 
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
@@ -22,7 +23,7 @@ pub struct InvokeRequest {
     pub session_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, sqlx::FromRow)]
 pub(crate) struct AgentRow {
     id: String,
     app_id: String,
@@ -32,7 +33,7 @@ pub(crate) struct AgentRow {
     config: JsonValue,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, sqlx::FromRow)]
 pub(crate) struct SessionRow {
     id: String,
     agent_id: String,
@@ -46,21 +47,14 @@ pub async fn list_agents(
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<AgentRow>>, ApiError> {
     let pool = routes::pool(&rt).await?;
-    let rows = sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>, JsonValue)>(
+    let rows = sqlx::query_as::<_, AgentRow>(
         "SELECT id, app_id, name, description, model, config
          FROM rootcx_system.agents WHERE app_id = $1 ORDER BY name",
     )
     .bind(&app_id)
     .fetch_all(&pool)
     .await?;
-
-    Ok(Json(
-        rows.into_iter()
-            .map(|(id, app_id, name, description, model, config)| AgentRow {
-                id, app_id, name, description, model, config,
-            })
-            .collect(),
-    ))
+    Ok(Json(rows))
 }
 
 pub async fn invoke_agent(
@@ -125,6 +119,7 @@ pub async fn invoke_agent(
         "_appId": &app_id,
         "_agentId": &agent_id,
         "_enabledTools": enabled_tools,
+        "_graphPath": config.get("graph"),
         "_dataContract": data_contract,
     });
 
@@ -146,48 +141,37 @@ pub async fn invoke_agent(
         )
         .await?;
 
-    let pool_for_stream = pool.clone();
+    let persist_ctx = Some((pool.clone(), app_id.clone(), agent_id.clone(), identity.user_id.to_string(), body.message));
     let sid = session_id.clone();
-    let aid = app_id.clone();
-    let agid = agent_id.clone();
-    let uid = Some(identity.user_id.to_string());
-    let user_msg = body.message;
 
     let stream = futures::stream::unfold(
-        (stream_rx, false),
-        move |(mut rx, done)| {
-            let pool = pool_for_stream.clone();
+        (stream_rx, persist_ctx),
+        move |(mut rx, ctx)| {
             let sid = sid.clone();
-            let aid = aid.clone();
-            let agid = agid.clone();
-            let uid = uid.clone();
-            let umsg = user_msg.clone();
             async move {
-                if done {
-                    return None;
-                }
                 match rx.recv().await {
                     Some(AgentEvent::Chunk { delta }) => {
                         let event = Event::default()
                             .event("chunk")
                             .data(json!({"delta": delta, "session_id": sid}).to_string());
-                        Some((Ok(event), (rx, false)))
+                        Some((Ok(event), (rx, ctx)))
                     }
                     Some(AgentEvent::Done { response, tokens }) => {
-                        let _ = persist_session(&pool, &sid, &aid, &agid, uid.as_deref(), &umsg, &response).await;
+                        if let Some((pool, aid, agid, uid, umsg)) = &ctx {
+                            if let Err(e) = persist_session(pool, &sid, aid, agid, Some(uid.as_str()), umsg, &response).await {
+                                error!(session_id = %sid, "failed to persist session: {e}");
+                            }
+                        }
                         let event = Event::default()
                             .event("done")
-                            .data(
-                                json!({"response": response, "session_id": sid, "tokens": tokens})
-                                    .to_string(),
-                            );
-                        Some((Ok(event), (rx, true)))
+                            .data(json!({"response": response, "session_id": sid, "tokens": tokens}).to_string());
+                        Some((Ok(event), (rx, None)))
                     }
                     Some(AgentEvent::Error { error }) => {
                         let event = Event::default()
                             .event("error")
                             .data(json!({"error": error, "session_id": sid}).to_string());
-                        Some((Ok(event), (rx, true)))
+                        Some((Ok(event), (rx, None)))
                     }
                     None => None,
                 }
@@ -203,7 +187,7 @@ pub async fn list_sessions(
     Path((app_id, agent_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<SessionRow>>, ApiError> {
     let pool = routes::pool(&rt).await?;
-    let rows = sqlx::query_as::<_, (String, String, JsonValue, String, String)>(
+    let rows = sqlx::query_as::<_, SessionRow>(
         "SELECT id::text, agent_id, messages, created_at::text, updated_at::text
          FROM rootcx_system.agent_sessions
          WHERE app_id = $1 AND agent_id = $2
@@ -213,14 +197,7 @@ pub async fn list_sessions(
     .bind(&agent_id)
     .fetch_all(&pool)
     .await?;
-
-    Ok(Json(
-        rows.into_iter()
-            .map(|(id, agent_id, messages, created_at, updated_at)| SessionRow {
-                id, agent_id, messages, created_at, updated_at,
-            })
-            .collect(),
-    ))
+    Ok(Json(rows))
 }
 
 pub async fn get_session(
@@ -228,7 +205,7 @@ pub async fn get_session(
     Path((app_id, agent_id, session_id)): Path<(String, String, String)>,
 ) -> Result<Json<SessionRow>, ApiError> {
     let pool = routes::pool(&rt).await?;
-    let row = sqlx::query_as::<_, (String, String, JsonValue, String, String)>(
+    let row = sqlx::query_as::<_, SessionRow>(
         "SELECT id::text, agent_id, messages, created_at::text, updated_at::text
          FROM rootcx_system.agent_sessions
          WHERE app_id = $1 AND agent_id = $2 AND id = $3::uuid",
@@ -239,14 +216,7 @@ pub async fn get_session(
     .fetch_optional(&pool)
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("session '{session_id}' not found")))?;
-
-    Ok(Json(SessionRow {
-        id: row.0,
-        agent_id: row.1,
-        messages: row.2,
-        created_at: row.3,
-        updated_at: row.4,
-    }))
+    Ok(Json(row))
 }
 
 fn extract_enabled_tools(config: &JsonValue) -> Vec<String> {

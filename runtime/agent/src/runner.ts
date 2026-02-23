@@ -1,4 +1,5 @@
 import { resolve } from "path";
+import { access as fsAccess, constants } from "fs/promises";
 import {
     AIMessage,
     HumanMessage,
@@ -6,6 +7,7 @@ import {
     type BaseMessage,
 } from "@langchain/core/messages";
 import { buildProvider } from "./provider.js";
+import { buildDefaultGraph } from "./default-graph.js";
 import { buildToolRegistry } from "./tools/registry.js";
 import type { IpcWriter } from "./ipc.js";
 
@@ -28,6 +30,7 @@ export interface AgentConfig {
     _appId: string;
     _agentId: string;
     _enabledTools: string[];
+    _graphPath?: string;
     _dataContract?: EntitySchema[];
 }
 
@@ -58,10 +61,7 @@ export async function runAgent(params: RunAgentParams) {
         dataContract: config._dataContract ?? [],
     });
 
-    const mod = await import(resolve(`agents/${agentId}/graph.ts`));
-    const graph = typeof mod.default === "function"
-        ? mod.default(model, tools)
-        : mod.default;
+    const graph = await loadGraph(agentId, config._graphPath, model, tools);
 
     const messages: BaseMessage[] = [
         new SystemMessage(systemPrompt),
@@ -71,7 +71,7 @@ export async function runAgent(params: RunAgentParams) {
 
     const maxTurns = config.limits?.maxTurns ?? 10;
     let turns = 0;
-    let finalResponse = "";
+    let lastResponse = "";
 
     const stream = await graph.stream(
         { messages },
@@ -89,16 +89,16 @@ export async function runAgent(params: RunAgentParams) {
         }
 
         const agentMessages = event.agent?.messages ?? event.messages;
-        if (agentMessages && Array.isArray(agentMessages)) {
-            for (const msg of agentMessages) {
-                if (msg.content && typeof msg.content === "string") {
-                    finalResponse = msg.content;
-                    writer.send({
-                        type: "agent_chunk",
-                        session_id: sessionId,
-                        delta: msg.content,
-                    });
-                }
+        if (!Array.isArray(agentMessages)) continue;
+
+        for (const msg of agentMessages) {
+            if (msg.content && typeof msg.content === "string") {
+                lastResponse = msg.content;
+                writer.send({
+                    type: "agent_chunk",
+                    session_id: sessionId,
+                    delta: msg.content,
+                });
             }
         }
     }
@@ -106,17 +106,40 @@ export async function runAgent(params: RunAgentParams) {
     writer.send({
         type: "agent_done",
         session_id: sessionId,
-        response: finalResponse,
-        tokens: 0,
+        response: lastResponse,
     });
 }
 
-function deserializeHistory(
-    history: Array<Record<string, unknown>>,
-): BaseMessage[] {
+async function loadGraph(
+    agentId: string,
+    graphPath: string | undefined,
+    model: ReturnType<typeof buildProvider>,
+    tools: ReturnType<typeof buildToolRegistry>,
+) {
+    // Try explicit graph path from manifest, then convention path
+    const candidates = graphPath
+        ? [resolve(graphPath)]
+        : [resolve(`agents/${agentId}/graph.ts`), resolve(`agents/${agentId}/graph.js`)];
+
+    for (const path of candidates) {
+        if (await fileExists(path)) {
+            const mod = await import(path);
+            return typeof mod.default === "function"
+                ? mod.default(model, tools)
+                : mod.default;
+        }
+    }
+
+    return buildDefaultGraph(model, tools);
+}
+
+async function fileExists(path: string): Promise<boolean> {
+    try { await fsAccess(path, constants.R_OK); return true; } catch { return false; }
+}
+
+function deserializeHistory(history: Array<Record<string, unknown>>): BaseMessage[] {
     return history.map((msg) => {
         const content = String(msg.content ?? "");
-        if (msg.role === "user") return new HumanMessage(content);
-        return new AIMessage(content);
+        return msg.role === "user" ? new HumanMessage(content) : new AIMessage(content);
     });
 }

@@ -48,8 +48,8 @@ impl WorkerManager {
         let entry_point = resolve_entry_point(&app_dir)?;
         let mut env = secrets.get_env_for_app(pool, app_id).await?;
 
-        // Mint a service JWT so agent tools can authenticate against CRUD routes
-        let agent_uuid = Uuid::new_v4();
+        // Deterministic UUID so the token survives crash restarts
+        let agent_uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("agent:{app_id}").as_bytes());
         let token = jwt::encode_access(&self.auth_config, agent_uuid, &format!("agent:{app_id}"))?;
         env.insert("ROOTCX_AUTH_TOKEN".into(), token);
 

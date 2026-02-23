@@ -16,8 +16,6 @@ const PROVIDERS: Provider[] = [
   { id: "bedrock", label: "Bedrock", envKey: "AWS_BEARER_TOKEN_BEDROCK", placeholder: "ABSK..." },
 ];
 
-const KNOWN_KEYS = PROVIDERS.map((p) => p.envKey);
-
 export function ProviderSetupPortal() {
   const [show, setShow] = useState(false);
 
@@ -28,8 +26,7 @@ export function ProviderSetupPortal() {
       invoke<string[]>("list_platform_secrets")
         .then((keys) => {
           if (cancelled) return;
-          const hasProvider = KNOWN_KEYS.some((k) => keys.includes(k));
-          if (!hasProvider) setShow(true);
+          if (!PROVIDERS.some((p) => keys.includes(p.envKey))) setShow(true);
         })
         .catch(() => {
           // Runtime may not be ready yet — retry a few times

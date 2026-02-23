@@ -105,6 +105,10 @@ async fn read_manifest(project_path: &str) -> Result<rootcx_shared_types::AppMan
 }
 
 impl AppState {
+    async fn platform_env(&self) -> std::collections::HashMap<String, String> {
+        self.client.get_platform_env().await.unwrap_or_default()
+    }
+
     pub fn from_tauri(app: &tauri::App) -> Self {
         let forge = if is_forge_available() {
             info!("forge binary found, AI features enabled");
@@ -127,8 +131,7 @@ impl AppState {
         if let Some(ref f) = self.forge {
             let cfg = ensure_config().await?;
             let cwd = home_dir()?;
-            let env = self.client.get_platform_env().await.unwrap_or_default();
-            if let Err(e) = f.lock().await.start(&cwd, Some(cfg.as_path()), env).await {
+            if let Err(e) = f.lock().await.start(&cwd, Some(cfg.as_path()), self.platform_env().await).await {
                 warn!("forge sidecar start failed (non-fatal): {e}");
             }
         }
@@ -233,8 +236,7 @@ impl AppState {
     pub async fn start_forge(&self, project_path: &str) -> Result<(), String> {
         if let Some(ref f) = self.forge {
             let cfg = ensure_config().await?;
-            let env = self.client.get_platform_env().await.unwrap_or_default();
-            f.lock().await.start(Path::new(project_path), Some(cfg.as_path()), env).await.map_err(|e| e.to_string())?;
+            f.lock().await.start(Path::new(project_path), Some(cfg.as_path()), self.platform_env().await).await.map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -244,8 +246,7 @@ impl AppState {
         write_config(&path, contents).await?;
 
         if let (Some(f), Some(pp)) = (&self.forge, project_path) {
-            let env = self.client.get_platform_env().await.unwrap_or_default();
-            f.lock().await.start(Path::new(pp), Some(&path), env).await.map_err(|e| e.to_string())?;
+            f.lock().await.start(Path::new(pp), Some(&path), self.platform_env().await).await.map_err(|e| e.to_string())?;
         }
         Ok(())
     }

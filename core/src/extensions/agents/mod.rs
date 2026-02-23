@@ -74,6 +74,7 @@ impl RuntimeExtension for AgentExtension {
         for (agent_id, def) in &manifest.agents {
             let config = serde_json::json!({
                 "systemPrompt": def.system_prompt,
+                "graph": def.graph,
                 "memory": def.memory,
                 "limits": def.limits,
                 "access": def.access,
@@ -115,22 +116,24 @@ impl RuntimeExtension for AgentExtension {
                 .await
                 .map_err(RuntimeError::Schema)?;
 
-            for entry in &def.access {
-                if entry.entity.starts_with("tool:") {
-                    continue;
+            let data_entries: Vec<_> = def.access.iter()
+                .filter(|e| !e.entity.starts_with("tool:"))
+                .collect();
+            if !data_entries.is_empty() {
+                let mut sql = String::from(
+                    "INSERT INTO rootcx_system.rbac_policies (app_id, role, entity, actions, ownership) VALUES "
+                );
+                for (i, _) in data_entries.iter().enumerate() {
+                    let off = i * 2 + 3;
+                    if i > 0 { sql.push(','); }
+                    sql.push_str(&format!("($1,$2,${},${},false)", off, off + 1));
                 }
-                let actions: Vec<&str> = entry.actions.iter().map(String::as_str).collect();
-                sqlx::query(
-                    "INSERT INTO rootcx_system.rbac_policies (app_id, role, entity, actions, ownership)
-                     VALUES ($1, $2, $3, $4, false)"
-                )
-                .bind(app_id)
-                .bind(&role_name)
-                .bind(&entry.entity)
-                .bind(&actions)
-                .execute(pool)
-                .await
-                .map_err(RuntimeError::Schema)?;
+                let mut q = sqlx::query(&sql).bind(app_id).bind(&role_name);
+                for entry in &data_entries {
+                    let actions: Vec<&str> = entry.actions.iter().map(String::as_str).collect();
+                    q = q.bind(&entry.entity).bind(actions);
+                }
+                q.execute(pool).await.map_err(RuntimeError::Schema)?;
             }
 
             info!(app = %app_id, agent = %agent_id, "agent registered with RBAC");
