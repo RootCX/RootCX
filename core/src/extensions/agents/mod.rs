@@ -15,8 +15,17 @@ use crate::extensions::rbac::PolicyCache;
 use crate::routes::SharedRuntime;
 use rootcx_shared_types::AppManifest;
 
+/// Fixed namespace for UUID v5 generation. Ensures `agent_user_id("my-app")`
+/// always returns the same UUID, so agents keep their identity across restarts.
+/// Do not change — existing agent user_ids in the DB depend on this value.
+const AGENT_UUID_NAMESPACE: Uuid = Uuid::from_bytes([
+    0x9a, 0x3b, 0x4c, 0x5d, 0x6e, 0x7f, 0x40, 0x01,
+    0x82, 0x93, 0xa4, 0xb5, 0xc6, 0xd7, 0xe8, 0xf9,
+]);
+
+/// Deterministic user ID for an agent: same app_id always yields the same UUID.
 pub fn agent_user_id(app_id: &str) -> Uuid {
-    Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("agent:{app_id}").as_bytes())
+    Uuid::new_v5(&AGENT_UUID_NAMESPACE, format!("agent:{app_id}").as_bytes())
 }
 
 pub struct AgentExtension {
@@ -46,7 +55,6 @@ impl RuntimeExtension for AgentExtension {
                 created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
             )",
-            "ALTER TABLE rootcx_system.agents DROP COLUMN IF EXISTS model",
             "CREATE TABLE IF NOT EXISTS rootcx_system.agent_sessions (
                 id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 app_id      TEXT NOT NULL REFERENCES rootcx_system.agents(app_id) ON DELETE CASCADE,
@@ -73,6 +81,7 @@ impl RuntimeExtension for AgentExtension {
         };
         let app_id = &manifest.app_id;
         let role_name = format!("agent:{app_id}");
+        let agent_uid = agent_user_id(app_id);
 
         let config = serde_json::json!({
             "provider": def.provider,
@@ -82,6 +91,9 @@ impl RuntimeExtension for AgentExtension {
             "limits": def.limits,
             "access": def.access,
         });
+
+        let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
+
         sqlx::query(
             "INSERT INTO rootcx_system.agents (app_id, name, description, config)
              VALUES ($1, $2, $3, $4)
@@ -93,7 +105,7 @@ impl RuntimeExtension for AgentExtension {
         .bind(&def.name)
         .bind(def.description.as_deref())
         .bind(&config)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(RuntimeError::Schema)?;
 
@@ -105,11 +117,10 @@ impl RuntimeExtension for AgentExtension {
         .bind(app_id)
         .bind(&role_name)
         .bind(format!("Auto-created role for agent {}", def.name))
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(RuntimeError::Schema)?;
 
-        let agent_uid = agent_user_id(app_id);
         sqlx::query(
             "INSERT INTO rootcx_system.users (id, username, is_system)
              VALUES ($1, $2, true)
@@ -117,7 +128,7 @@ impl RuntimeExtension for AgentExtension {
         )
         .bind(agent_uid)
         .bind(&role_name)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(RuntimeError::Schema)?;
 
@@ -129,14 +140,14 @@ impl RuntimeExtension for AgentExtension {
         .bind(agent_uid)
         .bind(app_id)
         .bind(&role_name)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(RuntimeError::Schema)?;
 
         sqlx::query("DELETE FROM rootcx_system.rbac_policies WHERE app_id = $1 AND role = $2")
             .bind(app_id)
             .bind(&role_name)
-            .execute(pool)
+            .execute(&mut *tx)
             .await
             .map_err(RuntimeError::Schema)?;
 
@@ -155,9 +166,10 @@ impl RuntimeExtension for AgentExtension {
                     .push_bind(actions)
                     .push_bind(false);
             });
-            qb.build().execute(pool).await.map_err(RuntimeError::Schema)?;
+            qb.build().execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
         }
 
+        tx.commit().await.map_err(RuntimeError::Schema)?;
         self.rbac_cache.invalidate(app_id);
         info!(app = %app_id, "agent registered");
         Ok(())

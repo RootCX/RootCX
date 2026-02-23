@@ -104,15 +104,11 @@ async fn read_manifest(project_path: &str) -> Result<rootcx_shared_types::AppMan
     serde_json::from_str(&contents).map_err(|e| format!("invalid manifest: {e}"))
 }
 
+const DEPLOY_EXCLUDE: &[&str] = &["node_modules", ".git", ".rootcx", "bun.lock", "src-tauri"];
+
 impl AppState {
-    async fn platform_env(&self) -> std::collections::HashMap<String, String> {
-        match self.client.get_platform_env().await {
-            Ok(env) => env,
-            Err(e) => {
-                warn!("failed to load platform secrets: {e}");
-                std::collections::HashMap::new()
-            }
-        }
+    async fn platform_env(&self) -> Result<std::collections::HashMap<String, String>, String> {
+        self.client.get_platform_env().await.map_err(|e| format!("failed to load platform secrets: {e}"))
     }
 
     pub fn from_tauri(app: &tauri::App) -> Self {
@@ -137,7 +133,8 @@ impl AppState {
         if let Some(ref f) = self.forge {
             let cfg = ensure_config().await?;
             let cwd = home_dir()?;
-            if let Err(e) = f.lock().await.start(&cwd, Some(cfg.as_path()), self.platform_env().await).await {
+            let env = self.platform_env().await.unwrap_or_default();
+            if let Err(e) = f.lock().await.start(&cwd, Some(cfg.as_path()), env).await {
                 warn!("forge sidecar start failed (non-fatal): {e}");
             }
         }
@@ -242,7 +239,7 @@ impl AppState {
     pub async fn start_forge(&self, project_path: &str) -> Result<(), String> {
         if let Some(ref f) = self.forge {
             let cfg = ensure_config().await?;
-            f.lock().await.start(Path::new(project_path), Some(cfg.as_path()), self.platform_env().await).await.map_err(|e| e.to_string())?;
+            f.lock().await.start(Path::new(project_path), Some(cfg.as_path()), self.platform_env().await?).await.map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -252,7 +249,7 @@ impl AppState {
         write_config(&path, contents).await?;
 
         if let (Some(f), Some(pp)) = (&self.forge, project_path) {
-            f.lock().await.start(Path::new(pp), Some(&path), self.platform_env().await).await.map_err(|e| e.to_string())?;
+            f.lock().await.start(Path::new(pp), Some(&path), self.platform_env().await?).await.map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -290,7 +287,7 @@ impl AppState {
                 let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if matches!(name_str.as_ref(), "node_modules" | ".git" | ".rootcx" | "bun.lock" | "src-tauri") {
+                if DEPLOY_EXCLUDE.contains(&name_str.as_ref()) {
                     continue;
                 }
                 let path = entry.path();

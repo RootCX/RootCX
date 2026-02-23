@@ -13,7 +13,7 @@ use sqlx::PgPool;
 
 use crate::RuntimeError;
 use crate::extensions::logs::{LOG_CHANNEL_CAPACITY, LogEntry, emit_log, spawn_output_reader};
-use crate::ipc::{InboundMessage, IpcEvent, IpcReader, IpcWriter, OutboundMessage, PendingRpcs, RpcCaller};
+use crate::ipc::{AgentInvokePayload, InboundMessage, IpcEvent, IpcReader, IpcWriter, OutboundMessage, PendingRpcs, RpcCaller};
 
 const MAX_CRASHES: u32 = 5;
 const CRASH_WINDOW: Duration = Duration::from_secs(60);
@@ -58,14 +58,7 @@ pub enum SupervisorCommand {
         payload: JsonValue,
     },
     AgentInvoke {
-        invoke_id: String,
-        session_id: String,
-        message: String,
-        system_prompt: String,
-        config: JsonValue,
-        auth_token: String,
-        history: Vec<JsonValue>,
-        caller: Option<RpcCaller>,
+        payload: AgentInvokePayload,
         stream_tx: mpsc::Sender<AgentEvent>,
     },
     GetStatus {
@@ -129,20 +122,10 @@ impl SupervisorHandle {
 
     pub async fn agent_invoke(
         &self,
-        invoke_id: String,
-        session_id: String,
-        message: String,
-        system_prompt: String,
-        config: JsonValue,
-        auth_token: String,
-        history: Vec<JsonValue>,
-        caller: Option<RpcCaller>,
+        payload: AgentInvokePayload,
     ) -> Result<mpsc::Receiver<AgentEvent>, RuntimeError> {
         let (stream_tx, stream_rx) = mpsc::channel(64);
-        self.send(SupervisorCommand::AgentInvoke {
-            invoke_id, session_id, message, system_prompt,
-            config, auth_token, history, caller, stream_tx,
-        }).await?;
+        self.send(SupervisorCommand::AgentInvoke { payload, stream_tx }).await?;
         Ok(stream_rx)
     }
 
@@ -253,22 +236,17 @@ async fn supervisor_loop(
                             }
                     }
 
-                    SupervisorCommand::AgentInvoke {
-                        invoke_id, session_id, message, system_prompt,
-                        config, auth_token, history, caller, stream_tx,
-                    } => {
+                    SupervisorCommand::AgentInvoke { payload, stream_tx } => {
                         if status != WorkerStatus::Running {
                             let _ = stream_tx.send(AgentEvent::Error {
                                 error: "worker not running".into(),
                             }).await;
                             continue;
                         }
+                        let invoke_id = payload.invoke_id.clone();
                         pending_agent_streams.insert(invoke_id.clone(), stream_tx);
                         if let Some(ref mut w) = ipc_writer {
-                            if let Err(e) = w.send(&OutboundMessage::AgentInvoke {
-                                invoke_id: invoke_id.clone(), session_id,
-                                message, system_prompt, config, auth_token, history, caller,
-                            }).await {
+                            if let Err(e) = w.send(&OutboundMessage::AgentInvoke(payload)).await {
                                 if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                     let _ = tx.send(AgentEvent::Error { error: e.to_string() }).await;
                                 }

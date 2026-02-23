@@ -12,8 +12,9 @@ export function buildDefaultGraph(model: BaseChatModel, tools: StructuredToolInt
     }
 
     function route(state: typeof MessagesAnnotation.State) {
-        const last = state.messages.at(-1) as any;
-        return last?.tool_calls?.length ? "tools" : "__end__";
+        const last = state.messages.at(-1);
+        const calls = (last as { tool_calls?: unknown[] } | undefined)?.tool_calls;
+        return calls?.length ? "tools" : "__end__";
     }
 
     return new StateGraph(MessagesAnnotation)

@@ -45,6 +45,7 @@ async function braveSearch(query: string, count: number, apiKey: string): Promis
     return formatResults((data.web?.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.description })));
 }
 
+// Tavily requires api_key in the POST body per their API spec.
 async function tavilySearch(query: string, count: number, apiKey: string): Promise<string> {
     const res = await fetch("https://api.tavily.com/search", {
         method: "POST",

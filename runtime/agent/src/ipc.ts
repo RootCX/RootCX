@@ -13,8 +13,8 @@ export class IpcReader {
                 const msg = JSON.parse(line);
                 const handler = this.handlers.get(msg.type);
                 if (handler) handler(msg);
-            } catch {
-                // Non-JSON output, ignore
+            } catch (e) {
+                process.stderr.write(`ipc: failed to parse line: ${e}\n`);
             }
         });
     }

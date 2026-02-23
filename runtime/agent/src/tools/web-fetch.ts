@@ -45,6 +45,8 @@ export function createWebFetchTool() {
     );
 }
 
+// Intentionally simple regex-based stripping — adequate for extracting
+// readable text from typical web pages. Not a full HTML parser.
 function htmlToText(html: string): string {
     return html
         .replace(/<script[\s\S]*?<\/script>/gi, "")
@@ -53,6 +55,8 @@ function htmlToText(html: string): string {
         .replace(/<\/(p|div|h[1-6]|li|tr|br|hr)[^>]*>/gi, "\n")
         .replace(/<br\s*\/?>/gi, "\n")
         .replace(/<[^>]+>/g, "")
+        .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+        .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
         .replace(/&amp;/g, "&")
         .replace(/&lt;/g, "<")
         .replace(/&gt;/g, ">")

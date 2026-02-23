@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Json;
@@ -14,7 +15,7 @@ use super::agent_user_id;
 use crate::api_error::ApiError;
 use crate::auth::jwt;
 use crate::auth::identity::Identity;
-use crate::ipc::RpcCaller;
+use crate::ipc::{AgentInvokePayload, RpcCaller};
 use crate::routes::{self, SharedRuntime};
 use crate::worker::AgentEvent;
 
@@ -39,6 +40,13 @@ pub(crate) struct SessionRow {
     messages: JsonValue,
     created_at: String,
     updated_at: String,
+}
+
+struct PersistCtx {
+    pool: PgPool,
+    app_id: String,
+    user_id: String,
+    user_message: String,
 }
 
 pub async fn get_agent(
@@ -91,107 +99,133 @@ pub async fn invoke_agent(
         .and_then(|e| e.as_bool())
         == Some(true);
 
-    let history: Vec<JsonValue> = if memory_enabled {
-        match sqlx::query_scalar::<_, JsonValue>(
-            "SELECT messages FROM rootcx_system.agent_sessions WHERE id = $1::uuid",
-        )
-        .bind(&session_id)
-        .fetch_optional(&pool)
-        .await?
-        {
-            None => vec![],
-            Some(v) => v.as_array().cloned()
-                .ok_or_else(|| ApiError::Internal("agent session messages is not a JSON array".into()))?,
-        }
-    } else {
-        vec![]
-    };
-
+    let history = load_history(&pool, memory_enabled, &session_id).await?;
     let system_prompt = load_system_prompt(&app_id, &config, &data_dir).await?;
-    let enabled_tools = extract_enabled_tools(&config);
-
-    let data_contract: JsonValue = sqlx::query_scalar(
-        "SELECT COALESCE(manifest->'dataContract', '[]'::jsonb) FROM rootcx_system.apps WHERE id = $1",
-    )
-    .bind(&app_id)
-    .fetch_optional(&pool)
-    .await?
-    .ok_or_else(|| ApiError::NotFound(format!("app '{app_id}' not found")))?;
-
-    let agent_config = json!({
-        "provider": config.get("provider"),
-        "limits": config.get("limits"),
-        "_appId": &app_id,
-        "_enabledTools": enabled_tools,
-        "_graphPath": config.get("graph"),
-        "_dataContract": data_contract,
-    });
-
-    let user_id_str = identity.user_id.to_string();
-    let caller = Some(RpcCaller {
-        user_id: user_id_str.clone(),
-        username: identity.username.clone(),
-    });
+    let agent_config = build_agent_config(&pool, &app_id, &config).await?;
 
     let agent_token = jwt::encode_access(&auth_cfg, agent_user_id(&app_id), &format!("agent:{app_id}"))
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
+    let caller = Some(RpcCaller {
+        user_id: identity.user_id.to_string(),
+        username: identity.username.clone(),
+    });
+
     let persist_ctx = if memory_enabled {
-        Some((pool.clone(), app_id.clone(), user_id_str, body.message.clone()))
-    } else { None };
-    let sid = session_id.clone();
+        Some(PersistCtx {
+            pool: pool.clone(),
+            app_id: app_id.clone(),
+            user_id: identity.user_id.to_string(),
+            user_message: body.message.clone(),
+        })
+    } else {
+        None
+    };
 
-    let invoke_id = uuid::Uuid::new_v4().to_string();
-    let stream_rx = wm
-        .agent_invoke(
-            &app_id,
-            invoke_id,
-            session_id,
-            body.message,
-            system_prompt,
-            agent_config,
-            agent_token,
-            history,
-            caller,
-        )
-        .await?;
+    let payload = AgentInvokePayload {
+        invoke_id: uuid::Uuid::new_v4().to_string(),
+        session_id: session_id.clone(),
+        message: body.message,
+        system_prompt,
+        config: agent_config,
+        auth_token: agent_token,
+        history,
+        caller,
+    };
 
-    let stream = futures::stream::unfold(
+    let stream_rx = wm.agent_invoke(&app_id, payload).await?;
+    let session_id: Arc<str> = session_id.into();
+
+    Ok(Sse::new(build_sse_stream(stream_rx, session_id, persist_ctx))
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+}
+
+fn build_sse_stream(
+    stream_rx: tokio::sync::mpsc::Receiver<AgentEvent>,
+    session_id: Arc<str>,
+    persist_ctx: Option<PersistCtx>,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    futures::stream::unfold(
         (stream_rx, persist_ctx),
         move |(mut rx, ctx)| {
-            let sid = sid.clone();
+            let sid = Arc::clone(&session_id);
             async move {
                 match rx.recv().await {
                     Some(AgentEvent::Chunk { delta }) => {
                         let event = Event::default()
                             .event("chunk")
-                            .data(json!({"delta": delta, "session_id": sid}).to_string());
+                            .data(json!({"delta": delta, "session_id": &*sid}).to_string());
                         Some((Ok(event), (rx, ctx)))
                     }
                     Some(AgentEvent::Done { response, tokens }) => {
-                        if let Some((pool, aid, uid, umsg)) = &ctx {
-                            if let Err(e) = persist_session(pool, &sid, aid, Some(uid.as_str()), umsg, &response).await {
+                        if let Some(ref pctx) = ctx {
+                            if let Err(e) = persist_session(&pctx.pool, &sid, &pctx.app_id, &pctx.user_id, &pctx.user_message, &response).await {
                                 error!(session_id = %sid, "failed to persist session: {e}");
                             }
                         }
                         let event = Event::default()
                             .event("done")
-                            .data(json!({"response": response, "session_id": sid, "tokens": tokens}).to_string());
+                            .data(json!({"response": response, "session_id": &*sid, "tokens": tokens}).to_string());
                         Some((Ok(event), (rx, None)))
                     }
                     Some(AgentEvent::Error { error }) => {
                         let event = Event::default()
                             .event("error")
-                            .data(json!({"error": error, "session_id": sid}).to_string());
+                            .data(json!({"error": error, "session_id": &*sid}).to_string());
                         Some((Ok(event), (rx, None)))
                     }
                     None => None,
                 }
             }
         },
-    );
+    )
+}
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
+async fn load_history(
+    pool: &PgPool,
+    memory_enabled: bool,
+    session_id: &str,
+) -> Result<Vec<JsonValue>, ApiError> {
+    if !memory_enabled {
+        return Ok(vec![]);
+    }
+    match sqlx::query_scalar::<_, JsonValue>(
+        "SELECT messages FROM rootcx_system.agent_sessions WHERE id = $1::uuid",
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await?
+    {
+        None => Ok(vec![]),
+        Some(v) => v
+            .as_array()
+            .cloned()
+            .ok_or_else(|| ApiError::Internal("agent session messages is not a JSON array".into())),
+    }
+}
+
+async fn build_agent_config(
+    pool: &PgPool,
+    app_id: &str,
+    config: &JsonValue,
+) -> Result<JsonValue, ApiError> {
+    let enabled_tools = extract_enabled_tools(config);
+    let data_contract: JsonValue = sqlx::query_scalar(
+        "SELECT COALESCE(manifest->'dataContract', '[]'::jsonb) FROM rootcx_system.apps WHERE id = $1",
+    )
+    .bind(app_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("app '{app_id}' not found")))?;
+
+    Ok(json!({
+        "provider": config.get("provider"),
+        "limits": config.get("limits"),
+        "_appId": app_id,
+        "_enabledTools": enabled_tools,
+        "_graphPath": config.get("graph"),
+        "_dataContract": data_contract,
+    }))
 }
 
 pub async fn list_sessions(
@@ -259,7 +293,8 @@ async fn load_system_prompt(
         .get("systemPrompt")
         .and_then(|p| p.as_str())
         .unwrap_or("./agent/system.md");
-    let full_path = data_dir.join("apps").join(app_id).join(prompt_path.trim_start_matches("./"));
+    let rel = prompt_path.strip_prefix("./").unwrap_or(prompt_path);
+    let full_path = data_dir.join("apps").join(app_id).join(rel);
     tokio::fs::read_to_string(&full_path).await.map_err(|e| {
         ApiError::Internal(format!("failed to read system prompt at {}: {e}", full_path.display()))
     })
@@ -269,7 +304,7 @@ async fn persist_session(
     pool: &PgPool,
     session_id: &str,
     app_id: &str,
-    user_id: Option<&str>,
+    user_id: &str,
     user_message: &str,
     assistant_response: &str,
 ) -> Result<(), sqlx::Error> {

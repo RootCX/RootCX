@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 
 use crate::RuntimeError;
 use crate::extensions::logs::LogEntry;
-use crate::ipc::RpcCaller;
+use crate::ipc::{AgentInvokePayload, RpcCaller};
 use crate::secrets::SecretManager;
 use crate::worker::{self, AgentEvent, SupervisorHandle, WorkerConfig, WorkerStatus};
 
@@ -97,19 +97,9 @@ impl WorkerManager {
     pub async fn agent_invoke(
         &self,
         app_id: &str,
-        invoke_id: String,
-        session_id: String,
-        message: String,
-        system_prompt: String,
-        config: JsonValue,
-        auth_token: String,
-        history: Vec<JsonValue>,
-        caller: Option<RpcCaller>,
+        payload: AgentInvokePayload,
     ) -> Result<mpsc::Receiver<AgentEvent>, RuntimeError> {
-        self.get_handle(app_id).await?.agent_invoke(
-            invoke_id, session_id, message, system_prompt,
-            config, auth_token, history, caller,
-        ).await
+        self.get_handle(app_id).await?.agent_invoke(payload).await
     }
 
     pub async fn dispatch_job(&self, app_id: &str, job_id: String, payload: JsonValue) -> Result<(), RuntimeError> {

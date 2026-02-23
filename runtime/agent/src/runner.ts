@@ -7,6 +7,7 @@ import {
     type BaseMessage,
 } from "@langchain/core/messages";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import type { StructuredToolInterface } from "@langchain/core/tools";
 import { buildProvider, type ProviderConfig } from "./providers/index.js";
 import { buildDefaultGraph } from "./default-graph.js";
 import { buildToolRegistry } from "./tools/registry.js";
@@ -85,16 +86,18 @@ export async function runAgent(params: RunAgentParams) {
             return;
         }
 
-        const agentMessages = event.agent?.messages ?? event.messages;
+        const agentMessages: unknown[] | undefined =
+            event.agent?.messages ?? event.messages;
         if (!Array.isArray(agentMessages)) continue;
 
         for (const msg of agentMessages) {
-            if (msg.content && typeof msg.content === "string") {
-                lastResponse = msg.content;
+            const content = (msg as { content?: unknown }).content;
+            if (content && typeof content === "string") {
+                lastResponse = content;
                 writer.send({
                     type: "agent_chunk",
                     invoke_id: invokeId,
-                    delta: msg.content,
+                    delta: content,
                 });
             }
         }
@@ -107,28 +110,33 @@ export async function runAgent(params: RunAgentParams) {
     });
 }
 
+async function importGraph(
+    path: string,
+    model: BaseChatModel,
+    tools: StructuredToolInterface[],
+) {
+    const mod = await import(path);
+    return typeof mod.default === "function"
+        ? mod.default(model, tools)
+        : mod.default;
+}
+
 async function loadGraph(
     graphPath: string | undefined,
     model: BaseChatModel,
-    tools: ReturnType<typeof buildToolRegistry>,
+    tools: StructuredToolInterface[],
 ) {
     if (graphPath) {
         const resolved = resolve(graphPath);
         if (!await fileExists(resolved)) {
             throw new Error(`graph file not found: ${resolved}`);
         }
-        const mod = await import(resolved);
-        return typeof mod.default === "function"
-            ? mod.default(model, tools)
-            : mod.default;
+        return importGraph(resolved, model, tools);
     }
 
     for (const path of [resolve("agent/graph.ts"), resolve("agent/graph.js")]) {
         if (await fileExists(path)) {
-            const mod = await import(path);
-            return typeof mod.default === "function"
-                ? mod.default(model, tools)
-                : mod.default;
+            return importGraph(path, model, tools);
         }
     }
 
