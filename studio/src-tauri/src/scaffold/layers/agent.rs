@@ -12,7 +12,7 @@ fn provider_config(answers: &HashMap<String, AnswerValue>) -> serde_json::Value 
     };
     match provider_type {
         "openai" => serde_json::json!({ "type": "openai", "model": "gpt-4o" }),
-        "bedrock" => serde_json::json!({ "type": "bedrock", "model": "anthropic.claude-opus-4-6-v1" }),
+        "bedrock" => serde_json::json!({ "type": "bedrock", "model": "global.anthropic.claude-opus-4-6-v1" }),
         _ => serde_json::json!({ "type": "anthropic", "model": "claude-sonnet-4-20250514" }),
     }
 }
