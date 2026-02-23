@@ -247,21 +247,23 @@ my-agent/
 
 Added alongside `dataContract` in `manifest.json`:
 
-```typescript
-agent: {
-  name: string;
-  description?: string;
-  model?: string;              // default: "claude-sonnet-4-20250514"
-  systemPrompt?: string;       // relative path to .md file
-  graph?: string;              // relative path to graph.ts
-  memory?: { enabled: boolean };
-  limits?: { maxTurns?: number }; // default: 10
-  access: Array<{
-    entity: string;            // collection name | "tool:<name>" | "app:<appId>/<entity>"
-    actions: string[];         // ["read","create","update","delete"] or ["use"]
-  }>;
+```json
+"agent": {
+  "name": "<name>",
+  "description": "<description>",
+  "provider": { "type": "anthropic", "model": "claude-sonnet-4-20250514" },
+  "systemPrompt": "./agent/system.md",
+  "graph": "./agent/graph.ts",
+  "memory": { "enabled": true },
+  "limits": { "maxTurns": 10 },
+  "access": [
+    { "entity": "<collection>", "actions": ["read", "create", "update", "delete"] },
+    { "entity": "tool:web_search", "actions": ["use"] }
+  ]
 }
 ```
+
+**`provider` is required.** Tagged union: `{ "type": "anthropic"|"openai"|"bedrock", "model": "<model>" }`. Bedrock also accepts `"region"`.
 
 ### Access & tools
 
@@ -293,11 +295,9 @@ export default function buildGraph(
 
 Build any `StateGraph` using LangGraph primitives: `Annotation.Root`, `MessagesAnnotation`, `ToolNode`, conditional edges, custom state fields. System prompt is injected by runtime — graph doesn't handle it.
 
-### Models
+### Secrets
 
-`claude-sonnet-4-20250514` (default) | `claude-opus-4-20250514` | `gpt-4o` | `gpt-4o-mini`
-
-Secrets: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `BRAVE_API_KEY`, `TAVILY_API_KEY`
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `BRAVE_API_KEY`, `TAVILY_API_KEY`
 
 ### Invocation
 

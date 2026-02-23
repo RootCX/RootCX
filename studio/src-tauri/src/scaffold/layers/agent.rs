@@ -59,57 +59,30 @@ List the entities from your dataContract here.
 - Reference entity names from the manifest
 "#, ctx.name)).await?;
 
-            e.write("backend/agent/graph.ts", r#"import { StateGraph, MessagesAnnotation, Annotation } from "@langchain/langgraph";
+            e.write("backend/agent/graph.ts", r#"import { StateGraph, MessagesAnnotation } from "@langchain/langgraph";
 import { ToolNode } from "@langchain/langgraph/prebuilt";
-import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import type { StructuredToolInterface } from "@langchain/core/tools";
 
-const PHASES = ["research", "execute"] as const;
-type Phase = (typeof PHASES)[number];
-
-const PHASE_PROMPT: Record<Phase, string> = {
-    research: "PHASE: RESEARCH — Gather information using available tools. Do not take actions yet. Summarize findings when done.",
-    execute: "PHASE: EXECUTE — Based on your research, take action: create/update records, produce outputs, and report results.",
-};
-
-const State = Annotation.Root({
-    ...MessagesAnnotation.spec,
-    phase: Annotation<Phase>({ reducer: (_, b) => b, default: () => PHASES[0] }),
-});
-
 export default function buildGraph(model: BaseChatModel, tools: StructuredToolInterface[]) {
-    const boundModel = model.bindTools(tools);
+    const bound = model.bindTools(tools);
     const toolNode = new ToolNode(tools);
 
-    async function agent(state: typeof State.State) {
-        const response = await boundModel.invoke([
-            new SystemMessage(PHASE_PROMPT[state.phase]),
-            ...state.messages,
-        ]);
-        return { messages: [response] };
+    async function agent(state: typeof MessagesAnnotation.State) {
+        return { messages: [await bound.invoke(state.messages)] };
     }
 
-    function route(state: typeof State.State) {
-        const last = state.messages.at(-1) as any;
-        if (last?.tool_calls?.length) return "tools";
-        if (state.phase !== PHASES.at(-1)) return "next_phase";
-        return "__end__";
+    function route(state: typeof MessagesAnnotation.State) {
+        const last = state.messages.at(-1) as { tool_calls?: unknown[] } | undefined;
+        return last?.tool_calls?.length ? "tools" : "__end__";
     }
 
-    function nextPhase(state: typeof State.State) {
-        const next = PHASES[PHASES.indexOf(state.phase) + 1];
-        return { phase: next, messages: [new HumanMessage(`Proceed to phase: ${next}`)] };
-    }
-
-    return new StateGraph(State)
+    return new StateGraph(MessagesAnnotation)
         .addNode("agent", agent)
         .addNode("tools", toolNode)
-        .addNode("next_phase", nextPhase)
         .addEdge("__start__", "agent")
         .addConditionalEdges("agent", route)
         .addEdge("tools", "agent")
-        .addEdge("next_phase", "agent")
         .compile();
 }
 "#).await?;

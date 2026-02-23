@@ -69,36 +69,33 @@ export async function runAgent(params: RunAgentParams) {
 
     const maxTurns = config.limits?.maxTurns ?? 10;
     let turns = 0;
-    let lastResponse = "";
+    let fullResponse = "";
 
-    const stream = await graph.stream(
+    const stream = graph.streamEvents(
         { messages },
-        { recursionLimit: maxTurns * 2 },
+        { version: "v2", recursionLimit: maxTurns * 2 },
     );
 
     for await (const event of stream) {
-        if (++turns > maxTurns) {
-            writer.send({
-                type: "agent_error",
-                invoke_id: invokeId,
-                error: `Max turns (${maxTurns}) exceeded`,
-            });
-            return;
-        }
-
-        const agentMessages: unknown[] | undefined =
-            event.agent?.messages ?? event.messages;
-        if (!Array.isArray(agentMessages)) continue;
-
-        for (const msg of agentMessages) {
-            const content = (msg as { content?: unknown }).content;
-            if (content && typeof content === "string") {
-                lastResponse = content;
+        if (event.event === "on_chat_model_stream") {
+            const chunk = event.data?.chunk;
+            const delta = typeof chunk?.content === "string" ? chunk.content : "";
+            if (delta) {
+                fullResponse += delta;
                 writer.send({
                     type: "agent_chunk",
                     invoke_id: invokeId,
-                    delta: content,
+                    delta,
                 });
+            }
+        } else if (event.event === "on_chat_model_end") {
+            if (++turns > maxTurns) {
+                writer.send({
+                    type: "agent_error",
+                    invoke_id: invokeId,
+                    error: `Max turns (${maxTurns}) exceeded`,
+                });
+                return;
             }
         }
     }
@@ -106,7 +103,7 @@ export async function runAgent(params: RunAgentParams) {
     writer.send({
         type: "agent_done",
         invoke_id: invokeId,
-        response: lastResponse,
+        response: fullResponse,
     });
 }
 
