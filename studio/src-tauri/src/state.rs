@@ -106,7 +106,13 @@ async fn read_manifest(project_path: &str) -> Result<rootcx_shared_types::AppMan
 
 impl AppState {
     async fn platform_env(&self) -> std::collections::HashMap<String, String> {
-        self.client.get_platform_env().await.unwrap_or_default()
+        match self.client.get_platform_env().await {
+            Ok(env) => env,
+            Err(e) => {
+                warn!("failed to load platform secrets: {e}");
+                std::collections::HashMap::new()
+            }
+        }
     }
 
     pub fn from_tauri(app: &tauri::App) -> Self {

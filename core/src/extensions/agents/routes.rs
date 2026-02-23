@@ -90,17 +90,20 @@ pub async fn invoke_agent(
         .get("memory")
         .and_then(|m| m.get("enabled"))
         .and_then(|e| e.as_bool())
-        .unwrap_or(false);
+        == Some(true);
 
     let history: Vec<JsonValue> = if memory_enabled {
-        sqlx::query_scalar::<_, JsonValue>(
+        match sqlx::query_scalar::<_, JsonValue>(
             "SELECT messages FROM rootcx_system.agent_sessions WHERE id = $1::uuid",
         )
         .bind(&session_id)
         .fetch_optional(&pool)
         .await?
-        .and_then(|v| v.as_array().cloned())
-        .unwrap_or_default()
+        {
+            None => vec![],
+            Some(v) => v.as_array().cloned()
+                .ok_or_else(|| ApiError::Internal("agent session messages is not a JSON array".into()))?,
+        }
     } else {
         vec![]
     };
@@ -114,7 +117,7 @@ pub async fn invoke_agent(
     .bind(&app_id)
     .fetch_optional(&pool)
     .await?
-    .unwrap_or(JsonValue::Array(vec![]));
+    .ok_or_else(|| ApiError::NotFound(format!("app '{app_id}' not found")))?;
 
     let agent_config = json!({
         "model": config.get("model"),
@@ -229,16 +232,16 @@ pub async fn get_session(
 
 fn extract_enabled_tools(config: &JsonValue) -> Vec<String> {
     let mut tools = vec![];
-    let access = config.get("access").and_then(|a| a.as_array());
     let mut has_data_access = false;
-    if let Some(entries) = access {
-        for entry in entries {
-            let entity = entry.get("entity").and_then(|e| e.as_str()).unwrap_or("");
-            if let Some(tool_name) = entity.strip_prefix("tool:") {
-                tools.push(tool_name.to_string());
-            } else if !entity.is_empty() {
-                has_data_access = true;
-            }
+    let Some(entries) = config.get("access").and_then(|a| a.as_array()) else {
+        return tools;
+    };
+    for entry in entries {
+        let Some(entity) = entry.get("entity").and_then(|e| e.as_str()) else { continue };
+        if let Some(tool_name) = entity.strip_prefix("tool:") {
+            tools.push(tool_name.to_string());
+        } else {
+            has_data_access = true;
         }
     }
     if has_data_access {
