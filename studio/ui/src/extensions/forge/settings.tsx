@@ -67,16 +67,20 @@ export default function ForgeSettings() {
       return;
     }
 
-    const config: Config = { model: `${providerId}/${modelKey}` };
-    if (apiKey.trim()) {
-      config.provider = { [providerId]: { options: { apiKey: apiKey.trim() } } };
-    }
-
     try {
+      // Save API key as a platform secret (single source of truth)
+      if (apiKey.trim() && selectedProvider?.env[0]) {
+        await invoke("set_platform_secret", { key: selectedProvider.env[0], value: apiKey.trim() });
+      }
+
+      // Config only stores the model selection — no apiKey
+      const config: Config = { model: `${providerId}/${modelKey}` };
       await invoke("save_forge_config", {
         contents: JSON.stringify(config, null, 2),
         projectPath: projectPath || undefined,
       });
+
+      setApiKey("");
       setSaved(true);
       setTimeout(() => setSaved(false), 3000);
     } catch (err) {

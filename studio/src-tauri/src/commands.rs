@@ -161,7 +161,11 @@ pub async fn run_app(
     state: State<'_, Mutex<RunnerState>>,
 ) -> Result<(), String> {
     let config = crate::launch::read(std::path::Path::new(&project_path))?;
-    state.lock().await.run(&config.command, &project_path, app_handle);
+    if let Some(ref cmd) = config.command {
+        state.lock().await.run(cmd, &project_path, app_handle);
+    }
+    // Agent projects have no local command — the worker runs in Core
+    // and logs are streamed via subscribe_to_worker_logs in deploy_and_watch.
     Ok(())
 }
 
@@ -249,6 +253,21 @@ pub async fn terminal_write(data: String, state: State<'_, Mutex<TerminalState>>
 #[tauri::command]
 pub async fn terminal_resize(rows: u16, cols: u16, state: State<'_, Mutex<TerminalState>>) -> Result<(), String> {
     state.lock().await.resize(rows, cols).await
+}
+
+#[tauri::command]
+pub async fn list_platform_secrets(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    state.list_platform_secrets().await
+}
+
+#[tauri::command]
+pub async fn set_platform_secret(state: State<'_, AppState>, key: String, value: String) -> Result<(), String> {
+    state.set_platform_secret(&key, &value).await
+}
+
+#[tauri::command]
+pub async fn delete_platform_secret(state: State<'_, AppState>, key: String) -> Result<(), String> {
+    state.delete_platform_secret(&key).await
 }
 
 #[cfg(test)]

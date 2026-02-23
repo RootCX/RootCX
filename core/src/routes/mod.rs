@@ -113,6 +113,7 @@ pub use crud::{create_record, delete_record, get_record, list_records, update_re
 pub use deploy::deploy_backend;
 pub use jobs::{enqueue_job, get_job, list_jobs};
 pub use secrets::{delete_secret, list_secrets, set_secret};
+pub use secrets::{delete_platform_secret, get_platform_env, list_platform_secrets, set_platform_secret};
 pub use upload::upload_file;
 pub use workers::{all_worker_statuses, rpc_proxy, start_worker, stop_worker, worker_status};
 
