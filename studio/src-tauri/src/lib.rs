@@ -42,6 +42,9 @@ pub fn run() {
             commands::spawn_terminal,
             commands::terminal_write,
             commands::terminal_resize,
+            commands::list_platform_secrets,
+            commands::set_platform_secret,
+            commands::delete_platform_secret,
         ])
         .setup(|app| {
             let view_menu = menu::setup(app)?;

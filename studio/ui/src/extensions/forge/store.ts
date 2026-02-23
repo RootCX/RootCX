@@ -398,4 +398,15 @@ export async function startForProject(projectPath: string): Promise<void> {
   }
 }
 
-connectEvents();
+// Resolve the real Forge port before first connection attempt
+(async () => {
+  try {
+    const status = await invoke<{ port?: number }>("get_forge_status");
+    if (status.port) {
+      setForgePort(status.port);
+    }
+  } catch {
+    // Forge may not be running yet — connectEvents will retry
+  }
+  connectEvents();
+})();
