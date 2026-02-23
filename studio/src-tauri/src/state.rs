@@ -272,13 +272,9 @@ impl AppState {
         .map_err(|e| format!("invalid manifest: {e}"))?;
         let app_id = manifest["appId"].as_str().ok_or("manifest.json missing appId")?;
 
-        // App projects use backend/, agent projects deploy from project root
-        let deploy_dir = {
-            let backend = project.join("backend");
-            if backend.exists() { backend } else { project.to_path_buf() }
-        };
-        if !deploy_dir.join("package.json").exists() && !deploy_dir.join("index.ts").exists() {
-            return Err("no deployable code found (missing package.json or index.ts)".into());
+        let deploy_dir = project.join("backend");
+        if !deploy_dir.exists() {
+            return Err("no backend/ directory found in project".into());
         }
 
         let archive = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
@@ -288,10 +284,9 @@ impl AppState {
                 let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if matches!(name_str.as_ref(),
-                    "node_modules" | ".git" | ".rootcx" | "bun.lock" | "src-tauri"
-                    | "manifest.json" | "frontend"
-                ) { continue; }
+                if matches!(name_str.as_ref(), "node_modules" | ".git" | ".rootcx" | "bun.lock" | "src-tauri") {
+                    continue;
+                }
                 let path = entry.path();
                 if path.is_file() {
                     tar.append_path_with_name(&path, &*name_str).map_err(|e| format!("tar: {e}"))?;
@@ -331,9 +326,8 @@ impl AppState {
 
     fn start_watcher(&self, project_path: &str) -> Result<(), String> {
         let project = Path::new(project_path);
-        let backend = project.join("backend");
-        let watch_dir = if backend.exists() { backend } else { project.to_path_buf() };
-        if !watch_dir.join("package.json").exists() && !watch_dir.join("index.ts").exists() {
+        let watch_dir = project.join("backend");
+        if !watch_dir.exists() {
             return Ok(());
         }
         let (tx, rx) = std::sync::mpsc::channel();

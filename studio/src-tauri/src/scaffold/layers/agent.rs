@@ -52,13 +52,13 @@ List the entities from your dataContract here.
                 ctx.name
             );
             e.write(
-                &format!("agents/{agent_id}/system.md"),
+                &format!("backend/agents/{agent_id}/system.md"),
                 &system_prompt,
             )
             .await?;
 
             e.write(
-                &format!("agents/{agent_id}/graph.ts"),
+                &format!("backend/agents/{agent_id}/graph.ts"),
                 r#"import { StateGraph, MessagesAnnotation, Annotation } from "@langchain/langgraph";
 import { ToolNode } from "@langchain/langgraph/prebuilt";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
@@ -116,11 +116,11 @@ export default function buildGraph(model: BaseChatModel, tools: StructuredToolIn
             )
             .await?;
 
-            e.write("index.ts", "import \"@rootcx/agent-runtime\";\n")
+            e.write("backend/index.ts", "import \"@rootcx/agent-runtime\";\n")
                 .await?;
 
             e.write(
-                "package.json",
+                "backend/package.json",
                 &format!(
                     r#"{{
   "name": "{}",
