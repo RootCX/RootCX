@@ -170,8 +170,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ── Outbound wire format (IPC contract) ──────────────────────────────
-
     #[test]
     fn outbound_messages_carry_type_tag() {
         let cases: Vec<(OutboundMessage, &str)> = vec![
@@ -185,8 +183,6 @@ mod tests {
             assert_eq!(v["type"], expected_type, "wrong type tag for {expected_type}");
         }
     }
-
-    // ── Inbound deserialization ─────────────────────────────────────────
 
     #[test]
     fn inbound_discover_deserialization() {
@@ -256,8 +252,6 @@ mod tests {
         let result = serde_json::from_str::<InboundMessage>(r#"{"type":"unknown"}"#);
         assert!(result.is_err());
     }
-
-    // ── PendingRpcs ─────────────────────────────────────────────────────
 
     #[test]
     fn pending_rpcs_register_resolve_ok() {

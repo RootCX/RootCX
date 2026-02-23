@@ -230,7 +230,6 @@ async fn supervisor_loop(
                             && let Err(e) = w.send(&OutboundMessage::Rpc { id: id.clone(), method, params, caller }).await {
                                 pending_rpcs.resolve(&id, Err(e.to_string()));
                             }
-                        // Spawn timeout watcher
                         tokio::spawn(async move {
                             let result = match tokio::time::timeout(Duration::from_secs(30), rx).await {
                                 Ok(Ok(r)) => r,
@@ -387,7 +386,6 @@ async fn supervisor_loop(
                             tokio::select! {
                                 _ = tokio::time::sleep(delay) => {}
                                 Some(cmd) = cmd_rx.recv() => {
-                                    // Process stop/status during backoff
                                     match cmd {
                                         SupervisorCommand::Stop { reply } => {
                                             status = WorkerStatus::Stopped;
