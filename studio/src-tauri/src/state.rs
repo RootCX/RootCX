@@ -271,38 +271,32 @@ impl AppState {
         .map_err(|e| format!("invalid manifest: {e}"))?;
         let app_id = manifest["appId"].as_str().ok_or("manifest.json missing appId")?;
 
-        // Agent projects have no backend/ dir — deploy the whole project instead
-        let is_agent = manifest.get("agents").and_then(|a| a.as_object()).is_some_and(|a| !a.is_empty());
-        let deploy_dir = if is_agent {
-            project.to_path_buf()
-        } else {
-            let backend_dir = project.join("backend");
-            if !backend_dir.exists() {
-                return Err("no backend/ directory found in project".into());
-            }
-            backend_dir
-        };
+        let deploy_dir = project.join("backend");
+        if !deploy_dir.exists() {
+            return Err("no backend/ directory found in project".into());
+        }
 
         let archive = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
             let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
             let mut tar = tar::Builder::new(enc);
-            if is_agent {
-                // For agents: include manifest.json, agents/, package.json (skip node_modules, .git, src-tauri)
-                for entry in ["manifest.json", "package.json", "agents"] {
-                    let path = deploy_dir.join(entry);
-                    if path.is_file() {
-                        tar.append_path_with_name(&path, entry).map_err(|e| format!("tar failed: {e}"))?;
-                    } else if path.is_dir() {
-                        tar.append_dir_all(entry, &path).map_err(|e| format!("tar failed: {e}"))?;
-                    }
+            for entry in std::fs::read_dir(&deploy_dir).map_err(|e| format!("read dir: {e}"))? {
+                let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if matches!(name_str.as_ref(), "node_modules" | ".git" | ".rootcx" | "bun.lock" | "src-tauri") {
+                    continue;
                 }
-            } else {
-                tar.append_dir_all(".", &deploy_dir).map_err(|e| format!("tar failed: {e}"))?;
+                let path = entry.path();
+                if path.is_file() {
+                    tar.append_path_with_name(&path, &*name_str).map_err(|e| format!("tar: {e}"))?;
+                } else if path.is_dir() {
+                    tar.append_dir_all(&*name_str, &path).map_err(|e| format!("tar: {e}"))?;
+                }
             }
             tar.into_inner()
-                .map_err(|e| format!("tar finalize failed: {e}"))?
+                .map_err(|e| format!("tar finalize: {e}"))?
                 .finish()
-                .map_err(|e| format!("gzip failed: {e}"))
+                .map_err(|e| format!("gzip: {e}"))
         })
         .await
         .map_err(|e| format!("archive task failed: {e}"))??;
@@ -331,12 +325,7 @@ impl AppState {
 
     fn start_watcher(&self, project_path: &str) -> Result<(), String> {
         let project = Path::new(project_path);
-        // Watch agents/ dir for agent projects, backend/ for apps
-        let watch_dir = if project.join("agents").exists() && !project.join("backend").exists() {
-            project.join("agents")
-        } else {
-            project.join("backend")
-        };
+        let watch_dir = project.join("backend");
         if !watch_dir.exists() {
             return Ok(());
         }

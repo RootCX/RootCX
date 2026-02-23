@@ -74,7 +74,6 @@ impl RuntimeExtension for AgentExtension {
         for (agent_id, def) in &manifest.agents {
             let config = serde_json::json!({
                 "systemPrompt": def.system_prompt,
-                "graph": def.graph,
                 "memory": def.memory,
                 "limits": def.limits,
                 "access": def.access,

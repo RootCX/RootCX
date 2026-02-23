@@ -1,9 +1,6 @@
 use crate::scaffold::emitter::Emitter;
 use crate::scaffold::types::{Layer, LayerFuture, ScaffoldContext};
 
-/// Emits a complete agent-only project: manifest.json with agents section,
-/// agents/{id}/system.md, package.json with agent-runtime, and launch config.
-/// No frontend, no React, no Tauri.
 pub struct AgentLayer {
     pub agent_id: String,
 }
@@ -14,7 +11,6 @@ impl Layer for AgentLayer {
         Box::pin(async move {
             let agent_runtime_dep = format!("file:{}", ctx.runtime.agent_runtime.display());
 
-            // manifest.json with agents section
             let manifest = serde_json::json!({
                 "appId": ctx.app_id,
                 "name": ctx.name,
@@ -35,7 +31,6 @@ impl Layer for AgentLayer {
             });
             e.write_json("manifest.json", &manifest).await?;
 
-            // System prompt template
             let system_prompt = format!(
                 r#"You are the {} agent.
 
@@ -57,14 +52,75 @@ List the entities from your dataContract here.
                 ctx.name
             );
             e.write(
-                &format!("agents/{agent_id}/system.md"),
+                &format!("backend/agents/{agent_id}/system.md"),
                 &system_prompt,
             )
             .await?;
 
-            // package.json — agent-only, no frontend deps
             e.write(
-                "package.json",
+                &format!("backend/agents/{agent_id}/graph.ts"),
+                r#"import { StateGraph, MessagesAnnotation, Annotation } from "@langchain/langgraph";
+import { ToolNode } from "@langchain/langgraph/prebuilt";
+import { HumanMessage, SystemMessage } from "@langchain/core/messages";
+import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import type { StructuredToolInterface } from "@langchain/core/tools";
+
+const PHASES = ["research", "execute"] as const;
+type Phase = (typeof PHASES)[number];
+
+const PHASE_PROMPT: Record<Phase, string> = {
+    research: "PHASE: RESEARCH — Gather information using available tools. Do not take actions yet. Summarize findings when done.",
+    execute: "PHASE: EXECUTE — Based on your research, take action: create/update records, produce outputs, and report results.",
+};
+
+const State = Annotation.Root({
+    ...MessagesAnnotation.spec,
+    phase: Annotation<Phase>({ reducer: (_, b) => b, default: () => PHASES[0] }),
+});
+
+export default function buildGraph(model: BaseChatModel, tools: StructuredToolInterface[]) {
+    const boundModel = model.bindTools(tools);
+    const toolNode = new ToolNode(tools);
+
+    async function agent(state: typeof State.State) {
+        const response = await boundModel.invoke([
+            new SystemMessage(PHASE_PROMPT[state.phase]),
+            ...state.messages,
+        ]);
+        return { messages: [response] };
+    }
+
+    function route(state: typeof State.State) {
+        const last = state.messages.at(-1) as any;
+        if (last?.tool_calls?.length) return "tools";
+        if (state.phase !== PHASES.at(-1)) return "next_phase";
+        return "__end__";
+    }
+
+    function nextPhase(state: typeof State.State) {
+        const next = PHASES[PHASES.indexOf(state.phase) + 1];
+        return { phase: next, messages: [new HumanMessage(`Proceed to phase: ${next}`)] };
+    }
+
+    return new StateGraph(State)
+        .addNode("agent", agent)
+        .addNode("tools", toolNode)
+        .addNode("next_phase", nextPhase)
+        .addEdge("__start__", "agent")
+        .addConditionalEdges("agent", route)
+        .addEdge("tools", "agent")
+        .addEdge("next_phase", "agent")
+        .compile();
+}
+"#,
+            )
+            .await?;
+
+            e.write("backend/index.ts", "import \"@rootcx/agent-runtime\";\n")
+                .await?;
+
+            e.write(
+                "backend/package.json",
                 &format!(
                     r#"{{
   "name": "{}",
@@ -81,8 +137,6 @@ List the entities from your dataContract here.
             )
             .await?;
 
-            // Launch config for agent projects — no local command needed,
-            // the agent worker runs inside Core after deploy.
             e.write(
                 ".rootcx/launch.json",
                 "{\n  \"preLaunch\": [\"verify_schema\", \"sync_manifest\", \"deploy_backend\"]\n}\n",

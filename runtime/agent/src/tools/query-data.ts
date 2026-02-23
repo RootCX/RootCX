@@ -1,17 +1,20 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
+import type { EntitySchema } from "../runner.js";
+import { formatSchema } from "./schema.js";
 
 export function createQueryDataTool(
     appId: string,
     agentId: string,
     runtimeUrl: string,
+    authToken: string,
+    dataContract: EntitySchema[],
 ) {
     return tool(
         async ({ entity, app, filter }) => {
             const targetApp = app ?? appId;
-            const targetEntity = entity;
             const url = new URL(
-                `/api/v1/apps/${targetApp}/collections/${targetEntity}`,
+                `/api/v1/apps/${targetApp}/collections/${entity}`,
                 runtimeUrl,
             );
 
@@ -23,8 +26,8 @@ export function createQueryDataTool(
 
             const res = await fetch(url.toString(), {
                 headers: {
+                    "Authorization": `Bearer ${authToken}`,
                     "X-Agent-Id": `agent:${agentId}`,
-                    "X-App-Id": appId,
                 },
             });
 
@@ -38,10 +41,10 @@ export function createQueryDataTool(
         {
             name: "query_data",
             description:
-                "Query records from a data collection. Use this to read leads, research notes, or any entity the agent has access to.",
+                `Query records from a data collection.${formatSchema(dataContract)}`,
             schema: z.object({
-                entity: z.string().describe("The collection/entity name to query (e.g. 'leads', 'research_notes')"),
-                app: z.string().optional().describe("Target app ID for cross-app reads (e.g. 'crm'). Omit to query own app."),
+                entity: z.string().describe("The collection/entity name"),
+                app: z.string().optional().describe("Target app ID for cross-app reads. Omit to query own app."),
                 filter: z.record(z.string(), z.unknown()).optional().describe("Key-value filter criteria"),
             }),
         },

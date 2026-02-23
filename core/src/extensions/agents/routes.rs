@@ -110,12 +110,22 @@ pub async fn invoke_agent(
 
     let system_prompt = load_system_prompt(&app_id, &agent_id, &config, &data_dir).await?;
     let enabled_tools = extract_enabled_tools(&config);
+
+    let data_contract: JsonValue = sqlx::query_scalar(
+        "SELECT COALESCE(manifest->'dataContract', '[]'::jsonb) FROM rootcx_system.apps WHERE id = $1",
+    )
+    .bind(&app_id)
+    .fetch_optional(&pool)
+    .await?
+    .unwrap_or(JsonValue::Array(vec![]));
+
     let agent_config = json!({
         "model": config.get("model"),
         "limits": config.get("limits"),
         "_appId": &app_id,
+        "_agentId": &agent_id,
         "_enabledTools": enabled_tools,
-        "_graphAbsolutePath": config.get("graph"),
+        "_dataContract": data_contract,
     });
 
     let caller = Some(RpcCaller {

@@ -1,20 +1,34 @@
+import { resolve } from "path";
 import {
     AIMessage,
     HumanMessage,
     SystemMessage,
     type BaseMessage,
 } from "@langchain/core/messages";
-import { buildDefaultGraph } from "./default-graph.js";
 import { buildProvider } from "./provider.js";
 import { buildToolRegistry } from "./tools/registry.js";
 import type { IpcWriter } from "./ipc.js";
+
+export interface FieldSchema {
+    name: string;
+    type: string;
+    required?: boolean;
+    enumValues?: string[];
+    references?: { entity: string; field: string };
+}
+
+export interface EntitySchema {
+    entityName: string;
+    fields: FieldSchema[];
+}
 
 export interface AgentConfig {
     model?: string;
     limits?: { maxTurns?: number; maxBudgetUsd?: number };
     _appId: string;
+    _agentId: string;
     _enabledTools: string[];
-    _graphAbsolutePath?: string;
+    _dataContract?: EntitySchema[];
 }
 
 interface RunAgentParams {
@@ -32,22 +46,22 @@ export async function runAgent(params: RunAgentParams) {
     const runtimeUrl = process.env.ROOTCX_RUNTIME_URL;
     if (!runtimeUrl) throw new Error("ROOTCX_RUNTIME_URL not set");
 
+    const authToken = process.env.ROOTCX_AUTH_TOKEN ?? "";
+    const agentId = config._agentId;
+
     const model = buildProvider(config.model);
     const tools = buildToolRegistry(config._enabledTools, {
         appId: config._appId,
-        agentId: config._appId,
+        agentId,
         runtimeUrl,
+        authToken,
+        dataContract: config._dataContract ?? [],
     });
 
-    let graph;
-    if (config._graphAbsolutePath) {
-        const custom = await import(config._graphAbsolutePath);
-        graph = typeof custom.default === "function"
-            ? custom.default(model, tools)
-            : custom.default;
-    } else {
-        graph = buildDefaultGraph(model, tools);
-    }
+    const mod = await import(resolve(`agents/${agentId}/graph.ts`));
+    const graph = typeof mod.default === "function"
+        ? mod.default(model, tools)
+        : mod.default;
 
     const messages: BaseMessage[] = [
         new SystemMessage(systemPrompt),

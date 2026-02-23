@@ -163,8 +163,6 @@ pub struct AgentDefinition {
     #[serde(default)]
     pub system_prompt: Option<String>,
     #[serde(default)]
-    pub graph: Option<String>,
-    #[serde(default)]
     pub memory: Option<AgentMemory>,
     #[serde(default)]
     pub limits: Option<AgentLimits>,

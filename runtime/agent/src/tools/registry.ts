@@ -1,22 +1,27 @@
 import type { StructuredToolInterface } from "@langchain/core/tools";
+import type { EntitySchema } from "../runner.js";
 import { createQueryDataTool } from "./query-data.js";
 import { createMutateDataTool } from "./mutate-data.js";
 import { createWebSearchTool } from "./web-search.js";
 import { createWebFetchTool } from "./web-fetch.js";
+import { createInvokeAgentTool } from "./invoke-agent.js";
 
 export interface ToolContext {
     appId: string;
     agentId: string;
     runtimeUrl: string;
+    authToken: string;
+    dataContract: EntitySchema[];
 }
 
 type ToolFactory = (ctx: ToolContext) => StructuredToolInterface;
 
 const TOOL_FACTORIES: Record<string, ToolFactory> = {
-    query_data: (ctx) => createQueryDataTool(ctx.appId, ctx.agentId, ctx.runtimeUrl),
-    mutate_data: (ctx) => createMutateDataTool(ctx.appId, ctx.agentId, ctx.runtimeUrl),
+    query_data: (ctx) => createQueryDataTool(ctx.appId, ctx.agentId, ctx.runtimeUrl, ctx.authToken, ctx.dataContract),
+    mutate_data: (ctx) => createMutateDataTool(ctx.appId, ctx.agentId, ctx.runtimeUrl, ctx.authToken, ctx.dataContract),
     web_search: () => createWebSearchTool(),
     web_fetch: () => createWebFetchTool(),
+    invoke_agent: (ctx) => createInvokeAgentTool(ctx.appId, ctx.agentId, ctx.runtimeUrl, ctx.authToken),
 };
 
 export function buildToolRegistry(

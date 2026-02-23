@@ -463,63 +463,72 @@ const columns: ColumnDef<Contact, unknown>[] = [
 
 ## 7. Building AI Agents
 
-RootCX also supports **AI agents** — autonomous workers that use LLMs and tools. Agents share the same manifest, deploy pipeline, and RBAC as apps, but have **NO frontend at all**.
+AI agents are **backend-only apps** that use LLMs and tools. Same manifest, same deploy pipeline, same RBAC — just no frontend. An agent is a LangGraph workflow in TypeScript.
 
-### CRITICAL: Agent projects are NOT apps
+**You MUST customize three files for every agent** based on its purpose:
+1. `manifest.json` — data contract, agent config, access rules
+2. `backend/agents/{id}/system.md` — persona, domain knowledge, scoring rules, constraints
+3. `backend/agents/{id}/graph.ts` — custom LangGraph workflow with phases matching the agent's task
 
-**An agent project contains ONLY:**
-- `manifest.json` (with `agents` section)
-- `agents/{id}/system.md` (system prompt)
-- `package.json` (with `@rootcx/agent-runtime` dependency only)
+Never leave scaffold templates as-is. Every agent is unique.
 
-**An agent project must NEVER contain:**
-- React code, JSX/TSX, or any UI components
-- `src/` directory with frontend code
-- `src-tauri/` directory
-- `vite.config.ts`, `tailwind.config.ts`, `index.html`
-- `@rootcx/runtime`, `@rootcx/ui`, `react`, `react-dom`, `vite`, or any frontend dependencies
-- Tauri, Cargo.toml, or any desktop shell
+### Agent project structure (strict — all files required)
 
-When the user asks to build an **agent**, generate ONLY the three files above. Do not generate any UI, React components, or frontend scaffolding.
+Same layout as any app: `manifest.json` at project root, deployable code in `backend/`.
 
-### When to build an agent vs an app
+```
+my-agent/
+├── manifest.json                          # Project root (read by Studio)
+├── .rootcx/launch.json
+└── backend/
+    ├── index.ts                           # import "@rootcx/agent-runtime";
+    ├── package.json
+    └── agents/
+        └── {agent-id}/
+            ├── system.md                  # Agent persona, rules, context
+            └── graph.ts                   # LangGraph workflow (THIS IS THE AGENT)
+```
 
-- **App**: Has a UI (React + Tauri), human users interact with it directly
-- **Agent**: **No UI. No React. No Tauri.** Uses an LLM to reason, call tools, read/write data autonomously. Invoked via API only.
+**An agent project must NEVER contain:** React, JSX/TSX, UI components, `src/` directory, `vite.config.ts`, `index.html`, `@rootcx/runtime`, `@rootcx/ui`, `react`, or any frontend dependencies.
 
-### Agent manifest
+### Fixed files (generate exactly as shown)
 
-An agent project has a `manifest.json` with an `agents` section instead of (or alongside) a frontend:
+**`backend/index.ts`** — standard entry point, identical for every agent:
+```typescript
+import "@rootcx/agent-runtime";
+```
+
+**`backend/package.json`** — only the agent runtime dependency:
+```json
+{
+  "name": "my-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@rootcx/agent-runtime": "file:../../runtime/agent"
+  }
+}
+```
+
+**`.rootcx/launch.json`**:
+```json
+{
+  "preLaunch": ["verify_schema", "sync_manifest", "deploy_backend"]
+}
+```
+
+### manifest.json
+
+Same schema as apps. The `agents` section declares each agent:
 
 ```json
 {
     "appId": "sales-prospector",
     "name": "Sales Prospector",
     "version": "0.1.0",
-    "description": "AI agent that researches leads and scores prospects",
-    "dataContract": [
-        {
-            "entityName": "leads",
-            "fields": [
-                { "name": "name", "type": "text", "required": true },
-                { "name": "company", "type": "text" },
-                { "name": "title", "type": "text" },
-                { "name": "email", "type": "text" },
-                { "name": "score", "type": "number" },
-                { "name": "status", "type": "text", "enumValues": ["new", "researched", "qualified", "disqualified"] },
-                { "name": "summary", "type": "text" }
-            ]
-        },
-        {
-            "entityName": "research_notes",
-            "fields": [
-                { "name": "lead_id", "type": "entity_link", "references": { "entity": "leads", "field": "id" } },
-                { "name": "source", "type": "text", "required": true },
-                { "name": "content", "type": "text", "required": true },
-                { "name": "category", "type": "text", "enumValues": ["company_info", "person_info", "news", "financial"] }
-            ]
-        }
-    ],
+    "description": "AI agent that researches and qualifies prospects",
+    "dataContract": [ ... ],
     "agents": {
         "prospector": {
             "name": "Sales Prospector",
@@ -539,6 +548,30 @@ An agent project has a `manifest.json` with an `agents` section instead of (or a
 }
 ```
 
+### `agents` section schema
+
+```typescript
+{
+    [agentId: string]: {
+        name: string;
+        description?: string;
+        model?: string;                   // default: "claude-sonnet-4-20250514"
+        systemPrompt?: string;            // default: "./agents/{id}/system.md"
+        memory?: { enabled: boolean };
+        limits?: {
+            maxTurns?: number;            // default: 10
+            maxBudgetUsd?: number;        // default: 1.00
+        };
+        access: Array<{
+            entity: string;               // collection name, "tool:{name}", or "app:{appId}/{entity}"
+            actions: string[];            // ["read","create","update","delete"] or ["use"]
+        }>;
+    }
+}
+```
+
+No `graph` field in the manifest. The runtime discovers `agents/{id}/graph.ts` by convention.
+
 ### Agent `access` rules
 
 The `access` array declares **everything** the agent can do. What's NOT listed = denied.
@@ -548,9 +581,8 @@ The `access` array declares **everything** the agent can do. What's NOT listed =
 | `{ "entity": "leads", "actions": ["read", "create", "update"] }` | Can read, create, update leads |
 | `{ "entity": "tool:web_search", "actions": ["use"] }` | Can search the web |
 | `{ "entity": "tool:web_fetch", "actions": ["use"] }` | Can fetch and read URLs |
-| `{ "entity": "app:crm/contacts", "actions": ["read"] }` | Can read another app's data (cross-app) |
-
-Core auto-creates RBAC role `agent:{id}` from this list. Same enforcement as human roles.
+| `{ "entity": "tool:invoke_agent", "actions": ["use"] }` | Can invoke other agents |
+| `{ "entity": "app:crm/contacts", "actions": ["read"] }` | Can read another app's data |
 
 ### Available tools
 
@@ -558,24 +590,13 @@ Core auto-creates RBAC role `agent:{id}` from this list. Same enforcement as hum
 |-------------|------|-------------|
 | `tool:web_search` | `web_search` | Search via Brave Search or Tavily |
 | `tool:web_fetch` | `web_fetch` | Fetch URL, extract readable content |
+| `tool:invoke_agent` | `invoke_agent` | Invoke another agent and get its response |
 | _(any data access)_ | `query_data` | Auto-loaded: read from collections |
 | _(any data access)_ | `mutate_data` | Auto-loaded: create/update/delete records |
 
-### Agent project structure
+### System prompt (`backend/agents/{id}/system.md`)
 
-```
-my-agent/
-├── manifest.json
-├── agents/
-│   └── {agent-id}/
-│       ├── system.md          # System prompt (markdown)
-│       └── graph.ts           # Optional: custom LangGraph workflow
-└── package.json               # includes @rootcx/agent-runtime
-```
-
-### System prompt (`agents/{id}/system.md`)
-
-Write a clear system prompt that describes the agent's role, data it works with, workflow steps, and constraints:
+**You MUST write a custom system prompt for every agent.** This is the agent's persona, domain knowledge, and rules — WHO it is and WHAT rules it follows. Loaded by the runtime and injected as a SystemMessage on every LLM call. The graph controls the workflow (HOW), the system prompt gives the LLM its expertise (WHO/WHAT).
 
 ```markdown
 You are a sales prospector agent. Your job is to research leads and score them.
@@ -584,12 +605,12 @@ You are a sales prospector agent. Your job is to research leads and score them.
 - **leads**: name, company, title, email, score, status, summary
 - **research_notes**: lead_id, source, content, category
 
-## Workflow
-1. Use web_search to find information about the person/company
-2. Use web_fetch to read relevant pages (LinkedIn, company sites)
-3. Create a lead record with mutate_data
-4. Create research_notes for each finding
-5. Score the lead 1-10 and update the lead record
+## Scoring guidelines
+- 9-10: Perfect ICP match
+- 7-8: Strong fit
+- 5-6: Moderate, worth a look
+- 3-4: Weak fit
+- 1-2: Not a fit
 
 ## Rules
 - Never delete records
@@ -597,27 +618,113 @@ You are a sales prospector agent. Your job is to research leads and score them.
 - Score conservatively — only 8+ for strong matches
 ```
 
-### `agents` section schema
+### graph.ts — the workflow (THIS IS WHERE THE INTELLIGENCE LIVES)
+
+`backend/agents/{id}/graph.ts` defines HOW the agent works as a LangGraph `StateGraph`. The runtime calls `graph.ts`'s default export with `(model, tools)` and executes the compiled graph.
+
+**You must design a custom graph for every agent.** Do not leave the default template. Analyze the agent's purpose and design phases, state, and routing that match its workflow.
+
+#### Contract
 
 ```typescript
-{
-    [agentId: string]: {
-        name: string;                     // Display name
-        description?: string;             // What this agent does
-        model?: string;                   // LLM model (default: "claude-sonnet-4-20250514")
-        systemPrompt?: string;            // Path to .md file (default: "./agents/{id}/system.md")
-        graph?: string;                   // Path to custom LangGraph .ts (default: built-in ReAct)
-        memory?: { enabled: boolean };    // Persist session messages
-        limits?: {
-            maxTurns?: number;            // Max agent↔tools loop iterations (default: 10)
-            maxBudgetUsd?: number;        // Cost ceiling (default: 1.00)
-        };
-        access: Array<{
-            entity: string;               // Collection name, "tool:{name}", or "app:{appId}/{entity}"
-            actions: string[];            // ["read","create","update","delete"] or ["use"]
-        }>;
+export default function buildGraph(
+    model: BaseChatModel,
+    tools: StructuredToolInterface[],
+): CompiledStateGraph
+```
+
+The runtime provides `model` (LLM with tools bound) and `tools` (from the manifest `access` array). The system prompt is injected separately — the graph does not handle it.
+
+#### Pattern: phased workflow
+
+Design the graph as a sequence of phases. Each phase is an agent loop (model ←→ tools) that runs until the model stops calling tools, then automatically advances to the next phase.
+
+```typescript
+import { StateGraph, MessagesAnnotation, Annotation } from "@langchain/langgraph";
+import { ToolNode } from "@langchain/langgraph/prebuilt";
+import { SystemMessage } from "@langchain/core/messages";
+import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import type { StructuredToolInterface } from "@langchain/core/tools";
+
+// 1. Define phases that match the agent's workflow
+const PHASES = ["research", "qualify"] as const;
+type Phase = (typeof PHASES)[number];
+
+// 2. Write focused instructions for each phase
+const PHASE_PROMPT: Record<Phase, string> = {
+    research:
+        "PHASE: RESEARCH — Search the web and fetch pages to gather information about the target. Do not create or update records yet. Summarize findings when done.",
+    qualify:
+        "PHASE: QUALIFY — Based on your research, create/update records, write notes with sources, score the prospect, and set qualification status.",
+};
+
+// 3. Extend state with custom fields as needed
+const State = Annotation.Root({
+    ...MessagesAnnotation.spec,
+    phase: Annotation<Phase>({ reducer: (_, b) => b, default: () => PHASES[0] }),
+});
+
+export default function buildGraph(model: BaseChatModel, tools: StructuredToolInterface[]) {
+    const boundModel = model.bindTools(tools);
+    const toolNode = new ToolNode(tools);
+
+    // Phase instruction injected per call, not persisted to state
+    async function agent(state: typeof State.State) {
+        const response = await boundModel.invoke([
+            new SystemMessage(PHASE_PROMPT[state.phase]),
+            ...state.messages,
+        ]);
+        return { messages: [response] };
     }
+
+    function route(state: typeof State.State) {
+        const last = state.messages.at(-1) as any;
+        if (last?.tool_calls?.length) return "tools";
+        if (state.phase !== PHASES.at(-1)) return "next_phase";
+        return "__end__";
+    }
+
+    function nextPhase(state: typeof State.State) {
+        return { phase: PHASES[PHASES.indexOf(state.phase) + 1] };
+    }
+
+    return new StateGraph(State)
+        .addNode("agent", agent)
+        .addNode("tools", toolNode)
+        .addNode("next_phase", nextPhase)
+        .addEdge("__start__", "agent")
+        .addConditionalEdges("agent", route)
+        .addEdge("tools", "agent")
+        .addEdge("next_phase", "agent")
+        .compile();
 }
+```
+
+#### Designing phases
+
+Analyze the agent's purpose and break its workflow into sequential phases. Examples:
+
+| Agent type | Phases |
+|-----------|--------|
+| SDR / Prospector | `research` → `qualify` |
+| Content writer | `research` → `outline` → `draft` → `review` |
+| Data enrichment | `fetch` → `normalize` → `store` |
+| Support agent | `classify` → `investigate` → `respond` |
+| Code reviewer | `analyze` → `annotate` → `summarize` |
+
+Each phase runs as its own agent loop. The model uses tools freely within a phase and produces a text summary when done, which triggers advancement to the next phase.
+
+#### Custom state fields
+
+Add fields to track progress, accumulate data, or pass context between phases:
+
+```typescript
+const State = Annotation.Root({
+    ...MessagesAnnotation.spec,
+    phase: Annotation<Phase>({ reducer: (_, b) => b, default: () => PHASES[0] }),
+    targetType: Annotation<string>({ reducer: (_, b) => b, default: () => "" }),
+    score: Annotation<number>({ reducer: (_, b) => b, default: () => 0 }),
+});
 ```
 
 ### Supported models
@@ -638,19 +745,3 @@ Content-Type: application/json
 ```
 
 Response: Server-Sent Events with `chunk`, `done`, `error` events.
-
-### package.json for agent projects
-
-```json
-{
-  "name": "my-agent",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "dependencies": {
-    "@rootcx/agent-runtime": "file:../../runtime/agent"
-  }
-}
-```
-
-**Only** the agent runtime dependency. No React, no Vite, no Tauri, no UI libraries.

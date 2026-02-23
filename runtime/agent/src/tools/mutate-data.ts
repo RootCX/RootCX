@@ -1,18 +1,22 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
+import type { EntitySchema } from "../runner.js";
+import { formatSchema } from "./schema.js";
 
 export function createMutateDataTool(
     appId: string,
     agentId: string,
     runtimeUrl: string,
+    authToken: string,
+    dataContract: EntitySchema[],
 ) {
     return tool(
         async ({ entity, action, data, id }) => {
             const baseUrl = `${runtimeUrl}/api/v1/apps/${appId}/collections/${entity}`;
             const headers: Record<string, string> = {
                 "Content-Type": "application/json",
+                "Authorization": `Bearer ${authToken}`,
                 "X-Agent-Id": `agent:${agentId}`,
-                "X-App-Id": appId,
             };
 
             let url = baseUrl;
@@ -47,18 +51,15 @@ export function createMutateDataTool(
                 return `Error ${res.status}: ${text}`;
             }
 
-            if (action === "delete") {
-                return "Deleted successfully";
-            }
-
+            if (action === "delete") return "Deleted successfully";
             return JSON.stringify(await res.json());
         },
         {
             name: "mutate_data",
             description:
-                "Create, update, or delete records in a data collection. Mutations are audit-logged.",
+                `Create, update, or delete records. Array fields (type [text], [number]) must be JSON arrays, not strings.${formatSchema(dataContract)}`,
             schema: z.object({
-                entity: z.string().describe("The collection/entity name (e.g. 'leads', 'research_notes')"),
+                entity: z.string().describe("The collection/entity name"),
                 action: z.enum(["create", "update", "delete"]).describe("The mutation action"),
                 data: z.record(z.string(), z.unknown()).optional().describe("The record data (for create/update)"),
                 id: z.string().optional().describe("The record UUID (required for update/delete)"),

@@ -6,7 +6,7 @@ use axum::http::request::Parts;
 use uuid::Uuid;
 
 use super::policy::PolicyCache;
-use super::policy::{evaluate, resolve_user_roles};
+use super::policy::{evaluate, expand_roles, resolve_user_roles};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::routes::{self, SharedRuntime};
@@ -69,7 +69,20 @@ impl FromRequestParts<SharedRuntime> for AccessGrant {
         };
 
         let identity = Identity::from_request_parts(parts, state).await?;
-        let expanded = resolve_user_roles(&pool, &cached, identity.user_id, &app_id).await?;
+
+        let expanded = if identity.username.starts_with("agent:") {
+            // Agent worker: JWT authenticates the process, X-Agent-Id header
+            // identifies which specific agent's role to evaluate.
+            let agent_role = parts
+                .headers
+                .get("x-agent-id")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from)
+                .unwrap_or_else(|| identity.username.clone());
+            expand_roles(&[agent_role], &cached.roles)
+        } else {
+            resolve_user_roles(&pool, &cached, identity.user_id, &app_id).await?
+        };
 
         if expanded.is_empty() {
             return Err(ApiError::Forbidden(format!("no roles assigned for app '{app_id}'")));

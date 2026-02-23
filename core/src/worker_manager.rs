@@ -7,8 +7,10 @@ use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 use crate::RuntimeError;
+use crate::auth::{AuthConfig, jwt};
 use crate::extensions::logs::LogEntry;
 use crate::ipc::RpcCaller;
 use crate::secrets::SecretManager;
@@ -19,11 +21,12 @@ pub struct WorkerManager {
     apps_dir: PathBuf,
     runtime_url: String,
     bun_bin: PathBuf,
+    auth_config: Arc<AuthConfig>,
 }
 
 impl WorkerManager {
-    pub fn new(apps_dir: PathBuf, runtime_url: String, bun_bin: PathBuf) -> Self {
-        Self { workers: Arc::new(RwLock::new(HashMap::new())), apps_dir, runtime_url, bun_bin }
+    pub fn new(apps_dir: PathBuf, runtime_url: String, bun_bin: PathBuf, auth_config: Arc<AuthConfig>) -> Self {
+        Self { workers: Arc::new(RwLock::new(HashMap::new())), apps_dir, runtime_url, bun_bin, auth_config }
     }
 
     async fn get_handle(&self, app_id: &str) -> Result<SupervisorHandle, RuntimeError> {
@@ -36,26 +39,19 @@ impl WorkerManager {
     }
 
     pub async fn start_app(&self, pool: &PgPool, secrets: &SecretManager, app_id: &str) -> Result<(), RuntimeError> {
-        self.start_app_inner(pool, secrets, app_id, false).await
-    }
-
-    pub async fn start_agent_app(&self, pool: &PgPool, secrets: &SecretManager, app_id: &str) -> Result<(), RuntimeError> {
-        self.start_app_inner(pool, secrets, app_id, true).await
-    }
-
-    async fn start_app_inner(&self, pool: &PgPool, secrets: &SecretManager, app_id: &str, is_agent: bool) -> Result<(), RuntimeError> {
         if let Ok(h) = self.get_handle(app_id).await
             && h.status().await? == WorkerStatus::Running {
                 return Ok(());
             }
 
         let app_dir = self.apps_dir.join(app_id);
-        let entry_point = if is_agent {
-            resolve_agent_entry_point(&app_dir)?
-        } else {
-            resolve_entry_point(&app_dir)?
-        };
-        let env = secrets.get_env_for_app(pool, app_id).await?;
+        let entry_point = resolve_entry_point(&app_dir)?;
+        let mut env = secrets.get_env_for_app(pool, app_id).await?;
+
+        // Mint a service JWT so agent tools can authenticate against CRUD routes
+        let agent_uuid = Uuid::new_v4();
+        let token = jwt::encode_access(&self.auth_config, agent_uuid, &format!("agent:{app_id}"))?;
+        env.insert("ROOTCX_AUTH_TOKEN".into(), token);
 
         let config = WorkerConfig {
             app_id: app_id.to_string(),
@@ -150,18 +146,4 @@ fn resolve_entry_point(app_dir: &Path) -> Result<PathBuf, RuntimeError> {
         }
     }
     Err(RuntimeError::Worker(format!("no entry point in {}", app_dir.display())))
-}
-
-fn resolve_agent_entry_point(app_dir: &Path) -> Result<PathBuf, RuntimeError> {
-    for name in [
-        "node_modules/@rootcx/agent-runtime/src/index.ts",
-        "node_modules/@rootcx/agent-runtime/dist/index.js",
-    ] {
-        let p = app_dir.join(name);
-        if p.exists() {
-            return Ok(p);
-        }
-    }
-    // Fall back to standard entry points
-    resolve_entry_point(app_dir)
 }
