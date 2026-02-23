@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
@@ -112,6 +113,16 @@ impl SecretManager {
             .await
             .map_err(secret_err)?;
         Ok(r.rows_affected() > 0)
+    }
+
+    /// Merge platform (`_platform`) secrets with app-specific secrets.
+    /// App-specific secrets win on conflict.
+    pub async fn get_env_for_app(&self, pool: &PgPool, app_id: &str) -> Result<HashMap<String, String>, RuntimeError> {
+        let mut env: HashMap<String, String> = self.get_all_for_app(pool, "_platform").await?.into_iter().collect();
+        for (k, v) in self.get_all_for_app(pool, app_id).await? {
+            env.insert(k, v);
+        }
+        Ok(env)
     }
 
     pub async fn list_keys(&self, pool: &PgPool, app_id: &str) -> Result<Vec<String>, RuntimeError> {

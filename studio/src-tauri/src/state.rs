@@ -127,7 +127,8 @@ impl AppState {
         if let Some(ref f) = self.forge {
             let cfg = ensure_config().await?;
             let cwd = home_dir()?;
-            if let Err(e) = f.lock().await.start(&cwd, Some(cfg.as_path())).await {
+            let env = self.client.get_platform_env().await.unwrap_or_default();
+            if let Err(e) = f.lock().await.start(&cwd, Some(cfg.as_path()), env).await {
                 warn!("forge sidecar start failed (non-fatal): {e}");
             }
         }
@@ -232,7 +233,8 @@ impl AppState {
     pub async fn start_forge(&self, project_path: &str) -> Result<(), String> {
         if let Some(ref f) = self.forge {
             let cfg = ensure_config().await?;
-            f.lock().await.start(Path::new(project_path), Some(cfg.as_path())).await.map_err(|e| e.to_string())?;
+            let env = self.client.get_platform_env().await.unwrap_or_default();
+            f.lock().await.start(Path::new(project_path), Some(cfg.as_path()), env).await.map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -242,7 +244,8 @@ impl AppState {
         write_config(&path, contents).await?;
 
         if let (Some(f), Some(pp)) = (&self.forge, project_path) {
-            f.lock().await.start(Path::new(pp), Some(&path)).await.map_err(|e| e.to_string())?;
+            let env = self.client.get_platform_env().await.unwrap_or_default();
+            f.lock().await.start(Path::new(pp), Some(&path), env).await.map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -268,15 +271,34 @@ impl AppState {
         .map_err(|e| format!("invalid manifest: {e}"))?;
         let app_id = manifest["appId"].as_str().ok_or("manifest.json missing appId")?;
 
-        let backend_dir = project.join("backend");
-        if !backend_dir.exists() {
-            return Err("no backend/ directory found in project".into());
-        }
+        // Agent projects have no backend/ dir — deploy the whole project instead
+        let is_agent = manifest.get("agents").and_then(|a| a.as_object()).is_some_and(|a| !a.is_empty());
+        let deploy_dir = if is_agent {
+            project.to_path_buf()
+        } else {
+            let backend_dir = project.join("backend");
+            if !backend_dir.exists() {
+                return Err("no backend/ directory found in project".into());
+            }
+            backend_dir
+        };
 
         let archive = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
             let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
             let mut tar = tar::Builder::new(enc);
-            tar.append_dir_all(".", &backend_dir).map_err(|e| format!("tar failed: {e}"))?;
+            if is_agent {
+                // For agents: include manifest.json, agents/, package.json (skip node_modules, .git, src-tauri)
+                for entry in ["manifest.json", "package.json", "agents"] {
+                    let path = deploy_dir.join(entry);
+                    if path.is_file() {
+                        tar.append_path_with_name(&path, entry).map_err(|e| format!("tar failed: {e}"))?;
+                    } else if path.is_dir() {
+                        tar.append_dir_all(entry, &path).map_err(|e| format!("tar failed: {e}"))?;
+                    }
+                }
+            } else {
+                tar.append_dir_all(".", &deploy_dir).map_err(|e| format!("tar failed: {e}"))?;
+            }
             tar.into_inner()
                 .map_err(|e| format!("tar finalize failed: {e}"))?
                 .finish()
@@ -308,16 +330,25 @@ impl AppState {
     }
 
     fn start_watcher(&self, project_path: &str) -> Result<(), String> {
-        let backend_dir = Path::new(project_path).join("backend");
+        let project = Path::new(project_path);
+        // Watch agents/ dir for agent projects, backend/ for apps
+        let watch_dir = if project.join("agents").exists() && !project.join("backend").exists() {
+            project.join("agents")
+        } else {
+            project.join("backend")
+        };
+        if !watch_dir.exists() {
+            return Ok(());
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         let mut debouncer = new_debouncer(std::time::Duration::from_millis(500), tx)
             .map_err(|e| format!("watcher setup failed: {e}"))?;
         debouncer
             .watcher()
-            .watch(&backend_dir, notify::RecursiveMode::Recursive)
+            .watch(&watch_dir, notify::RecursiveMode::Recursive)
             .map_err(|e| format!("watch failed: {e}"))?;
 
-        info!(dir = %backend_dir.display(), "watching backend for hot reload");
+        info!(dir = %watch_dir.display(), "watching for hot reload");
 
         let state = self.clone();
         let project_path = project_path.to_string();
@@ -359,6 +390,18 @@ impl AppState {
             let _ = tokio::fs::remove_file(&path).await;
         }
         self.watchers.lock().await.clear();
+    }
+
+    pub async fn list_platform_secrets(&self) -> Result<Vec<String>, String> {
+        self.client.list_platform_secrets().await.map_err(|e| format!("failed to list secrets: {e}"))
+    }
+
+    pub async fn set_platform_secret(&self, key: &str, value: &str) -> Result<(), String> {
+        self.client.set_platform_secret(key, value).await.map_err(|e| format!("failed to set secret: {e}"))
+    }
+
+    pub async fn delete_platform_secret(&self, key: &str) -> Result<(), String> {
+        self.client.delete_platform_secret(key).await.map_err(|e| format!("failed to delete secret: {e}"))
     }
 
     pub async fn shutdown(&self) {
