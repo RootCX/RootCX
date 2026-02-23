@@ -58,11 +58,11 @@ pub enum SupervisorCommand {
         payload: JsonValue,
     },
     AgentInvoke {
-        agent_id: String,
         session_id: String,
         message: String,
         system_prompt: String,
         config: JsonValue,
+        auth_token: String,
         history: Vec<JsonValue>,
         caller: Option<RpcCaller>,
         stream_tx: mpsc::Sender<AgentEvent>,
@@ -128,18 +128,18 @@ impl SupervisorHandle {
 
     pub async fn agent_invoke(
         &self,
-        agent_id: String,
         session_id: String,
         message: String,
         system_prompt: String,
         config: JsonValue,
+        auth_token: String,
         history: Vec<JsonValue>,
         caller: Option<RpcCaller>,
     ) -> Result<mpsc::Receiver<AgentEvent>, RuntimeError> {
         let (stream_tx, stream_rx) = mpsc::channel(64);
         self.send(SupervisorCommand::AgentInvoke {
-            agent_id, session_id, message, system_prompt,
-            config, history, caller, stream_tx,
+            session_id, message, system_prompt,
+            config, auth_token, history, caller, stream_tx,
         }).await?;
         Ok(stream_rx)
     }
@@ -253,8 +253,8 @@ async fn supervisor_loop(
                     }
 
                     SupervisorCommand::AgentInvoke {
-                        agent_id, session_id, message, system_prompt,
-                        config, history, caller, stream_tx,
+                        session_id, message, system_prompt,
+                        config, auth_token, history, caller, stream_tx,
                     } => {
                         if status != WorkerStatus::Running {
                             let _ = stream_tx.send(AgentEvent::Error {
@@ -265,8 +265,8 @@ async fn supervisor_loop(
                         pending_agent_streams.insert(session_id.clone(), stream_tx);
                         if let Some(ref mut w) = ipc_writer {
                             if let Err(e) = w.send(&OutboundMessage::AgentInvoke {
-                                agent_id, session_id: session_id.clone(),
-                                message, system_prompt, config, history, caller,
+                                session_id: session_id.clone(),
+                                message, system_prompt, config, auth_token, history, caller,
                             }).await {
                                 if let Some(tx) = pending_agent_streams.remove(&session_id) {
                                     let _ = tx.send(AgentEvent::Error { error: e.to_string() }).await;
@@ -361,7 +361,6 @@ async fn supervisor_loop(
                         ipc_reader = None;
                         for h in output_handles.drain(..) { h.abort(); }
 
-                        // Drain all pending agent streams with error on crash
                         for (_sid, tx) in pending_agent_streams.drain() {
                             let _ = tx.send(AgentEvent::Error {
                                 error: "worker crashed".into(),

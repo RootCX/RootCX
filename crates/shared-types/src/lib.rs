@@ -63,7 +63,7 @@ pub struct AppManifest {
     #[serde(default)]
     pub data_contract: Vec<EntityContract>,
     #[serde(default)]
-    pub agents: HashMap<String, AgentDefinition>,
+    pub agent: Option<AgentDefinition>,
 }
 
 fn default_version() -> String {

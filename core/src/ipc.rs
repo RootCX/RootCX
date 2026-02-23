@@ -31,11 +31,11 @@ pub enum OutboundMessage {
     Rpc { id: String, method: String, params: JsonValue, caller: Option<RpcCaller> },
     Job { id: String, payload: JsonValue },
     AgentInvoke {
-        agent_id: String,
         session_id: String,
         message: String,
         system_prompt: String,
         config: JsonValue,
+        auth_token: String,
         #[serde(default)]
         history: Vec<JsonValue>,
         caller: Option<RpcCaller>,

@@ -5,7 +5,6 @@ import { formatSchema } from "./schema.js";
 
 export function createQueryDataTool(
     appId: string,
-    agentId: string,
     runtimeUrl: string,
     authToken: string,
     dataContract: EntitySchema[],
@@ -25,10 +24,7 @@ export function createQueryDataTool(
             }
 
             const res = await fetch(url.toString(), {
-                headers: {
-                    "Authorization": `Bearer ${authToken}`,
-                    "X-Agent-Id": `agent:${agentId}`,
-                },
+                headers: { "Authorization": `Bearer ${authToken}` },
             });
 
             if (!res.ok) {

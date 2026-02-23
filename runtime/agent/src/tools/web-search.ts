@@ -25,50 +25,34 @@ export function createWebSearchTool() {
     );
 }
 
+function formatResults(results: Array<{ title: string; url: string; snippet: string }>): string {
+    return results
+        .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`)
+        .join("\n\n");
+}
+
 async function braveSearch(query: string, count: number, apiKey: string): Promise<string> {
     const url = new URL("https://api.search.brave.com/res/v1/web/search");
     url.searchParams.set("q", query);
     url.searchParams.set("count", String(count));
 
     const res = await fetch(url.toString(), {
-        headers: {
-            "Accept": "application/json",
-            "X-Subscription-Token": apiKey,
-        },
+        headers: { "Accept": "application/json", "X-Subscription-Token": apiKey },
     });
-
-    if (!res.ok) {
-        return `Search error ${res.status}: ${await res.text()}`;
-    }
+    if (!res.ok) return `Search error ${res.status}: ${await res.text()}`;
 
     const data = await res.json() as { web?: { results?: Array<{ title: string; url: string; description: string }> } };
-    const results = data.web?.results ?? [];
-
-    return results
-        .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.description}`)
-        .join("\n\n");
+    return formatResults((data.web?.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.description })));
 }
 
 async function tavilySearch(query: string, count: number, apiKey: string): Promise<string> {
     const res = await fetch("https://api.tavily.com/search", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            api_key: apiKey,
-            query,
-            max_results: count,
-            search_depth: "basic",
-        }),
+        body: JSON.stringify({ api_key: apiKey, query, max_results: count, search_depth: "basic" }),
     });
-
-    if (!res.ok) {
-        return `Search error ${res.status}: ${await res.text()}`;
-    }
+    if (!res.ok) return `Search error ${res.status}: ${await res.text()}`;
 
     const data = await res.json() as { results?: Array<{ title: string; url: string; content: string }> };
-    const results = data.results ?? [];
-
-    return results
-        .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.content}`)
-        .join("\n\n");
+    return formatResults((data.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.content })));
 }

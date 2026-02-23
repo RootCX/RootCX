@@ -7,10 +7,8 @@ use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{error, info, warn};
-use uuid::Uuid;
 
 use crate::RuntimeError;
-use crate::auth::{AuthConfig, jwt};
 use crate::extensions::logs::LogEntry;
 use crate::ipc::RpcCaller;
 use crate::secrets::SecretManager;
@@ -21,12 +19,11 @@ pub struct WorkerManager {
     apps_dir: PathBuf,
     runtime_url: String,
     bun_bin: PathBuf,
-    auth_config: Arc<AuthConfig>,
 }
 
 impl WorkerManager {
-    pub fn new(apps_dir: PathBuf, runtime_url: String, bun_bin: PathBuf, auth_config: Arc<AuthConfig>) -> Self {
-        Self { workers: Arc::new(RwLock::new(HashMap::new())), apps_dir, runtime_url, bun_bin, auth_config }
+    pub fn new(apps_dir: PathBuf, runtime_url: String, bun_bin: PathBuf) -> Self {
+        Self { workers: Arc::new(RwLock::new(HashMap::new())), apps_dir, runtime_url, bun_bin }
     }
 
     async fn get_handle(&self, app_id: &str) -> Result<SupervisorHandle, RuntimeError> {
@@ -46,12 +43,7 @@ impl WorkerManager {
 
         let app_dir = self.apps_dir.join(app_id);
         let entry_point = resolve_entry_point(&app_dir)?;
-        let mut env = secrets.get_env_for_app(pool, app_id).await?;
-
-        // Deterministic UUID so the token survives crash restarts
-        let agent_uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("agent:{app_id}").as_bytes());
-        let token = jwt::encode_access(&self.auth_config, agent_uuid, &format!("agent:{app_id}"))?;
-        env.insert("ROOTCX_AUTH_TOKEN".into(), token);
+        let env = secrets.get_env_for_app(pool, app_id).await?;
 
         let config = WorkerConfig {
             app_id: app_id.to_string(),
@@ -105,17 +97,17 @@ impl WorkerManager {
     pub async fn agent_invoke(
         &self,
         app_id: &str,
-        agent_id: String,
         session_id: String,
         message: String,
         system_prompt: String,
         config: JsonValue,
+        auth_token: String,
         history: Vec<JsonValue>,
         caller: Option<RpcCaller>,
     ) -> Result<mpsc::Receiver<AgentEvent>, RuntimeError> {
         self.get_handle(app_id).await?.agent_invoke(
-            agent_id, session_id, message, system_prompt,
-            config, history, caller,
+            session_id, message, system_prompt,
+            config, auth_token, history, caller,
         ).await
     }
 

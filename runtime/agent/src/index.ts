@@ -15,6 +15,7 @@ reader.on("agent_invoke", async (msg) => {
             message: msg.message as string,
             systemPrompt: msg.system_prompt as string,
             config: msg.config as AgentConfig,
+            authToken: msg.auth_token as string,
             history: (msg.history as Array<Record<string, unknown>>) ?? [],
             writer,
         });

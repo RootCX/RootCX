@@ -1,13 +1,10 @@
 use crate::scaffold::emitter::Emitter;
 use crate::scaffold::types::{Layer, LayerFuture, ScaffoldContext};
 
-pub struct AgentLayer {
-    pub agent_id: String,
-}
+pub struct AgentLayer;
 
 impl Layer for AgentLayer {
     fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> LayerFuture<'a> {
-        let agent_id = self.agent_id.clone();
         Box::pin(async move {
             let agent_runtime_dep = format!("file:{}", ctx.runtime.agent_runtime.display());
 
@@ -17,21 +14,19 @@ impl Layer for AgentLayer {
                 "version": "0.0.1",
                 "description": "",
                 "dataContract": [],
-                "agents": {
-                    &agent_id: {
-                        "name": ctx.name,
-                        "description": format!("AI agent for {}", ctx.name),
-                        "model": "global.anthropic.claude-opus-4-6-v1",
-                        "systemPrompt": format!("./agents/{agent_id}/system.md"),
-                        "memory": { "enabled": true },
-                        "limits": { "maxTurns": 10 },
-                        "access": []
-                    }
+                "agent": {
+                    "name": ctx.name,
+                    "description": format!("AI agent for {}", ctx.name),
+                    "model": "global.anthropic.claude-opus-4-6-v1",
+                    "systemPrompt": "./agent/system.md",
+                    "memory": { "enabled": true },
+                    "limits": { "maxTurns": 10 },
+                    "access": []
                 }
             });
             e.write_json("manifest.json", &manifest).await?;
 
-            let system_prompt = format!(
+            e.write("backend/agent/system.md", &format!(
                 r#"You are the {} agent.
 
 ## Your role
@@ -48,18 +43,9 @@ List the entities from your dataContract here.
 ## Rules
 - Be specific about constraints
 - Reference entity names from the manifest
-"#,
-                ctx.name
-            );
-            e.write(
-                &format!("backend/agents/{agent_id}/system.md"),
-                &system_prompt,
-            )
-            .await?;
+"#, ctx.name)).await?;
 
-            e.write(
-                &format!("backend/agents/{agent_id}/graph.ts"),
-                r#"import { StateGraph, MessagesAnnotation, Annotation } from "@langchain/langgraph";
+            e.write("backend/agent/graph.ts", r#"import { StateGraph, MessagesAnnotation, Annotation } from "@langchain/langgraph";
 import { ToolNode } from "@langchain/langgraph/prebuilt";
 import { HumanMessage, SystemMessage } from "@langchain/core/messages";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
@@ -112,36 +98,18 @@ export default function buildGraph(model: BaseChatModel, tools: StructuredToolIn
         .addEdge("next_phase", "agent")
         .compile();
 }
-"#,
-            )
-            .await?;
+"#).await?;
 
-            e.write("backend/index.ts", "import \"@rootcx/agent-runtime\";\n")
-                .await?;
+            e.write("backend/index.ts", "import \"@rootcx/agent-runtime\";\n").await?;
 
-            e.write(
-                "backend/package.json",
-                &format!(
-                    r#"{{
-  "name": "{}",
-  "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "dependencies": {{
-    "@rootcx/agent-runtime": "{agent_runtime_dep}"
-  }}
-}}
-"#,
-                    ctx.app_id
-                ),
-            )
-            .await?;
+            e.write("backend/package.json", &format!(
+                r#"{{"name":"{}","version":"0.1.0","private":true,"type":"module","dependencies":{{"@rootcx/agent-runtime":"{agent_runtime_dep}"}}}}"#,
+                ctx.app_id
+            )).await?;
 
-            e.write(
-                ".rootcx/launch.json",
-                "{\n  \"preLaunch\": [\"verify_schema\", \"sync_manifest\", \"deploy_backend\"]\n}\n",
-            )
-            .await?;
+            e.write(".rootcx/launch.json",
+                "{\n  \"preLaunch\": [\"verify_schema\", \"sync_manifest\", \"deploy_backend\"]\n}\n"
+            ).await?;
 
             Ok(())
         })

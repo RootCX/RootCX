@@ -28,7 +28,6 @@ export interface AgentConfig {
     model?: string;
     limits?: { maxTurns?: number };
     _appId: string;
-    _agentId: string;
     _enabledTools: string[];
     _graphPath?: string;
     _dataContract?: EntitySchema[];
@@ -39,29 +38,26 @@ interface RunAgentParams {
     message: string;
     systemPrompt: string;
     config: AgentConfig;
+    authToken: string;
     history: Array<Record<string, unknown>>;
     writer: IpcWriter;
 }
 
 export async function runAgent(params: RunAgentParams) {
-    const { sessionId, message, systemPrompt, config, history, writer } = params;
+    const { sessionId, message, systemPrompt, config, authToken, history, writer } = params;
 
     const runtimeUrl = process.env.ROOTCX_RUNTIME_URL;
     if (!runtimeUrl) throw new Error("ROOTCX_RUNTIME_URL not set");
 
-    const authToken = process.env.ROOTCX_AUTH_TOKEN ?? "";
-    const agentId = config._agentId;
-
     const model = buildProvider(config.model);
     const tools = buildToolRegistry(config._enabledTools, {
         appId: config._appId,
-        agentId,
         runtimeUrl,
         authToken,
         dataContract: config._dataContract ?? [],
     });
 
-    const graph = await loadGraph(agentId, config._graphPath, model, tools);
+    const graph = await loadGraph(config._graphPath, model, tools);
 
     const messages: BaseMessage[] = [
         new SystemMessage(systemPrompt),
@@ -111,15 +107,13 @@ export async function runAgent(params: RunAgentParams) {
 }
 
 async function loadGraph(
-    agentId: string,
     graphPath: string | undefined,
     model: ReturnType<typeof buildProvider>,
     tools: ReturnType<typeof buildToolRegistry>,
 ) {
-    // Try explicit graph path from manifest, then convention path
     const candidates = graphPath
         ? [resolve(graphPath)]
-        : [resolve(`agents/${agentId}/graph.ts`), resolve(`agents/${agentId}/graph.js`)];
+        : [resolve("agent/graph.ts"), resolve("agent/graph.js")];
 
     for (const path of candidates) {
         if (await fileExists(path)) {

@@ -10,7 +10,9 @@ use serde_json::{json, Value as JsonValue};
 use sqlx::PgPool;
 use tracing::error;
 
+use super::agent_user_id;
 use crate::api_error::ApiError;
+use crate::auth::jwt;
 use crate::auth::identity::Identity;
 use crate::ipc::RpcCaller;
 use crate::routes::{self, SharedRuntime};
@@ -25,7 +27,6 @@ pub struct InvokeRequest {
 
 #[derive(Serialize, sqlx::FromRow)]
 pub(crate) struct AgentRow {
-    id: String,
     app_id: String,
     name: String,
     description: Option<String>,
@@ -36,49 +37,51 @@ pub(crate) struct AgentRow {
 #[derive(Serialize, sqlx::FromRow)]
 pub(crate) struct SessionRow {
     id: String,
-    agent_id: String,
     messages: JsonValue,
     created_at: String,
     updated_at: String,
 }
 
-pub async fn list_agents(
+pub async fn get_agent(
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
-) -> Result<Json<Vec<AgentRow>>, ApiError> {
+) -> Result<Json<AgentRow>, ApiError> {
     let pool = routes::pool(&rt).await?;
-    let rows = sqlx::query_as::<_, AgentRow>(
-        "SELECT id, app_id, name, description, model, config
-         FROM rootcx_system.agents WHERE app_id = $1 ORDER BY name",
+    sqlx::query_as::<_, AgentRow>(
+        "SELECT app_id, name, description, model, config
+         FROM rootcx_system.agents WHERE app_id = $1",
     )
     .bind(&app_id)
-    .fetch_all(&pool)
-    .await?;
-    Ok(Json(rows))
+    .fetch_optional(&pool)
+    .await?
+    .map(Json)
+    .ok_or_else(|| ApiError::NotFound(format!("no agent for app '{app_id}'")))
 }
 
 pub async fn invoke_agent(
     identity: Identity,
     State(rt): State<SharedRuntime>,
-    Path((app_id, agent_id)): Path<(String, String)>,
+    Path(app_id): Path<String>,
     Json(body): Json<InvokeRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let (pool, wm, data_dir) = {
+    let (pool, wm, data_dir, auth_cfg) = {
         let g = rt.lock().await;
-        let pool = g.pool().cloned().ok_or(ApiError::NotReady)?;
-        let wm = g.worker_manager().cloned().ok_or(ApiError::NotReady)?;
-        let data_dir = g.data_dir().to_path_buf();
-        (pool, wm, data_dir)
+        (
+            g.pool().cloned().ok_or(ApiError::NotReady)?,
+            g.worker_manager().cloned().ok_or(ApiError::NotReady)?,
+            g.data_dir().to_path_buf(),
+            g.auth_config().clone(),
+        )
     };
 
     let config: JsonValue = sqlx::query_scalar(
-        "SELECT config FROM rootcx_system.agents WHERE app_id = $1 AND id = $2",
+        "SELECT config FROM rootcx_system.agents WHERE app_id = $1",
     )
     .bind(&app_id)
-    .bind(&agent_id)
     .fetch_optional(&pool)
     .await?
-    .ok_or_else(|| ApiError::NotFound(format!("agent '{agent_id}' not found")))?;
+    .ok_or_else(|| ApiError::NotFound(format!("no agent for app '{app_id}'")))?;
+
     let session_id = body
         .session_id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -102,7 +105,7 @@ pub async fn invoke_agent(
         vec![]
     };
 
-    let system_prompt = load_system_prompt(&app_id, &agent_id, &config, &data_dir).await?;
+    let system_prompt = load_system_prompt(&app_id, &config, &data_dir).await?;
     let enabled_tools = extract_enabled_tools(&config);
 
     let data_contract: JsonValue = sqlx::query_scalar(
@@ -117,7 +120,6 @@ pub async fn invoke_agent(
         "model": config.get("model"),
         "limits": config.get("limits"),
         "_appId": &app_id,
-        "_agentId": &agent_id,
         "_enabledTools": enabled_tools,
         "_graphPath": config.get("graph"),
         "_dataContract": data_contract,
@@ -128,20 +130,25 @@ pub async fn invoke_agent(
         username: identity.username.clone(),
     });
 
+    let agent_token = jwt::encode_access(&auth_cfg, agent_user_id(&app_id), &format!("agent:{app_id}"))
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
     let stream_rx = wm
         .agent_invoke(
             &app_id,
-            agent_id.clone(),
             session_id.clone(),
             body.message.clone(),
             system_prompt,
             agent_config,
+            agent_token,
             history,
             caller,
         )
         .await?;
 
-    let persist_ctx = Some((pool.clone(), app_id.clone(), agent_id.clone(), identity.user_id.to_string(), body.message));
+    let persist_ctx = if memory_enabled {
+        Some((pool.clone(), app_id.clone(), identity.user_id.to_string(), body.message))
+    } else { None };
     let sid = session_id.clone();
 
     let stream = futures::stream::unfold(
@@ -157,8 +164,8 @@ pub async fn invoke_agent(
                         Some((Ok(event), (rx, ctx)))
                     }
                     Some(AgentEvent::Done { response, tokens }) => {
-                        if let Some((pool, aid, agid, uid, umsg)) = &ctx {
-                            if let Err(e) = persist_session(pool, &sid, aid, agid, Some(uid.as_str()), umsg, &response).await {
+                        if let Some((pool, aid, uid, umsg)) = &ctx {
+                            if let Err(e) = persist_session(pool, &sid, aid, Some(uid.as_str()), umsg, &response).await {
                                 error!(session_id = %sid, "failed to persist session: {e}");
                             }
                         }
@@ -184,17 +191,16 @@ pub async fn invoke_agent(
 
 pub async fn list_sessions(
     State(rt): State<SharedRuntime>,
-    Path((app_id, agent_id)): Path<(String, String)>,
+    Path(app_id): Path<String>,
 ) -> Result<Json<Vec<SessionRow>>, ApiError> {
     let pool = routes::pool(&rt).await?;
     let rows = sqlx::query_as::<_, SessionRow>(
-        "SELECT id::text, agent_id, messages, created_at::text, updated_at::text
+        "SELECT id::text, messages, created_at::text, updated_at::text
          FROM rootcx_system.agent_sessions
-         WHERE app_id = $1 AND agent_id = $2
+         WHERE app_id = $1
          ORDER BY updated_at DESC",
     )
     .bind(&app_id)
-    .bind(&agent_id)
     .fetch_all(&pool)
     .await?;
     Ok(Json(rows))
@@ -202,16 +208,15 @@ pub async fn list_sessions(
 
 pub async fn get_session(
     State(rt): State<SharedRuntime>,
-    Path((app_id, agent_id, session_id)): Path<(String, String, String)>,
+    Path((app_id, session_id)): Path<(String, String)>,
 ) -> Result<Json<SessionRow>, ApiError> {
     let pool = routes::pool(&rt).await?;
     let row = sqlx::query_as::<_, SessionRow>(
-        "SELECT id::text, agent_id, messages, created_at::text, updated_at::text
+        "SELECT id::text, messages, created_at::text, updated_at::text
          FROM rootcx_system.agent_sessions
-         WHERE app_id = $1 AND agent_id = $2 AND id = $3::uuid",
+         WHERE app_id = $1 AND id = $2::uuid",
     )
     .bind(&app_id)
-    .bind(&agent_id)
     .bind(&session_id)
     .fetch_optional(&pool)
     .await?
@@ -225,10 +230,7 @@ fn extract_enabled_tools(config: &JsonValue) -> Vec<String> {
     let mut has_data_access = false;
     if let Some(entries) = access {
         for entry in entries {
-            let entity = entry
-                .get("entity")
-                .and_then(|e| e.as_str())
-                .unwrap_or("");
+            let entity = entry.get("entity").and_then(|e| e.as_str()).unwrap_or("");
             if let Some(tool_name) = entity.strip_prefix("tool:") {
                 tools.push(tool_name.to_string());
             } else if !entity.is_empty() {
@@ -245,22 +247,17 @@ fn extract_enabled_tools(config: &JsonValue) -> Vec<String> {
 
 async fn load_system_prompt(
     app_id: &str,
-    agent_id: &str,
     config: &JsonValue,
     data_dir: &std::path::Path,
 ) -> Result<String, ApiError> {
-    let default_path = format!("./agents/{agent_id}/system.md");
+    let default_path = "./agent/system.md".to_string();
     let prompt_path = config
         .get("systemPrompt")
         .and_then(|p| p.as_str())
         .unwrap_or(&default_path);
-    let app_dir = data_dir.join("apps").join(app_id);
-    let full_path = app_dir.join(prompt_path.trim_start_matches("./"));
+    let full_path = data_dir.join("apps").join(app_id).join(prompt_path.trim_start_matches("./"));
     tokio::fs::read_to_string(&full_path).await.map_err(|e| {
-        ApiError::Internal(format!(
-            "failed to read system prompt at {}: {e}",
-            full_path.display()
-        ))
+        ApiError::Internal(format!("failed to read system prompt at {}: {e}", full_path.display()))
     })
 }
 
@@ -268,7 +265,6 @@ async fn persist_session(
     pool: &PgPool,
     session_id: &str,
     app_id: &str,
-    agent_id: &str,
     user_id: Option<&str>,
     user_message: &str,
     assistant_response: &str,
@@ -278,15 +274,14 @@ async fn persist_session(
         {"role": "assistant", "content": assistant_response}
     ]);
     sqlx::query(
-        "INSERT INTO rootcx_system.agent_sessions (id, app_id, agent_id, user_id, messages)
-         VALUES ($1::uuid, $2, $3, $4, $5)
+        "INSERT INTO rootcx_system.agent_sessions (id, app_id, user_id, messages)
+         VALUES ($1::uuid, $2, $3, $4)
          ON CONFLICT (id) DO UPDATE SET
-             messages = rootcx_system.agent_sessions.messages || $5,
+             messages = rootcx_system.agent_sessions.messages || $4,
              updated_at = now()",
     )
     .bind(session_id)
     .bind(app_id)
-    .bind(agent_id)
     .bind(user_id)
     .bind(&new_messages)
     .execute(pool)

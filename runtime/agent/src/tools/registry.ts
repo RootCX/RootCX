@@ -7,7 +7,6 @@ import { createWebFetchTool } from "./web-fetch.js";
 
 export interface ToolContext {
     appId: string;
-    agentId: string;
     runtimeUrl: string;
     authToken: string;
     dataContract: EntitySchema[];
@@ -16,8 +15,8 @@ export interface ToolContext {
 type ToolFactory = (ctx: ToolContext) => StructuredToolInterface;
 
 const TOOL_FACTORIES: Record<string, ToolFactory> = {
-    query_data: (ctx) => createQueryDataTool(ctx.appId, ctx.agentId, ctx.runtimeUrl, ctx.authToken, ctx.dataContract),
-    mutate_data: (ctx) => createMutateDataTool(ctx.appId, ctx.agentId, ctx.runtimeUrl, ctx.authToken, ctx.dataContract),
+    query_data: (ctx) => createQueryDataTool(ctx.appId, ctx.runtimeUrl, ctx.authToken, ctx.dataContract),
+    mutate_data: (ctx) => createMutateDataTool(ctx.appId, ctx.runtimeUrl, ctx.authToken, ctx.dataContract),
     web_search: () => createWebSearchTool(),
     web_fetch: () => createWebFetchTool(),
 };

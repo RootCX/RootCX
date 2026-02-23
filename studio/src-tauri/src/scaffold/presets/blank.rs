@@ -50,14 +50,6 @@ impl Preset for BlankPreset {
                 default: Some(AnswerValue::Bool(true)),
                 depends_on: Some(DependsOn { key: "project_type".into(), equals: AnswerValue::Text("app".into()) }),
             },
-            // ── Agent-specific questions ──
-            Question {
-                key: "agent_id".into(),
-                label: "Agent identifier (lowercase, e.g. prospector)".into(),
-                question_type: QuestionType::Text,
-                default: Some(AnswerValue::Text("assistant".into())),
-                depends_on: Some(DependsOn { key: "project_type".into(), equals: AnswerValue::Text("agent".into()) }),
-            },
         ]
     }
 
@@ -65,11 +57,7 @@ impl Preset for BlankPreset {
         let is_agent = matches!(answers.get("project_type"), Some(AnswerValue::Text(v)) if v == "agent");
 
         if is_agent {
-            let agent_id = match answers.get("agent_id") {
-                Some(AnswerValue::Text(v)) if !v.is_empty() => v.clone(),
-                _ => "assistant".into(),
-            };
-            vec![Box::new(AgentLayer { agent_id })]
+            vec![Box::new(AgentLayer)]
         } else {
             let auth = matches!(answers.get("auth"), Some(AnswerValue::Bool(true)) | None);
             let backend = matches!(answers.get("backend"), Some(AnswerValue::Bool(true)) | None);

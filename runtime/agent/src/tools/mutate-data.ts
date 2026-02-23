@@ -5,7 +5,6 @@ import { formatSchema } from "./schema.js";
 
 export function createMutateDataTool(
     appId: string,
-    agentId: string,
     runtimeUrl: string,
     authToken: string,
     dataContract: EntitySchema[],
@@ -16,7 +15,6 @@ export function createMutateDataTool(
             const headers: Record<string, string> = {
                 "Content-Type": "application/json",
                 "Authorization": `Bearer ${authToken}`,
-                "X-Agent-Id": `agent:${agentId}`,
             };
 
             let url = baseUrl;
