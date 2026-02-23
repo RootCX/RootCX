@@ -153,13 +153,28 @@ pub struct SchemaVerification {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ProviderConfig {
+    #[serde(rename = "anthropic")]
+    Anthropic { model: String },
+    #[serde(rename = "openai")]
+    OpenAI { model: String },
+    #[serde(rename = "bedrock")]
+    Bedrock {
+        model: String,
+        #[serde(default)]
+        region: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDefinition {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
-    pub model: Option<String>,
+    pub provider: Option<ProviderConfig>,
     #[serde(default)]
     pub system_prompt: Option<String>,
     #[serde(default)]

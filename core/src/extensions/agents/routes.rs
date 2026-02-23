@@ -30,7 +30,6 @@ pub(crate) struct AgentRow {
     app_id: String,
     name: String,
     description: Option<String>,
-    model: Option<String>,
     config: JsonValue,
 }
 
@@ -48,7 +47,7 @@ pub async fn get_agent(
 ) -> Result<Json<AgentRow>, ApiError> {
     let pool = routes::pool(&rt).await?;
     sqlx::query_as::<_, AgentRow>(
-        "SELECT app_id, name, description, model, config
+        "SELECT app_id, name, description, config
          FROM rootcx_system.agents WHERE app_id = $1",
     )
     .bind(&app_id)
@@ -120,7 +119,7 @@ pub async fn invoke_agent(
     .ok_or_else(|| ApiError::NotFound(format!("app '{app_id}' not found")))?;
 
     let agent_config = json!({
-        "model": config.get("model"),
+        "provider": config.get("provider"),
         "limits": config.get("limits"),
         "_appId": &app_id,
         "_enabledTools": enabled_tools,

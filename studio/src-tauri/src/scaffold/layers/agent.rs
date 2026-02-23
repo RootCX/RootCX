@@ -1,7 +1,21 @@
+use std::collections::HashMap;
+
 use crate::scaffold::emitter::Emitter;
-use crate::scaffold::types::{Layer, LayerFuture, ScaffoldContext};
+use crate::scaffold::types::{AnswerValue, Layer, LayerFuture, ScaffoldContext};
 
 pub struct AgentLayer;
+
+fn provider_config(answers: &HashMap<String, AnswerValue>) -> serde_json::Value {
+    let provider_type = match answers.get("provider") {
+        Some(AnswerValue::Text(v)) => v.as_str(),
+        _ => "anthropic",
+    };
+    match provider_type {
+        "openai" => serde_json::json!({ "type": "openai", "model": "gpt-4o" }),
+        "bedrock" => serde_json::json!({ "type": "bedrock", "model": "anthropic.claude-opus-4-6-v1" }),
+        _ => serde_json::json!({ "type": "anthropic", "model": "claude-sonnet-4-20250514" }),
+    }
+}
 
 impl Layer for AgentLayer {
     fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> LayerFuture<'a> {
@@ -17,7 +31,7 @@ impl Layer for AgentLayer {
                 "agent": {
                     "name": ctx.name,
                     "description": format!("AI agent for {}", ctx.name),
-                    "model": "global.anthropic.claude-opus-4-6-v1",
+                    "provider": provider_config(&ctx.answers),
                     "systemPrompt": "./agent/system.md",
                     "memory": { "enabled": true },
                     "limits": { "maxTurns": 10 },

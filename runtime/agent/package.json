@@ -6,15 +6,21 @@
   "main": "src/index.ts",
   "dependencies": {
     "@langchain/langgraph": "^0.2",
-    "@langchain/anthropic": "^0.3",
-    "@langchain/openai": "^0.3",
     "@langchain/core": "^0.3",
     "zod": "^3.22"
   },
   "peerDependencies": {
+    "@langchain/anthropic": "^0.3",
+    "@langchain/openai": "^0.3",
     "@langchain/aws": "^0.1"
   },
   "peerDependenciesMeta": {
+    "@langchain/anthropic": {
+      "optional": true
+    },
+    "@langchain/openai": {
+      "optional": true
+    },
     "@langchain/aws": {
       "optional": true
     }

@@ -6,7 +6,8 @@ import {
     SystemMessage,
     type BaseMessage,
 } from "@langchain/core/messages";
-import { buildProvider } from "./provider.js";
+import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
+import { buildProvider, type ProviderConfig } from "./providers/index.js";
 import { buildDefaultGraph } from "./default-graph.js";
 import { buildToolRegistry } from "./tools/registry.js";
 import type { IpcWriter } from "./ipc.js";
@@ -25,7 +26,7 @@ export interface EntitySchema {
 }
 
 export interface AgentConfig {
-    model?: string;
+    provider: ProviderConfig;
     limits?: { maxTurns?: number };
     _appId: string;
     _enabledTools: string[];
@@ -49,7 +50,7 @@ export async function runAgent(params: RunAgentParams) {
     const runtimeUrl = process.env.ROOTCX_RUNTIME_URL;
     if (!runtimeUrl) throw new Error("ROOTCX_RUNTIME_URL not set");
 
-    const model = await buildProvider(config.model);
+    const model = await buildProvider(config.provider);
     const tools = buildToolRegistry(config._enabledTools, {
         appId: config._appId,
         runtimeUrl,
@@ -108,7 +109,7 @@ export async function runAgent(params: RunAgentParams) {
 
 async function loadGraph(
     graphPath: string | undefined,
-    model: Awaited<ReturnType<typeof buildProvider>>,
+    model: BaseChatModel,
     tools: ReturnType<typeof buildToolRegistry>,
 ) {
     if (graphPath) {

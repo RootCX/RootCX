@@ -42,11 +42,11 @@ impl RuntimeExtension for AgentExtension {
                 app_id      TEXT PRIMARY KEY REFERENCES rootcx_system.apps(id) ON DELETE CASCADE,
                 name        TEXT NOT NULL,
                 description TEXT,
-                model       TEXT,
                 config      JSONB NOT NULL DEFAULT '{}',
                 created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
             )",
+            "ALTER TABLE rootcx_system.agents DROP COLUMN IF EXISTS model",
             "CREATE TABLE IF NOT EXISTS rootcx_system.agent_sessions (
                 id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 app_id      TEXT NOT NULL REFERENCES rootcx_system.agents(app_id) ON DELETE CASCADE,
@@ -75,6 +75,7 @@ impl RuntimeExtension for AgentExtension {
         let role_name = format!("agent:{app_id}");
 
         let config = serde_json::json!({
+            "provider": def.provider,
             "systemPrompt": def.system_prompt,
             "graph": def.graph,
             "memory": def.memory,
@@ -82,16 +83,15 @@ impl RuntimeExtension for AgentExtension {
             "access": def.access,
         });
         sqlx::query(
-            "INSERT INTO rootcx_system.agents (app_id, name, description, model, config)
-             VALUES ($1, $2, $3, $4, $5)
+            "INSERT INTO rootcx_system.agents (app_id, name, description, config)
+             VALUES ($1, $2, $3, $4)
              ON CONFLICT (app_id) DO UPDATE SET
                  name = EXCLUDED.name, description = EXCLUDED.description,
-                 model = EXCLUDED.model, config = EXCLUDED.config, updated_at = now()"
+                 config = EXCLUDED.config, updated_at = now()"
         )
         .bind(app_id)
         .bind(&def.name)
         .bind(def.description.as_deref())
-        .bind(def.model.as_deref())
         .bind(&config)
         .execute(pool)
         .await

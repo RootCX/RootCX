@@ -29,6 +29,19 @@ impl Preset for BlankPreset {
                 depends_on: None,
             },
             Question {
+                key: "provider".into(),
+                label: "LLM provider".into(),
+                question_type: QuestionType::Choice {
+                    options: vec![
+                        ChoiceOption { value: "anthropic".into(), label: "Anthropic".into() },
+                        ChoiceOption { value: "openai".into(), label: "OpenAI".into() },
+                        ChoiceOption { value: "bedrock".into(), label: "AWS Bedrock".into() },
+                    ],
+                },
+                default: Some(AnswerValue::Text("anthropic".into())),
+                depends_on: Some(DependsOn { key: "project_type".into(), equals: AnswerValue::Text("agent".into()) }),
+            },
+            Question {
                 key: "auth".into(),
                 label: "Include authentication?".into(),
                 question_type: QuestionType::Bool,
