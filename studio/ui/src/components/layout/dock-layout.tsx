@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/resizable";
 import { StatusBar } from "./status-bar";
 import { PanelContainer } from "./panel-container";
+import { ActivityBar } from "./activity-bar";
 import { ProjectProvider, useProjectContext } from "./app-context";
 import { LayoutProvider, useLayout, buildDefaultState } from "./layout-store";
 import { useViews } from "@/core/hooks";
@@ -52,30 +53,33 @@ function Shell() {
   }, [dispatch]);
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden">
-      <ResizablePanelGroup orientation="vertical" className="flex-1 overflow-hidden">
-        <ResizablePanel id="top-area" defaultSize="70%">
-          <ResizablePanelGroup orientation="horizontal" className="h-full overflow-hidden">
-            <ResizablePanel id="sidebar" defaultSize="40%" minSize="10%" maxSize="60%" className="bg-sidebar">
-              <PanelContainer zone="sidebar" />
-            </ResizablePanel>
-            <ResizableHandle />
-            <ResizablePanel id="main" defaultSize="40%">
-              <PanelContainer zone="editor" />
-            </ResizablePanel>
-            <ResizableHandle />
-            <ResizablePanel id="right" defaultSize="20%" minSize="3%" maxSize="40%" className="bg-sidebar">
-              <PanelContainer zone="right" />
-            </ResizablePanel>
-          </ResizablePanelGroup>
-        </ResizablePanel>
-        <ResizableHandle />
-        <ResizablePanel id="bottom" defaultSize="30%" minSize="5%" maxSize="60%" className="bg-sidebar">
-          <PanelContainer zone="bottom" />
-        </ResizablePanel>
-      </ResizablePanelGroup>
-      <StatusBar />
-      <CommandPaletteOverlay />
+    <div className="flex h-screen w-screen overflow-hidden">
+      <ActivityBar />
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <ResizablePanelGroup orientation="vertical" className="flex-1 overflow-hidden">
+          <ResizablePanel id="top-area" defaultSize="70%">
+            <ResizablePanelGroup orientation="horizontal" className="h-full overflow-hidden">
+              <ResizablePanel id="sidebar" defaultSize="40%" minSize="10%" maxSize="60%" className="bg-sidebar">
+                <PanelContainer zone="sidebar" />
+              </ResizablePanel>
+              <ResizableHandle />
+              <ResizablePanel id="main" defaultSize="40%">
+                <PanelContainer zone="editor" />
+              </ResizablePanel>
+              <ResizableHandle />
+              <ResizablePanel id="right" defaultSize="20%" minSize="3%" maxSize="40%" className="bg-sidebar">
+                <PanelContainer zone="right" />
+              </ResizablePanel>
+            </ResizablePanelGroup>
+          </ResizablePanel>
+          <ResizableHandle />
+          <ResizablePanel id="bottom" defaultSize="30%" minSize="5%" maxSize="60%" className="bg-sidebar">
+            <PanelContainer zone="bottom" />
+          </ResizablePanel>
+        </ResizablePanelGroup>
+        <StatusBar />
+        <CommandPaletteOverlay />
+      </div>
     </div>
   );
 }
