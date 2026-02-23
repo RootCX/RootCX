@@ -31,6 +31,7 @@ pub enum OutboundMessage {
     Rpc { id: String, method: String, params: JsonValue, caller: Option<RpcCaller> },
     Job { id: String, payload: JsonValue },
     AgentInvoke {
+        invoke_id: String,
         session_id: String,
         message: String,
         system_prompt: String,
@@ -70,17 +71,17 @@ pub enum InboundMessage {
         message: String,
     },
     AgentChunk {
-        session_id: String,
+        invoke_id: String,
         delta: String,
     },
     AgentDone {
-        session_id: String,
+        invoke_id: String,
         response: String,
         #[serde(default)]
         tokens: Option<u64>,
     },
     AgentError {
-        session_id: String,
+        invoke_id: String,
         error: String,
     },
 }

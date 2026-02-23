@@ -9,9 +9,10 @@ reader.on("discover", () => {
 });
 
 reader.on("agent_invoke", async (msg) => {
+    const invokeId = msg.invoke_id as string;
     try {
         await runAgent({
-            sessionId: msg.session_id as string,
+            invokeId,
             message: msg.message as string,
             systemPrompt: msg.system_prompt as string,
             config: msg.config as AgentConfig,
@@ -22,7 +23,7 @@ reader.on("agent_invoke", async (msg) => {
     } catch (err) {
         writer.send({
             type: "agent_error",
-            session_id: msg.session_id as string,
+            invoke_id: invokeId,
             error: err instanceof Error ? err.message : String(err),
         });
     }

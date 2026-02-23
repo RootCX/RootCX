@@ -34,7 +34,7 @@ export interface AgentConfig {
 }
 
 interface RunAgentParams {
-    sessionId: string;
+    invokeId: string;
     message: string;
     systemPrompt: string;
     config: AgentConfig;
@@ -44,12 +44,12 @@ interface RunAgentParams {
 }
 
 export async function runAgent(params: RunAgentParams) {
-    const { sessionId, message, systemPrompt, config, authToken, history, writer } = params;
+    const { invokeId, message, systemPrompt, config, authToken, history, writer } = params;
 
     const runtimeUrl = process.env.ROOTCX_RUNTIME_URL;
     if (!runtimeUrl) throw new Error("ROOTCX_RUNTIME_URL not set");
 
-    const model = buildProvider(config.model);
+    const model = await buildProvider(config.model);
     const tools = buildToolRegistry(config._enabledTools, {
         appId: config._appId,
         runtimeUrl,
@@ -78,7 +78,7 @@ export async function runAgent(params: RunAgentParams) {
         if (++turns > maxTurns) {
             writer.send({
                 type: "agent_error",
-                session_id: sessionId,
+                invoke_id: invokeId,
                 error: `Max turns (${maxTurns}) exceeded`,
             });
             return;
@@ -92,7 +92,7 @@ export async function runAgent(params: RunAgentParams) {
                 lastResponse = msg.content;
                 writer.send({
                     type: "agent_chunk",
-                    session_id: sessionId,
+                    invoke_id: invokeId,
                     delta: msg.content,
                 });
             }
@@ -101,21 +101,28 @@ export async function runAgent(params: RunAgentParams) {
 
     writer.send({
         type: "agent_done",
-        session_id: sessionId,
+        invoke_id: invokeId,
         response: lastResponse,
     });
 }
 
 async function loadGraph(
     graphPath: string | undefined,
-    model: ReturnType<typeof buildProvider>,
+    model: Awaited<ReturnType<typeof buildProvider>>,
     tools: ReturnType<typeof buildToolRegistry>,
 ) {
-    const candidates = graphPath
-        ? [resolve(graphPath)]
-        : [resolve("agent/graph.ts"), resolve("agent/graph.js")];
+    if (graphPath) {
+        const resolved = resolve(graphPath);
+        if (!await fileExists(resolved)) {
+            throw new Error(`graph file not found: ${resolved}`);
+        }
+        const mod = await import(resolved);
+        return typeof mod.default === "function"
+            ? mod.default(model, tools)
+            : mod.default;
+    }
 
-    for (const path of candidates) {
+    for (const path of [resolve("agent/graph.ts"), resolve("agent/graph.js")]) {
         if (await fileExists(path)) {
             const mod = await import(path);
             return typeof mod.default === "function"

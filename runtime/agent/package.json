@@ -7,9 +7,16 @@
   "dependencies": {
     "@langchain/langgraph": "^0.2",
     "@langchain/anthropic": "^0.3",
-    "@langchain/aws": "^0.1",
     "@langchain/openai": "^0.3",
     "@langchain/core": "^0.3",
     "zod": "^3.22"
+  },
+  "peerDependencies": {
+    "@langchain/aws": "^0.1"
+  },
+  "peerDependenciesMeta": {
+    "@langchain/aws": {
+      "optional": true
+    }
   }
 }

@@ -1,6 +1,5 @@
 import { ChatAnthropic } from "@langchain/anthropic";
 import { ChatOpenAI } from "@langchain/openai";
-import { ChatBedrockConverse } from "@langchain/aws";
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 
 function requireEnv(name: string): string {
@@ -31,18 +30,18 @@ function detectDefaultModel(): string {
     return "claude-sonnet-4-20250514";
 }
 
-export function buildProvider(modelId?: string): BaseChatModel {
+export async function buildProvider(modelId?: string): Promise<BaseChatModel> {
     const id = modelId ?? detectDefaultModel();
 
     if (isBedrockModel(id)) {
-        // AWS SDK picks up AWS_BEARER_TOKEN_BEDROCK automatically as Bearer token auth
-        requireEnv("AWS_BEARER_TOKEN_BEDROCK");
+        const token = requireEnv("AWS_BEARER_TOKEN_BEDROCK");
         const region = process.env.AWS_REGION ?? "us-east-1";
-        const bedrockModelId = id.replace("bedrock/", "");
+        const { ChatBedrockConverse } = await import("@langchain/aws");
         return new ChatBedrockConverse({
-            model: bedrockModelId,
+            model: id.replace("bedrock/", ""),
             region,
             streaming: true,
+            clientOptions: { token: { token, expiration: new Date(Date.now() + 3600_000) } },
         });
     }
 

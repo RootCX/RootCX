@@ -28,7 +28,6 @@ impl Preset for BlankPreset {
                 default: Some(AnswerValue::Text("app".into())),
                 depends_on: None,
             },
-            // ── App-specific questions ──
             Question {
                 key: "auth".into(),
                 label: "Include authentication?".into(),

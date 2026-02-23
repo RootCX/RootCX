@@ -58,6 +58,7 @@ pub enum SupervisorCommand {
         payload: JsonValue,
     },
     AgentInvoke {
+        invoke_id: String,
         session_id: String,
         message: String,
         system_prompt: String,
@@ -128,6 +129,7 @@ impl SupervisorHandle {
 
     pub async fn agent_invoke(
         &self,
+        invoke_id: String,
         session_id: String,
         message: String,
         system_prompt: String,
@@ -138,7 +140,7 @@ impl SupervisorHandle {
     ) -> Result<mpsc::Receiver<AgentEvent>, RuntimeError> {
         let (stream_tx, stream_rx) = mpsc::channel(64);
         self.send(SupervisorCommand::AgentInvoke {
-            session_id, message, system_prompt,
+            invoke_id, session_id, message, system_prompt,
             config, auth_token, history, caller, stream_tx,
         }).await?;
         Ok(stream_rx)
@@ -252,7 +254,7 @@ async fn supervisor_loop(
                     }
 
                     SupervisorCommand::AgentInvoke {
-                        session_id, message, system_prompt,
+                        invoke_id, session_id, message, system_prompt,
                         config, auth_token, history, caller, stream_tx,
                     } => {
                         if status != WorkerStatus::Running {
@@ -261,13 +263,13 @@ async fn supervisor_loop(
                             }).await;
                             continue;
                         }
-                        pending_agent_streams.insert(session_id.clone(), stream_tx);
+                        pending_agent_streams.insert(invoke_id.clone(), stream_tx);
                         if let Some(ref mut w) = ipc_writer {
                             if let Err(e) = w.send(&OutboundMessage::AgentInvoke {
-                                session_id: session_id.clone(),
+                                invoke_id: invoke_id.clone(), session_id,
                                 message, system_prompt, config, auth_token, history, caller,
                             }).await {
-                                if let Some(tx) = pending_agent_streams.remove(&session_id) {
+                                if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                     let _ = tx.send(AgentEvent::Error { error: e.to_string() }).await;
                                 }
                             }
@@ -325,20 +327,20 @@ async fn supervisor_loop(
                             }
                             emit_log(&log_tx, &level, &message);
                         }
-                        InboundMessage::AgentChunk { session_id, delta } => {
-                            if let Some(tx) = pending_agent_streams.get(&session_id) {
+                        InboundMessage::AgentChunk { invoke_id, delta } => {
+                            if let Some(tx) = pending_agent_streams.get(&invoke_id) {
                                 if tx.send(AgentEvent::Chunk { delta }).await.is_err() {
-                                    pending_agent_streams.remove(&session_id);
+                                    pending_agent_streams.remove(&invoke_id);
                                 }
                             }
                         }
-                        InboundMessage::AgentDone { session_id, response, tokens } => {
-                            if let Some(tx) = pending_agent_streams.remove(&session_id) {
+                        InboundMessage::AgentDone { invoke_id, response, tokens } => {
+                            if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Done { response, tokens }).await;
                             }
                         }
-                        InboundMessage::AgentError { session_id, error } => {
-                            if let Some(tx) = pending_agent_streams.remove(&session_id) {
+                        InboundMessage::AgentError { invoke_id, error } => {
+                            if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Error { error }).await;
                             }
                         }

@@ -144,20 +144,18 @@ impl RuntimeExtension for AgentExtension {
             .filter(|e| !e.entity.starts_with("tool:"))
             .collect();
         if !data_entries.is_empty() {
-            let mut sql = String::from(
-                "INSERT INTO rootcx_system.rbac_policies (app_id, role, entity, actions, ownership) VALUES "
+            let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
+                "INSERT INTO rootcx_system.rbac_policies (app_id, role, entity, actions, ownership) "
             );
-            for (i, _) in data_entries.iter().enumerate() {
-                let off = i * 2 + 3;
-                if i > 0 { sql.push(','); }
-                sql.push_str(&format!("($1,$2,${},${},false)", off, off + 1));
-            }
-            let mut q = sqlx::query(&sql).bind(app_id).bind(&role_name);
-            for entry in &data_entries {
+            qb.push_values(&data_entries, |mut b, entry| {
                 let actions: Vec<&str> = entry.actions.iter().map(String::as_str).collect();
-                q = q.bind(&entry.entity).bind(actions);
-            }
-            q.execute(pool).await.map_err(RuntimeError::Schema)?;
+                b.push_bind(app_id.to_string())
+                    .push_bind(role_name.clone())
+                    .push_bind(entry.entity.clone())
+                    .push_bind(actions)
+                    .push_bind(false);
+            });
+            qb.build().execute(pool).await.map_err(RuntimeError::Schema)?;
         }
 
         self.rbac_cache.invalidate(app_id);

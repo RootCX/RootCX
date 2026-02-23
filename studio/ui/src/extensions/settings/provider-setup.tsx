@@ -16,6 +16,10 @@ const PROVIDERS: Provider[] = [
   { id: "bedrock", label: "Bedrock", envKey: "AWS_BEARER_TOKEN_BEDROCK", placeholder: "ABSK..." },
 ];
 
+const INITIAL_DELAY_MS = 3000;
+const RETRY_INTERVAL_MS = 2000;
+const MAX_RETRIES = 5;
+
 export function ProviderSetupPortal() {
   const [show, setShow] = useState(false);
 
@@ -29,12 +33,10 @@ export function ProviderSetupPortal() {
           if (!PROVIDERS.some((p) => keys.includes(p.envKey))) setShow(true);
         })
         .catch(() => {
-          // Runtime may not be ready yet — retry a few times
-          if (!cancelled && ++attempt < 5) setTimeout(check, 2000);
+          if (!cancelled && ++attempt < MAX_RETRIES) setTimeout(check, RETRY_INTERVAL_MS);
         });
     };
-    // Delay initial check to let the runtime boot
-    const timer = setTimeout(check, 3000);
+    const timer = setTimeout(check, INITIAL_DELAY_MS);
     return () => { cancelled = true; clearTimeout(timer); };
   }, []);
 

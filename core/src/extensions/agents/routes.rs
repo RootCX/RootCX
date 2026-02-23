@@ -133,9 +133,11 @@ pub async fn invoke_agent(
     let agent_token = jwt::encode_access(&auth_cfg, agent_user_id(&app_id), &format!("agent:{app_id}"))
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
+    let invoke_id = uuid::Uuid::new_v4().to_string();
     let stream_rx = wm
         .agent_invoke(
             &app_id,
+            invoke_id,
             session_id.clone(),
             body.message.clone(),
             system_prompt,

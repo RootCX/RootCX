@@ -97,6 +97,7 @@ impl WorkerManager {
     pub async fn agent_invoke(
         &self,
         app_id: &str,
+        invoke_id: String,
         session_id: String,
         message: String,
         system_prompt: String,
@@ -106,7 +107,7 @@ impl WorkerManager {
         caller: Option<RpcCaller>,
     ) -> Result<mpsc::Receiver<AgentEvent>, RuntimeError> {
         self.get_handle(app_id).await?.agent_invoke(
-            session_id, message, system_prompt,
+            invoke_id, session_id, message, system_prompt,
             config, auth_token, history, caller,
         ).await
     }
