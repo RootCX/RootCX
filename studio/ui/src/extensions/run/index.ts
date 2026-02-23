@@ -61,7 +61,8 @@ async function executeStep(step: string, projectPath: string): Promise<boolean> 
     case "deploy_backend": {
       try {
         const entries = await invoke<{ name: string; is_dir: boolean }[]>("read_dir", { path: projectPath });
-        if (entries.some((e) => e.name === "backend" && e.is_dir))
+        const hasBackend = entries.some((e) => e.is_dir && (e.name === "backend" || e.name === "agents"));
+        if (hasBackend)
           await invoke("deploy_backend", { projectPath });
       } catch { }
       return true;

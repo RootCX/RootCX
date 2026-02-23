@@ -458,3 +458,199 @@ const columns: ColumnDef<Contact, unknown>[] = [
   emptyState={<EmptyState title="No contacts" description="Add your first contact" />}
 />
 ```
+
+---
+
+## 7. Building AI Agents
+
+RootCX also supports **AI agents** — autonomous workers that use LLMs and tools. Agents share the same manifest, deploy pipeline, and RBAC as apps, but have **NO frontend at all**.
+
+### CRITICAL: Agent projects are NOT apps
+
+**An agent project contains ONLY:**
+- `manifest.json` (with `agents` section)
+- `agents/{id}/system.md` (system prompt)
+- `package.json` (with `@rootcx/agent-runtime` dependency only)
+
+**An agent project must NEVER contain:**
+- React code, JSX/TSX, or any UI components
+- `src/` directory with frontend code
+- `src-tauri/` directory
+- `vite.config.ts`, `tailwind.config.ts`, `index.html`
+- `@rootcx/runtime`, `@rootcx/ui`, `react`, `react-dom`, `vite`, or any frontend dependencies
+- Tauri, Cargo.toml, or any desktop shell
+
+When the user asks to build an **agent**, generate ONLY the three files above. Do not generate any UI, React components, or frontend scaffolding.
+
+### When to build an agent vs an app
+
+- **App**: Has a UI (React + Tauri), human users interact with it directly
+- **Agent**: **No UI. No React. No Tauri.** Uses an LLM to reason, call tools, read/write data autonomously. Invoked via API only.
+
+### Agent manifest
+
+An agent project has a `manifest.json` with an `agents` section instead of (or alongside) a frontend:
+
+```json
+{
+    "appId": "sales-prospector",
+    "name": "Sales Prospector",
+    "version": "0.1.0",
+    "description": "AI agent that researches leads and scores prospects",
+    "dataContract": [
+        {
+            "entityName": "leads",
+            "fields": [
+                { "name": "name", "type": "text", "required": true },
+                { "name": "company", "type": "text" },
+                { "name": "title", "type": "text" },
+                { "name": "email", "type": "text" },
+                { "name": "score", "type": "number" },
+                { "name": "status", "type": "text", "enumValues": ["new", "researched", "qualified", "disqualified"] },
+                { "name": "summary", "type": "text" }
+            ]
+        },
+        {
+            "entityName": "research_notes",
+            "fields": [
+                { "name": "lead_id", "type": "entity_link", "references": { "entity": "leads", "field": "id" } },
+                { "name": "source", "type": "text", "required": true },
+                { "name": "content", "type": "text", "required": true },
+                { "name": "category", "type": "text", "enumValues": ["company_info", "person_info", "news", "financial"] }
+            ]
+        }
+    ],
+    "agents": {
+        "prospector": {
+            "name": "Sales Prospector",
+            "description": "Researches leads, enriches profiles, scores prospects",
+            "model": "claude-sonnet-4-20250514",
+            "systemPrompt": "./agents/prospector/system.md",
+            "memory": { "enabled": true },
+            "limits": { "maxTurns": 20, "maxBudgetUsd": 2.00 },
+            "access": [
+                { "entity": "leads", "actions": ["read", "create", "update"] },
+                { "entity": "research_notes", "actions": ["read", "create"] },
+                { "entity": "tool:web_search", "actions": ["use"] },
+                { "entity": "tool:web_fetch", "actions": ["use"] }
+            ]
+        }
+    }
+}
+```
+
+### Agent `access` rules
+
+The `access` array declares **everything** the agent can do. What's NOT listed = denied.
+
+| Pattern | Meaning |
+|---------|---------|
+| `{ "entity": "leads", "actions": ["read", "create", "update"] }` | Can read, create, update leads |
+| `{ "entity": "tool:web_search", "actions": ["use"] }` | Can search the web |
+| `{ "entity": "tool:web_fetch", "actions": ["use"] }` | Can fetch and read URLs |
+| `{ "entity": "app:crm/contacts", "actions": ["read"] }` | Can read another app's data (cross-app) |
+
+Core auto-creates RBAC role `agent:{id}` from this list. Same enforcement as human roles.
+
+### Available tools
+
+| Access entry | Tool | Description |
+|-------------|------|-------------|
+| `tool:web_search` | `web_search` | Search via Brave Search or Tavily |
+| `tool:web_fetch` | `web_fetch` | Fetch URL, extract readable content |
+| _(any data access)_ | `query_data` | Auto-loaded: read from collections |
+| _(any data access)_ | `mutate_data` | Auto-loaded: create/update/delete records |
+
+### Agent project structure
+
+```
+my-agent/
+├── manifest.json
+├── agents/
+│   └── {agent-id}/
+│       ├── system.md          # System prompt (markdown)
+│       └── graph.ts           # Optional: custom LangGraph workflow
+└── package.json               # includes @rootcx/agent-runtime
+```
+
+### System prompt (`agents/{id}/system.md`)
+
+Write a clear system prompt that describes the agent's role, data it works with, workflow steps, and constraints:
+
+```markdown
+You are a sales prospector agent. Your job is to research leads and score them.
+
+## Data you work with
+- **leads**: name, company, title, email, score, status, summary
+- **research_notes**: lead_id, source, content, category
+
+## Workflow
+1. Use web_search to find information about the person/company
+2. Use web_fetch to read relevant pages (LinkedIn, company sites)
+3. Create a lead record with mutate_data
+4. Create research_notes for each finding
+5. Score the lead 1-10 and update the lead record
+
+## Rules
+- Never delete records
+- Always cite sources in research_notes
+- Score conservatively — only 8+ for strong matches
+```
+
+### `agents` section schema
+
+```typescript
+{
+    [agentId: string]: {
+        name: string;                     // Display name
+        description?: string;             // What this agent does
+        model?: string;                   // LLM model (default: "claude-sonnet-4-20250514")
+        systemPrompt?: string;            // Path to .md file (default: "./agents/{id}/system.md")
+        graph?: string;                   // Path to custom LangGraph .ts (default: built-in ReAct)
+        memory?: { enabled: boolean };    // Persist session messages
+        limits?: {
+            maxTurns?: number;            // Max agent↔tools loop iterations (default: 10)
+            maxBudgetUsd?: number;        // Cost ceiling (default: 1.00)
+        };
+        access: Array<{
+            entity: string;               // Collection name, "tool:{name}", or "app:{appId}/{entity}"
+            actions: string[];            // ["read","create","update","delete"] or ["use"]
+        }>;
+    }
+}
+```
+
+### Supported models
+
+- `claude-sonnet-4-20250514` (default) — best balance of speed and quality
+- `claude-opus-4-20250514` — most capable
+- `gpt-4o`, `gpt-4o-mini` — OpenAI models
+
+API keys are configured as secrets: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `BRAVE_API_KEY` or `TAVILY_API_KEY`.
+
+### Invoking an agent
+
+```
+POST /api/v1/apps/{appId}/agents/{agentId}/invoke
+Content-Type: application/json
+
+{ "message": "Research Jane Doe, CTO at Acme Corp" }
+```
+
+Response: Server-Sent Events with `chunk`, `done`, `error` events.
+
+### package.json for agent projects
+
+```json
+{
+  "name": "my-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@rootcx/agent-runtime": "file:../../runtime/agent"
+  }
+}
+```
+
+**Only** the agent runtime dependency. No React, no Vite, no Tauri, no UI libraries.

@@ -5,14 +5,14 @@ use std::sync::Arc;
 use futures::future::join_all;
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{error, info, warn};
 
 use crate::RuntimeError;
 use crate::extensions::logs::LogEntry;
 use crate::ipc::RpcCaller;
 use crate::secrets::SecretManager;
-use crate::worker::{self, SupervisorHandle, WorkerConfig, WorkerStatus};
+use crate::worker::{self, AgentEvent, SupervisorHandle, WorkerConfig, WorkerStatus};
 
 pub struct WorkerManager {
     workers: Arc<RwLock<HashMap<String, SupervisorHandle>>>,
@@ -36,14 +36,26 @@ impl WorkerManager {
     }
 
     pub async fn start_app(&self, pool: &PgPool, secrets: &SecretManager, app_id: &str) -> Result<(), RuntimeError> {
+        self.start_app_inner(pool, secrets, app_id, false).await
+    }
+
+    pub async fn start_agent_app(&self, pool: &PgPool, secrets: &SecretManager, app_id: &str) -> Result<(), RuntimeError> {
+        self.start_app_inner(pool, secrets, app_id, true).await
+    }
+
+    async fn start_app_inner(&self, pool: &PgPool, secrets: &SecretManager, app_id: &str, is_agent: bool) -> Result<(), RuntimeError> {
         if let Ok(h) = self.get_handle(app_id).await
             && h.status().await? == WorkerStatus::Running {
                 return Ok(());
             }
 
         let app_dir = self.apps_dir.join(app_id);
-        let entry_point = resolve_entry_point(&app_dir)?;
-        let env: HashMap<String, String> = secrets.get_all_for_app(pool, app_id).await?.into_iter().collect();
+        let entry_point = if is_agent {
+            resolve_agent_entry_point(&app_dir)?
+        } else {
+            resolve_entry_point(&app_dir)?
+        };
+        let env = secrets.get_env_for_app(pool, app_id).await?;
 
         let config = WorkerConfig {
             app_id: app_id.to_string(),
@@ -94,6 +106,23 @@ impl WorkerManager {
         self.get_handle(app_id).await?.rpc(id, method, params, caller).await
     }
 
+    pub async fn agent_invoke(
+        &self,
+        app_id: &str,
+        agent_id: String,
+        session_id: String,
+        message: String,
+        system_prompt: String,
+        config: JsonValue,
+        history: Vec<JsonValue>,
+        caller: Option<RpcCaller>,
+    ) -> Result<mpsc::Receiver<AgentEvent>, RuntimeError> {
+        self.get_handle(app_id).await?.agent_invoke(
+            agent_id, session_id, message, system_prompt,
+            config, history, caller,
+        ).await
+    }
+
     pub async fn dispatch_job(&self, app_id: &str, job_id: String, payload: JsonValue) -> Result<(), RuntimeError> {
         self.get_handle(app_id).await?.dispatch_job(job_id, payload).await
     }
@@ -121,4 +150,18 @@ fn resolve_entry_point(app_dir: &Path) -> Result<PathBuf, RuntimeError> {
         }
     }
     Err(RuntimeError::Worker(format!("no entry point in {}", app_dir.display())))
+}
+
+fn resolve_agent_entry_point(app_dir: &Path) -> Result<PathBuf, RuntimeError> {
+    for name in [
+        "node_modules/@rootcx/agent-runtime/src/index.ts",
+        "node_modules/@rootcx/agent-runtime/dist/index.js",
+    ] {
+        let p = app_dir.join(name);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    // Fall back to standard entry points
+    resolve_entry_point(app_dir)
 }

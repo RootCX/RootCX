@@ -9,6 +9,7 @@ use tracing::info;
 use super::SharedRuntime;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
+use rootcx_shared_types::AppManifest;
 
 /// POST /api/v1/apps/{app_id}/deploy — upload tar.gz, extract, install deps, start worker.
 pub async fn deploy_backend(
@@ -57,9 +58,21 @@ pub async fn deploy_backend(
         install_deps(&bun_bin, &app_dir).await?;
     }
 
-    let w = wm;
-    let _ = w.stop_app(&app_id).await;
-    w.start_app(&pool, &secrets, &app_id).await?;
+    let is_agent = app_dir.join("manifest.json").exists() && {
+        let m_str = tokio::fs::read_to_string(app_dir.join("manifest.json"))
+            .await
+            .unwrap_or_default();
+        serde_json::from_str::<AppManifest>(&m_str)
+            .ok()
+            .is_some_and(|m| !m.agents.is_empty())
+    };
+
+    let _ = wm.stop_app(&app_id).await;
+    if is_agent {
+        wm.start_agent_app(&pool, &secrets, &app_id).await?;
+    } else {
+        wm.start_app(&pool, &secrets, &app_id).await?;
+    }
 
     Ok(Json(json!({ "message": format!("app '{app_id}' deployed and started") })))
 }

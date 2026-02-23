@@ -30,6 +30,16 @@ pub enum OutboundMessage {
     Discover { app_id: String, runtime_url: String },
     Rpc { id: String, method: String, params: JsonValue, caller: Option<RpcCaller> },
     Job { id: String, payload: JsonValue },
+    AgentInvoke {
+        agent_id: String,
+        session_id: String,
+        message: String,
+        system_prompt: String,
+        config: JsonValue,
+        #[serde(default)]
+        history: Vec<JsonValue>,
+        caller: Option<RpcCaller>,
+    },
     Shutdown,
 }
 
@@ -58,6 +68,20 @@ pub enum InboundMessage {
         #[serde(default = "default_level")]
         level: String,
         message: String,
+    },
+    AgentChunk {
+        session_id: String,
+        delta: String,
+    },
+    AgentDone {
+        session_id: String,
+        response: String,
+        #[serde(default)]
+        tokens: Option<u64>,
+    },
+    AgentError {
+        session_id: String,
+        error: String,
     },
 }
 

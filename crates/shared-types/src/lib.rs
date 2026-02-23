@@ -62,6 +62,8 @@ pub struct AppManifest {
     pub permissions: Option<PermissionsContract>,
     #[serde(default)]
     pub data_contract: Vec<EntityContract>,
+    #[serde(default)]
+    pub agents: HashMap<String, AgentDefinition>,
 }
 
 fn default_version() -> String {
@@ -148,4 +150,44 @@ pub struct SchemaChange {
 pub struct SchemaVerification {
     pub compliant: bool,
     pub changes: Vec<SchemaChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDefinition {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub graph: Option<String>,
+    #[serde(default)]
+    pub memory: Option<AgentMemory>,
+    #[serde(default)]
+    pub limits: Option<AgentLimits>,
+    #[serde(default)]
+    pub access: Vec<AgentAccessEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentMemory {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLimits {
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub max_budget_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentAccessEntry {
+    pub entity: String,
+    pub actions: Vec<String>,
 }
