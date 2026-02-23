@@ -18,7 +18,7 @@ RootCX Core manages **deployable units**. Today those are apps. With this spec, 
 | **Has a dataContract** | Yes — the app's business data | Yes — the agent's own persistent storage |
 | **Access control** | `permissions` — roles for human users | `access` — inside agent definition |
 | **Deploy** | `rootcx deploy` | `rootcx deploy` — same pipeline |
-| **Manifest** | `appId`, `dataContract`, `permissions` | `appId`, `dataContract`, `agents` (with `access` inside) |
+| **Manifest** | `appId`, `dataContract`, `permissions` | `appId`, `dataContract`, `agent` (with `access` inside) |
 
 An agent's `dataContract` is **its own data** — what the agent needs to persist to do its job. A sales prospector stores leads and research notes. A compliance checker stores audit findings. The agent reads and writes this data through the same CRUD API, governed by the same RBAC.
 
@@ -99,8 +99,6 @@ Client                    Core (Rust)                    Bun Worker (Agent)
   │  SSE stream closed       │                                │
 ```
 
-This is the same pattern as an app RPC call (`Rpc` in → `RpcResponse` out), but with streaming chunks instead of a single response.
-
 ---
 
 ## The User Experience
@@ -119,7 +117,7 @@ This is the same pattern as an app RPC call (`Rpc` in → `RpcResponse` out), bu
 │  │  manifest.json                                              │  │
 │  │  ├─ appId: "sales-prospector"                               │  │
 │  │  ├─ dataContract: leads, research_notes                     │  │
-│  │  └─ agents.prospector: model, memory, limits, access        │  │
+│  │  └─ agent: model, memory, limits, access                     │  │
 │  │                                                             │  │
 │  │  agents/prospector/system.md                                │  │
 │  │  └─ System prompt: research instructions, scoring rubric    │  │
@@ -142,22 +140,19 @@ This is the same pattern as an app RPC call (`Rpc` in → `RpcResponse` out), bu
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-The experience is identical to building an app. Forge generates code → user reviews → deploy. The difference is what Forge generates: a LangGraph + system prompt instead of a React UI + backend handlers.
-
 ---
 
 ## Manifest Specification
 
-The manifest gains one new top-level field: `agents`. No `permissions` needed for a standalone agent — the agent's access rules live inside its own definition via the `access` key.
+The manifest gains one new top-level field: `agent`. No `permissions` needed for a standalone agent — the agent's access rules live inside its own definition via the `access` key.
 
 ```
 manifest.json
 ├─ appId, name, version          identity
 ├─ dataContract                  what data exists
-└─ agents
-   └─ prospector
-      ├─ name, model, graph...   how the agent behaves
-      └─ access                  what the agent can do
+└─ agent
+   ├─ name, model, graph...     how the agent behaves
+   └─ access                    what the agent can do
 ```
 
 `permissions` (top-level) remains reserved for human roles — used by apps, optional for agents if a human dashboard is added later.
@@ -196,23 +191,21 @@ manifest.json
         }
     ],
 
-    "agents": {
-        "prospector": {
-            "name": "Sales Prospector",
-            "description": "Researches leads, enriches profiles, scores prospects",
-            "model": "claude-sonnet-4-20250514",
-            "systemPrompt": "./agents/prospector/system.md",
-            "graph": "./agents/prospector/graph.ts",
-            "memory": { "enabled": true },
-            "limits": { "maxTurns": 20 },
-            "access": [
-                { "entity": "leads", "actions": ["read", "create", "update"] },
-                { "entity": "research_notes", "actions": ["read", "create"] },
-                { "entity": "tool:web_search", "actions": ["use"] },
-                { "entity": "tool:web_fetch", "actions": ["use"] },
-                { "entity": "app:crm/contacts", "actions": ["read"] }
-            ]
-        }
+    "agent": {
+        "name": "Sales Prospector",
+        "description": "Researches leads, enriches profiles, scores prospects",
+        "model": "claude-sonnet-4-20250514",
+        "systemPrompt": "./agents/prospector/system.md",
+        "graph": "./agents/prospector/graph.ts",
+        "memory": { "enabled": true },
+        "limits": { "maxTurns": 20 },
+        "access": [
+            { "entity": "leads", "actions": ["read", "create", "update"] },
+            { "entity": "research_notes", "actions": ["read", "create"] },
+            { "entity": "tool:web_search", "actions": ["use"] },
+            { "entity": "tool:web_fetch", "actions": ["use"] },
+            { "entity": "app:crm/contacts", "actions": ["read"] }
+        ]
     }
 }
 ```
@@ -232,50 +225,43 @@ manifest.json
 - No `tool:send_email` → the agent can't send emails
 - No `app:crm/contacts` with `create` → it can read CRM contacts but not modify them
 
-One block. Complete picture.
-
-### `agents` section schema
+### `agent` field schema
 
 ```typescript
 {
-    [agentId: string]: {
-        name: string;                     // Human-readable display name
-        description?: string;             // What this agent does
-        model?: string;                   // LLM model ID (default: "claude-sonnet-4-20250514")
-        systemPrompt?: string;            // Relative path to .md file (default: "./agents/{id}/system.md")
-        graph?: string;                   // Relative path to .ts file (default: null → built-in ReAct)
-        memory?: {
-            enabled: boolean;             // true = persist session messages + load on resume
-        };
-        limits?: {
-            maxTurns?: number;            // Max agent↔tools loop iterations (default: 10)
-        };
-        access: Array<{
-            entity: string;               // Collection name, "tool:{name}", or "app:{appId}/{entity}"
-            actions: string[];            // ["read","create","update","delete"] or ["use"] for tools
-        }>;
-    }
+    name: string;
+    description?: string;
+    model?: string;                   // default: "claude-sonnet-4-20250514"
+    systemPrompt?: string;            // relative path to .md file
+    graph?: string;                   // relative path to .ts file (null → built-in ReAct)
+    memory?: {
+        enabled: boolean;             // persist session messages + load on resume
+    };
+    limits?: {
+        maxTurns?: number;            // default: 10
+    };
+    access: Array<{
+        entity: string;               // collection name, "tool:{name}", or "app:{appId}/{entity}"
+        actions: string[];            // ["read","create","update","delete"] or ["use"]
+    }>;
 }
 ```
 
 **Conventions:**
-- Agent IDs are kebab-case, unique within the deployment
-- Core auto-creates the RBAC role `agent:{id}` from the `access` list — no manual role declaration
-- The `systemPrompt` path is relative to the project root
+- Core auto-creates the RBAC role from the `access` list — no manual role declaration
+- `systemPrompt` path is relative to the project root
 - If `graph` is omitted, the agent uses the built-in ReAct loop
-- Tools are determined from `access`: entries with `entity` starting with `tool:` → those tools get loaded into the LangGraph
+- `tool:` prefixed entities in `access` → those tools get loaded into the LangGraph
 
 ### How `access` works under the hood
 
-At install time, Core reads `agents.{id}.access` and translates it into standard RBAC artifacts:
+At install time, Core reads `agent.access` and translates it into standard RBAC artifacts:
 
 1. Creates role `agent:prospector` in `rbac_roles`
 2. For each access entry, creates a policy in `rbac_policies`:
    - `{ entity: "leads", actions: ["read", "create", "update"] }` → RBAC policy `(agent:prospector, leads, read/create/update)`
    - `{ entity: "tool:web_search", actions: ["use"] }` → stored as tool grant
    - `{ entity: "app:crm/contacts", actions: ["read"] }` → RBAC policy with cross-app flag
-
-Same RBAC tables, same enforcement engine, same audit trail. The `access` list is just a cleaner way to declare it in the manifest.
 
 **Three kinds of entity:**
 
@@ -308,13 +294,11 @@ Same RBAC tables, same enforcement engine, same audit trail. The `access` list i
 
 `query_data` and `mutate_data` are auto-loaded when the agent has ANY data access entry (own collections or cross-app). `web_search` and `web_fetch` are loaded only when the corresponding `tool:` entry exists in `access`.
 
-Every data tool call goes through Core's middleware: authentication → RBAC → execution → audit.
-
 ---
 
 ## Agent Implementation (TypeScript)
 
-Agents are TypeScript, consistent with app workers. The agent runtime is a new package `@rootcx/agent-runtime` that runs inside Bun.
+`@rootcx/agent-runtime` — runs inside Bun, same as app workers.
 
 ### Project structure
 
@@ -327,8 +311,6 @@ sales-prospector/
 │       └── graph.ts               # Optional: custom LangGraph
 └── package.json                   # includes @rootcx/agent-runtime
 ```
-
-No `backend/` folder. No `src/` folder. No frontend. Just the manifest, the agent code, and dependencies.
 
 ### The agent runtime package (`runtime/agent/`)
 
@@ -411,37 +393,31 @@ interface RunAgentParams {
 export async function runAgent(params: RunAgentParams) {
     const { agentId, sessionId, message, systemPrompt, config, history, caller, writer } = params;
 
-    // 1. Build LLM provider
     const model = buildProvider(config.model);
 
-    // 2. Tools come from access list: entity starting with "tool:" → tool name
-    //    e.g. { entity: "tool:web_search" } → loads "web_search"
-    //    query_data/mutate_data are auto-loaded when any data access entry exists
+    // "tool:" access entries → tool names; query_data/mutate_data auto-loaded for any data access
     const tools = buildToolRegistry(config._enabledTools, {
         appId: config._appId,
         agentId,
         runtimeUrl: process.env.ROOTCX_RUNTIME_URL!,
     });
 
-    // 3. Load custom graph or use default ReAct
     let graph;
     if (config._graphAbsolutePath) {
         const custom = await import(config._graphAbsolutePath);
         graph = typeof custom.default === "function"
-            ? custom.default(model, tools)   // custom graph receives model + tools
+            ? custom.default(model, tools)
             : custom.default;
     } else {
         graph = buildDefaultGraph(model, tools);
     }
 
-    // 4. Assemble messages: system prompt + session history + new message
     const messages: BaseMessage[] = [
         new SystemMessage(systemPrompt),
         ...history,
         new HumanMessage(message),
     ];
 
-    // 5. Execute the graph with streaming
     const maxTurns = config.limits?.maxTurns ?? 10;
     let turns = 0;
     let finalResponse = "";
@@ -495,8 +471,6 @@ function buildProvider(modelId: string | undefined) {
 ```
 
 ### Default ReAct graph (`default-graph.ts`)
-
-The built-in graph. Used when an agent does not provide a custom `graph.ts`.
 
 ```typescript
 import { StateGraph, MessagesAnnotation } from "@langchain/langgraph";
@@ -693,19 +667,19 @@ No vector database. No embeddings. The agent's data IS its knowledge base.
 ### Rust (Core side)
 
 **1. Extend `AppManifest`** in `crates/shared-types/src/lib.rs`
-Add `agents: Option<HashMap<String, AgentDefinition>>` with sub-structs.
+Add `agent: Option<AgentDefinition>` (one agent per app).
 
 **2. `AgentExtension`** in `core/src/extensions/agents/`
 New `RuntimeExtension`:
 - `bootstrap()`: create `rootcx_system.agents` + `rootcx_system.agent_sessions` tables
-- `on_app_installed()`: read `manifest.agents`, upsert into `rootcx_system.agents`, auto-create `agent:{id}` role, translate `access` entries into RBAC policies, extract `tool:` entries as tool allowlist
+- `on_app_installed()`: read `manifest.agent`, upsert into `rootcx_system.agents`, auto-create agent role, translate `access` entries into RBAC policies, extract `tool:` entries as tool allowlist
 - `routes()`: invoke (SSE), list agents, list sessions, session detail
 
 **3. IPC messages** in `core/src/ipc.rs`
 Add `AgentInvoke` (outbound) and `AgentChunk`/`AgentDone`/`AgentError` (inbound).
 
 **4. Deploy extension** in `core/src/routes/deploy.rs`
-If `manifest.agents` is non-empty: read system prompt files, start agent worker via existing `WorkerManager`.
+If `manifest.agent` is present: read system prompt files, start agent worker via existing `WorkerManager`.
 
 **5. Scaffold layer** in `studio/src-tauri/src/scaffold/layers/agent.rs`
 Generate manifest + agent folder + `system.md` + `package.json`.
@@ -731,7 +705,7 @@ Teaches Forge: manifest schema, RBAC patterns, tool catalog, system prompt best 
 4. Click Deploy
 
 5. Invoke:
-   POST /api/v1/apps/sales-prospector/agents/prospector/invoke
+   POST /api/v1/apps/sales-prospector/agent/invoke
    { "message": "Research Jane Doe, CTO at Acme Corp" }
 
 6. Watch (SSE streaming):
@@ -770,7 +744,7 @@ Teaches Forge: manifest schema, RBAC patterns, tool catalog, system prompt best 
 
 ## Definition of done
 
-- [ ] `manifest.json` with `agents` section accepted by `install_app()`
+- [ ] `manifest.json` with `agent` field accepted by `install_app()`
 - [ ] Installation auto-creates `agent:{id}` role from `access` list
 - [ ] Agents registered in `rootcx_system.agents` on install
 - [ ] Re-install updates agent config without losing sessions
@@ -813,4 +787,3 @@ Teaches Forge: manifest schema, RBAC patterns, tool catalog, system prompt best 
 | Domain scoping | Restrict `tool:web_fetch` to specific domains (e.g. only linkedin.com) via policy `scope` field |
 | Browser automation | Agent navigates web pages via headless Chromium |
 
-Each is a natural extension. None requires rearchitecting.

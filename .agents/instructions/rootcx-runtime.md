@@ -302,8 +302,13 @@ Secrets: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `BRAVE_API_KEY`, `TAVILY_API_KEY
 ### Invocation
 
 ```
-POST /api/v1/apps/{appId}/agents/{agentId}/invoke
-{ "message": "..." }
+POST /api/v1/apps/{appId}/agent/invoke
+{ "message": "...", "session_id": "optional-uuid" }
 ```
 
 Response: SSE stream (`chunk`, `done`, `error` events).
+
+Other endpoints:
+- `GET /api/v1/apps/{appId}/agent` — agent config
+- `GET /api/v1/apps/{appId}/agent/sessions` — list sessions
+- `GET /api/v1/apps/{appId}/agent/sessions/{sessionId}` — get session
