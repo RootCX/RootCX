@@ -31,7 +31,7 @@ An agent project has a `manifest.json` with an `agents` section:
             "systemPrompt": "./agents/worker/system.md",
             "graph": "./agents/worker/graph.ts",
             "memory": { "enabled": true },
-            "limits": { "maxTurns": 20, "maxBudgetUsd": 2.00 },
+            "limits": { "maxTurns": 20 },
             "access": [
                 { "entity": "records", "actions": ["read", "create", "update"] },
                 { "entity": "tool:web_search", "actions": ["use"] },

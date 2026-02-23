@@ -204,7 +204,7 @@ manifest.json
             "systemPrompt": "./agents/prospector/system.md",
             "graph": "./agents/prospector/graph.ts",
             "memory": { "enabled": true },
-            "limits": { "maxTurns": 20, "maxBudgetUsd": 2.00 },
+            "limits": { "maxTurns": 20 },
             "access": [
                 { "entity": "leads", "actions": ["read", "create", "update"] },
                 { "entity": "research_notes", "actions": ["read", "create"] },
@@ -249,7 +249,6 @@ One block. Complete picture.
         };
         limits?: {
             maxTurns?: number;            // Max agent↔tools loop iterations (default: 10)
-            maxBudgetUsd?: number;        // Abort if estimated cost exceeds this (default: 1.00)
         };
         access: Array<{
             entity: string;               // Collection name, "tool:{name}", or "app:{appId}/{entity}"
@@ -789,7 +788,6 @@ Teaches Forge: manifest schema, RBAC patterns, tool catalog, system prompt best 
 - [ ] Session resumes with previous messages on new invoke with same session
 - [ ] Agent persists data to its own collections via `mutate_data`
 - [ ] `maxTurns` stops the agent loop
-- [ ] `maxBudgetUsd` aborts when cost ceiling reached
 - [ ] Agent worker restarts on crash (existing supervisor)
 - [ ] Forge generates working agent from natural language description
 - [ ] `rootcx new --template agent` generates working starter project
@@ -808,6 +806,7 @@ Teaches Forge: manifest schema, RBAC patterns, tool catalog, system prompt best 
 | Webhooks | External services trigger agents |
 | Fleet Dashboard | Studio UI to monitor all agents, costs, errors |
 | Chat widget | Embeddable chat component in web apps |
+| Budget limits (`maxBudgetUsd`) | Track token costs per invocation, abort when ceiling reached |
 | Multi-agent delegation | Agents invoke other agents |
 | MCP client | Connect to external MCP tool servers |
 | Approval flows | Human-in-the-loop before destructive actions |

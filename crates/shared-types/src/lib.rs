@@ -182,8 +182,6 @@ pub struct AgentMemory {
 pub struct AgentLimits {
     #[serde(default)]
     pub max_turns: Option<u32>,
-    #[serde(default)]
-    pub max_budget_usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

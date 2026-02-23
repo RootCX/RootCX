@@ -24,7 +24,7 @@ impl Layer for AgentLayer {
                         "model": "global.anthropic.claude-opus-4-6-v1",
                         "systemPrompt": format!("./agents/{agent_id}/system.md"),
                         "memory": { "enabled": true },
-                        "limits": { "maxTurns": 10, "maxBudgetUsd": 1.0 },
+                        "limits": { "maxTurns": 10 },
                         "access": []
                     }
                 }

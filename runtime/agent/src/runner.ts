@@ -26,7 +26,7 @@ export interface EntitySchema {
 
 export interface AgentConfig {
     model?: string;
-    limits?: { maxTurns?: number; maxBudgetUsd?: number };
+    limits?: { maxTurns?: number };
     _appId: string;
     _agentId: string;
     _enabledTools: string[];

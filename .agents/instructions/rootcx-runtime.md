@@ -536,7 +536,7 @@ Same schema as apps. The `agents` section declares each agent:
             "model": "claude-sonnet-4-20250514",
             "systemPrompt": "./agents/prospector/system.md",
             "memory": { "enabled": true },
-            "limits": { "maxTurns": 20, "maxBudgetUsd": 2.00 },
+            "limits": { "maxTurns": 20 },
             "access": [
                 { "entity": "leads", "actions": ["read", "create", "update"] },
                 { "entity": "research_notes", "actions": ["read", "create"] },
@@ -560,7 +560,6 @@ Same schema as apps. The `agents` section declares each agent:
         memory?: { enabled: boolean };
         limits?: {
             maxTurns?: number;            // default: 10
-            maxBudgetUsd?: number;        // default: 1.00
         };
         access: Array<{
             entity: string;               // collection name, "tool:{name}", or "app:{appId}/{entity}"
