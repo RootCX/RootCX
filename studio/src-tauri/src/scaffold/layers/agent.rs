@@ -24,7 +24,6 @@ impl Layer for AgentLayer {
                     "provider": provider,
                     "systemPrompt": "./agent/system.md",
                     "memory": { "enabled": true },
-                    "limits": { "maxTurns": 10 },
                     "access": []
                 }
             });

@@ -67,15 +67,13 @@ export async function runAgent(params: RunAgentParams) {
         new HumanMessage(message),
     ];
 
-    const maxTurns = config.limits?.maxTurns ?? 10;
+    const maxTurns = config.limits?.maxTurns;
     let turns = 0;
-    // Intentionally accumulates the full response text to return in agent_done
     let fullResponse = "";
 
-    // Each turn = agent node + tool node = 2 graph steps
     const stream = graph.streamEvents(
         { messages },
-        { version: "v2", recursionLimit: maxTurns * 2 },
+        { version: "v2", recursionLimit: maxTurns ? maxTurns * 2 : 1000 },
     );
 
     for await (const event of stream) {
@@ -91,7 +89,8 @@ export async function runAgent(params: RunAgentParams) {
                 });
             }
         } else if (event.event === "on_chat_model_end") {
-            if (++turns > maxTurns) {
+            turns++;
+            if (maxTurns && turns > maxTurns) {
                 writer.send({
                     type: "agent_error",
                     invoke_id: invokeId,
