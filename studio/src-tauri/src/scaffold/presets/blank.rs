@@ -21,8 +21,8 @@ impl Preset for BlankPreset {
                 label: "What are you building?".into(),
                 question_type: QuestionType::Choice {
                     options: vec![
-                        ChoiceOption { value: "app".into(), label: "App (UI + backend)".into() },
-                        ChoiceOption { value: "agent".into(), label: "AI Agent (no UI)".into() },
+                        ChoiceOption { value: "app".into(), label: "App".into() },
+                        ChoiceOption { value: "agent".into(), label: "AI Agent".into() },
                     ],
                 },
                 default: Some(AnswerValue::Text("app".into())),
