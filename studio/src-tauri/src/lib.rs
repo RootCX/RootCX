@@ -13,7 +13,7 @@ use tracing::error;
 
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_log::Builder::new().build())
+        .plugin(tauri_plugin_log::Builder::new().level(tauri_plugin_log::log::LevelFilter::Info).build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
@@ -49,15 +49,13 @@ pub fn run() {
         .setup(|app| {
             let view_menu = menu::setup(app)?;
             app.manage(view_menu);
-
             app.manage(tokio::sync::Mutex::new(terminal::TerminalState::default()));
             app.manage(tokio::sync::Mutex::new(runner::RunnerState::default()));
 
-            let app_state = AppState::from_tauri(app);
-            let state = app_state.clone();
-            app.manage(app_state);
+            let state = AppState::from_tauri(app);
+            let bg = state.clone();
+            app.manage(state);
 
-            // Start daemon + boot in background so the UI opens immediately
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = tokio::task::spawn_blocking(rootcx_runtime::ensure_runtime)
                     .await
@@ -65,7 +63,7 @@ pub fn run() {
                 {
                     error!("failed to start core daemon: {e}");
                 }
-                if let Err(e) = state.boot().await {
+                if let Err(e) = bg.boot().await {
                     error!("runtime boot failed: {e}");
                 }
             });
@@ -84,10 +82,10 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("failed to build tauri application")
-        .run(|_app, event| {
+        .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
-                let state = _app.state::<AppState>().inner().clone();
-                let runner = _app.state::<tokio::sync::Mutex<runner::RunnerState>>();
+                let state = app.state::<AppState>().inner().clone();
+                let runner = app.state::<tokio::sync::Mutex<runner::RunnerState>>();
                 tauri::async_runtime::block_on(async {
                     runner.lock().await.stop();
                     state.shutdown().await;

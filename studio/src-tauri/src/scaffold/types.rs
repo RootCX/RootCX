@@ -12,6 +12,7 @@ pub struct RuntimePaths {
     pub sdk: PathBuf,
     pub ui: PathBuf,
     pub client_crate: PathBuf,
+    pub agent_runtime: PathBuf,
 }
 
 impl RuntimePaths {
@@ -24,6 +25,10 @@ impl RuntimePaths {
                 .join("../../runtime/client")
                 .canonicalize()
                 .map_err(|e| format!("runtime client crate not found: {e}"))?,
+            agent_runtime: base
+                .join("../../runtime/agent")
+                .canonicalize()
+                .map_err(|e| format!("agent runtime not found: {e}"))?,
         })
     }
 }

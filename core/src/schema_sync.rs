@@ -830,7 +830,6 @@ mod tests {
         };
         let stmts = generate_ddl(&diff);
 
-        // Find positions of key operations
         let drop_check_pos = stmts.iter().position(|s| s.contains("DROP CONSTRAINT")).unwrap();
         let alter_type_pos = stmts.iter().position(|s| s.contains("TYPE DOUBLE PRECISION")).unwrap();
         let add_col_pos = stmts.iter().position(|s| s.contains("ADD COLUMN")).unwrap();

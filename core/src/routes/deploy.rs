@@ -57,9 +57,8 @@ pub async fn deploy_backend(
         install_deps(&bun_bin, &app_dir).await?;
     }
 
-    let w = wm;
-    let _ = w.stop_app(&app_id).await;
-    w.start_app(&pool, &secrets, &app_id).await?;
+    let _ = wm.stop_app(&app_id).await;
+    wm.start_app(&pool, &secrets, &app_id).await?;
 
     Ok(Json(json!({ "message": format!("app '{app_id}' deployed and started") })))
 }

@@ -29,8 +29,6 @@ pub fn start(c: &ServiceConfig)     -> Result<(), PlatformError> { imp::start(c)
 pub fn stop(c: &ServiceConfig)      -> Result<(), PlatformError> { imp::stop(c) }
 pub fn status(c: &ServiceConfig)    -> Result<ServiceStatus, PlatformError> { imp::status(c) }
 
-// ── macOS — launchd LaunchAgent ───────────────────────────────────────────────
-
 #[cfg(target_os = "macos")]
 mod imp {
     use super::{PlatformError, ServiceConfig, ServiceStatus};
@@ -97,8 +95,6 @@ mod imp {
     }
 }
 
-// ── Linux — systemd user unit ─────────────────────────────────────────────────
-
 #[cfg(target_os = "linux")]
 mod imp {
     use super::{PlatformError, ServiceConfig, ServiceStatus};
@@ -152,8 +148,6 @@ mod imp {
         { ServiceStatus::Running } else { ServiceStatus::Stopped })
     }
 }
-
-// ── Windows — Task Scheduler ──────────────────────────────────────────────────
 
 #[cfg(windows)]
 mod imp {
