@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use rootcx_shared_types::{AppManifest, InstalledApp, OsStatus, SchemaVerification};
+use rootcx_shared_types::{AiConfig, AppManifest, InstalledApp, OsStatus, SchemaVerification};
 use serde_json::Value as JsonValue;
 
 pub mod daemon;
@@ -152,6 +153,49 @@ impl RuntimeClient {
         let resp = self.authed(self.client.get(self.api(&format!("/apps/{app_id}/worker/status")))).send().await?;
         let body: JsonValue = check_response(resp).await?.json().await?;
         Ok(body["status"].as_str().unwrap_or("unknown").to_string())
+    }
+
+    pub async fn get_ai_config(&self) -> Result<Option<AiConfig>, ClientError> {
+        let resp = self.authed(self.client.get(self.api("/config/ai"))).send().await?;
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        Ok(Some(check_response(resp).await?.json().await?))
+    }
+
+    pub async fn set_ai_config(&self, config: &AiConfig) -> Result<(), ClientError> {
+        let resp = self.authed(self.client.put(self.api("/config/ai"))).json(config).send().await?;
+        check_response(resp).await?;
+        Ok(())
+    }
+
+    pub async fn get_forge_config(&self) -> Result<JsonValue, ClientError> {
+        let resp = self.authed(self.client.get(self.api("/config/ai/forge"))).send().await?;
+        check_response(resp).await?.json().await.map_err(Into::into)
+    }
+
+    pub async fn get_platform_env(&self) -> Result<HashMap<String, String>, ClientError> {
+        let resp = self.authed(self.client.get(self.api("/platform/secrets/env"))).send().await?;
+        let body: HashMap<String, String> = check_response(resp).await?.json().await?;
+        Ok(body)
+    }
+
+    pub async fn list_platform_secrets(&self) -> Result<Vec<String>, ClientError> {
+        let resp = self.authed(self.client.get(self.api("/platform/secrets"))).send().await?;
+        check_response(resp).await?.json().await.map_err(Into::into)
+    }
+
+    pub async fn set_platform_secret(&self, key: &str, value: &str) -> Result<(), ClientError> {
+        let body = serde_json::json!({ "key": key, "value": value });
+        let resp = self.authed(self.client.post(self.api("/platform/secrets"))).json(&body).send().await?;
+        check_response(resp).await?;
+        Ok(())
+    }
+
+    pub async fn delete_platform_secret(&self, key: &str) -> Result<(), ClientError> {
+        let resp = self.authed(self.client.delete(self.api(&format!("/platform/secrets/{key}")))).send().await?;
+        check_response(resp).await?;
+        Ok(())
     }
 
     async fn worker_action(&self, app_id: &str, action: &str) -> Result<String, ClientError> {

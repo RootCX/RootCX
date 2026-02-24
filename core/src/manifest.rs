@@ -47,10 +47,10 @@ pub async fn install_app(
                 sqlx::query(stmt).execute(pool).await.map_err(RuntimeError::Schema)?;
             }
         }
+    }
 
-        for ext in extensions {
-            ext.on_app_installed(pool, manifest).await?;
-        }
+    for ext in extensions {
+        ext.on_app_installed(pool, manifest).await?;
     }
 
     info!(

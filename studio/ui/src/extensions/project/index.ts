@@ -11,6 +11,7 @@ async function openFolder() {
 async function createProject() {
   const result = await showScaffoldWizard();
   if (!result) return;
+
   await invoke("scaffold_project", { ...result });
   workspace.openProject(result.path);
 }

@@ -25,7 +25,16 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
     .await
     .map_err(RuntimeError::Schema)?;
 
-    // Bootstrap secrets and jobs tables
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rootcx_system.config (
+            key   TEXT PRIMARY KEY,
+            value JSONB NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(RuntimeError::Schema)?;
+
     crate::secrets::bootstrap_secrets_schema(pool).await?;
     crate::jobs::bootstrap_jobs_schema(pool).await?;
 
