@@ -2,39 +2,6 @@ export interface RuntimeClientOptions {
   baseUrl?: string;
 }
 
-export interface OsStatus {
-  runtime: { version: string; state: string };
-  postgres: { state: string; port: number | null; data_dir: string | null };
-  forge: { state: string; port: number | null };
-}
-
-export interface InstalledApp {
-  id: string;
-  name: string;
-  version: string;
-  status: string;
-  entities: string[];
-}
-
-export interface AppManifest {
-  appId: string;
-  name: string;
-  version?: string;
-  description?: string;
-  routes?: unknown[];
-  permissions?: {
-    roles: Record<string, { description?: string; inherits?: string[] }>;
-    defaultRole?: string;
-    policies: {
-      role: string;
-      entity: string;
-      actions: string[];
-      ownership?: boolean;
-    }[];
-  };
-  dataContract?: unknown[];
-}
-
 export interface AuthUser {
   id: string;
   username: string;
@@ -56,7 +23,6 @@ export interface RegisterInput {
   email?: string;
   displayName?: string;
 }
-
 
 export interface RoleDefinition {
   name: string;
@@ -91,7 +57,6 @@ export class RuntimeClient {
     this.baseUrl = opts?.baseUrl ?? DEFAULT_BASE_URL;
   }
 
-  /** Set tokens (e.g. restored from localStorage). */
   setTokens(access: string | null, refresh: string | null): void {
     this.accessToken = access;
     this.refreshToken = refresh;
@@ -104,58 +69,6 @@ export class RuntimeClient {
   getRefreshToken(): string | null {
     return this.refreshToken;
   }
-
-
-  async isAvailable(): Promise<boolean> {
-    try {
-      const res = await fetch(`${this.baseUrl}/health`);
-      return res.ok;
-    } catch {
-      return false;
-    }
-  }
-
-  async waitForReady(timeoutMs = 30000): Promise<void> {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      if (await this.isAvailable()) return;
-      await new Promise((r) => setTimeout(r, 500));
-    }
-    throw new RuntimeApiError(0, `Runtime not ready after ${timeoutMs}ms`);
-  }
-
-
-  async status(): Promise<OsStatus> {
-    const res = await fetch(`${this.baseUrl}/api/v1/status`);
-    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
-    return res.json();
-  }
-
-
-  async installApp(manifest: AppManifest): Promise<{ message: string }> {
-    const res = await fetch(`${this.baseUrl}/api/v1/apps`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(manifest),
-    });
-    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
-    return res.json();
-  }
-
-  async listApps(): Promise<InstalledApp[]> {
-    const res = await fetch(`${this.baseUrl}/api/v1/apps`);
-    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
-    return res.json();
-  }
-
-  async uninstallApp(appId: string): Promise<{ message: string }> {
-    const res = await fetch(`${this.baseUrl}/api/v1/apps/${encodeURIComponent(appId)}`, {
-      method: "DELETE",
-    });
-    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
-    return res.json();
-  }
-
 
   async listRecords<T = Record<string, unknown>>(
     appId: string,
@@ -220,7 +133,6 @@ export class RuntimeClient {
     return res.json();
   }
 
-
   async rpc(appId: string, method: string, params?: Record<string, unknown>): Promise<unknown> {
     const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/rpc`, {
       method: "POST",
@@ -230,7 +142,6 @@ export class RuntimeClient {
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }
-
 
   async register(data: RegisterInput): Promise<{ user: AuthUser }> {
     const res = await fetch(`${this.baseUrl}/api/v1/auth/register`, {
@@ -291,7 +202,6 @@ export class RuntimeClient {
     return res.json();
   }
 
-
   async listRoles(appId: string): Promise<RoleDefinition[]> {
     const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/roles`);
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
@@ -333,7 +243,6 @@ export class RuntimeClient {
     return res.json();
   }
 
-  /** Fetch with Authorization header and auto-refresh on 401. */
   private async authFetch(url: string, init?: RequestInit): Promise<Response> {
     const doFetch = (token: string | null) => {
       const headers = new Headers(init?.headers);
