@@ -46,6 +46,46 @@ export interface EffectivePermissions {
   permissions: Record<string, EntityPermission>;
 }
 
+export type WhereOperator =
+  | "$eq"
+  | "$ne"
+  | "$gt"
+  | "$gte"
+  | "$lt"
+  | "$lte"
+  | "$like"
+  | "$ilike"
+  | "$in"
+  | "$contains"
+  | "$isNull";
+
+export type WhereValue = string | number | boolean | null | unknown[];
+
+export type FieldCondition =
+  | WhereValue
+  | Partial<Record<WhereOperator, WhereValue>>;
+
+export type WhereClause = {
+  [field: string]: FieldCondition | WhereClause[] | WhereClause;
+} & {
+  $and?: WhereClause[];
+  $or?: WhereClause[];
+  $not?: WhereClause;
+};
+
+export interface QueryOptions {
+  where?: WhereClause;
+  orderBy?: string;
+  order?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
+}
+
+export interface QueryResult<T> {
+  data: T[];
+  total: number;
+}
+
 const DEFAULT_BASE_URL = "http://localhost:9100";
 
 export class RuntimeClient {
@@ -73,9 +113,26 @@ export class RuntimeClient {
   async listRecords<T = Record<string, unknown>>(
     appId: string,
     entity: string,
+    params?: Record<string, string>,
   ): Promise<T[]> {
-    const url = `${this.baseUrl}/api/v1/apps/${enc(appId)}/collections/${enc(entity)}`;
-    const res = await this.authFetch(url);
+    const base = `${this.baseUrl}/api/v1/apps/${enc(appId)}/collections/${enc(entity)}`;
+    const qs = params ? "?" + new URLSearchParams(params).toString() : "";
+    const res = await this.authFetch(base + qs);
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async queryRecords<T = Record<string, unknown>>(
+    appId: string,
+    entity: string,
+    opts: QueryOptions,
+  ): Promise<QueryResult<T>> {
+    const url = `${this.baseUrl}/api/v1/apps/${enc(appId)}/collections/${enc(entity)}/query`;
+    const res = await this.authFetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts),
+    });
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }

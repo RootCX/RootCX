@@ -3,45 +3,49 @@ import { z } from "zod";
 import type { EntitySchema } from "../runner.js";
 import { formatSchema } from "./schema.js";
 
+const WHERE_DSL = `\
+WHERE DSL (MongoDB-style):
+- Equality shorthand: {"field":"value"}
+- Operators: {"field":{"$op":value}} — $eq $ne $gt $gte $lt $lte $like $ilike $in $contains $isNull
+- $like/$ilike: SQL pattern (% = wildcard). $in: array. $contains: array subset. $isNull: bool.
+- Logic: $and:[...] $or:[...] $not:{...} — nestable. Top-level keys are AND-ed.
+Example: {"$or":[{"status":"active"},{"role":"admin"}],"age":{"$gte":18}}`;
+
 export function createQueryDataTool(
     appId: string,
     runtimeUrl: string,
     authToken: string,
     dataContract: EntitySchema[],
 ) {
+    const headers = { Authorization: `Bearer ${authToken}` };
+
     return tool(
-        async ({ entity, app, filter }) => {
-            const targetApp = app ?? appId;
-            const url = new URL(
-                `/api/v1/apps/${targetApp}/collections/${entity}`,
-                runtimeUrl,
-            );
+        async ({ entity, app, where: w, orderBy, order, limit, offset }) => {
+            const base = `${runtimeUrl}/api/v1/apps/${app ?? appId}/collections/${entity}`;
+            const useQuery = w || orderBy || order || limit || offset;
 
-            if (filter) {
-                for (const [key, value] of Object.entries(filter)) {
-                    url.searchParams.set(key, String(value));
-                }
-            }
+            const res = useQuery
+                ? await fetch(`${base}/query`, {
+                      method: "POST",
+                      headers: { ...headers, "Content-Type": "application/json" },
+                      body: JSON.stringify({ where: w, orderBy, order, limit, offset }),
+                  })
+                : await fetch(base, { headers });
 
-            const res = await fetch(url, {
-                headers: { "Authorization": `Bearer ${authToken}` },
-            });
-
-            if (!res.ok) {
-                const text = await res.text();
-                return `Error ${res.status}: ${text}`;
-            }
-
+            if (!res.ok) return `Error ${res.status}: ${await res.text()}`;
             return JSON.stringify(await res.json());
         },
         {
             name: "query_data",
-            description:
-                `Query records from a data collection.${formatSchema(dataContract)}`,
+            description: `Query records from a collection. Returns {data,total} with filters, or T[] for simple list.\n${WHERE_DSL}${formatSchema(dataContract)}`,
             schema: z.object({
-                entity: z.string().describe("The collection/entity name"),
-                app: z.string().optional().describe("Target app ID for cross-app reads. Omit to query own app."),
-                filter: z.record(z.string(), z.unknown()).optional().describe("Key-value filter criteria"),
+                entity: z.string().describe("Collection/entity name"),
+                app: z.string().optional().describe("Target app ID for cross-app reads"),
+                where: z.record(z.string(), z.unknown()).optional().describe("WHERE clause — see DSL above"),
+                orderBy: z.string().optional().describe("Sort field (default: created_at)"),
+                order: z.enum(["asc", "desc"]).optional().describe("Sort direction (default: desc)"),
+                limit: z.number().int().min(1).max(1000).optional().describe("Max rows (default: 100)"),
+                offset: z.number().int().min(0).optional().describe("Skip N rows (default: 0)"),
             }),
         },
     );

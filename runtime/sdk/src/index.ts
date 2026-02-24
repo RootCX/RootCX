@@ -8,6 +8,12 @@ export type {
   RoleAssignment,
   EntityPermission,
   EffectivePermissions,
+  WhereOperator,
+  WhereValue,
+  FieldCondition,
+  WhereClause,
+  QueryOptions,
+  QueryResult,
 } from "./client";
 
 export { RuntimeProvider, useRuntimeClient } from "./components/RuntimeProvider";
