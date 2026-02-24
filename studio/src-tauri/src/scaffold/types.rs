@@ -12,6 +12,7 @@ pub struct RuntimePaths {
     pub sdk: PathBuf,
     pub ui: PathBuf,
     pub client_crate: PathBuf,
+    pub agent_runtime: PathBuf,
 }
 
 impl RuntimePaths {
@@ -20,7 +21,14 @@ impl RuntimePaths {
         Ok(Self {
             sdk: base.join("../../runtime/sdk").canonicalize().map_err(|e| format!("SDK not found: {e}"))?,
             ui: base.join("../../runtime/ui").canonicalize().map_err(|e| format!("UI library not found: {e}"))?,
-            client_crate: base.join("../../runtime/client").canonicalize().map_err(|e| format!("runtime client crate not found: {e}"))?,
+            client_crate: base
+                .join("../../runtime/client")
+                .canonicalize()
+                .map_err(|e| format!("runtime client crate not found: {e}"))?,
+            agent_runtime: base
+                .join("../../runtime/agent")
+                .canonicalize()
+                .map_err(|e| format!("agent runtime not found: {e}"))?,
         })
     }
 }
@@ -96,6 +104,7 @@ pub struct ScaffoldContext {
     pub port: u16,
     pub runtime: RuntimePaths,
     pub answers: HashMap<String, AnswerValue>,
+    pub ai_config: Option<rootcx_shared_types::AiConfig>,
 }
 
 pub trait Preset: Send + Sync {
@@ -105,9 +114,5 @@ pub trait Preset: Send + Sync {
 }
 
 pub trait Layer: Send + Sync {
-    fn emit<'a>(
-        &'a self,
-        ctx: &'a ScaffoldContext,
-        emitter: &'a super::emitter::Emitter,
-    ) -> LayerFuture<'a>;
+    fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, emitter: &'a super::emitter::Emitter) -> LayerFuture<'a>;
 }

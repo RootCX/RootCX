@@ -1,0 +1,31 @@
+{
+  "name": "@rootcx/agent-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@langchain/langgraph": "^0.2",
+    "@langchain/core": "^0.3",
+    "zod": "^3.22"
+  },
+  "devDependencies": {
+    "bun-types": "^1.2"
+  },
+  "peerDependencies": {
+    "@langchain/anthropic": "^0.3",
+    "@langchain/openai": "^0.3",
+    "@langchain/aws": "^0.1"
+  },
+  "peerDependenciesMeta": {
+    "@langchain/anthropic": {
+      "optional": true
+    },
+    "@langchain/openai": {
+      "optional": true
+    },
+    "@langchain/aws": {
+      "optional": true
+    }
+  }
+}

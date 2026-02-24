@@ -10,18 +10,15 @@ pub struct AuthLayer {
 impl Layer for AuthLayer {
     fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> LayerFuture<'a> {
         Box::pin(async move {
-            let content = if self.include_auth {
-                auth_app(&ctx.name)
-            } else {
-                simple_app(&ctx.name)
-            };
+            let content = if self.include_auth { auth_app(&ctx.name) } else { simple_app(&ctx.name) };
             e.write("src/App.tsx", &content).await
         })
     }
 }
 
 fn simple_app(name: &str) -> String {
-    format!(r#"import {{ PageHeader }} from "@rootcx/ui";
+    format!(
+        r#"import {{ PageHeader }} from "@rootcx/ui";
 
 export default function App() {{
   return (
@@ -30,11 +27,13 @@ export default function App() {{
     </div>
   );
 }}
-"#)
+"#
+    )
 }
 
 fn auth_app(name: &str) -> String {
-    format!(r#"import {{ AuthGate }} from "@rootcx/runtime";
+    format!(
+        r#"import {{ AuthGate }} from "@rootcx/runtime";
 import {{ AppShell, AppShellSidebar, AppShellMain, Sidebar, SidebarItem, PageHeader, Button }} from "@rootcx/ui";
 import {{ IconLogout, IconHome }} from "@tabler/icons-react";
 
@@ -68,5 +67,6 @@ export default function App() {{
     </AuthGate>
   );
 }}
-"#)
+"#
+    )
 }

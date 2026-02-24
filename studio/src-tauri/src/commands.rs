@@ -1,6 +1,6 @@
 use rootcx_shared_types::OsStatus;
 use serde::Serialize;
-use tauri::{ipc::Channel, State};
+use tauri::{State, ipc::Channel};
 use tokio::sync::Mutex;
 
 use crate::menu::ViewMenuItems;
@@ -36,14 +36,17 @@ pub async fn start_forge(state: State<'_, AppState>, project_path: String) -> Re
 }
 
 #[tauri::command]
-pub async fn save_forge_config(
+pub async fn save_ai_config(
     state: State<'_, AppState>,
-    contents: String,
+    config: rootcx_shared_types::AiConfig,
     project_path: Option<String>,
 ) -> Result<(), String> {
-    state
-        .save_forge_config(&contents, project_path.as_deref())
-        .await
+    state.save_ai_config(&config, project_path.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn get_ai_config(state: State<'_, AppState>) -> Result<Option<rootcx_shared_types::AiConfig>, String> {
+    state.get_ai_config().await
 }
 
 #[derive(Serialize)]
@@ -57,9 +60,7 @@ pub struct DirEntry {
 pub async fn read_dir(path: String) -> Result<Vec<DirEntry>, String> {
     validate_fs_path(&path)?;
     let mut entries = Vec::new();
-    let mut rd = tokio::fs::read_dir(&path)
-        .await
-        .map_err(|e| format!("failed to read directory: {e}"))?;
+    let mut rd = tokio::fs::read_dir(&path).await.map_err(|e| format!("failed to read directory: {e}"))?;
 
     while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -67,11 +68,7 @@ pub async fn read_dir(path: String) -> Result<Vec<DirEntry>, String> {
             continue;
         }
         let metadata = entry.metadata().await.map_err(|e| e.to_string())?;
-        entries.push(DirEntry {
-            name,
-            path: entry.path().to_string_lossy().to_string(),
-            is_dir: metadata.is_dir(),
-        });
+        entries.push(DirEntry { name, path: entry.path().to_string_lossy().to_string(), is_dir: metadata.is_dir() });
     }
 
     entries.sort_by_cached_key(|e| (!e.is_dir, e.name.to_lowercase()));
@@ -87,7 +84,7 @@ pub fn sync_view_menu(hidden: Vec<String>, state: State<'_, ViewMenuItems>) {
 }
 
 fn validate_fs_path(path: &str) -> Result<(), String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
+    let home = rootcx_platform::dirs::home_dir().map_err(|e| e.to_string())?;
     let raw = std::path::Path::new(path);
 
     if !raw.is_absolute() {
@@ -116,7 +113,9 @@ fn normalize_lexical(path: &std::path::Path) -> std::path::PathBuf {
     let mut out = PathBuf::new();
     for comp in path.components() {
         match comp {
-            Component::ParentDir => { out.pop(); }
+            Component::ParentDir => {
+                out.pop();
+            }
             Component::CurDir => {}
             _ => out.push(comp),
         }
@@ -127,25 +126,19 @@ fn normalize_lexical(path: &std::path::Path) -> std::path::PathBuf {
 #[tauri::command]
 pub async fn read_file(path: String) -> Result<String, String> {
     validate_fs_path(&path)?;
-    tokio::fs::read_to_string(&path)
-        .await
-        .map_err(|e| format!("failed to read file: {e}"))
+    tokio::fs::read_to_string(&path).await.map_err(|e| format!("failed to read file: {e}"))
 }
 
 #[tauri::command]
 pub async fn write_file(path: String, contents: String) -> Result<(), String> {
     validate_fs_path(&path)?;
-    tokio::fs::write(&path, contents.as_bytes())
-        .await
-        .map_err(|e| format!("failed to write file: {e}"))
+    tokio::fs::write(&path, contents.as_bytes()).await.map_err(|e| format!("failed to write file: {e}"))
 }
 
 #[tauri::command]
 pub async fn ensure_dir(path: String) -> Result<(), String> {
     validate_fs_path(&path)?;
-    tokio::fs::create_dir_all(&path)
-        .await
-        .map_err(|e| format!("failed to create directory: {e}"))
+    tokio::fs::create_dir_all(&path).await.map_err(|e| format!("failed to create directory: {e}"))
 }
 
 #[tauri::command]
@@ -157,18 +150,12 @@ pub async fn verify_schema(
 }
 
 #[tauri::command]
-pub async fn sync_manifest(
-    state: State<'_, AppState>,
-    project_path: String,
-) -> Result<(), String> {
+pub async fn sync_manifest(state: State<'_, AppState>, project_path: String) -> Result<(), String> {
     state.sync_manifest(&project_path).await
 }
 
 #[tauri::command]
-pub async fn deploy_backend(
-    state: State<'_, AppState>,
-    project_path: String,
-) -> Result<String, String> {
+pub async fn deploy_backend(state: State<'_, AppState>, project_path: String) -> Result<String, String> {
     state.deploy_and_watch(&project_path).await
 }
 
@@ -179,7 +166,11 @@ pub async fn run_app(
     state: State<'_, Mutex<RunnerState>>,
 ) -> Result<(), String> {
     let config = crate::launch::read(std::path::Path::new(&project_path))?;
-    state.lock().await.run(&config.command, &project_path, app_handle);
+    if let Some(ref cmd) = config.command {
+        state.lock().await.run(cmd, &project_path, app_handle);
+    }
+    // Agent projects have no local command — the worker runs in Core
+    // and logs are streamed via subscribe_to_worker_logs in deploy_and_watch.
     Ok(())
 }
 
@@ -191,18 +182,21 @@ pub async fn stop_deployed_worker(state: State<'_, AppState>) -> Result<(), Stri
 
 #[tauri::command]
 pub async fn scaffold_project(
+    state: State<'_, AppState>,
     path: String,
     name: String,
     preset_id: Option<String>,
     answers: Option<std::collections::HashMap<String, crate::scaffold::Answer>>,
 ) -> Result<(), String> {
     validate_fs_path(&path)?;
+    let ai_config = state.get_ai_config().await.ok().flatten();
     crate::scaffold::create(
         std::path::Path::new(&path),
         &name,
         crate::scaffold::RuntimePaths::resolve()?,
         preset_id.as_deref().unwrap_or("blank"),
         answers.unwrap_or_default(),
+        ai_config,
     )
     .await
 }
@@ -260,20 +254,28 @@ pub async fn spawn_terminal(
 }
 
 #[tauri::command]
-pub async fn terminal_write(
-    data: String,
-    state: State<'_, Mutex<TerminalState>>,
-) -> Result<(), String> {
+pub async fn terminal_write(data: String, state: State<'_, Mutex<TerminalState>>) -> Result<(), String> {
     state.lock().await.write(data.as_bytes()).await
 }
 
 #[tauri::command]
-pub async fn terminal_resize(
-    rows: u16,
-    cols: u16,
-    state: State<'_, Mutex<TerminalState>>,
-) -> Result<(), String> {
+pub async fn terminal_resize(rows: u16, cols: u16, state: State<'_, Mutex<TerminalState>>) -> Result<(), String> {
     state.lock().await.resize(rows, cols).await
+}
+
+#[tauri::command]
+pub async fn list_platform_secrets(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    state.list_platform_secrets().await
+}
+
+#[tauri::command]
+pub async fn set_platform_secret(state: State<'_, AppState>, key: String, value: String) -> Result<(), String> {
+    state.set_platform_secret(&key, &value).await
+}
+
+#[tauri::command]
+pub async fn delete_platform_secret(state: State<'_, AppState>, key: String) -> Result<(), String> {
+    state.delete_platform_secret(&key).await
 }
 
 #[cfg(test)]
@@ -282,7 +284,7 @@ mod tests {
 
     #[test]
     fn fs_path_blocks_sensitive_dirs() {
-        let home = std::env::var("HOME").unwrap();
+        let home = rootcx_platform::dirs::home_dir().unwrap().to_string_lossy().to_string();
         for dir in [".ssh", ".gnupg", ".aws", ".kube"] {
             let path = format!("{home}/{dir}/id_rsa");
             assert!(validate_fs_path(&path).is_err(), "should block: {path}");
@@ -302,14 +304,14 @@ mod tests {
 
     #[test]
     fn fs_path_allows_project_dirs() {
-        let home = std::env::var("HOME").unwrap();
+        let home = rootcx_platform::dirs::home_dir().unwrap().to_string_lossy().to_string();
         assert!(validate_fs_path(&format!("{home}/workspace/project/src/main.rs")).is_ok());
         assert!(validate_fs_path(&format!("{home}/Documents/file.txt")).is_ok());
     }
 
     #[test]
     fn fs_path_blocks_dotdot_traversal_to_sensitive_dirs() {
-        let home = std::env::var("HOME").unwrap();
+        let home = rootcx_platform::dirs::home_dir().unwrap().to_string_lossy().to_string();
         let traversal = format!("{home}/workspace/../.ssh/id_rsa");
         assert!(validate_fs_path(&traversal).is_err(), "should block ../ traversal to .ssh");
     }

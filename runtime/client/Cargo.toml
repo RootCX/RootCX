@@ -1,5 +1,5 @@
 [package]
-name = "rootcx-runtime-client"
+name = "rootcx-runtime"
 version.workspace = true
 edition.workspace = true
 
@@ -8,7 +8,5 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+rootcx-platform.workspace = true
 rootcx-shared-types.workspace = true
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"

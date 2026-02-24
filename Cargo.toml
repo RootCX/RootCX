@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "runtime",
+    "core",
     "runtime/client",
+    "crates/platform",
     "crates/postgres-mgmt",
     "crates/shared-types",
     "studio/src-tauri",
@@ -36,7 +37,8 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 
 # Internal crates
-rootcx-runtime = { path = "runtime" }
-rootcx-runtime-client = { path = "runtime/client" }
+rootcx-core = { path = "core" }
+rootcx-platform = { path = "crates/platform" }
+rootcx-runtime = { path = "runtime/client" }
 rootcx-postgres-mgmt = { path = "crates/postgres-mgmt" }
 rootcx-shared-types = { path = "crates/shared-types" }

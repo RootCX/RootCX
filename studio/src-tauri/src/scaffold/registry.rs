@@ -8,9 +8,7 @@ pub struct PresetRegistry {
 
 impl PresetRegistry {
     pub fn new() -> Self {
-        Self {
-            presets: vec![Box::new(BlankPreset)],
-        }
+        Self { presets: vec![Box::new(BlankPreset)] }
     }
 
     pub fn list(&self) -> Vec<PresetInfo> {

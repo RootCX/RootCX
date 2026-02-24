@@ -74,7 +74,7 @@ async fn pipe_stream<R: AsyncReadExt + Unpin>(mut reader: R, handle: AppHandle) 
 }
 
 fn spawn_child(command: &str, cwd: &str) -> Result<tokio::process::Child, std::io::Error> {
-    let (shell, flag) = if cfg!(windows) { ("cmd", "/C") } else { ("sh", "-c") };
+    let (shell, flag) = rootcx_platform::shell::shell_command();
     tokio::process::Command::new(shell)
         .args([flag, command])
         .current_dir(cwd)

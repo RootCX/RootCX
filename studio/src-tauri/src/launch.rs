@@ -15,16 +15,19 @@ const TEMPLATE: &str = r#"{
 pub struct LaunchConfig {
     #[serde(default)]
     pub pre_launch: Vec<String>,
-    pub command: String,
+    /// The local dev command (e.g. "cargo tauri dev"). None for agent projects
+    /// where the worker runs inside Core and no local process is needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 pub fn read(project: &Path) -> Result<LaunchConfig, String> {
     let path = project.join(DIR).join(FILE);
-    let data = std::fs::read_to_string(&path)
-        .map_err(|_| format!("{} not found", path.display()))?;
-    let config: LaunchConfig = serde_json::from_str(&data)
-        .map_err(|e| format!("invalid launch.json: {e}"))?;
-    validate_command(&config.command)?;
+    let data = std::fs::read_to_string(&path).map_err(|_| format!("{} not found", path.display()))?;
+    let config: LaunchConfig = serde_json::from_str(&data).map_err(|e| format!("invalid launch.json: {e}"))?;
+    if let Some(ref cmd) = config.command {
+        validate_command(cmd)?;
+    }
     Ok(config)
 }
 
@@ -92,7 +95,7 @@ mod tests {
         let json = r#"{"preLaunch":["verify_schema","sync_manifest"],"command":"cargo tauri dev"}"#;
         let config: LaunchConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.pre_launch, vec!["verify_schema", "sync_manifest"]);
-        assert_eq!(config.command, "cargo tauri dev");
+        assert_eq!(config.command, Some("cargo tauri dev".into()));
     }
 
     #[test]
@@ -100,6 +103,14 @@ mod tests {
         let json = r#"{"command":"cargo tauri dev"}"#;
         let config: LaunchConfig = serde_json::from_str(json).unwrap();
         assert!(config.pre_launch.is_empty(), "should default to empty vec");
-        assert_eq!(config.command, "cargo tauri dev");
+        assert_eq!(config.command, Some("cargo tauri dev".into()));
+    }
+
+    #[test]
+    fn deserialize_without_command() {
+        let json = r#"{"preLaunch":["verify_schema","deploy_backend"]}"#;
+        let config: LaunchConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.pre_launch, vec!["verify_schema", "deploy_backend"]);
+        assert!(config.command.is_none(), "agent projects have no command");
     }
 }

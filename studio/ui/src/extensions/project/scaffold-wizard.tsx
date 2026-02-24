@@ -41,9 +41,18 @@ export function ScaffoldWizardPortal() {
     );
 }
 
-function isVisible(q: Question, answers: Record<string, boolean | string>): boolean {
-    if (!q.depends_on) return true;
-    return answers[q.depends_on.key] === q.depends_on.equals;
+function resolveVisible(questions: Question[], answers: Record<string, boolean | string>) {
+    const effective = { ...answers };
+    for (;;) {
+        const visible = questions.filter(
+            q => !q.depends_on || effective[q.depends_on.key] === q.depends_on.equals,
+        );
+        const keys = new Set(visible.map(q => q.key));
+        let pruned = false;
+        for (const k of Object.keys(effective))
+            if (!keys.has(k)) { delete effective[k]; pruned = true; }
+        if (!pruned) return { visible, cleaned: effective };
+    }
 }
 
 function Wizard({ onDone }: { onDone: (r: WizardResult | null) => void }) {
@@ -57,9 +66,8 @@ function Wizard({ onDone }: { onDone: (r: WizardResult | null) => void }) {
     const presetId = "blank";
     const cancel = useCallback(() => onDone(null), [onDone]);
 
-    // Filter questions by dependency conditions — recomputed on every answer change
     const visibleQs = useMemo(
-        () => allQuestions.filter((q) => isVisible(q, answers)),
+        () => resolveVisible(allQuestions, answers).visible,
         [allQuestions, answers],
     );
 
@@ -79,9 +87,9 @@ function Wizard({ onDone }: { onDone: (r: WizardResult | null) => void }) {
     }, [name, presetId]);
 
     const advance = useCallback((fromIndex: number, newAnswers: Record<string, boolean | string>) => {
-        const nextVisible = allQuestions.filter((nq) => isVisible(nq, newAnswers));
+        const { visible: nextVisible, cleaned: nextCleaned } = resolveVisible(allQuestions, newAnswers);
         if (fromIndex + 1 >= nextVisible.length) {
-            onDone({ path, name, presetId, answers: newAnswers });
+            onDone({ path, name, presetId, answers: nextCleaned });
         } else {
             setStep(fromIndex + 2); // +1 next question, +1 because step 0 = name
         }
@@ -183,9 +191,6 @@ function Wizard({ onDone }: { onDone: (r: WizardResult | null) => void }) {
                             </div>
                         )}
 
-                        <div className="mt-1.5 text-[10px] text-muted-foreground/40">
-                            Configurable later in manifest.json
-                        </div>
                     </div>
                 )}
             </div>

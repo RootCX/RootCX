@@ -1,0 +1,67 @@
+import { tool } from "@langchain/core/tools";
+import { z } from "zod";
+import type { EntitySchema } from "../runner.js";
+import { formatSchema } from "./schema.js";
+
+export function createMutateDataTool(
+    appId: string,
+    runtimeUrl: string,
+    authToken: string,
+    dataContract: EntitySchema[],
+) {
+    return tool(
+        async ({ entity, action, data, id }) => {
+            const basePath = `/api/v1/apps/${appId}/collections/${entity}`;
+            const headers: Record<string, string> = {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${authToken}`,
+            };
+
+            let url = new URL(basePath, runtimeUrl);
+            let method: string;
+
+            switch (action) {
+                case "create":
+                    method = "POST";
+                    break;
+                case "update":
+                    if (!id) return "Error: 'id' is required for update";
+                    url = new URL(`${basePath}/${id}`, runtimeUrl);
+                    method = "PATCH";
+                    break;
+                case "delete":
+                    if (!id) return "Error: 'id' is required for delete";
+                    url = new URL(`${basePath}/${id}`, runtimeUrl);
+                    method = "DELETE";
+                    break;
+                default:
+                    return `Error: unknown action '${action}'`;
+            }
+
+            const res = await fetch(url, {
+                method,
+                headers,
+                body: action !== "delete" ? JSON.stringify(data ?? {}) : undefined,
+            });
+
+            if (!res.ok) {
+                const text = await res.text();
+                return `Error ${res.status}: ${text}`;
+            }
+
+            if (action === "delete") return "Deleted successfully";
+            return JSON.stringify(await res.json());
+        },
+        {
+            name: "mutate_data",
+            description:
+                `Create, update, or delete records. Array fields (type [text], [number]) must be JSON arrays, not strings.${formatSchema(dataContract)}`,
+            schema: z.object({
+                entity: z.string().describe("The collection/entity name"),
+                action: z.enum(["create", "update", "delete"]).describe("The mutation action"),
+                data: z.record(z.string(), z.unknown()).optional().describe("The record data (for create/update)"),
+                id: z.string().optional().describe("The record UUID (required for update/delete)"),
+            }),
+        },
+    );
+}

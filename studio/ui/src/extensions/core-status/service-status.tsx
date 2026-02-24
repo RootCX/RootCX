@@ -20,7 +20,7 @@ export function ServiceStatus() {
 
   return (
     <>
-      <StatusDot label="Runtime" state={status.runtime.state} />
+      <StatusDot label="Core" state={status.runtime.state} />
       <StatusDot label="Postgres" state={status.postgres.state} />
     </>
   );

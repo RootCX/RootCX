@@ -29,7 +29,7 @@ The workflow is simple: **develop locally, then ship anywhere.** You build your 
 RootCX is built on two core pillars:
 
 1. **RootCX Studio**: A high-performance, extension-first IDE built with **Rust and Tauri v2**.
-2. **RootCX Runtime**: A secure-by-design backend daemon that manages the **bundled PostgreSQL** lifecycle. It serves as the fleet's brain, automatically generating APIs, AI tools, and a shared **Governance Layer** (Auth/SSO, RBAC, and Audit Logs) for every app and agent.
+2. **RootCX Core**: A secure-by-design backend daemon that manages the **bundled PostgreSQL** lifecycle. It serves as the fleet's brain, automatically generating APIs, AI tools, and a shared **Governance Layer** (Auth/SSO, RBAC, and Audit Logs) for every app and agent.
 
 ```text
     ┌──────────────────┐          ┌──────────────────┐
@@ -41,7 +41,7 @@ RootCX is built on two core pillars:
                           │
                           ▼
              ┌─────────────────────────────┐
-             │       RootCX Runtime        │
+             │         RootCX Core         │
              │ (DB, API, Auth, RBAC, Audit)│
              └─────────────────────────────┘
 ```

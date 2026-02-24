@@ -26,13 +26,24 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "resources": {},
+    "externalBin": ["./rootcx-core"],
+    "resources": {
+      "../../core/resources/": "resources/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["English"],
+        "displayLanguageSelector": false,
+        "installerHooks": "./nsis-hooks.nsh"
+      }
+    }
   }
 }

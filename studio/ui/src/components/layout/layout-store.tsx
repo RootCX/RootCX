@@ -17,7 +17,7 @@ export interface LayoutState {
 export type Action =
   | { type: "MOVE_VIEW"; viewId: string; toZone: ZoneId; index?: number }
   | { type: "TOGGLE_VIEW"; viewId: string }
-  | { type: "SHOW_VIEW"; viewId: string }
+  | { type: "SHOW_VIEW"; viewId: string; zone?: ZoneId }
   | { type: "SET_ACTIVE"; zone: ZoneId; viewId: string }
   | { type: "RESET"; defaultState: LayoutState };
 
@@ -27,7 +27,7 @@ const ZONE_IDS: ZoneId[] = ["sidebar", "editor", "bottom", "right"];
 export function buildDefaultState(
   views: { id: string; defaultZone: ZoneId }[],
 ): LayoutState {
-  const zones = Object.fromEntries(ZONE_IDS.map((z) => [z, []])) as Record<ZoneId, string[]>;
+  const zones = Object.fromEntries(ZONE_IDS.map((z) => [z, []])) as unknown as Record<ZoneId, string[]>;
   for (const v of views) zones[v.defaultZone].push(v.id);
   const active = Object.fromEntries(ZONE_IDS.map((z) => [z, zones[z][0] ?? null])) as Record<ZoneId, string | null>;
   const hidden = new Set<string>();
@@ -75,13 +75,15 @@ function reducer(state: LayoutState, action: Action): LayoutState {
       const hidden = new Set(state.hidden);
       hidden.delete(action.viewId);
       const active = { ...state.active };
-      for (const z of ZONE_IDS) {
-        if (state.zones[z].includes(action.viewId)) {
-          active[z] = action.viewId;
-          break;
-        }
+      const existing = ZONE_IDS.find((z) => state.zones[z].includes(action.viewId));
+      if (existing) {
+        active[existing] = action.viewId;
+        return { ...state, active, hidden };
       }
-      return { ...state, active, hidden };
+      if (!action.zone) return { ...state, active, hidden };
+      const zones = { ...state.zones, [action.zone]: [...state.zones[action.zone], action.viewId] };
+      active[action.zone] = action.viewId;
+      return { ...state, zones, active, hidden };
     }
 
     case "SET_ACTIVE":

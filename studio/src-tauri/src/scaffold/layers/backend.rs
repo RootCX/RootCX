@@ -8,8 +8,6 @@ pub struct BackendLayer;
 
 impl Layer for BackendLayer {
     fn emit<'a>(&'a self, _ctx: &'a ScaffoldContext, e: &'a Emitter) -> LayerFuture<'a> {
-        Box::pin(async move {
-            e.write("backend/index.ts", BACKEND_WORKER).await
-        })
+        Box::pin(async move { e.write("backend/index.ts", BACKEND_WORKER).await })
     }
 }

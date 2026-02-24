@@ -5,8 +5,7 @@ import {
   type Part,
   type Permission,
   type Event,
-  type Config,
-} from "@opencode-ai/sdk";
+} from "@opencode-ai/sdk/client";
 import { invoke } from "@tauri-apps/api/core";
 
 let BASE_URL = "http://127.0.0.1:4096";
@@ -15,13 +14,6 @@ let client = createOpencodeClient({ baseUrl: BASE_URL });
 export function setForgePort(port: number) {
   BASE_URL = `http://127.0.0.1:${port}`;
   client = createOpencodeClient({ baseUrl: BASE_URL });
-}
-
-export interface ProviderInfo {
-  id: string;
-  name: string;
-  env: string[];
-  models: Record<string, { id: string; name: string }>;
 }
 
 export interface QuestionOption {
@@ -54,9 +46,6 @@ export interface ForgeState {
   questions: QuestionRequest[];
   streaming: boolean;
   error: string | null;
-  providers: ProviderInfo[];
-  connectedProviders: string[];
-  currentConfig: Config | null;
 }
 
 type Listener = () => void;
@@ -81,13 +70,10 @@ let state: ForgeState = {
   questions: [],
   streaming: false,
   error: null,
-  providers: [],
-  connectedProviders: [],
-  currentConfig: null,
 };
 const listeners = new Set<Listener>();
 let snapshot = state;
-let eventStream: AsyncGenerator | null = null;
+let eventStream: AsyncGenerator<unknown> | null = null;
 
 function emit() {
   snapshot = { ...state, parts: new Map(state.parts) };
@@ -114,8 +100,6 @@ async function connectEvents() {
     emit();
 
     loadSessions();
-    loadProviders();
-    loadConfig();
 
     for await (const event of eventStream) {
       handleEvent(event as Event);
@@ -184,7 +168,7 @@ function handleEvent(event: Event) {
       break;
     }
     case "permission.updated": {
-      const perm = event.properties.permission;
+      const perm = event.properties;
       if (perm.sessionID !== state.sessionId) break;
       state = { ...state, permissions: [...state.permissions, perm] };
       emit();
@@ -261,7 +245,9 @@ export async function selectSession(sessionId: string) {
   try {
     const result = await client.session.messages({ path: { id: sessionId } });
     if (result.data) {
-      state = { ...state, messages: result.data };
+      const messages = result.data.map((m) => m.info);
+      const parts = new Map(result.data.map((m) => [m.info.id, m.parts]));
+      state = { ...state, messages, parts };
       emit();
     }
   } catch { /* ignore */ }
@@ -345,37 +331,6 @@ export async function rejectQuestion(requestId: string) {
   dismissQuestion(requestId);
 }
 
-export async function loadProviders() {
-  try {
-    const result = await client.provider.list();
-    if (result.data) {
-      state = {
-        ...state,
-        providers: result.data.all.map((p) => ({
-          id: p.id,
-          name: p.name,
-          env: p.env,
-          models: Object.fromEntries(
-            Object.entries(p.models).map(([key, m]) => [key, { id: m.id, name: m.name }]),
-          ),
-        })),
-        connectedProviders: result.data.connected,
-      };
-      emit();
-    }
-  } catch { /* ignore */ }
-}
-
-export async function loadConfig() {
-  try {
-    const result = await client.config.get();
-    if (result.data) {
-      state = { ...state, currentConfig: result.data };
-      emit();
-    }
-  } catch { /* ignore */ }
-}
-
 let startedProject: string | null = null;
 
 export async function startForProject(projectPath: string): Promise<void> {
@@ -387,6 +342,7 @@ export async function startForProject(projectPath: string): Promise<void> {
     if (status.port) {
       setForgePort(status.port);
       if (eventStream) {
+        eventStream.return(undefined);
         eventStream = null;
         connectEvents();
       }
@@ -396,4 +352,15 @@ export async function startForProject(projectPath: string): Promise<void> {
   }
 }
 
-connectEvents();
+// Resolve the real Forge port before first connection attempt
+(async () => {
+  try {
+    const status = await invoke<{ port?: number }>("get_forge_status");
+    if (status.port) {
+      setForgePort(status.port);
+    }
+  } catch {
+    // Forge may not be running yet — connectEvents will retry
+  }
+  connectEvents();
+})();
