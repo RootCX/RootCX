@@ -104,6 +104,7 @@ pub struct ScaffoldContext {
     pub port: u16,
     pub runtime: RuntimePaths,
     pub answers: HashMap<String, AnswerValue>,
+    pub ai_config: Option<rootcx_shared_types::AiConfig>,
 }
 
 pub trait Preset: Send + Sync {

@@ -1,6 +1,57 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useCallback, useEffect, useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
+import { aiConfigStore } from "@/lib/ai-models";
+import { showAISetupDialog } from "@/components/ai-setup-dialog";
+
+function AIProviderSection() {
+  const aiConfig = useSyncExternalStore(aiConfigStore.subscribe, aiConfigStore.getSnapshot);
+  const providerName = aiConfigStore.providerName();
+
+  return (
+    <>
+      <h3 className="text-xs font-semibold uppercase tracking-wider text-primary">AI Provider</h3>
+      {aiConfig ? (
+        <div className="flex items-center gap-2">
+          <span className="h-2 w-2 rounded-full bg-green-500" />
+          <span className="flex-1 text-[10px] text-foreground">{providerName}</span>
+          <button className="text-[10px] text-primary hover:underline" onClick={() => showAISetupDialog()}>
+            Change
+          </button>
+        </div>
+      ) : (
+        <Button size="sm" className="h-7 text-[10px]" onClick={() => showAISetupDialog()}>
+          Configure AI Provider
+        </Button>
+      )}
+    </>
+  );
+}
+
+function InstructionsSection() {
+  const [files, setFiles] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    invoke<string[]>("resolve_instructions").then(setFiles).catch(() => setFiles([]));
+  }, []);
+
+  return (
+    <>
+      <h3 className="text-xs font-semibold uppercase tracking-wider text-primary">Instructions</h3>
+      {files === null ? (
+        <span className="text-[10px] text-muted-foreground">Resolving...</span>
+      ) : files.length === 0 ? (
+        <span className="text-[10px] text-yellow-400">No instruction files found.</span>
+      ) : (
+        <div className="flex flex-col gap-0.5">
+          {files.map((f) => (
+            <span key={f} className="rounded-sm bg-accent px-1.5 py-0.5 font-mono text-[10px] text-foreground">{f}</span>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
 
 export default function SettingsPanel() {
   const [keys, setKeys] = useState<string[]>([]);
@@ -46,6 +97,14 @@ export default function SettingsPanel() {
 
   return (
     <div className="flex flex-col gap-3 p-3">
+      <AIProviderSection />
+
+      <div className="my-1 border-t border-border" />
+
+      <InstructionsSection />
+
+      <div className="my-1 border-t border-border" />
+
       <h3 className="text-xs font-semibold uppercase tracking-wider text-primary">
         Platform Secrets
       </h3>

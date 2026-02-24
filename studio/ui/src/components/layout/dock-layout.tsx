@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useRef, useMemo } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -15,6 +15,8 @@ import { LayoutProvider, useLayout, buildDefaultState } from "./layout-store";
 import { useViews } from "@/core/hooks";
 import { views as viewRegistry, executeCommand, workspace, layout } from "@/core/studio";
 import { CommandPaletteOverlay } from "@/extensions/command-palette/palette";
+import { showAISetupDialog } from "@/components/ai-setup-dialog";
+import { aiConfigStore } from "@/lib/ai-models";
 
 function Shell() {
   const { state, dispatch } = useLayout();
@@ -51,6 +53,21 @@ function Shell() {
       u3.then((fn) => fn());
     };
   }, [dispatch]);
+
+  const autoPrompted = useRef(false);
+  useEffect(() => {
+    const check = () => {
+      if (autoPrompted.current) return;
+      aiConfigStore.refresh().then(() => {
+        if (!aiConfigStore.isLoaded() || autoPrompted.current) return;
+        autoPrompted.current = true;
+        if (!aiConfigStore.getSnapshot()) showAISetupDialog();
+      });
+    };
+    const unlisten = listen("runtime-booted", check);
+    check();
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
