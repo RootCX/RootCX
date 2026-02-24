@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 
-use rootcx_browser::BrowserSession;
-use serde_json::Value;
+use rootcx_browser::{BrowserSession, SnapshotMode};
+use serde_json::{json, Value};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
@@ -24,11 +24,7 @@ pub fn spawn_listener() {
 async fn listen_commands() -> Result<(), String> {
     let url = format!("{DAEMON_URL}/api/v1/browser/commands");
     let resp = HTTP.get(&url).send().await.map_err(|e| format!("connect: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("status {}", resp.status()));
-    }
-
+    if !resp.status().is_success() { return Err(format!("status {}", resp.status())); }
     info!("browser command listener connected");
 
     let mut buf = String::new();
@@ -48,9 +44,7 @@ async fn listen_commands() -> Result<(), String> {
                     }
                     consumed = end + 1;
                 }
-                if consumed > 0 {
-                    buf.drain(..consumed);
-                }
+                if consumed > 0 { buf.drain(..consumed); }
             }
             Ok(None) => break,
             Err(e) => return Err(format!("chunk: {e}")),
@@ -63,66 +57,89 @@ async fn execute_command(cmd: Value) {
     let id = cmd["id"].as_u64().unwrap_or(0);
     let action = cmd["action"].as_str().unwrap_or("");
     let params = &cmd["params"];
+    let t0 = std::time::Instant::now();
 
     let result = match dispatch(action, params).await {
-        Ok(val) => val,
+        Ok(val) => {
+            info!(id, action, ms = t0.elapsed().as_millis() as u64, "browser: ok");
+            val
+        }
         Err(e) => {
-            error!(id, action, "browser command failed: {e}");
-            serde_json::json!({ "error": e })
+            error!(id, action, ms = t0.elapsed().as_millis() as u64, "browser: {e}");
+            json!({ "error": format!("{e} (took {}ms)", t0.elapsed().as_millis()) })
         }
     };
 
     let url = format!("{DAEMON_URL}/api/v1/browser/result/{id}");
     if let Err(e) = HTTP.post(&url).json(&result).send().await {
-        error!(id, "failed to post browser result: {e}");
+        error!(id, "browser result post failed: {e}");
     }
 }
 
-async fn ensure_session() -> Result<(), String> {
-    let mut session = SESSION.lock().await;
-    if session.is_none() {
-        info!("launching browser...");
-        *session = Some(
-            BrowserSession::launch()
-                .await
-                .map_err(|e| format!("browser launch failed: {e}"))?,
-        );
-        info!("browser launched");
+fn ok_url(s: &BrowserSession) -> Value {
+    json!({ "ok": true, "url": s.page_url() })
+}
+
+fn parse_mode(params: &Value) -> SnapshotMode {
+    match params["mode"].as_str() {
+        Some("efficient") => SnapshotMode::Efficient,
+        _ => SnapshotMode::Full,
     }
-    Ok(())
+}
+
+fn ref_id(params: &Value) -> Result<u32, String> {
+    params["ref_id"].as_u64().map(|v| v as u32).ok_or_else(|| "missing ref_id".into())
 }
 
 async fn dispatch(action: &str, params: &Value) -> Result<Value, String> {
-    ensure_session().await?;
-    let mut session = SESSION.lock().await;
-    let s = session.as_mut().unwrap();
+    let mut guard = SESSION.lock().await;
+    if guard.is_none() {
+        info!("launching browser...");
+        *guard = Some(BrowserSession::launch().await.map_err(|e| format!("launch: {e}"))?);
+        info!("browser launched");
+    }
+    let s = guard.as_mut().ok_or("session unavailable")?;
 
     match action {
         "navigate" => {
             let url = params["url"].as_str().ok_or("missing url")?;
-            let snap = s.navigate(url).await.map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(snap).unwrap())
+            serde_json::to_value(s.navigate(url).await.map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())
         }
         "snapshot" => {
-            let snap = s.snapshot().await.map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(snap).unwrap())
+            serde_json::to_value(s.snapshot(parse_mode(params)).await.map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())
         }
         "click" => {
-            let ref_id = params["ref_id"].as_u64().ok_or("missing ref_id")? as u32;
-            let snap = s.click(ref_id).await.map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(snap).unwrap())
+            s.click(ref_id(params)?).await.map_err(|e| e.to_string())?;
+            Ok(ok_url(s))
         }
         "type" => {
-            let ref_id = params["ref_id"].as_u64().ok_or("missing ref_id")? as u32;
+            let id = ref_id(params)?;
             let text = params["text"].as_str().ok_or("missing text")?;
-            let snap = s.type_keys(ref_id, text).await.map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(snap).unwrap())
+            s.type_keys(id, text).await.map_err(|e| e.to_string())?;
+            Ok(ok_url(s))
         }
         "scroll" => {
-            let direction = params["direction"].as_str().unwrap_or("down");
-            let amount = params["amount"].as_u64().unwrap_or(3) as u32;
-            let snap = s.scroll(direction, amount).await.map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(snap).unwrap())
+            let dir = params["direction"].as_str().unwrap_or("down");
+            let amt = params["amount"].as_u64().unwrap_or(3) as u32;
+            s.scroll(dir, amt).await.map_err(|e| e.to_string())?;
+            Ok(ok_url(s))
+        }
+        "press_key" => {
+            let key = params["key"].as_str().ok_or("missing key")?;
+            s.press_key(key).await.map_err(|e| e.to_string())?;
+            Ok(ok_url(s))
+        }
+        "select_option" => {
+            let id = ref_id(params)?;
+            let val = params["value"].as_str().ok_or("missing value")?;
+            s.select_option(id, val).await.map_err(|e| e.to_string())?;
+            Ok(ok_url(s))
+        }
+        "hover" => {
+            s.hover(ref_id(params)?).await.map_err(|e| e.to_string())?;
+            Ok(ok_url(s))
         }
         _ => Err(format!("unknown action: {action}")),
     }

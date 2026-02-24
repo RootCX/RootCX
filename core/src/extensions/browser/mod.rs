@@ -38,15 +38,16 @@ impl RuntimeExtension for BrowserExtension {
         let q = Arc::clone(&self.queue);
         Some(
             Router::new()
-                // Studio SSE + result
                 .route("/api/v1/browser/commands", get(routes::command_stream))
                 .route("/api/v1/browser/result/{cmd_id}", post(routes::submit_result))
-                // Agent tool endpoints
                 .route("/api/v1/browser/navigate", post(routes::navigate))
                 .route("/api/v1/browser/snapshot", post(routes::snapshot))
                 .route("/api/v1/browser/click", post(routes::click))
                 .route("/api/v1/browser/type", post(routes::type_text))
                 .route("/api/v1/browser/scroll", post(routes::scroll))
+                .route("/api/v1/browser/press_key", post(routes::press_key))
+                .route("/api/v1/browser/select_option", post(routes::select_option))
+                .route("/api/v1/browser/hover", post(routes::hover))
                 .layer(axum::Extension(q)),
         )
     }

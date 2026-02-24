@@ -38,7 +38,7 @@ pub async fn launch() -> Result<ChromeHandle, BrowserError> {
         .map_err(|e| BrowserError::Launch(e.to_string()))?;
 
     page.enable_stealth_mode().await.map_err(|e| BrowserError::Launch(e.to_string()))?;
-    // Lifecycle events for wait::network_idle
+    // Lifecycle events for wait::navigate
     page.execute(EnableParams::default()).await.map_err(|e| BrowserError::Launch(e.to_string()))?;
 
     Ok(ChromeHandle { page, _browser: browser, _handler: h })

@@ -98,6 +98,36 @@ export async function runAgent(params: RunAgentParams) {
                 });
                 return;
             }
+        } else if (event.event === "on_tool_start") {
+            const toolName = event.name ?? "unknown";
+            const input = event.data?.input;
+            const inputStr = input ? JSON.stringify(input) : "";
+            writer.send({
+                type: "log",
+                level: "info",
+                message: `[agent] tool_start: ${toolName}${inputStr ? ` ${inputStr}` : ""}`,
+            });
+        } else if (event.event === "on_tool_end") {
+            const toolName = event.name ?? "unknown";
+            const output = event.data?.output;
+            const preview = typeof output === "string"
+                ? output.slice(0, 500)
+                : typeof output?.content === "string"
+                    ? output.content.slice(0, 500)
+                    : "";
+            writer.send({
+                type: "log",
+                level: "info",
+                message: `[agent] tool_end: ${toolName}${preview ? ` (${preview.length > 200 ? preview.slice(0, 200) + "…" : preview})` : ""}`,
+            });
+        } else if (event.event === "on_tool_error") {
+            const toolName = event.name ?? "unknown";
+            const error = event.data?.error;
+            writer.send({
+                type: "log",
+                level: "error",
+                message: `[agent] tool_error: ${toolName}: ${error instanceof Error ? error.message : String(error ?? "unknown")}`,
+            });
         }
     }
 

@@ -11,28 +11,25 @@ use serde_json::{json, Value};
 use super::queue::BrowserQueue;
 use crate::api_error::ApiError;
 
+#[derive(Deserialize)] pub(crate) struct NavigateReq { url: String }
+#[derive(Deserialize)] pub(crate) struct ClickReq { ref_id: u32 }
+#[derive(Deserialize)] pub(crate) struct TypeReq { ref_id: u32, text: String }
+#[derive(Deserialize)] pub(crate) struct PressKeyReq { key: String }
+#[derive(Deserialize)] pub(crate) struct SelectOptionReq { ref_id: u32, value: String }
+#[derive(Deserialize)] pub(crate) struct HoverReq { ref_id: u32 }
 #[derive(Deserialize)]
-pub struct NavigateReq { pub url: String }
-
-#[derive(Deserialize)]
-pub struct ClickReq { pub ref_id: u32 }
-
-#[derive(Deserialize)]
-pub struct TypeReq { pub ref_id: u32, pub text: String }
-
-#[derive(Deserialize)]
-pub struct ScrollReq {
-    #[serde(default = "d_dir")]  pub direction: String,
-    #[serde(default = "d_amt")]  pub amount: u32,
+pub(crate) struct ScrollReq {
+    #[serde(default = "d_dir")] direction: String,
+    #[serde(default = "d_amt")] amount: u32,
 }
 fn d_dir() -> String { "down".into() }
 fn d_amt() -> u32 { 3 }
 
-#[derive(Serialize)]
-pub struct OkResponse { pub ok: bool }
-
 #[derive(Deserialize)]
-pub struct CmdResult { #[serde(flatten)] pub data: Value }
+pub(crate) struct SnapshotReq { #[serde(default)] mode: Option<String> }
+
+#[derive(Serialize)] pub(crate) struct OkResponse { ok: bool }
+#[derive(Deserialize)] pub(crate) struct CmdResult { #[serde(flatten)] data: Value }
 
 pub async fn command_stream(
     Extension(q): Extension<Arc<BrowserQueue>>,
@@ -61,8 +58,8 @@ pub async fn navigate(Extension(q): Extension<Arc<BrowserQueue>>, Json(b): Json<
     q.submit("navigate", json!({"url": b.url})).await.map(Json).map_err(ApiError::Internal)
 }
 
-pub async fn snapshot(Extension(q): Extension<Arc<BrowserQueue>>) -> Result<Json<Value>, ApiError> {
-    q.submit("snapshot", json!({})).await.map(Json).map_err(ApiError::Internal)
+pub async fn snapshot(Extension(q): Extension<Arc<BrowserQueue>>, Json(b): Json<SnapshotReq>) -> Result<Json<Value>, ApiError> {
+    q.submit("snapshot", json!({"mode": b.mode})).await.map(Json).map_err(ApiError::Internal)
 }
 
 pub async fn click(Extension(q): Extension<Arc<BrowserQueue>>, Json(b): Json<ClickReq>) -> Result<Json<Value>, ApiError> {
@@ -75,4 +72,16 @@ pub async fn type_text(Extension(q): Extension<Arc<BrowserQueue>>, Json(b): Json
 
 pub async fn scroll(Extension(q): Extension<Arc<BrowserQueue>>, Json(b): Json<ScrollReq>) -> Result<Json<Value>, ApiError> {
     q.submit("scroll", json!({"direction": b.direction, "amount": b.amount})).await.map(Json).map_err(ApiError::Internal)
+}
+
+pub async fn press_key(Extension(q): Extension<Arc<BrowserQueue>>, Json(b): Json<PressKeyReq>) -> Result<Json<Value>, ApiError> {
+    q.submit("press_key", json!({"key": b.key})).await.map(Json).map_err(ApiError::Internal)
+}
+
+pub async fn select_option(Extension(q): Extension<Arc<BrowserQueue>>, Json(b): Json<SelectOptionReq>) -> Result<Json<Value>, ApiError> {
+    q.submit("select_option", json!({"ref_id": b.ref_id, "value": b.value})).await.map(Json).map_err(ApiError::Internal)
+}
+
+pub async fn hover(Extension(q): Extension<Arc<BrowserQueue>>, Json(b): Json<HoverReq>) -> Result<Json<Value>, ApiError> {
+    q.submit("hover", json!({"ref_id": b.ref_id})).await.map(Json).map_err(ApiError::Internal)
 }

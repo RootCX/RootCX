@@ -7,4 +7,4 @@ mod wait;
 
 pub use error::BrowserError;
 pub use session::BrowserSession;
-pub use snapshot::{Snapshot, refs::RefRegistry};
+pub use snapshot::{Snapshot, SnapshotMode, refs::RefRegistry};
