@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-const DAEMON_URL: &str = "http://localhost:9100";
+pub(crate) const DAEMON_URL: &str = "http://localhost:9100";
 
 static LOG_HTTP: LazyLock<reqwest::Client> =
     LazyLock::new(|| reqwest::Client::new());
@@ -140,6 +140,7 @@ impl AppState {
         }
 
         self.reconnect_or_cleanup().await;
+        crate::browser::spawn_listener();
         let _ = self.app_handle.emit("runtime-booted", ());
         Ok(())
     }
@@ -397,6 +398,7 @@ impl AppState {
     }
 
     pub async fn shutdown(&self) {
+        crate::browser::shutdown().await;
         self.stop_deployed_worker().await;
 
         if let Some(ref f) = self.forge

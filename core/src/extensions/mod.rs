@@ -1,6 +1,7 @@
 pub mod agents;
 mod audit;
 pub mod auth;
+pub mod browser;
 pub mod logs;
 pub mod rbac;
 
@@ -51,5 +52,6 @@ pub fn builtin_extensions_with_cache(
         Box::new(auth::AuthExtension { config: auth_config }),
         Box::new(rbac::RbacExtension::with_cache(Arc::clone(&rbac_cache))),
         Box::new(agents::AgentExtension::with_cache(rbac_cache)),
+        Box::new(browser::BrowserExtension::new()),
     ]
 }

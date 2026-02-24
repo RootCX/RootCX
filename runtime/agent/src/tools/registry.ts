@@ -4,6 +4,7 @@ import { createQueryDataTool } from "./query-data.js";
 import { createMutateDataTool } from "./mutate-data.js";
 import { createWebSearchTool } from "./web-search.js";
 import { createWebFetchTool } from "./web-fetch.js";
+import { createBrowserTool } from "./browser.js";
 
 export interface ToolContext {
     appId: string;
@@ -19,6 +20,7 @@ const TOOL_FACTORIES: Record<string, ToolFactory> = {
     mutate_data: (ctx) => createMutateDataTool(ctx.appId, ctx.runtimeUrl, ctx.authToken, ctx.dataContract),
     web_search: () => createWebSearchTool(),
     web_fetch: () => createWebFetchTool(),
+    browser: (ctx) => createBrowserTool(ctx.runtimeUrl, ctx.authToken),
 };
 
 export function buildToolRegistry(
