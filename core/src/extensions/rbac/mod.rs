@@ -115,7 +115,6 @@ impl RuntimeExtension for RbacExtension {
         };
         let app_id = &manifest.app_id;
 
-        // Validate
         let role_map: HashMap<String, Vec<String>> =
             contract.roles.iter().map(|(k, v)| (k.clone(), v.inherits.clone())).collect();
         if let Some(cycle) = policy::detect_cycle(&role_map) {
@@ -131,7 +130,6 @@ impl RuntimeExtension for RbacExtension {
             }
         }
 
-        // Clean sync
         sqlx::query("DELETE FROM rootcx_system.rbac_policies WHERE app_id = $1")
             .bind(app_id)
             .execute(pool)

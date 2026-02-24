@@ -69,6 +69,7 @@ impl FromRequestParts<SharedRuntime> for AccessGrant {
         };
 
         let identity = Identity::from_request_parts(parts, state).await?;
+
         let expanded = resolve_user_roles(&pool, &cached, identity.user_id, &app_id).await?;
 
         if expanded.is_empty() {

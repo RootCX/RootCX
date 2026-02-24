@@ -29,6 +29,7 @@ pub async fn create(
     runtime: RuntimePaths,
     preset_id: &str,
     answers: HashMap<String, AnswerValue>,
+    ai_config: Option<rootcx_shared_types::AiConfig>,
 ) -> Result<(), String> {
     let registry = PresetRegistry::new();
     let preset = registry.get(preset_id)?;
@@ -42,7 +43,7 @@ pub async fn create(
     name.hash(&mut h);
     let port = 3000 + (h.finish() % 6000) as u16;
 
-    let ctx = ScaffoldContext { name: name.to_string(), app_id, lib_name, identifier, port, runtime, answers };
+    let ctx = ScaffoldContext { name: name.to_string(), app_id, lib_name, identifier, port, runtime, answers, ai_config };
 
     let emitter = Emitter::new(root.to_path_buf());
     for layer in &layers {

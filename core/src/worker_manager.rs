@@ -5,14 +5,14 @@ use std::sync::Arc;
 use futures::future::join_all;
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tracing::{error, info, warn};
 
 use crate::RuntimeError;
 use crate::extensions::logs::LogEntry;
-use crate::ipc::RpcCaller;
+use crate::ipc::{AgentInvokePayload, RpcCaller};
 use crate::secrets::SecretManager;
-use crate::worker::{self, SupervisorHandle, WorkerConfig, WorkerStatus};
+use crate::worker::{self, AgentEvent, SupervisorHandle, WorkerConfig, WorkerStatus};
 
 pub struct WorkerManager {
     workers: Arc<RwLock<HashMap<String, SupervisorHandle>>>,
@@ -43,7 +43,7 @@ impl WorkerManager {
 
         let app_dir = self.apps_dir.join(app_id);
         let entry_point = resolve_entry_point(&app_dir)?;
-        let env: HashMap<String, String> = secrets.get_all_for_app(pool, app_id).await?.into_iter().collect();
+        let env = secrets.get_env_for_app(pool, app_id).await?;
 
         let config = WorkerConfig {
             app_id: app_id.to_string(),
@@ -92,6 +92,14 @@ impl WorkerManager {
         caller: Option<RpcCaller>,
     ) -> Result<JsonValue, RuntimeError> {
         self.get_handle(app_id).await?.rpc(id, method, params, caller).await
+    }
+
+    pub async fn agent_invoke(
+        &self,
+        app_id: &str,
+        payload: AgentInvokePayload,
+    ) -> Result<mpsc::Receiver<AgentEvent>, RuntimeError> {
+        self.get_handle(app_id).await?.agent_invoke(payload).await
     }
 
     pub async fn dispatch_job(&self, app_id: &str, job_id: String, payload: JsonValue) -> Result<(), RuntimeError> {

@@ -12,8 +12,6 @@ use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::routes::{self, SharedRuntime};
 
-// ── DTOs ─────────────────────────────────────────────────────────
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RoleResponse {
@@ -50,8 +48,6 @@ pub(crate) struct EntityPermission {
     actions: Vec<String>,
     ownership: bool,
 }
-
-// ── Handlers ─────────────────────────────────────────────────────
 
 pub(crate) async fn list_roles(
     State(rt): State<SharedRuntime>,

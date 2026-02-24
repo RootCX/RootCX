@@ -58,6 +58,7 @@ export const workspace = {
 export const layout = {
   dispatch: null as React.Dispatch<Action> | null,
   showView(id: string) {
-    this.dispatch?.({ type: "SHOW_VIEW", viewId: id });
+    const zone = views.get(id)?.defaultZone;
+    this.dispatch?.({ type: "SHOW_VIEW", viewId: id, zone });
   },
 };

@@ -7,8 +7,6 @@ use uuid::Uuid;
 use crate::api_error::ApiError;
 use rootcx_shared_types::PermissionsContract;
 
-// ── Cached types ─────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
 pub struct CachedPolicy {
     pub role: String,
@@ -64,7 +62,6 @@ impl PolicyCache {
             return Ok(Some(cached));
         }
 
-        // Cache miss — load from DB
         let role_rows: Vec<(String, Vec<String>)> =
             sqlx::query_as("SELECT name, inherits FROM rootcx_system.rbac_roles WHERE app_id = $1")
                 .bind(app_id)
@@ -82,7 +79,6 @@ impl PolicyCache {
         .fetch_all(pool)
         .await?;
 
-        // Load default_role from manifest
         let default_role: Option<String> =
             sqlx::query_scalar("SELECT manifest->'permissions'->>'defaultRole' FROM rootcx_system.apps WHERE id = $1")
                 .bind(app_id)
@@ -103,8 +99,6 @@ impl PolicyCache {
         Ok(Some(cached))
     }
 }
-
-// ── Pure evaluation functions ────────────────────────────────────
 
 pub fn expand_roles(assigned: &[String], role_map: &HashMap<String, Vec<String>>) -> HashSet<String> {
     let mut expanded = HashSet::new();
@@ -230,8 +224,6 @@ pub async fn require_admin(
     Ok(())
 }
 
-// ── Tests ────────────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,8 +302,6 @@ mod tests {
         assert_eq!(evaluate(&r, "contacts", "create", &p), (false, false));
     }
 
-    // ── Edge cases ──────────────────────────────────────────────
-
     #[test]
     fn expand_roles_empty_assigned() {
         let r = roles(&[("admin", &[]), ("viewer", &[])]);
@@ -388,7 +378,6 @@ mod tests {
         let role_map = roles(&[("member", &["viewer"]), ("viewer", &[])]);
         let policies = vec![policy("viewer", "*", &["read"], false), policy("member", "deals", &["create"], true)];
         let default_role = "member";
-        // Expand from default role (what resolve_user_roles does when no assignments)
         let expanded = expand_roles(&[default_role.into()], &role_map);
         assert!(expanded.contains("member") && expanded.contains("viewer"));
         // Viewer grants unrestricted read everywhere

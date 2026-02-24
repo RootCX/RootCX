@@ -28,6 +28,7 @@ impl ForgeManager {
         &mut self,
         cwd: &std::path::Path,
         config_path: Option<&std::path::Path>,
+        env_vars: std::collections::HashMap<String, String>,
     ) -> Result<(), ForgeError> {
         self.stop().await?;
 
@@ -58,6 +59,10 @@ impl ForgeManager {
 
         if let Some(path) = config_path {
             cmd.env("OPENCODE_CONFIG", path);
+        }
+
+        for (k, v) in &env_vars {
+            cmd.env(k, v);
         }
 
         let child = cmd.spawn().map_err(|e| ForgeError::SpawnFailed(e.to_string()))?;

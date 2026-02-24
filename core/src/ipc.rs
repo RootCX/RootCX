@@ -25,11 +25,25 @@ pub struct RpcCaller {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct AgentInvokePayload {
+    pub invoke_id: String,
+    pub session_id: String,
+    pub message: String,
+    pub system_prompt: String,
+    pub config: JsonValue,
+    pub auth_token: String,
+    #[serde(default)]
+    pub history: Vec<JsonValue>,
+    pub caller: Option<RpcCaller>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutboundMessage {
     Discover { app_id: String, runtime_url: String },
     Rpc { id: String, method: String, params: JsonValue, caller: Option<RpcCaller> },
     Job { id: String, payload: JsonValue },
+    AgentInvoke(AgentInvokePayload),
     Shutdown,
 }
 
@@ -58,6 +72,20 @@ pub enum InboundMessage {
         #[serde(default = "default_level")]
         level: String,
         message: String,
+    },
+    AgentChunk {
+        invoke_id: String,
+        delta: String,
+    },
+    AgentDone {
+        invoke_id: String,
+        response: String,
+        #[serde(default)]
+        tokens: Option<u64>,
+    },
+    AgentError {
+        invoke_id: String,
+        error: String,
     },
 }
 
@@ -146,8 +174,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    // ── Outbound wire format (IPC contract) ──────────────────────────────
-
     #[test]
     fn outbound_messages_carry_type_tag() {
         let cases: Vec<(OutboundMessage, &str)> = vec![
@@ -161,8 +187,6 @@ mod tests {
             assert_eq!(v["type"], expected_type, "wrong type tag for {expected_type}");
         }
     }
-
-    // ── Inbound deserialization ─────────────────────────────────────────
 
     #[test]
     fn inbound_discover_deserialization() {
@@ -232,8 +256,6 @@ mod tests {
         let result = serde_json::from_str::<InboundMessage>(r#"{"type":"unknown"}"#);
         assert!(result.is_err());
     }
-
-    // ── PendingRpcs ─────────────────────────────────────────────────────
 
     #[test]
     fn pending_rpcs_register_resolve_ok() {

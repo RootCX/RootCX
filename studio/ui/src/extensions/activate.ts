@@ -8,6 +8,8 @@ import { activate as output } from "./output";
 import { activate as coreStatus } from "./core-status";
 import { activate as run } from "./run";
 import { activate as editor } from "./editor";
+import { activate as settings } from "./settings";
+import { activate as agents } from "./agents";
 
 export function activateBuiltins() {
   commandPalette();
@@ -20,4 +22,6 @@ export function activateBuiltins() {
   coreStatus();
   run();
   editor();
+  settings();
+  agents();
 }
