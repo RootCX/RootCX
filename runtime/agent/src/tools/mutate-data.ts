@@ -11,13 +11,13 @@ export function createMutateDataTool(
 ) {
     return tool(
         async ({ entity, action, data, id }) => {
-            const baseUrl = `${runtimeUrl}/api/v1/apps/${appId}/collections/${entity}`;
+            const basePath = `/api/v1/apps/${appId}/collections/${entity}`;
             const headers: Record<string, string> = {
                 "Content-Type": "application/json",
                 "Authorization": `Bearer ${authToken}`,
             };
 
-            let url = baseUrl;
+            let url = new URL(basePath, runtimeUrl);
             let method: string;
 
             switch (action) {
@@ -26,12 +26,12 @@ export function createMutateDataTool(
                     break;
                 case "update":
                     if (!id) return "Error: 'id' is required for update";
-                    url = `${baseUrl}/${id}`;
+                    url = new URL(`${basePath}/${id}`, runtimeUrl);
                     method = "PATCH";
                     break;
                 case "delete":
                     if (!id) return "Error: 'id' is required for delete";
-                    url = `${baseUrl}/${id}`;
+                    url = new URL(`${basePath}/${id}`, runtimeUrl);
                     method = "DELETE";
                     break;
                 default:

@@ -125,7 +125,7 @@ impl SecretManager {
         Ok(env)
     }
 
-    pub async fn list_keys(&self, pool: &PgPool, app_id: &str) -> Result<Vec<String>, RuntimeError> {
+    pub async fn list_keys(pool: &PgPool, app_id: &str) -> Result<Vec<String>, RuntimeError> {
         let rows: Vec<(String,)> =
             sqlx::query_as("SELECT key_name FROM rootcx_system.secrets WHERE app_id = $1 ORDER BY key_name")
                 .bind(app_id)

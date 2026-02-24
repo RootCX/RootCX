@@ -5,6 +5,11 @@ use tokio::process::{Child, Command};
 use tracing::{info, warn};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
+const KILL_RETRIES: usize = 10;
+const KILL_RETRY_MS: u64 = 200;
+const HEALTH_RETRIES: usize = 30;
+const HEALTH_RETRY_MS: u64 = 500;
+const DEFAULT_PORT: u16 = 4096;
 
 static HTTP: LazyLock<reqwest::Client> =
     LazyLock::new(|| reqwest::Client::builder().timeout(HEALTH_TIMEOUT).build().expect("failed to build http client"));
@@ -39,8 +44,8 @@ impl ForgeManager {
             warn!("stale forge process detected on port {port}, killing it");
             rootcx_platform::process::kill_listeners_on_port(port).await;
 
-            for _ in 0..10 {
-                tokio::time::sleep(Duration::from_millis(200)).await;
+            for _ in 0..KILL_RETRIES {
+                tokio::time::sleep(Duration::from_millis(KILL_RETRY_MS)).await;
                 if !health_check_url(&health_url).await {
                     break;
                 }
@@ -69,10 +74,10 @@ impl ForgeManager {
 
         self.child = Some(child);
 
-        for i in 0..30 {
-            tokio::time::sleep(Duration::from_millis(500)).await;
+        for i in 0..HEALTH_RETRIES {
+            tokio::time::sleep(Duration::from_millis(HEALTH_RETRY_MS)).await;
             if health_check_url(&health_url).await {
-                info!("forge sidecar healthy after {}ms", (i + 1) * 500);
+                info!("forge sidecar healthy after {}ms", (i + 1) * HEALTH_RETRY_MS as usize);
                 return Ok(());
             }
         }
@@ -108,10 +113,9 @@ async fn health_check_url(url: &str) -> bool {
 }
 
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map(|a| a.port()).unwrap_or(4096)
+    std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map(|a| a.port()).unwrap_or(DEFAULT_PORT)
 }
 
-/// Check if the `opencode` binary is available in PATH.
 pub fn is_forge_available() -> bool {
     std::process::Command::new(rootcx_platform::bin::binary_name("opencode"))
         .arg("--version")

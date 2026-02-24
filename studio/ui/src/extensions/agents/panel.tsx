@@ -47,7 +47,7 @@ export default function AgentChatPanel({ appId }: { appId: string }) {
       </div>
 
       <div className="min-h-0 min-w-0 flex-1 space-y-2 overflow-y-auto overflow-x-hidden p-3">
-        {messages.map((msg, i) => <Bubble key={i} role={msg.role}>{msg.content}</Bubble>)}
+        {messages.map((msg, i) => <Bubble key={`${msg.role}-${i}`} role={msg.role}>{msg.content}</Bubble>)}
 
         {streaming && streamed && (
           <Bubble role="assistant">

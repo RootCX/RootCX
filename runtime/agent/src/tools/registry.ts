@@ -26,6 +26,10 @@ export function buildToolRegistry(
     ctx: ToolContext,
 ): StructuredToolInterface[] {
     return enabledTools
-        .filter((name) => name in TOOL_FACTORIES)
+        .filter((name) => {
+            if (name in TOOL_FACTORIES) return true;
+            console.warn(`Unknown tool "${name}" — not found in TOOL_FACTORIES, skipping`);
+            return false;
+        })
         .map((name) => TOOL_FACTORIES[name](ctx));
 }

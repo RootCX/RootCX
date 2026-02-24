@@ -50,8 +50,8 @@ function AISetupWizard({ preselect, onDone }: { preselect?: string; onDone: (ok:
 
   useEffect(() => {
     if (!preselect) return;
-    const p = AI_PROVIDERS.find((p) => p.id === preselect);
-    if (p) { setSelected(p); setStep("key"); }
+    const match = AI_PROVIDERS.find((provider) => provider.id === preselect);
+    if (match) { setSelected(match); setStep("key"); }
   }, [preselect]);
 
   const selectProvider = (p: AIProvider) => {
@@ -96,7 +96,6 @@ function AISetupWizard({ preselect, onDone }: { preselect?: string; onDone: (ok:
       <div
         className="relative max-h-[60vh] w-full max-w-md overflow-y-auto rounded-lg border border-border bg-card shadow-2xl"
         onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => e.key === "Escape" && canDismiss && onDone(false)}
       >
         <div className="px-4 py-3">
           {step === "provider" && (

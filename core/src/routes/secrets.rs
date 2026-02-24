@@ -2,24 +2,29 @@ use std::collections::HashMap;
 
 use axum::Json;
 use axum::extract::{Path, State};
+use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 
 use super::{SharedRuntime, pool_and_secrets};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
+use crate::secrets::SecretManager;
+
+#[derive(Deserialize)]
+pub(crate) struct SetSecretBody {
+    key: String,
+    value: String,
+}
 
 pub async fn set_secret(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
-    Json(body): Json<JsonValue>,
+    Json(body): Json<SetSecretBody>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let key = body.get("key").and_then(|v| v.as_str()).ok_or_else(|| ApiError::BadRequest("missing 'key'".into()))?;
-    let val =
-        body.get("value").and_then(|v| v.as_str()).ok_or_else(|| ApiError::BadRequest("missing 'value'".into()))?;
     let (pool, sm) = pool_and_secrets(&rt).await?;
-    sm.set(&pool, &app_id, key, val).await?;
-    Ok(Json(json!({ "message": format!("secret '{key}' set") })))
+    sm.set(&pool, &app_id, &body.key, &body.value).await?;
+    Ok(Json(json!({ "message": format!("secret '{}' set", body.key) })))
 }
 
 pub async fn delete_secret(
@@ -40,8 +45,8 @@ pub async fn list_secrets(
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<String>>, ApiError> {
-    let (pool, sm) = pool_and_secrets(&rt).await?;
-    Ok(Json(sm.list_keys(&pool, &app_id).await?))
+    let (pool, _) = pool_and_secrets(&rt).await?;
+    Ok(Json(SecretManager::list_keys(&pool, &app_id).await?))
 }
 
 const PLATFORM_SCOPE: &str = "_platform";
@@ -69,16 +74,13 @@ async fn reject_system_user(identity: &Identity, rt: &SharedRuntime) -> Result<(
 pub async fn set_platform_secret(
     identity: Identity,
     State(rt): State<SharedRuntime>,
-    Json(body): Json<JsonValue>,
+    Json(body): Json<SetSecretBody>,
 ) -> Result<Json<JsonValue>, ApiError> {
     reject_system_user(&identity, &rt).await?;
-    let key = body.get("key").and_then(|v| v.as_str()).ok_or_else(|| ApiError::BadRequest("missing 'key'".into()))?;
-    let val =
-        body.get("value").and_then(|v| v.as_str()).ok_or_else(|| ApiError::BadRequest("missing 'value'".into()))?;
-    validate_key_name(key)?;
+    validate_key_name(&body.key)?;
     let (pool, sm) = pool_and_secrets(&rt).await?;
-    sm.set(&pool, PLATFORM_SCOPE, key, val).await?;
-    Ok(Json(json!({ "message": format!("platform secret '{key}' set") })))
+    sm.set(&pool, PLATFORM_SCOPE, &body.key, &body.value).await?;
+    Ok(Json(json!({ "message": format!("platform secret '{}' set", body.key) })))
 }
 
 pub async fn delete_platform_secret(
@@ -100,8 +102,8 @@ pub async fn list_platform_secrets(
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<String>>, ApiError> {
     reject_system_user(&identity, &rt).await?;
-    let (pool, sm) = pool_and_secrets(&rt).await?;
-    Ok(Json(sm.list_keys(&pool, PLATFORM_SCOPE).await?))
+    let (pool, _) = pool_and_secrets(&rt).await?;
+    Ok(Json(SecretManager::list_keys(&pool, PLATFORM_SCOPE).await?))
 }
 
 pub async fn get_platform_env(

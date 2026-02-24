@@ -11,6 +11,8 @@ use serde_json::{json, Value as JsonValue};
 use sqlx::PgPool;
 use tracing::error;
 
+use uuid::Uuid;
+
 use super::agent_user_id;
 use crate::api_error::ApiError;
 use crate::auth::jwt;
@@ -46,7 +48,7 @@ pub(crate) struct SessionRow {
 struct PersistCtx {
     pool: PgPool,
     app_id: String,
-    user_id: String,
+    user_id: Uuid,
     user_message: String,
 }
 
@@ -117,7 +119,7 @@ pub async fn invoke_agent(
         Some(PersistCtx {
             pool: pool.clone(),
             app_id: app_id.clone(),
-            user_id: identity.user_id.to_string(),
+            user_id: identity.user_id,
             user_message: body.message.clone(),
         })
     } else {
@@ -161,7 +163,7 @@ fn build_sse_stream(
                     }
                     Some(AgentEvent::Done { response, tokens }) => {
                         if let Some(ref pctx) = ctx {
-                            if let Err(e) = persist_session(&pctx.pool, &sid, &pctx.app_id, &pctx.user_id, &pctx.user_message, &response).await {
+                            if let Err(e) = persist_session(&pctx.pool, &sid, &pctx.app_id, pctx.user_id, &pctx.user_message, &response).await {
                                 error!(session_id = %sid, "failed to persist session: {e}");
                             }
                         }
@@ -252,10 +254,9 @@ async fn resolve_secret_refs(
             resolved.push((k.clone(), secret));
         }
     }
-    if let Some(obj) = value.as_object_mut() {
-        for (k, secret) in resolved {
-            obj.insert(k, JsonValue::String(secret));
-        }
+    let obj = value.as_object_mut().unwrap();
+    for (k, secret) in resolved {
+        obj.insert(k, JsonValue::String(secret));
     }
     Ok(())
 }
@@ -336,7 +337,7 @@ async fn persist_session(
     pool: &PgPool,
     session_id: &str,
     app_id: &str,
-    user_id: &str,
+    user_id: Uuid,
     user_message: &str,
     assistant_response: &str,
 ) -> Result<(), sqlx::Error> {
@@ -346,7 +347,7 @@ async fn persist_session(
     ]);
     sqlx::query(
         "INSERT INTO rootcx_system.agent_sessions (id, app_id, user_id, messages)
-         VALUES ($1::uuid, $2, $3::uuid, $4)
+         VALUES ($1::uuid, $2, $3, $4)
          ON CONFLICT (id) DO UPDATE SET
              messages = rootcx_system.agent_sessions.messages || $4,
              updated_at = now()",

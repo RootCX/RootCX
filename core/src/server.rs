@@ -5,7 +5,7 @@ use tower_http::cors::CorsLayer;
 
 use crate::routes::{self, SharedRuntime};
 
-const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024; // 50 MB
+const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 
 pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Error> {
     let mut router = Router::new()
