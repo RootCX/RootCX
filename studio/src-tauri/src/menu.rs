@@ -8,6 +8,7 @@ const VIEWS: &[(&str, &str)] = &[
     ("welcome", "Welcome"),
     ("console", "Console"),
     ("output", "Output"),
+    ("settings", "Settings"),
 ];
 
 pub struct ViewMenuItems(pub HashMap<String, CheckMenuItem<Wry>>);

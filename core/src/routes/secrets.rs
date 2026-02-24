@@ -53,11 +53,25 @@ fn validate_key_name(key: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+async fn reject_system_user(identity: &Identity, rt: &SharedRuntime) -> Result<(), ApiError> {
+    let pool = super::pool(rt).await?;
+    let is_system: bool = sqlx::query_scalar("SELECT is_system FROM rootcx_system.users WHERE id = $1")
+        .bind(identity.user_id)
+        .fetch_optional(&pool)
+        .await?
+        .unwrap_or(false);
+    if is_system {
+        return Err(ApiError::Forbidden("system users cannot manage platform secrets".into()));
+    }
+    Ok(())
+}
+
 pub async fn set_platform_secret(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Json(body): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    reject_system_user(&identity, &rt).await?;
     let key = body.get("key").and_then(|v| v.as_str()).ok_or_else(|| ApiError::BadRequest("missing 'key'".into()))?;
     let val =
         body.get("value").and_then(|v| v.as_str()).ok_or_else(|| ApiError::BadRequest("missing 'value'".into()))?;
@@ -68,10 +82,11 @@ pub async fn set_platform_secret(
 }
 
 pub async fn delete_platform_secret(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(key_name): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    reject_system_user(&identity, &rt).await?;
     let (pool, sm) = pool_and_secrets(&rt).await?;
     if sm.delete(&pool, PLATFORM_SCOPE, &key_name).await? {
         Ok(Json(json!({ "message": format!("platform secret '{key_name}' deleted") })))
@@ -81,9 +96,10 @@ pub async fn delete_platform_secret(
 }
 
 pub async fn list_platform_secrets(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<String>>, ApiError> {
+    reject_system_user(&identity, &rt).await?;
     let (pool, sm) = pool_and_secrets(&rt).await?;
     Ok(Json(sm.list_keys(&pool, PLATFORM_SCOPE).await?))
 }

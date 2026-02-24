@@ -9,7 +9,7 @@ impl Preset for BlankPreset {
         PresetInfo {
             id: "blank",
             name: "Blank",
-            description: "Empty project with optional auth, permissions, and backend worker",
+            description: "Empty project: app with UI, or AI agent",
             icon: "📦",
         }
     }
@@ -17,11 +17,36 @@ impl Preset for BlankPreset {
     fn questions(&self) -> Vec<Question> {
         vec![
             Question {
+                key: "project_type".into(),
+                label: "What are you building?".into(),
+                question_type: QuestionType::Choice {
+                    options: vec![
+                        ChoiceOption { value: "app".into(), label: "App (UI + backend)".into() },
+                        ChoiceOption { value: "agent".into(), label: "AI Agent (no UI)".into() },
+                    ],
+                },
+                default: Some(AnswerValue::Text("app".into())),
+                depends_on: None,
+            },
+            Question {
+                key: "provider".into(),
+                label: "LLM provider".into(),
+                question_type: QuestionType::Choice {
+                    options: vec![
+                        ChoiceOption { value: "anthropic".into(), label: "Anthropic".into() },
+                        ChoiceOption { value: "openai".into(), label: "OpenAI".into() },
+                        ChoiceOption { value: "bedrock".into(), label: "AWS Bedrock".into() },
+                    ],
+                },
+                default: Some(AnswerValue::Text("anthropic".into())),
+                depends_on: Some(DependsOn { key: "project_type".into(), equals: AnswerValue::Text("agent".into()) }),
+            },
+            Question {
                 key: "auth".into(),
                 label: "Include authentication?".into(),
                 question_type: QuestionType::Bool,
                 default: Some(AnswerValue::Bool(true)),
-                depends_on: None,
+                depends_on: Some(DependsOn { key: "project_type".into(), equals: AnswerValue::Text("app".into()) }),
             },
             Question {
                 key: "permissions".into(),
@@ -35,20 +60,26 @@ impl Preset for BlankPreset {
                 label: "Include backend worker?".into(),
                 question_type: QuestionType::Bool,
                 default: Some(AnswerValue::Bool(true)),
-                depends_on: None,
+                depends_on: Some(DependsOn { key: "project_type".into(), equals: AnswerValue::Text("app".into()) }),
             },
         ]
     }
 
     fn layers(&self, answers: &HashMap<String, AnswerValue>) -> Vec<Box<dyn Layer>> {
-        let auth = matches!(answers.get("auth"), Some(AnswerValue::Bool(true)) | None);
-        let backend = matches!(answers.get("backend"), Some(AnswerValue::Bool(true)) | None);
+        let is_agent = matches!(answers.get("project_type"), Some(AnswerValue::Text(v)) if v == "agent");
 
-        let mut layers: Vec<Box<dyn Layer>> =
-            vec![Box::new(CoreLayer), Box::new(TauriLayer), Box::new(AuthLayer { include_auth: auth })];
-        if backend {
-            layers.push(Box::new(BackendLayer));
+        if is_agent {
+            vec![Box::new(AgentLayer)]
+        } else {
+            let auth = matches!(answers.get("auth"), Some(AnswerValue::Bool(true)) | None);
+            let backend = matches!(answers.get("backend"), Some(AnswerValue::Bool(true)) | None);
+
+            let mut layers: Vec<Box<dyn Layer>> =
+                vec![Box::new(CoreLayer), Box::new(TauriLayer), Box::new(AuthLayer { include_auth: auth })];
+            if backend {
+                layers.push(Box::new(BackendLayer));
+            }
+            layers
         }
-        layers
     }
 }

@@ -13,7 +13,7 @@ use sqlx::PgPool;
 
 use crate::RuntimeError;
 use crate::extensions::logs::{LOG_CHANNEL_CAPACITY, LogEntry, emit_log, spawn_output_reader};
-use crate::ipc::{InboundMessage, IpcEvent, IpcReader, IpcWriter, OutboundMessage, PendingRpcs, RpcCaller};
+use crate::ipc::{AgentInvokePayload, InboundMessage, IpcEvent, IpcReader, IpcWriter, OutboundMessage, PendingRpcs, RpcCaller};
 
 const MAX_CRASHES: u32 = 5;
 const CRASH_WINDOW: Duration = Duration::from_secs(60);
@@ -21,6 +21,14 @@ const BACKOFF_BASE: Duration = Duration::from_secs(2);
 
 fn dead() -> RuntimeError {
     RuntimeError::Worker("supervisor actor dead".into())
+}
+
+/// Events streamed from an agent worker back to the invoke route.
+#[derive(Debug, Clone)]
+pub enum AgentEvent {
+    Chunk { delta: String },
+    Done { response: String, tokens: Option<u64> },
+    Error { error: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -48,6 +56,10 @@ pub enum SupervisorCommand {
     Job {
         id: String,
         payload: JsonValue,
+    },
+    AgentInvoke {
+        payload: AgentInvokePayload,
+        stream_tx: mpsc::Sender<AgentEvent>,
     },
     GetStatus {
         reply: oneshot::Sender<WorkerStatus>,
@@ -108,6 +120,15 @@ impl SupervisorHandle {
         rx.await.map_err(|_| dead())
     }
 
+    pub async fn agent_invoke(
+        &self,
+        payload: AgentInvokePayload,
+    ) -> Result<mpsc::Receiver<AgentEvent>, RuntimeError> {
+        let (stream_tx, stream_rx) = mpsc::channel(64);
+        self.send(SupervisorCommand::AgentInvoke { payload, stream_tx }).await?;
+        Ok(stream_rx)
+    }
+
     pub fn subscribe(&self) -> broadcast::Receiver<LogEntry> {
         self.log_tx.subscribe()
     }
@@ -131,6 +152,7 @@ async fn supervisor_loop(
     let mut ipc_writer: Option<IpcWriter> = None;
     let mut ipc_reader: Option<IpcReader> = None;
     let mut pending_rpcs = PendingRpcs::new();
+    let mut pending_agent_streams: HashMap<String, mpsc::Sender<AgentEvent>> = HashMap::new();
     let mut crash_times: Vec<Instant> = Vec::new();
     let mut restart_count: u32 = 0;
     let mut output_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
@@ -193,7 +215,6 @@ async fn supervisor_loop(
                             && let Err(e) = w.send(&OutboundMessage::Rpc { id: id.clone(), method, params, caller }).await {
                                 pending_rpcs.resolve(&id, Err(e.to_string()));
                             }
-                        // Spawn timeout watcher
                         tokio::spawn(async move {
                             let result = match tokio::time::timeout(Duration::from_secs(30), rx).await {
                                 Ok(Ok(r)) => r,
@@ -213,6 +234,24 @@ async fn supervisor_loop(
                             && let Err(e) = w.send(&OutboundMessage::Job { id: id.clone(), payload }).await {
                                 error!(app_id = %app_id, job_id = %id, "send failed: {e}");
                             }
+                    }
+
+                    SupervisorCommand::AgentInvoke { payload, stream_tx } => {
+                        if status != WorkerStatus::Running {
+                            let _ = stream_tx.send(AgentEvent::Error {
+                                error: "worker not running".into(),
+                            }).await;
+                            continue;
+                        }
+                        let invoke_id = payload.invoke_id.clone();
+                        pending_agent_streams.insert(invoke_id.clone(), stream_tx);
+                        if let Some(ref mut w) = ipc_writer {
+                            if let Err(e) = w.send(&OutboundMessage::AgentInvoke(payload)).await {
+                                if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
+                                    let _ = tx.send(AgentEvent::Error { error: e.to_string() }).await;
+                                }
+                            }
+                        }
                     }
 
                     SupervisorCommand::GetStatus { reply } => {
@@ -266,6 +305,23 @@ async fn supervisor_loop(
                             }
                             emit_log(&log_tx, &level, &message);
                         }
+                        InboundMessage::AgentChunk { invoke_id, delta } => {
+                            if let Some(tx) = pending_agent_streams.get(&invoke_id) {
+                                if tx.send(AgentEvent::Chunk { delta }).await.is_err() {
+                                    pending_agent_streams.remove(&invoke_id);
+                                }
+                            }
+                        }
+                        InboundMessage::AgentDone { invoke_id, response, tokens } => {
+                            if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
+                                let _ = tx.send(AgentEvent::Done { response, tokens }).await;
+                            }
+                        }
+                        InboundMessage::AgentError { invoke_id, error } => {
+                            if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
+                                let _ = tx.send(AgentEvent::Error { error }).await;
+                            }
+                        }
                     },
                     Some(IpcEvent::Output(line)) => {
                         emit_log(&log_tx, "stdout", &line);
@@ -283,6 +339,12 @@ async fn supervisor_loop(
                         ipc_writer = None;
                         ipc_reader = None;
                         for h in output_handles.drain(..) { h.abort(); }
+
+                        for (_sid, tx) in pending_agent_streams.drain() {
+                            let _ = tx.send(AgentEvent::Error {
+                                error: "worker crashed".into(),
+                            }).await;
+                        }
 
                         let now = Instant::now();
                         crash_times.retain(|t| now.duration_since(*t) < CRASH_WINDOW);
@@ -304,7 +366,6 @@ async fn supervisor_loop(
                             tokio::select! {
                                 _ = tokio::time::sleep(delay) => {}
                                 Some(cmd) = cmd_rx.recv() => {
-                                    // Process stop/status during backoff
                                     match cmd {
                                         SupervisorCommand::Stop { reply } => {
                                             status = WorkerStatus::Stopped;

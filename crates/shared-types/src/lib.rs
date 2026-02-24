@@ -62,6 +62,8 @@ pub struct AppManifest {
     pub permissions: Option<PermissionsContract>,
     #[serde(default)]
     pub data_contract: Vec<EntityContract>,
+    #[serde(default)]
+    pub agent: Option<AgentDefinition>,
 }
 
 fn default_version() -> String {
@@ -148,4 +150,57 @@ pub struct SchemaChange {
 pub struct SchemaVerification {
     pub compliant: bool,
     pub changes: Vec<SchemaChange>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ProviderConfig {
+    #[serde(rename = "anthropic")]
+    Anthropic { model: String },
+    #[serde(rename = "openai")]
+    OpenAI { model: String },
+    #[serde(rename = "bedrock")]
+    Bedrock {
+        model: String,
+        #[serde(default)]
+        region: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDefinition {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub provider: Option<ProviderConfig>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub graph: Option<String>,
+    #[serde(default)]
+    pub memory: Option<AgentMemory>,
+    #[serde(default)]
+    pub limits: Option<AgentLimits>,
+    #[serde(default)]
+    pub access: Vec<AgentAccessEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentMemory {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentLimits {
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentAccessEntry {
+    pub entity: String,
+    pub actions: Vec<String>,
 }

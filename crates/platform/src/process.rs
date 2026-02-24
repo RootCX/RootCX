@@ -46,7 +46,6 @@ pub async fn kill_listeners_on_port(port: u16) {
     for &pid in &pids { kill_gracefully(pid, Duration::from_millis(500)).await; }
 }
 
-// ── macOS ─────────────────────────────────────────────────────────────────────
 // lsof ships on every macOS installation; fastest option available.
 #[cfg(target_os = "macos")]
 async fn find_listeners(port: u16) -> Vec<u32> {
@@ -59,7 +58,6 @@ async fn find_listeners(port: u16) -> Vec<u32> {
         .unwrap_or_default()
 }
 
-// ── Linux ─────────────────────────────────────────────────────────────────────
 // Read /proc directly — zero external tool dependencies.
 #[cfg(target_os = "linux")]
 async fn find_listeners(port: u16) -> Vec<u32> {
@@ -107,7 +105,6 @@ async fn pids_for_inodes(inodes: &[u64]) -> Vec<u32> {
     out
 }
 
-// ── Windows ───────────────────────────────────────────────────────────────────
 #[cfg(windows)]
 async fn find_listeners(port: u16) -> Vec<u32> {
     tokio::process::Command::new("netstat").args(["-ano", "-p", "TCP"])
