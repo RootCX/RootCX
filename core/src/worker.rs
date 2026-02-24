@@ -152,10 +152,10 @@ async fn supervisor_loop(
     let mut ipc_writer: Option<IpcWriter> = None;
     let mut ipc_reader: Option<IpcReader> = None;
     let mut pending_rpcs = PendingRpcs::new();
-    let mut pending_agent_streams: HashMap<String, mpsc::Sender<AgentEvent>> = HashMap::new();
+    let mut pending_agent_streams = HashMap::new();
     let mut crash_times: Vec<Instant> = Vec::new();
     let mut restart_count: u32 = 0;
-    let mut output_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    let mut output_handles = Vec::new();
 
     info!(app_id = %app_id, "supervisor started");
 
@@ -331,6 +331,7 @@ async fn supervisor_loop(
                     }
                     None => {
                         if let Some(ref mut c) = child {
+                            // Fully-qualified call needed because `c` is `&mut` and `.wait()` would be ambiguous with the `Child::wait` method
                             let exit = AsyncGroupChild::wait(c).await;
                             warn!(app_id = %app_id, ?exit, "worker exited unexpectedly");
                             emit_log(&log_tx, "system", "worker crashed");

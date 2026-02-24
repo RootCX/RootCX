@@ -55,7 +55,7 @@ async function executeStep(step: string, projectPath: string): Promise<boolean> 
       return true;
     }
     case "sync_manifest": {
-      try { await invoke("sync_manifest", { projectPath }); } catch { }
+      try { await invoke("sync_manifest", { projectPath }); } catch (e) { console.warn("sync_manifest failed:", e); }
       return true;
     }
     case "deploy_backend": {
@@ -63,7 +63,7 @@ async function executeStep(step: string, projectPath: string): Promise<boolean> 
         const entries = await invoke<{ name: string; is_dir: boolean }[]>("read_dir", { path: projectPath });
         if (entries.some((e) => e.is_dir && e.name === "backend"))
           await invoke("deploy_backend", { projectPath });
-      } catch { }
+      } catch (e) { console.warn("deploy_backend failed:", e); }
       return true;
     }
     default:

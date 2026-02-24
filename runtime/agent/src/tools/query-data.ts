@@ -23,7 +23,7 @@ export function createQueryDataTool(
                 }
             }
 
-            const res = await fetch(url.toString(), {
+            const res = await fetch(url, {
                 headers: { "Authorization": `Bearer ${authToken}` },
             });
 

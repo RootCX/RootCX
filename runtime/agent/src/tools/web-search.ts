@@ -1,6 +1,14 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 
+interface BraveResponse {
+    web?: { results?: Array<{ title: string; url: string; description: string }> };
+}
+
+interface TavilyResponse {
+    results?: Array<{ title: string; url: string; content: string }>;
+}
+
 export function createWebSearchTool() {
     return tool(
         async ({ query, count }) => {
@@ -36,16 +44,20 @@ async function braveSearch(query: string, count: number, apiKey: string): Promis
     url.searchParams.set("q", query);
     url.searchParams.set("count", String(count));
 
-    const res = await fetch(url.toString(), {
+    const res = await fetch(url, {
         headers: { "Accept": "application/json", "X-Subscription-Token": apiKey },
     });
     if (!res.ok) return `Search error ${res.status}: ${await res.text()}`;
 
-    const data = await res.json() as { web?: { results?: Array<{ title: string; url: string; description: string }> } };
-    return formatResults((data.web?.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.description })));
+    const data = await res.json() as BraveResponse;
+    const results = (data.web?.results ?? []).map((r) => ({
+        title: r.title,
+        url: r.url,
+        snippet: r.description,
+    }));
+    return formatResults(results);
 }
 
-// Tavily requires api_key in the POST body per their API spec.
 async function tavilySearch(query: string, count: number, apiKey: string): Promise<string> {
     const res = await fetch("https://api.tavily.com/search", {
         method: "POST",
@@ -54,6 +66,11 @@ async function tavilySearch(query: string, count: number, apiKey: string): Promi
     });
     if (!res.ok) return `Search error ${res.status}: ${await res.text()}`;
 
-    const data = await res.json() as { results?: Array<{ title: string; url: string; content: string }> };
-    return formatResults((data.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.content })));
+    const data = await res.json() as TavilyResponse;
+    const results = (data.results ?? []).map((r) => ({
+        title: r.title,
+        url: r.url,
+        snippet: r.content,
+    }));
+    return formatResults(results);
 }

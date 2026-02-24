@@ -73,7 +73,7 @@ let state: ForgeState = {
 };
 const listeners = new Set<Listener>();
 let snapshot = state;
-let eventStream: AsyncGenerator | null = null;
+let eventStream: AsyncGenerator<unknown> | null = null;
 
 function emit() {
   snapshot = { ...state, parts: new Map(state.parts) };
@@ -342,6 +342,7 @@ export async function startForProject(projectPath: string): Promise<void> {
     if (status.port) {
       setForgePort(status.port);
       if (eventStream) {
+        eventStream.return(undefined);
         eventStream = null;
         connectEvents();
       }

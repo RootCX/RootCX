@@ -9,7 +9,8 @@ impl Layer for AgentLayer {
             let agent_runtime_dep = format!("file:{}", ctx.runtime.agent_runtime.display());
 
             let ai = ctx.ai_config.clone().unwrap_or_default();
-            let provider = serde_json::to_value(ai.agent_provider_config()).unwrap();
+            let provider = serde_json::to_value(ai.agent_provider_config())
+                .map_err(|e| format!("failed to serialize provider config: {e}"))?;
 
             let manifest = serde_json::json!({
                 "appId": ctx.app_id,

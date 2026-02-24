@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use crate::forge::{ForgeManager, is_forge_available};
 use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
@@ -10,6 +10,9 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 const DAEMON_URL: &str = "http://localhost:9100";
+
+static LOG_HTTP: LazyLock<reqwest::Client> =
+    LazyLock::new(|| reqwest::Client::new());
 
 const ROOTCX_RUNTIME_INSTRUCTIONS: &str = include_str!("../../../.agents/instructions/rootcx-runtime.md");
 
@@ -27,7 +30,6 @@ fn default_mcp_servers() -> serde_json::Value {
 pub struct AppState {
     client: RuntimeClient,
     forge: Option<Arc<Mutex<ForgeManager>>>,
-    #[allow(dead_code)]
     watchers: Arc<Mutex<Vec<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>>>>,
     active_app_id: Arc<Mutex<Option<String>>>,
     app_handle: AppHandle,
@@ -183,7 +185,7 @@ impl AppState {
         let abort_store = self.log_stream_abort.clone();
 
         let task = tokio::spawn(async move {
-            let client = reqwest::Client::new();
+            let client = LOG_HTTP.clone();
             loop {
                 match client.get(&url).send().await {
                     Ok(mut resp) if resp.status().is_success() => {
@@ -269,13 +271,8 @@ impl AppState {
 
     pub async fn deploy_backend(&self, project_path: &str) -> Result<String, String> {
         let project = Path::new(project_path);
-        let manifest: serde_json::Value = serde_json::from_str(
-            &tokio::fs::read_to_string(project.join("manifest.json"))
-                .await
-                .map_err(|e| format!("failed to read manifest: {e}"))?,
-        )
-        .map_err(|e| format!("invalid manifest: {e}"))?;
-        let app_id = manifest["appId"].as_str().ok_or("manifest.json missing appId")?;
+        let manifest = read_manifest(project_path).await?;
+        let app_id = manifest.app_id;
 
         let deploy_dir = project.join("backend");
         if !deploy_dir.exists() {
@@ -307,10 +304,10 @@ impl AppState {
         .await
         .map_err(|e| format!("archive task failed: {e}"))??;
 
-        info!(app_id, size = archive.len(), "deploying backend");
-        let result = self.client.deploy_app(app_id, archive).await.map_err(|e| format!("deploy failed: {e}"))?;
+        info!(app_id = %app_id, size = archive.len(), "deploying backend");
+        let result = self.client.deploy_app(&app_id, archive).await.map_err(|e| format!("deploy failed: {e}"))?;
 
-        *self.active_app_id.lock().await = Some(app_id.to_string());
+        *self.active_app_id.lock().await = Some(app_id.clone());
         if let Ok(path) = session_file() {
             let data = serde_json::json!({ "active_app_id": app_id });
             let _ = tokio::fs::write(&path, data.to_string()).await;

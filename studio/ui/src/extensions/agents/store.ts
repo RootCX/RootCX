@@ -57,15 +57,17 @@ async function fetchAgents() {
 
     state = { ...state, agents };
     emit();
-  } catch { /* noop */ }
+  } catch (e) { console.warn("fetchAgents failed:", e); }
 }
 
-let polling = false;
+let pollingId: ReturnType<typeof setInterval> | null = null;
 export function startPolling() {
-  if (polling) return;
-  polling = true;
+  if (pollingId) return;
   fetchAgents();
-  setInterval(fetchAgents, 5_000);
+  pollingId = setInterval(fetchAgents, 5_000);
+}
+export function stopPolling() {
+  if (pollingId) { clearInterval(pollingId); pollingId = null; }
 }
 
 // ── Worker lifecycle ──
@@ -77,12 +79,13 @@ async function ensureWorker(appId: string) {
   try {
     const r = await fetch(`${BASE}/api/v1/apps/${appId}/worker/status`);
     if (r.ok && (await r.json()).status === "running") { runningWorkers.add(appId); return; }
-  } catch { /* noop */ }
+  } catch (e) { console.warn("ensureWorker status check failed:", e); }
 
   const r = await fetch(`${BASE}/api/v1/apps/${appId}/worker/start`, { method: "POST" });
   if (!r.ok) throw new Error(await r.text().catch(() => "failed to start worker"));
   runningWorkers.add(appId);
-  await new Promise((r) => setTimeout(r, 1000)); // worker init grace period
+  const WORKER_INIT_GRACE_MS = 1_000;
+  await new Promise((resolve) => setTimeout(resolve, WORKER_INIT_GRACE_MS));
 }
 
 // ── SSE streaming ──

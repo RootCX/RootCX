@@ -69,8 +69,10 @@ export async function runAgent(params: RunAgentParams) {
 
     const maxTurns = config.limits?.maxTurns ?? 10;
     let turns = 0;
+    // Intentionally accumulates the full response text to return in agent_done
     let fullResponse = "";
 
+    // Each turn = agent node + tool node = 2 graph steps
     const stream = graph.streamEvents(
         { messages },
         { version: "v2", recursionLimit: maxTurns * 2 },
@@ -131,9 +133,9 @@ async function loadGraph(
         return importGraph(resolved, model, tools);
     }
 
-    for (const path of [resolve("agent/graph.ts"), resolve("agent/graph.js")]) {
-        if (await fileExists(path)) {
-            return importGraph(path, model, tools);
+    for (const candidate of [resolve("agent/graph.ts"), resolve("agent/graph.js")]) {
+        if (await fileExists(candidate)) {
+            return importGraph(candidate, model, tools);
         }
     }
 
@@ -141,7 +143,12 @@ async function loadGraph(
 }
 
 async function fileExists(path: string): Promise<boolean> {
-    try { await fsAccess(path, constants.R_OK); return true; } catch { return false; }
+    try {
+        await fsAccess(path, constants.R_OK);
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 function deserializeHistory(history: Array<Record<string, unknown>>): BaseMessage[] {

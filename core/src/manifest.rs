@@ -263,7 +263,8 @@ pub fn quote_ident(ident: &str) -> String {
 }
 
 async fn register_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), RuntimeError> {
-    let manifest_json = serde_json::to_value(manifest).unwrap_or_default();
+    let manifest_json = serde_json::to_value(manifest)
+        .map_err(|e| RuntimeError::Schema(sqlx::Error::Protocol(e.to_string())))?;
 
     sqlx::query(
         r#"

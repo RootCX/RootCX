@@ -10,7 +10,6 @@ use super::SharedRuntime;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 
-/// POST /api/v1/apps/{app_id}/deploy — upload tar.gz, extract, install deps, start worker.
 pub async fn deploy_backend(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
