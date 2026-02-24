@@ -36,12 +36,17 @@ pub async fn start_forge(state: State<'_, AppState>, project_path: String) -> Re
 }
 
 #[tauri::command]
-pub async fn save_forge_config(
+pub async fn save_ai_config(
     state: State<'_, AppState>,
-    contents: String,
+    config: rootcx_shared_types::AiConfig,
     project_path: Option<String>,
 ) -> Result<(), String> {
-    state.save_forge_config(&contents, project_path.as_deref()).await
+    state.save_ai_config(&config, project_path.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn get_ai_config(state: State<'_, AppState>) -> Result<Option<rootcx_shared_types::AiConfig>, String> {
+    state.get_ai_config().await
 }
 
 #[derive(Serialize)]
@@ -177,18 +182,21 @@ pub async fn stop_deployed_worker(state: State<'_, AppState>) -> Result<(), Stri
 
 #[tauri::command]
 pub async fn scaffold_project(
+    state: State<'_, AppState>,
     path: String,
     name: String,
     preset_id: Option<String>,
     answers: Option<std::collections::HashMap<String, crate::scaffold::Answer>>,
 ) -> Result<(), String> {
     validate_fs_path(&path)?;
+    let ai_config = state.get_ai_config().await.ok().flatten();
     crate::scaffold::create(
         std::path::Path::new(&path),
         &name,
         crate::scaffold::RuntimePaths::resolve()?,
         preset_id.as_deref().unwrap_or("blank"),
         answers.unwrap_or_default(),
+        ai_config,
     )
     .await
 }

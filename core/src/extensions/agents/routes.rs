@@ -17,6 +17,7 @@ use crate::auth::jwt;
 use crate::auth::identity::Identity;
 use crate::ipc::{AgentInvokePayload, RpcCaller};
 use crate::routes::{self, SharedRuntime};
+use crate::secrets::SecretManager;
 use crate::worker::AgentEvent;
 
 #[derive(Deserialize)]
@@ -71,13 +72,14 @@ pub async fn invoke_agent(
     Path(app_id): Path<String>,
     Json(body): Json<InvokeRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let (pool, wm, data_dir, auth_cfg) = {
+    let (pool, wm, data_dir, auth_cfg, sm) = {
         let g = rt.lock().await;
         (
             g.pool().cloned().ok_or(ApiError::NotReady)?,
             g.worker_manager().cloned().ok_or(ApiError::NotReady)?,
             g.data_dir().to_path_buf(),
             g.auth_config().clone(),
+            g.secret_manager().cloned().ok_or(ApiError::NotReady)?,
         )
     };
 
@@ -101,7 +103,7 @@ pub async fn invoke_agent(
 
     let history = load_history(&pool, memory_enabled, &session_id).await?;
     let system_prompt = load_system_prompt(&app_id, &config, &data_dir).await?;
-    let agent_config = build_agent_config(&pool, &app_id, &config).await?;
+    let agent_config = build_agent_config(&pool, &sm, &app_id, &config).await?;
 
     let agent_token = jwt::encode_access(&auth_cfg, agent_user_id(&app_id), &format!("agent:{app_id}"))
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -206,6 +208,7 @@ async fn load_history(
 
 async fn build_agent_config(
     pool: &PgPool,
+    sm: &SecretManager,
     app_id: &str,
     config: &JsonValue,
 ) -> Result<JsonValue, ApiError> {
@@ -218,14 +221,43 @@ async fn build_agent_config(
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("app '{app_id}' not found")))?;
 
+    let mut provider = config.get("provider").cloned().unwrap_or(json!(null));
+    resolve_secret_refs(pool, sm, &mut provider).await?;
+
     Ok(json!({
-        "provider": config.get("provider"),
+        "provider": provider,
         "limits": config.get("limits"),
         "_appId": app_id,
         "_enabledTools": enabled_tools,
         "_graphPath": config.get("graph"),
         "_dataContract": data_contract,
     }))
+}
+
+async fn resolve_secret_refs(
+    pool: &PgPool,
+    sm: &SecretManager,
+    value: &mut JsonValue,
+) -> Result<(), ApiError> {
+    let Some(obj) = value.as_object() else { return Ok(()) };
+    let mut resolved = Vec::new();
+    for (k, v) in obj {
+        let Some(raw) = v.as_str() else { continue };
+        if let Some(key) = raw.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+            let secret = sm
+                .get(pool, "_platform", key)
+                .await
+                .map_err(|e| ApiError::Internal(format!("secret resolution failed: {e}")))?
+                .ok_or_else(|| ApiError::BadRequest(format!("platform secret '{key}' not found")))?;
+            resolved.push((k.clone(), secret));
+        }
+    }
+    if let Some(obj) = value.as_object_mut() {
+        for (k, secret) in resolved {
+            obj.insert(k, JsonValue::String(secret));
+        }
+    }
+    Ok(())
 }
 
 pub async fn list_sessions(
