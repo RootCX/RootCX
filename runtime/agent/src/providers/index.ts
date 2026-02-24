@@ -1,8 +1,8 @@
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
 
 export type ProviderConfig =
-    | { type: "anthropic"; model: string }
-    | { type: "openai"; model: string }
+    | { type: "anthropic"; model: string; api_key?: string }
+    | { type: "openai"; model: string; api_key?: string }
     | { type: "bedrock"; model: string; region?: string };
 
 const PROVIDERS: Record<string, (config: ProviderConfig) => Promise<BaseChatModel>> = {

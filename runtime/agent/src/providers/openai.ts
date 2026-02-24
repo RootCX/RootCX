@@ -1,11 +1,8 @@
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import { requireEnv } from "./env.js";
 
-export async function create(config: { model: string }): Promise<BaseChatModel> {
+export async function create(config: { model: string; api_key?: string }): Promise<BaseChatModel> {
+    const apiKey = config.api_key;
+    if (!apiKey) throw new Error("Missing api_key for OpenAI provider");
     const { ChatOpenAI } = await import("@langchain/openai");
-    return new ChatOpenAI({
-        model: config.model,
-        apiKey: requireEnv("OPENAI_API_KEY"),
-        streaming: true,
-    });
+    return new ChatOpenAI({ model: config.model, apiKey, streaming: true });
 }

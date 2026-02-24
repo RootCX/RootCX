@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::forge::{ForgeManager, is_forge_available};
 use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
 use rootcx_runtime::RuntimeClient;
-use rootcx_shared_types::{ForgeStatus, OsStatus, ServiceState};
+use rootcx_shared_types::{AiConfig, ForgeStatus, OsStatus, ServiceState};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -23,38 +23,11 @@ fn default_mcp_servers() -> serde_json::Value {
     })
 }
 
-fn enrich_config(config: &str) -> Result<String, String> {
-    let mut obj: serde_json::Value = serde_json::from_str(config).map_err(|e| format!("invalid config JSON: {e}"))?;
-
-    let defaults = default_mcp_servers();
-    if let Some(existing) = obj.get_mut("mcp").and_then(|v| v.as_object_mut()) {
-        for (key, value) in defaults.as_object().unwrap() {
-            existing.entry(key.clone()).or_insert_with(|| value.clone());
-        }
-    } else {
-        obj["mcp"] = defaults;
-    }
-
-    if let Ok(dir) = instructions_dir() {
-        obj["instructions"] = serde_json::json!([dir.join("*.md").to_string_lossy().as_ref()]);
-    }
-
-    serde_json::to_string_pretty(&obj).map_err(|e| format!("failed to serialize config: {e}"))
-}
-
-async fn write_config(path: &Path, contents: &str) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        tokio::fs::create_dir_all(dir).await.map_err(|e| format!("failed to create config dir: {e}"))?;
-    }
-    let enriched = enrich_config(contents)?;
-    tokio::fs::write(path, enriched.as_bytes()).await.map_err(|e| format!("failed to write config: {e}"))
-}
-
 #[derive(Clone)]
 pub struct AppState {
     client: RuntimeClient,
     forge: Option<Arc<Mutex<ForgeManager>>>,
-    #[allow(dead_code)] // held alive for RAII
+    #[allow(dead_code)]
     watchers: Arc<Mutex<Vec<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>>>>,
     active_app_id: Arc<Mutex<Option<String>>>,
     app_handle: AppHandle,
@@ -64,7 +37,7 @@ pub struct AppState {
 fn home_dir() -> Result<PathBuf, String> { rootcx_platform::dirs::home_dir().map_err(|e| e.to_string()) }
 pub fn config_dir() -> Result<PathBuf, String> { rootcx_platform::dirs::config_dir().map_err(|e| e.to_string()) }
 
-pub fn config_path() -> Result<PathBuf, String> {
+fn config_path() -> Result<PathBuf, String> {
     Ok(config_dir()?.join("config.json"))
 }
 
@@ -82,18 +55,22 @@ async fn ensure_instructions() -> Result<(), String> {
     tokio::fs::write(dir.join("rootcx-runtime.md"), ROOTCX_RUNTIME_INSTRUCTIONS.as_bytes())
         .await
         .map_err(|e| format!("failed to write instruction file: {e}"))?;
-    info!("installed instructions to {}", dir.display());
     Ok(())
 }
 
-async fn ensure_config() -> Result<PathBuf, String> {
-    ensure_instructions().await?;
+async fn write_forge_config(forge_model: &str) -> Result<PathBuf, String> {
+    let mut config = serde_json::json!({ "model": forge_model });
+    config["mcp"] = default_mcp_servers();
+    if let Ok(dir) = instructions_dir() {
+        config["instructions"] = serde_json::json!([dir.join("*.md").to_string_lossy().as_ref()]);
+    }
+
     let path = config_path()?;
-    let raw = match tokio::fs::read_to_string(&path).await {
-        Ok(s) => s,
-        Err(_) => "{}".to_string(),
-    };
-    write_config(&path, &raw).await?;
+    if let Some(dir) = path.parent() {
+        tokio::fs::create_dir_all(dir).await.map_err(|e| format!("failed to create config dir: {e}"))?;
+    }
+    let json = serde_json::to_string_pretty(&config).map_err(|e| format!("serialize: {e}"))?;
+    tokio::fs::write(&path, json.as_bytes()).await.map_err(|e| format!("write config: {e}"))?;
     Ok(path)
 }
 
@@ -109,6 +86,20 @@ const DEPLOY_EXCLUDE: &[&str] = &["node_modules", ".git", ".rootcx", "bun.lock",
 impl AppState {
     async fn platform_env(&self) -> Result<std::collections::HashMap<String, String>, String> {
         self.client.get_platform_env().await.map_err(|e| format!("failed to load platform secrets: {e}"))
+    }
+
+    async fn forge_model_from_core(&self) -> String {
+        match self.client.get_forge_config().await {
+            Ok(v) => v
+                .get("model")
+                .and_then(|m| m.as_str())
+                .map(String::from)
+                .unwrap_or_else(|| AiConfig::default().forge_model_string()),
+            Err(e) => {
+                warn!("failed to fetch forge config from core: {e}");
+                AiConfig::default().forge_model_string()
+            }
+        }
     }
 
     pub fn from_tauri(app: &tauri::App) -> Self {
@@ -130,21 +121,24 @@ impl AppState {
     }
 
     pub async fn boot(&self) -> Result<(), String> {
+        if !self.client.is_available().await {
+            return Err(format!("core daemon not reachable at {DAEMON_URL}"));
+        }
+        info!("connected to core daemon at {DAEMON_URL}");
+
         if let Some(ref f) = self.forge {
-            let cfg = ensure_config().await?;
+            ensure_instructions().await?;
+            let model = self.forge_model_from_core().await;
+            let cfg = write_forge_config(&model).await?;
             let cwd = home_dir()?;
             let env = self.platform_env().await.unwrap_or_default();
             if let Err(e) = f.lock().await.start(&cwd, Some(cfg.as_path()), env).await {
                 warn!("forge sidecar start failed (non-fatal): {e}");
             }
         }
-        if !self.client.is_available().await {
-            return Err(format!("core daemon not reachable at {DAEMON_URL}"));
-        }
-        info!("connected to core daemon at {DAEMON_URL}");
 
         self.reconnect_or_cleanup().await;
-
+        let _ = self.app_handle.emit("runtime-booted", ());
         Ok(())
     }
 
@@ -159,7 +153,6 @@ impl AppState {
         };
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data)
             && let Some(app_id) = parsed["active_app_id"].as_str() {
-                // Check if the worker is still running — if so, reconnect to its log stream
                 match self.client.worker_status(app_id).await {
                     Ok(status) if status == "running" => {
                         info!(app_id, "reconnecting to running worker from previous session");
@@ -238,20 +231,29 @@ impl AppState {
 
     pub async fn start_forge(&self, project_path: &str) -> Result<(), String> {
         if let Some(ref f) = self.forge {
-            let cfg = ensure_config().await?;
+            let model = self.forge_model_from_core().await;
+            let cfg = write_forge_config(&model).await?;
             f.lock().await.start(Path::new(project_path), Some(cfg.as_path()), self.platform_env().await?).await.map_err(|e| e.to_string())?;
         }
         Ok(())
     }
 
-    pub async fn save_forge_config(&self, contents: &str, project_path: Option<&str>) -> Result<(), String> {
-        let path = config_path()?;
-        write_config(&path, contents).await?;
+    pub async fn save_ai_config(&self, config: &AiConfig, project_path: Option<&str>) -> Result<(), String> {
+        self.client.set_ai_config(config).await.map_err(|e| format!("failed to save AI config: {e}"))?;
 
-        if let (Some(f), Some(pp)) = (&self.forge, project_path) {
-            f.lock().await.start(Path::new(pp), Some(&path), self.platform_env().await?).await.map_err(|e| e.to_string())?;
+        if let Some(ref f) = self.forge {
+            let cfg = write_forge_config(&config.forge_model_string()).await?;
+            let cwd = match project_path {
+                Some(pp) => PathBuf::from(pp),
+                None => home_dir()?,
+            };
+            f.lock().await.start(&cwd, Some(&cfg), self.platform_env().await?).await.map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+
+    pub async fn get_ai_config(&self) -> Result<Option<AiConfig>, String> {
+        self.client.get_ai_config().await.map_err(|e| format!("failed to get AI config: {e}"))
     }
 
     pub async fn verify_schema(&self, project_path: &str) -> Result<rootcx_shared_types::SchemaVerification, String> {
