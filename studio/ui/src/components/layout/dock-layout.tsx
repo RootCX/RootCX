@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useRef, useMemo } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
 import { StatusBar } from "./status-bar";
@@ -18,13 +19,28 @@ const WelcomePanel = lazy(() => import("@/extensions/welcome/panel"));
 
 function useEventListeners(dispatch: React.Dispatch<Parameters<typeof dispatch>[0]>) {
   useEffect(() => {
+    // Use per-window listen so each window only receives events targeted at it
+    const win = getCurrentWebviewWindow();
     const subs = [
-      listen<string>("toggle-view", (e) => dispatch({ type: "TOGGLE_VIEW", viewId: e.payload })),
-      listen("run", () => executeCommand("rootcx.run")),
-      listen("reset-layout", async () => {
+      win.listen<string>("toggle-view", (e) => dispatch({ type: "TOGGLE_VIEW", viewId: e.payload })),
+      win.listen("run", () => executeCommand("rootcx.run")),
+      win.listen("reset-layout", async () => {
         if (await ask("Reset all views to their default positions?", {
           title: "Reset Layout", kind: "warning", okLabel: "Reset", cancelLabel: "Cancel",
         })) dispatch({ type: "RESET", defaultState: buildDefaultState(viewRegistry.getAll()) });
+      }),
+      win.listen("file:open-folder", () => {
+        executeCommand("project.open");
+      }),
+      win.listen("file:create-project", () => {
+        executeCommand("project.create");
+      }),
+      win.listen<string>("file:open-recent", (e) => {
+        if (workspace.projectPath) {
+          invoke("create_window", { projectPath: e.payload }).catch(console.error);
+        } else {
+          workspace.openProject(e.payload);
+        }
       }),
     ];
     return () => { subs.forEach((s) => s.then((fn) => fn())); };

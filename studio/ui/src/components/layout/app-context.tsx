@@ -1,6 +1,7 @@
 import { createContext, useContext, useState, useCallback, useEffect, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { workspace } from "@/core/studio";
+import { initialProjectPath } from "@/core/window";
 
 interface ProjectContext {
   projectPath: string | null;
@@ -10,17 +11,20 @@ interface ProjectContext {
 const ProjectCtx = createContext<ProjectContext | null>(null);
 
 export function ProjectProvider({ children }: { children: ReactNode }) {
-  const [projectPath, setProjectPath] = useState<string | null>(null);
+  const [projectPath, setProjectPath] = useState<string | null>(initialProjectPath);
 
   const openProject = useCallback((path: string) => {
     setProjectPath(path);
     workspace.projectPath = path;
+    invoke("add_to_recent", { projectPath: path }).catch(() => {});
   }, []);
   workspace.openProject = openProject;
 
   useEffect(() => {
     if (projectPath) {
+      workspace.projectPath = projectPath;
       invoke("sync_manifest", { projectPath }).catch(console.error);
+      invoke("add_to_recent", { projectPath }).catch(() => {});
     }
   }, [projectPath]);
 

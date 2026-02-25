@@ -9,7 +9,7 @@ mod state;
 mod terminal;
 
 use state::AppState;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 use tracing::error;
 
 pub fn run() {
@@ -47,12 +47,20 @@ pub fn run() {
             commands::list_platform_secrets,
             commands::set_platform_secret,
             commands::delete_platform_secret,
+            commands::create_window,
+            commands::get_recent_projects,
+            commands::add_to_recent,
+            commands::clear_recent,
         ])
         .setup(|app| {
             let view_menu = menu::setup(app)?;
             app.manage(view_menu);
             app.manage(tokio::sync::Mutex::new(terminal::TerminalState::default()));
             app.manage(tokio::sync::Mutex::new(runner::RunnerState::default()));
+
+            if let Some(main_window) = app.get_webview_window("main") {
+                menu::track_window_focus(&main_window);
+            }
 
             let state = AppState::from_tauri(app);
             let bg = state.clone();
@@ -73,14 +81,7 @@ pub fn run() {
             Ok(())
         })
         .on_menu_event(|app, event| {
-            let id = event.id().as_ref();
-            if app.state::<menu::ViewMenuItems>().0.contains_key(id) {
-                let _ = app.emit("toggle-view", id);
-            } else if id == "run" {
-                let _ = app.emit("run", ());
-            } else if id == "reset-layout" {
-                let _ = app.emit("reset-layout", ());
-            }
+            menu::handle_menu_event(app, &event);
         })
         .build(tauri::generate_context!())
         .expect("failed to build tauri application")

@@ -5,6 +5,7 @@ import {
   useEffect,
   type ReactNode,
 } from "react";
+import { windowLabel } from "@/core/window";
 
 export type ZoneId = "sidebar" | "editor" | "bottom" | "right";
 
@@ -21,7 +22,7 @@ export type Action =
   | { type: "SET_ACTIVE"; zone: ZoneId; viewId: string }
   | { type: "RESET"; defaultState: LayoutState };
 
-const STORAGE_KEY = "studio:layout";
+const STORAGE_KEY = `studio:layout:${windowLabel}`;
 const ZONE_IDS: ZoneId[] = ["sidebar", "editor", "bottom", "right"];
 
 export function buildDefaultState(

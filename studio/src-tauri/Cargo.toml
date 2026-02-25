@@ -30,4 +30,6 @@ tar = "0.4"
 flate2 = "1"
 notify = "7"
 notify-debouncer-mini = "0.5"
+uuid = { version = "1", features = ["v4"] }
+urlencoding = "2"
 

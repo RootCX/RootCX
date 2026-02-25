@@ -1,11 +1,12 @@
 use rootcx_shared_types::OsStatus;
 use serde::Serialize;
 use tauri::{State, ipc::Channel};
+use tauri::webview::WebviewWindowBuilder;
 use tokio::sync::Mutex;
 
 use crate::menu::ViewMenuItems;
 use crate::runner::RunnerState;
-use crate::state::AppState;
+use crate::state::{AppState, RecentProject};
 use crate::terminal::TerminalState;
 
 #[tauri::command]
@@ -276,6 +277,43 @@ pub async fn set_platform_secret(state: State<'_, AppState>, key: String, value:
 #[tauri::command]
 pub async fn delete_platform_secret(state: State<'_, AppState>, key: String) -> Result<(), String> {
     state.delete_platform_secret(&key).await
+}
+
+#[tauri::command]
+pub fn create_window(app_handle: tauri::AppHandle, project_path: Option<String>) -> Result<String, String> {
+    let label = format!("studio-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let url_path = match &project_path {
+        Some(path) => format!("index.html?project={}", urlencoding::encode(path)),
+        None => "index.html".to_string(),
+    };
+
+    let window = WebviewWindowBuilder::new(&app_handle, &label, tauri::WebviewUrl::App(url_path.into()))
+        .title("RootCX Studio")
+        .inner_size(1024.0, 700.0)
+        .resizable(true)
+        .build()
+        .map_err(|e| format!("failed to create window: {e}"))?;
+
+    crate::menu::track_window_focus(&window);
+
+    Ok(label)
+}
+
+#[tauri::command]
+pub fn get_recent_projects() -> Vec<RecentProject> {
+    crate::state::load_recent_projects()
+}
+
+#[tauri::command]
+pub fn add_to_recent(app_handle: tauri::AppHandle, project_path: String) {
+    crate::state::add_recent_project(&project_path);
+    crate::menu::rebuild_recent_menu(&app_handle, &crate::state::load_recent_projects());
+}
+
+#[tauri::command]
+pub fn clear_recent(app_handle: tauri::AppHandle) {
+    crate::state::clear_recent_projects();
+    crate::menu::rebuild_recent_menu(&app_handle, &[]);
 }
 
 #[cfg(test)]

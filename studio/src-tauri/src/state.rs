@@ -51,6 +51,60 @@ fn session_file() -> Result<PathBuf, String> {
     Ok(config_dir()?.join("studio-session.json"))
 }
 
+fn recent_projects_file() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("studio-recent.json"))
+}
+
+const MAX_RECENT: usize = 10;
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RecentProject {
+    pub path: String,
+    pub name: String,
+    pub last_opened: i64,
+}
+
+pub fn load_recent_projects() -> Vec<RecentProject> {
+    recent_projects_file()
+        .ok()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|d| serde_json::from_str(&d).ok())
+        .unwrap_or_default()
+}
+
+pub fn add_recent_project(project_path: &str) {
+    let mut recents = load_recent_projects();
+    recents.retain(|r| r.path != project_path);
+
+    let name = Path::new(project_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| project_path.to_string());
+
+    recents.insert(0, RecentProject { path: project_path.to_string(), name, last_opened: unix_now() });
+    recents.truncate(MAX_RECENT);
+
+    if let Ok(file) = recent_projects_file() {
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(&file, serde_json::to_string_pretty(&recents).unwrap_or_default());
+    }
+}
+
+pub fn clear_recent_projects() {
+    if let Ok(file) = recent_projects_file() {
+        let _ = std::fs::remove_file(&file);
+    }
+}
+
 async fn ensure_instructions() -> Result<(), String> {
     let dir = instructions_dir()?;
     tokio::fs::create_dir_all(&dir).await.map_err(|e| format!("failed to create instructions dir: {e}"))?;

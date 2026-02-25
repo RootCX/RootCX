@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "Default capabilities for RootCX Studio",
-  "windows": ["main"],
+  "windows": ["main", "studio-*"],
   "permissions": [
     "core:default",
     "shell:allow-open",
