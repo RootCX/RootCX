@@ -1,12 +1,8 @@
-import { useEffect, useRef, useMemo } from "react";
+import { Suspense, lazy, useEffect, useRef, useMemo } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
-import {
-  ResizablePanelGroup,
-  ResizablePanel,
-  ResizableHandle,
-} from "@/components/ui/resizable";
+import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
 import { StatusBar } from "./status-bar";
 import { PanelContainer } from "./panel-container";
 import { ActivityBar } from "./activity-bar";
@@ -17,6 +13,40 @@ import { views as viewRegistry, executeCommand, workspace, layout } from "@/core
 import { CommandPaletteOverlay } from "@/extensions/command-palette/palette";
 import { showAISetupDialog } from "@/components/ai-setup-dialog";
 import { aiConfigStore } from "@/lib/ai-models";
+
+const WelcomePanel = lazy(() => import("@/extensions/welcome/panel"));
+
+function useEventListeners(dispatch: React.Dispatch<Parameters<typeof dispatch>[0]>) {
+  useEffect(() => {
+    const subs = [
+      listen<string>("toggle-view", (e) => dispatch({ type: "TOGGLE_VIEW", viewId: e.payload })),
+      listen("run", () => executeCommand("rootcx.run")),
+      listen("reset-layout", async () => {
+        if (await ask("Reset all views to their default positions?", {
+          title: "Reset Layout", kind: "warning", okLabel: "Reset", cancelLabel: "Cancel",
+        })) dispatch({ type: "RESET", defaultState: buildDefaultState(viewRegistry.getAll()) });
+      }),
+    ];
+    return () => { subs.forEach((s) => s.then((fn) => fn())); };
+  }, [dispatch]);
+}
+
+function useAISetupPrompt() {
+  const prompted = useRef(false);
+  useEffect(() => {
+    const check = () => {
+      if (prompted.current) return;
+      aiConfigStore.refresh().then(() => {
+        if (!aiConfigStore.isLoaded() || prompted.current) return;
+        prompted.current = true;
+        if (!aiConfigStore.getSnapshot()) showAISetupDialog();
+      });
+    };
+    const unlisten = listen("runtime-booted", check);
+    check();
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+}
 
 function Shell() {
   const { state, dispatch } = useLayout();
@@ -31,43 +61,16 @@ function Shell() {
     invoke("sync_view_menu", { hidden: [...state.hidden] }).catch(() => {});
   }, [state.hidden]);
 
-  useEffect(() => {
-    const u1 = listen<string>("toggle-view", (e) => {
-      dispatch({ type: "TOGGLE_VIEW", viewId: e.payload });
-    });
-    const u2 = listen("run", () => {
-      executeCommand("rootcx.run");
-    });
-    const u3 = listen("reset-layout", async () => {
-      const ok = await ask("Reset all views to their default positions?", {
-        title: "Reset Layout",
-        kind: "warning",
-        okLabel: "Reset",
-        cancelLabel: "Cancel",
-      });
-      if (ok) dispatch({ type: "RESET", defaultState: buildDefaultState(viewRegistry.getAll()) });
-    });
-    return () => {
-      u1.then((fn) => fn());
-      u2.then((fn) => fn());
-      u3.then((fn) => fn());
-    };
-  }, [dispatch]);
+  useEventListeners(dispatch);
+  useAISetupPrompt();
 
-  const autoPrompted = useRef(false);
-  useEffect(() => {
-    const check = () => {
-      if (autoPrompted.current) return;
-      aiConfigStore.refresh().then(() => {
-        if (!aiConfigStore.isLoaded() || autoPrompted.current) return;
-        autoPrompted.current = true;
-        if (!aiConfigStore.getSnapshot()) showAISetupDialog();
-      });
-    };
-    const unlisten = listen("runtime-booted", check);
-    check();
-    return () => { unlisten.then((fn) => fn()); };
-  }, []);
+  if (!projectPath) {
+    return (
+      <div className="h-screen w-screen overflow-hidden">
+        <Suspense fallback={null}><WelcomePanel /></Suspense>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen w-screen overflow-hidden">
