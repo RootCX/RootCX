@@ -1,7 +1,7 @@
 import { useSyncExternalStore, useState, useEffect } from "react";
-import { subscribe, getSnapshot, uninstallAgent } from "@/extensions/agents/store";
 import { subscribe as subscribeTools, getSnapshot as getToolsSnapshot, loadProject as loadToolsProject } from "@/extensions/agent-tools/store";
 import { openAgentChat } from "@/extensions/agents";
+import { uninstallAgent } from "@/extensions/agents/store";
 import { Trash2, Database, Wrench, FolderOpen, Hammer, type LucideIcon } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { views } from "@/core/studio";
@@ -27,14 +27,13 @@ const isVisible = (state: LayoutState, id: string) =>
   Object.values(state.zones).some((ids) => ids.includes(id)) && !state.hidden.has(id);
 
 export function ActivityBar() {
-  const { agents } = useSyncExternalStore(subscribe, getSnapshot);
-  const { isAgent } = useSyncExternalStore(subscribeTools, getToolsSnapshot);
+  const { isAgent, appId, agentName } = useSyncExternalStore(subscribeTools, getToolsSnapshot);
   const { projectPath } = useProjectContext();
 
   useEffect(() => { if (projectPath) loadToolsProject(projectPath) }, [projectPath]);
 
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [menu, setMenu] = useState<{ appId: string; x: number; y: number } | null>(null);
+  const [agentActive, setAgentActive] = useState(false);
+  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const { state, dispatch } = useLayout();
 
   const items = isAgent ? [...NAV_ITEMS, TOOLS_ITEM] : NAV_ITEMS;
@@ -66,42 +65,41 @@ export function ActivityBar() {
           );
         })}
 
-        {agents.length > 0 && <div className="my-1 h-px w-6 bg-border" />}
-
-        {agents.map((a) => (
-          <Tooltip key={a.app_id}>
-            <TooltipTrigger asChild>
-              <button
-                className={cn(BTN, "text-[18px] font-bold", activeId === a.app_id && "text-foreground")}
-                onClick={() => { setActiveId(a.app_id); openAgentChat(a.app_id, a.name); }}
-                onContextMenu={(e) => { e.preventDefault(); setMenu({ appId: a.app_id, x: e.clientX, y: e.clientY }); }}
-              >
-                {activeId === a.app_id && <span className={INDICATOR} />}
-                {a.name[0].toUpperCase()}
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right" sideOffset={4}>
-              <div className="text-xs font-semibold">{a.name}</div>
-              {a.description && <div className="text-[10px] text-muted-foreground">{a.description}</div>}
-            </TooltipContent>
-          </Tooltip>
-        ))}
+        {isAgent && appId && (
+          <>
+            <div className="my-1 h-px w-6 bg-border" />
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  className={cn(BTN, "text-[18px] font-bold", agentActive && "text-foreground")}
+                  onClick={() => { setAgentActive(true); openAgentChat(appId, agentName ?? undefined); }}
+                  onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY }); }}
+                >
+                  {agentActive && <span className={INDICATOR} />}
+                  {(agentName ?? appId)[0].toUpperCase()}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right" sideOffset={4}>
+                <div className="text-xs font-semibold">{agentName ?? appId}</div>
+              </TooltipContent>
+            </Tooltip>
+          </>
+        )}
       </div>
 
-      {menu && (
+      {menu && appId && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMenu(null); }} />
           <div className="fixed z-50 min-w-[160px] rounded-[5px] border border-[#454545] bg-[#252526] p-[4px] shadow-[0_2px_8px_rgba(0,0,0,0.5)]" style={{ left: menu.x, top: menu.y }}>
             <button
               className="flex w-full items-center gap-2 rounded-[3px] px-2 py-[3px] text-[13px] text-[#cc6b6b] hover:bg-[#3a1d1d] hover:text-[#f48771]"
               onClick={async () => {
-                const { appId } = menu;
                 setMenu(null);
-                const name = agents.find((a) => a.app_id === appId)?.name ?? appId;
+                const name = agentName ?? appId;
                 if (await ask(`Delete "${name}"? This will undeploy the agent.`, { title: "Delete Agent", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" })) {
                   views.unregister(`agent-chat:${appId}`);
                   await uninstallAgent(appId).catch(console.error);
-                  if (activeId === appId) setActiveId(null);
+                  setAgentActive(false);
                 }
               }}
             >

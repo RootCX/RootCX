@@ -1,4 +1,5 @@
-import type { AgentInfo, AgentMessage } from "@/types";
+import type { AgentMessage } from "@/types";
+import { dismiss } from "@/core/notifications";
 
 const BASE = "http://localhost:9100";
 
@@ -11,21 +12,38 @@ interface AgentChatState {
 }
 
 interface State {
-  agents: AgentInfo[];
   chats: Record<string, AgentChatState>;
+  deployed: Record<string, boolean>;
 }
 
-let state: State = { agents: [], chats: {} };
+let state: State = { chats: {}, deployed: {} };
 const listeners = new Set<() => void>();
 let snapshot = state;
 
 function emit() {
-  snapshot = { ...state, chats: { ...state.chats } };
+  snapshot = { ...state };
   listeners.forEach((fn) => fn());
 }
 
 export const subscribe = (fn: () => void) => (listeners.add(fn), () => listeners.delete(fn));
 export const getSnapshot = () => snapshot;
+
+export async function checkDeployment(appId: string): Promise<boolean> {
+  let ok = false;
+  try {
+    const r = await fetch(`${BASE}/api/v1/apps/${appId}/worker/status`);
+    ok = r.ok && (await r.json()).status === "running";
+  } catch {}
+  state = { ...state, deployed: { ...state.deployed, [appId]: ok } };
+  emit();
+  if (ok) dismiss("agent-not-deployed");
+  return ok;
+}
+
+export function markUndeployed() {
+  state = { ...state, deployed: {} };
+  emit();
+}
 
 function chatFor(appId: string): AgentChatState {
   return (state.chats[appId] ??= {
@@ -40,56 +58,6 @@ function patchChat(appId: string, partial: Partial<AgentChatState>) {
   emit();
 }
 
-// ── Agent discovery ──
-
-async function fetchAgents() {
-  try {
-    const res = await fetch(`${BASE}/api/v1/apps`);
-    if (!res.ok) return;
-    const apps: { id: string }[] = await res.json();
-
-    const results = await Promise.allSettled(
-      apps.map((a) => fetch(`${BASE}/api/v1/apps/${a.id}/agent`).then((r) => r.ok ? r.json() : null)),
-    );
-    const agents: AgentInfo[] = results
-      .filter((r): r is PromiseFulfilledResult<AgentInfo> => r.status === "fulfilled" && r.value !== null)
-      .map((r) => ({ app_id: r.value.app_id, name: r.value.name, description: r.value.description ?? null }));
-
-    state = { ...state, agents };
-    emit();
-  } catch (e) { console.warn("fetchAgents failed:", e); }
-}
-
-let pollingId: ReturnType<typeof setInterval> | null = null;
-export function startPolling() {
-  if (pollingId) return;
-  fetchAgents();
-  pollingId = setInterval(fetchAgents, 5_000);
-}
-export function stopPolling() {
-  if (pollingId) { clearInterval(pollingId); pollingId = null; }
-}
-
-// ── Worker lifecycle ──
-
-const runningWorkers = new Set<string>();
-
-async function ensureWorker(appId: string) {
-  if (runningWorkers.has(appId)) return;
-  try {
-    const r = await fetch(`${BASE}/api/v1/apps/${appId}/worker/status`);
-    if (r.ok && (await r.json()).status === "running") { runningWorkers.add(appId); return; }
-  } catch (e) { console.warn("ensureWorker status check failed:", e); }
-
-  const r = await fetch(`${BASE}/api/v1/apps/${appId}/worker/start`, { method: "POST" });
-  if (!r.ok) throw new Error(await r.text().catch(() => "failed to start worker"));
-  runningWorkers.add(appId);
-  const WORKER_INIT_GRACE_MS = 1_000;
-  await new Promise((resolve) => setTimeout(resolve, WORKER_INIT_GRACE_MS));
-}
-
-// ── SSE streaming ──
-
 const abortControllers = new Map<string, AbortController>();
 
 export async function sendAgentMessage(appId: string, message: string) {
@@ -103,8 +71,6 @@ export async function sendAgentMessage(appId: string, message: string) {
   abortControllers.set(appId, ctrl);
 
   try {
-    await ensureWorker(appId);
-
     const body: Record<string, string> = { message };
     if (chat.sessionId) body.session_id = chat.sessionId;
 
@@ -145,7 +111,7 @@ async function readSSE(body: ReadableStream<Uint8Array>, appId: string) {
     for (const line of lines) {
       if (line.startsWith("event:")) eventType = line.slice(6).trim();
       else if (line.startsWith("data:")) {
-        try { handleSSE(appId, eventType, JSON.parse(line.slice(5))); } catch { /* skip */ }
+        try { handleSSE(appId, eventType, JSON.parse(line.slice(5))); } catch {}
       }
     }
   }
@@ -199,6 +165,7 @@ export async function uninstallAgent(appId: string) {
   if (!res.ok) throw new Error(await res.text().catch(() => "uninstall failed"));
   abortControllers.get(appId)?.abort();
   const { [appId]: _, ...chats } = state.chats;
-  state = { ...state, chats, agents: state.agents.filter((a) => a.app_id !== appId) };
+  const { [appId]: __, ...deployed } = state.deployed;
+  state = { ...state, chats, deployed };
   emit();
 }

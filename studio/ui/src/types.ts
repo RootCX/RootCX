@@ -39,12 +39,6 @@ export interface SchemaVerification {
   changes: SchemaChange[];
 }
 
-export interface AgentInfo {
-  app_id: string;
-  name: string;
-  description: string | null;
-}
-
 export interface AgentMessage {
   role: "user" | "assistant";
   content: string;

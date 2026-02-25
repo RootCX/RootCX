@@ -18,9 +18,11 @@ interface State {
   isAgent: boolean;
   loading: boolean;
   projectPath: string | null;
+  appId: string | null;
+  agentName: string | null;
 }
 
-let state: State = { tools: [], isAgent: false, loading: false, projectPath: null };
+let state: State = { tools: [], isAgent: false, loading: false, projectPath: null, appId: null, agentName: null };
 const listeners = new Set<() => void>();
 let snapshot = state;
 
@@ -34,6 +36,7 @@ export const getSnapshot = () => snapshot;
 
 interface Manifest {
   appId: string;
+  name?: string;
   agent?: {
     access?: Array<{ entity: string; actions?: string[] }>;
     [key: string]: unknown;
@@ -92,7 +95,7 @@ export async function loadProject(projectPath: string) {
   try {
     const manifest = await readManifest(projectPath);
     if (!manifest.agent) {
-      state = { ...state, isAgent: false, tools: [], loading: false };
+      state = { ...state, isAgent: false, tools: [], loading: false, appId: null, agentName: null };
       emit();
       return;
     }
@@ -104,6 +107,8 @@ export async function loadProject(projectPath: string) {
       isAgent: true,
       tools: buildToolEntries(available, access, hasEntities),
       loading: false,
+      appId: manifest.appId,
+      agentName: manifest.name ?? manifest.appId,
     };
     emit();
   } catch {

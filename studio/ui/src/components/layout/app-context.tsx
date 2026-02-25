@@ -13,17 +13,12 @@ const ProjectCtx = createContext<ProjectContext | null>(null);
 export function ProjectProvider({ children }: { children: ReactNode }) {
   const [projectPath, setProjectPath] = useState<string | null>(initialProjectPath);
 
-  const openProject = useCallback((path: string) => {
-    setProjectPath(path);
-    workspace.projectPath = path;
-    invoke("add_to_recent", { projectPath: path }).catch(() => {});
-  }, []);
+  const openProject = useCallback((path: string) => { setProjectPath(path); }, []);
   workspace.openProject = openProject;
 
   useEffect(() => {
     if (projectPath) {
       workspace.projectPath = projectPath;
-      invoke("sync_manifest", { projectPath }).catch(console.error);
       invoke("add_to_recent", { projectPath }).catch(() => {});
     }
   }, [projectPath]);
@@ -37,8 +32,6 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
 export function useProjectContext(): ProjectContext {
   const ctx = useContext(ProjectCtx);
-  if (!ctx) {
-    throw new Error("useProjectContext must be used within ProjectProvider");
-  }
+  if (!ctx) throw new Error("useProjectContext must be used within ProjectProvider");
   return ctx;
 }
