@@ -10,6 +10,7 @@ import { activate as run } from "./run";
 import { activate as editor } from "./editor";
 import { activate as settings } from "./settings";
 import { activate as agents } from "./agents";
+import { activate as database } from "./database";
 
 export function activateBuiltins() {
   commandPalette();
@@ -24,4 +25,5 @@ export function activateBuiltins() {
   editor();
   settings();
   agents();
+  database();
 }

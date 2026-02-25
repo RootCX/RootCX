@@ -25,7 +25,7 @@ export type Action =
 const STORAGE_KEY = `studio:layout:${windowLabel}`;
 const ZONE_IDS: ZoneId[] = ["sidebar", "editor", "bottom", "right"];
 
-const DEFAULT_VISIBLE = new Set(["forge", "explorer", "welcome"]);
+const DEFAULT_VISIBLE = new Set(["forge", "explorer", "welcome", "database"]);
 
 export function buildDefaultState(
   views: { id: string; defaultZone: ZoneId; defaultActive?: boolean }[],

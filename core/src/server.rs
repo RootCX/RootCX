@@ -38,7 +38,10 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .route(
             "/api/v1/apps/{app_id}/deploy",
             post(routes::deploy_backend).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
-        );
+        )
+        .route("/api/v1/db/schemas", get(routes::list_schemas))
+        .route("/api/v1/db/schemas/{schema}/tables", get(routes::list_tables))
+        .route("/api/v1/db/query", post(routes::execute_query));
 
     let (auth_config, rbac_cache) = {
         let rt = runtime.lock().await;
