@@ -1,8 +1,8 @@
 import { useState, useCallback, useEffect, useSyncExternalStore } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { aiConfigStore } from "@/lib/ai-models";
 import { showAISetupDialog } from "@/components/ai-setup-dialog";
+import { listSecrets, setSecret, deleteSecret } from "@/core/api";
 
 const heading = "text-xs font-semibold uppercase tracking-wider text-primary";
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -33,7 +33,7 @@ export default function SettingsPanel() {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   const refresh = useCallback(() => {
-    invoke<string[]>("list_platform_secrets").then(setKeys).catch((e) => setError(errMsg(e)));
+    listSecrets().then(setKeys).catch((e) => setError(errMsg(e)));
   }, []);
 
   useEffect(refresh, [refresh]);
@@ -43,7 +43,7 @@ export default function SettingsPanel() {
     if (!k || !v) return;
     setError(null);
     try {
-      await invoke("set_platform_secret", { key: k, value: v });
+      await setSecret(k, v);
       setNewKey("");
       setNewValue("");
       refresh();
@@ -53,7 +53,7 @@ export default function SettingsPanel() {
   const handleDelete = async (key: string) => {
     setError(null);
     try {
-      await invoke("delete_platform_secret", { key });
+      await deleteSecret(key);
       setConfirmDelete(null);
       refresh();
     } catch (e) { setError(errMsg(e)); }

@@ -295,41 +295,16 @@ impl AppState {
         *abort_store.lock().await = Some(task.abort_handle());
     }
 
+    pub async fn get_ai_config(&self) -> Result<Option<AiConfig>, String> {
+        self.client.get_ai_config().await.map_err(|e| format!("failed to get AI config: {e}"))
+    }
+
     pub async fn start_forge(&self, project_path: &str) -> Result<(), String> {
         if let Some(ref f) = self.forge {
             let model = self.forge_model_from_core().await;
             let cfg = write_forge_config(&model).await?;
             f.lock().await.start(Path::new(project_path), Some(cfg.as_path()), self.platform_env().await?).await.map_err(|e| e.to_string())?;
         }
-        Ok(())
-    }
-
-    pub async fn save_ai_config(&self, config: &AiConfig, project_path: Option<&str>) -> Result<(), String> {
-        self.client.set_ai_config(config).await.map_err(|e| format!("failed to save AI config: {e}"))?;
-
-        if let Some(ref f) = self.forge {
-            let cfg = write_forge_config(&config.forge_model_string()).await?;
-            let cwd = match project_path {
-                Some(pp) => PathBuf::from(pp),
-                None => home_dir()?,
-            };
-            f.lock().await.start(&cwd, Some(&cfg), self.platform_env().await?).await.map_err(|e| e.to_string())?;
-        }
-        Ok(())
-    }
-
-    pub async fn get_ai_config(&self) -> Result<Option<AiConfig>, String> {
-        self.client.get_ai_config().await.map_err(|e| format!("failed to get AI config: {e}"))
-    }
-
-    pub async fn verify_schema(&self, project_path: &str) -> Result<rootcx_shared_types::SchemaVerification, String> {
-        let manifest = read_manifest(project_path).await?;
-        self.client.verify_schema(&manifest).await.map_err(|e| format!("verify failed: {e}"))
-    }
-
-    pub async fn sync_manifest(&self, project_path: &str) -> Result<(), String> {
-        let manifest = read_manifest(project_path).await?;
-        self.client.install_app(&manifest).await.map_err(|e| format!("failed to install app: {e}"))?;
         Ok(())
     }
 
@@ -446,18 +421,6 @@ impl AppState {
             let _ = tokio::fs::remove_file(&path).await;
         }
         self.watchers.lock().await.clear();
-    }
-
-    pub async fn list_platform_secrets(&self) -> Result<Vec<String>, String> {
-        self.client.list_platform_secrets().await.map_err(|e| format!("failed to list secrets: {e}"))
-    }
-
-    pub async fn set_platform_secret(&self, key: &str, value: &str) -> Result<(), String> {
-        self.client.set_platform_secret(key, value).await.map_err(|e| format!("failed to set secret: {e}"))
-    }
-
-    pub async fn delete_platform_secret(&self, key: &str) -> Result<(), String> {
-        self.client.delete_platform_secret(key).await.map_err(|e| format!("failed to delete secret: {e}"))
     }
 
     pub async fn shutdown(&self) {

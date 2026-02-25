@@ -3,7 +3,7 @@ import { emit, listen } from "@tauri-apps/api/event";
 import { commands, workspace, layout } from "@/core/studio";
 import { dismiss } from "@/core/notifications";
 import { showMigrationDialog } from "./migration-dialog";
-import type { SchemaVerification } from "@/types";
+import { verifySchema, syncManifest } from "@/core/api";
 
 interface LaunchConfig {
   preLaunch: string[];
@@ -49,20 +49,23 @@ function logError(step: string, err: unknown): false {
   return false;
 }
 
+async function readManifest(projectPath: string): Promise<unknown> {
+  const raw = await invoke<string>("read_file", { path: `${projectPath}/manifest.json` });
+  return JSON.parse(raw);
+}
+
 async function executeStep(step: string, projectPath: string): Promise<boolean> {
   switch (step) {
     case "verify_schema": {
       try {
-        const result = await invoke<SchemaVerification>("verify_schema", { projectPath });
-        if (!result.compliant) {
-          return await showMigrationDialog(result.changes);
-        }
+        const result = await verifySchema(await readManifest(projectPath));
+        if (!result.compliant) return await showMigrationDialog(result.changes);
       } catch (e) { return logError("verify_schema", e); }
       return true;
     }
     case "sync_manifest": {
       try {
-        await invoke("sync_manifest", { projectPath });
+        await syncManifest(await readManifest(projectPath));
         dismiss("agent-tools-changed");
       } catch (e) { return logError("sync_manifest", e); }
       return true;

@@ -13,6 +13,8 @@ import {
   type AIProvider,
   type AwsAuthMode,
 } from "@/lib/ai-models";
+import { setSecret, saveAiConfig } from "@/core/api";
+import { workspace } from "@/core/studio";
 
 type Step = "provider" | "key" | "saving";
 
@@ -72,14 +74,17 @@ function AISetupWizard({ preselect, onDone }: { preselect?: string; onDone: (ok:
     try {
       setSavingStatus("Encrypting credentials...");
       for (const key of activeEnvKeys) {
-        await invoke("set_platform_secret", { key, value: secrets[key].trim() });
+        await setSecret(key, secrets[key].trim());
       }
       setSecrets({});
 
       setSavingStatus("Saving configuration...");
-      await invoke("save_ai_config", { config: defaultAiConfig(selected.id) });
+      await saveAiConfig(defaultAiConfig(selected.id));
 
       setSavingStatus("Starting AI engine...");
+      if (workspace.projectPath) {
+        await invoke("start_forge", { projectPath: workspace.projectPath });
+      }
       await aiConfigStore.refresh();
       onDone(true);
     } catch (e) {

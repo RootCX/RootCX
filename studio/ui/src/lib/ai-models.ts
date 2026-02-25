@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { getAiConfig } from "@/core/api";
 
 const DEFAULT_MODEL = "claude-sonnet-4-6";
 
@@ -58,7 +58,7 @@ export const aiConfigStore = {
   isLoaded() { return loaded; },
   async refresh() {
     try {
-      current = await invoke<AiConfig | null>("get_ai_config");
+      current = await getAiConfig();
       loaded = true;
     } catch {
       // runtime not ready — don't update state

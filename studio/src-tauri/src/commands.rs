@@ -41,20 +41,6 @@ pub async fn start_forge(state: State<'_, AppState>, project_path: String) -> Re
     state.start_forge(&project_path).await
 }
 
-#[tauri::command]
-pub async fn save_ai_config(
-    state: State<'_, AppState>,
-    config: rootcx_shared_types::AiConfig,
-    project_path: Option<String>,
-) -> Result<(), String> {
-    state.save_ai_config(&config, project_path.as_deref()).await
-}
-
-#[tauri::command]
-pub async fn get_ai_config(state: State<'_, AppState>) -> Result<Option<rootcx_shared_types::AiConfig>, String> {
-    state.get_ai_config().await
-}
-
 #[derive(Serialize)]
 pub struct DirEntry {
     name: String,
@@ -145,19 +131,6 @@ pub async fn write_file(path: String, contents: String) -> Result<(), String> {
 pub async fn ensure_dir(path: String) -> Result<(), String> {
     validate_fs_path(&path)?;
     tokio::fs::create_dir_all(&path).await.map_err(|e| format!("failed to create directory: {e}"))
-}
-
-#[tauri::command]
-pub async fn verify_schema(
-    state: State<'_, AppState>,
-    project_path: String,
-) -> Result<rootcx_shared_types::SchemaVerification, String> {
-    state.verify_schema(&project_path).await
-}
-
-#[tauri::command]
-pub async fn sync_manifest(state: State<'_, AppState>, project_path: String) -> Result<(), String> {
-    state.sync_manifest(&project_path).await
 }
 
 #[tauri::command]
@@ -267,21 +240,6 @@ pub async fn terminal_write(data: String, state: State<'_, Mutex<TerminalState>>
 #[tauri::command]
 pub async fn terminal_resize(rows: u16, cols: u16, state: State<'_, Mutex<TerminalState>>) -> Result<(), String> {
     state.lock().await.resize(rows, cols).await
-}
-
-#[tauri::command]
-pub async fn list_platform_secrets(state: State<'_, AppState>) -> Result<Vec<String>, String> {
-    state.list_platform_secrets().await
-}
-
-#[tauri::command]
-pub async fn set_platform_secret(state: State<'_, AppState>, key: String, value: String) -> Result<(), String> {
-    state.set_platform_secret(&key, &value).await
-}
-
-#[tauri::command]
-pub async fn delete_platform_secret(state: State<'_, AppState>, key: String) -> Result<(), String> {
-    state.delete_platform_secret(&key).await
 }
 
 #[tauri::command]
