@@ -194,10 +194,9 @@ async fn compute_permissions(
     app_id: &str,
     user_id: Uuid,
 ) -> Result<Json<EffectivePermissions>, ApiError> {
-    let cached = cache
-        .get_or_fetch(pool, app_id)
-        .await?
-        .ok_or_else(|| ApiError::NotFound(format!("no RBAC configured for app '{app_id}'")))?;
+    let Some(cached) = cache.get_or_fetch(pool, app_id).await? else {
+        return Ok(Json(EffectivePermissions { roles: vec![], permissions: HashMap::new() }));
+    };
 
     let expanded = resolve_user_roles(pool, &cached, user_id, app_id).await?;
 

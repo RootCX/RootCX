@@ -212,16 +212,14 @@ pub async fn require_admin(
     user_id: Uuid,
 ) -> Result<(), ApiError> {
     let cached =
-        cache.get_or_fetch(pool, app_id).await?.ok_or_else(|| ApiError::Forbidden("no RBAC configured".into()))?;
+        cache.get_or_fetch(pool, app_id).await?.ok_or_else(|| ApiError::Forbidden("admin access required".into()))?;
     let expanded = resolve_user_roles(pool, &cached, user_id, app_id).await?;
-    let is_admin = cached
+    cached
         .policies
         .iter()
-        .any(|p| p.entity == "*" && expanded.contains(&p.role) && p.actions.iter().any(|a| a == "*"));
-    if !is_admin {
-        return Err(ApiError::Forbidden("admin access required".into()));
-    }
-    Ok(())
+        .any(|p| p.entity == "*" && expanded.contains(&p.role) && p.actions.iter().any(|a| a == "*"))
+        .then_some(())
+        .ok_or_else(|| ApiError::Forbidden("admin access required".into()))
 }
 
 #[cfg(test)]
