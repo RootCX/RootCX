@@ -49,7 +49,7 @@ export function ActivityBar() {
           <div className="fixed inset-0 z-40" onClick={closeMenu} onContextMenu={(e) => { e.preventDefault(); closeMenu(); }} />
           <div className="fixed z-50 min-w-[160px] rounded-[5px] border border-[#454545] bg-[#252526] p-[4px] shadow-[0_2px_8px_rgba(0,0,0,0.5)]" style={{ left: menu.x, top: menu.y }}>
             <button
-              className="flex w-full items-center gap-2 rounded-[3px] px-2 py-[3px] text-[13px] text-[#cc6b6b] hover:bg-[#04395e] hover:text-[#f48771]"
+              className="flex w-full items-center gap-2 rounded-[3px] px-2 py-[3px] text-[13px] text-[#cc6b6b] hover:bg-[#3a1d1d] hover:text-[#f48771]"
               onClick={async () => {
                 const { appId } = menu;
                 closeMenu();
