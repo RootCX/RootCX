@@ -140,72 +140,63 @@ function QuestionFieldView({
   info: QuestionInfo;
   index: number;
   answers: string[][];
-  setAnswers: React.Dispatch<React.SetStateAction<string[][]>>;
+  setAnswers: (fn: React.SetStateAction<string[][]>) => void;
 }) {
   const [customText, setCustomText] = useState("");
   const selected = answers[index] || [];
 
+  const set = (value: string[]) =>
+    setAnswers((prev) => prev.map((a, i) => (i === index ? value : a)));
+
   const toggle = (label: string) => {
-    setAnswers((prev) => {
-      const copy = [...prev];
-      const cur = copy[index] || [];
-      if (info.multiple) {
-        copy[index] = cur.includes(label) ? cur.filter((l) => l !== label) : [...cur, label];
-      } else {
-        copy[index] = [label];
-      }
-      return copy;
-    });
+    if (info.multiple) {
+      set(selected.includes(label) ? selected.filter((l) => l !== label) : [...selected, label]);
+    } else {
+      set(selected[0] === label ? [] : [label]);
+    }
   };
 
   const submitCustom = () => {
     if (!customText.trim()) return;
-    setAnswers((prev) => {
-      const copy = [...prev];
-      copy[index] = [customText.trim()];
-      return copy;
-    });
+    set([customText.trim()]);
     setCustomText("");
   };
 
   return (
-    <div className="flex flex-col gap-1.5">
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-blue-300">
-        {info.header}
-      </div>
-      <div className="text-xs text-foreground">{info.question}</div>
-      <div className="flex flex-wrap gap-1.5">
+    <div className="flex flex-col gap-2">
+      <div className="text-[11px] font-medium text-foreground">{info.question}</div>
+      <div className="flex flex-col gap-1.5">
         {info.options.map((opt) => (
           <button
             key={opt.label}
             className={cn(
-              "rounded-md border px-2 py-1 text-left text-[10px] transition-colors",
+              "flex cursor-pointer flex-col gap-0.5 rounded-md border px-3 py-2 text-left transition-colors",
               selected.includes(opt.label)
-                ? "border-blue-500 bg-blue-950 text-blue-200"
-                : "border-border bg-accent text-muted-foreground hover:border-blue-700 hover:text-foreground",
+                ? "border-primary bg-primary/10 text-foreground"
+                : "border-border bg-card text-muted-foreground hover:border-muted-foreground/40 hover:text-foreground",
             )}
             onClick={() => toggle(opt.label)}
           >
-            <span className="font-medium">{opt.label}</span>
+            <span className="text-xs font-medium">{opt.label}</span>
             {opt.description && (
-              <span className="ml-1 text-muted-foreground">— {opt.description}</span>
+              <span className="text-[10px] leading-snug text-muted-foreground">{opt.description}</span>
             )}
           </button>
         ))}
       </div>
       {info.custom !== false && (
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1.5">
           <input
             type="text"
-            className="flex-1 rounded-md border border-input bg-background px-2 py-1 font-mono text-[10px] text-foreground placeholder:text-muted-foreground focus:border-ring focus:outline-none"
-            placeholder="Custom answer..."
+            className="flex-1 rounded-md border border-input bg-background px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground focus:border-ring focus:outline-none"
+            placeholder="Or type a custom answer..."
             value={customText}
             onChange={(e) => setCustomText(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), submitCustom())}
           />
           {customText.trim() && (
             <button className="rounded-md p-1 text-muted-foreground hover:text-foreground" onClick={submitCustom}>
-              <SendHorizontal className="h-3 w-3" />
+              <SendHorizontal className="h-3.5 w-3.5" />
             </button>
           )}
         </div>
@@ -214,41 +205,63 @@ function QuestionFieldView({
   );
 }
 
-function QuestionCard({ req }: { req: QuestionRequest }) {
-  const [answers, setAnswers] = useState<string[][]>(() =>
-    req.questions.map(() => []),
+const emptyAnswers = (r: QuestionRequest) => r.questions.map((): string[] => []);
+
+function QuestionsPanel({ requests }: { requests: QuestionRequest[] }) {
+  const [allAnswers, setAllAnswers] = useState<Record<string, string[][]>>(() =>
+    Object.fromEntries(requests.map((r) => [r.id, emptyAnswers(r)])),
   );
 
-  const canSubmit = answers.every((a) => a.length > 0);
+  useEffect(() => {
+    setAllAnswers((prev) => {
+      const next: Record<string, string[][]> = {};
+      for (const r of requests) next[r.id] = prev[r.id] ?? emptyAnswers(r);
+      return next;
+    });
+  }, [requests]);
+
+  const get = (r: QuestionRequest) => allAnswers[r.id] ?? emptyAnswers(r);
+  const canSubmit = requests.every((r) => get(r).every((a) => a.length > 0));
 
   return (
-    <div className="rounded-md border border-blue-700 bg-blue-950/50 px-3 py-2 text-xs">
-      <div className="mb-2 flex flex-col gap-3">
-        {req.questions.map((q, i) => (
-          <QuestionFieldView
-            key={i}
-            info={q}
-            index={i}
-            answers={answers}
-            setAnswers={setAnswers}
-          />
-        ))}
+    <div className="flex flex-col gap-3 rounded-lg border border-border bg-card p-3">
+      <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+        <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
+        <span className="font-medium uppercase tracking-wider">Questions</span>
+        <span className="ml-auto opacity-50">{requests.reduce((n, r) => n + r.questions.length, 0)} items</span>
       </div>
-      <div className="flex gap-2">
+      <div className="flex flex-col gap-4">
+        {requests.flatMap((req) =>
+          req.questions.map((q, qi) => (
+            <QuestionFieldView
+              key={`${req.id}-${qi}`}
+              info={q}
+              index={qi}
+              answers={get(req)}
+              setAnswers={(fn) =>
+                setAllAnswers((prev) => ({
+                  ...prev,
+                  [req.id]: typeof fn === "function" ? fn(get(req)) : fn,
+                }))
+              }
+            />
+          )),
+        )}
+      </div>
+      <div className="flex gap-2 border-t border-border pt-2">
         <Button
           size="sm"
-          variant="outline"
-          className="h-6 text-[10px]"
+          className="h-7 px-4 text-xs"
           disabled={!canSubmit}
-          onClick={() => replyQuestion(req.id, answers)}
+          onClick={() => requests.forEach((r) => replyQuestion(r.id, get(r)))}
         >
-          Submit
+          Submit All
         </Button>
         <Button
           size="sm"
-          variant="destructive"
-          className="h-6 text-[10px]"
-          onClick={() => rejectQuestion(req.id)}
+          variant="ghost"
+          className="h-7 px-3 text-xs text-muted-foreground"
+          onClick={() => requests.forEach((r) => rejectQuestion(r.id))}
         >
           Skip
         </Button>
@@ -364,9 +377,9 @@ export default function ForgePanel() {
           <PermissionCard key={perm.id} perm={perm} />
         ))}
 
-        {questions.map((req) => (
-          <QuestionCard key={req.id} req={req} />
-        ))}
+        {questions.length > 0 && (
+          <QuestionsPanel requests={questions} />
+        )}
 
         {error && (
           <div className="rounded-md border border-red-800 bg-red-950 px-3 py-2 text-xs text-red-300">

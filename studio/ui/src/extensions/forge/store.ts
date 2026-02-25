@@ -215,7 +215,7 @@ function handleEvent(event: Event) {
       const { type, properties } = event as { type: string; properties: Record<string, unknown> };
       if (type === "question.asked") {
         const q = properties as unknown as QuestionRequest;
-        if (q.sessionID === state.sessionId) {
+        if (q.sessionID === state.sessionId && !state.questions.some((e) => e.id === q.id)) {
           state = { ...state, questions: [...state.questions, q] };
           emit();
         }
@@ -305,30 +305,22 @@ export async function replyPermission(permissionId: string, response: "once" | "
   } catch { /* best-effort */ }
 }
 
-function dismissQuestion(requestId: string) {
-  state = { ...state, questions: state.questions.filter((q) => q.id !== requestId) };
+function questionAction(id: string, action: "reply" | "reject", body?: unknown) {
+  fetch(`${BASE_URL}/question/${id}/${action}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    ...(body != null && { body: JSON.stringify(body) }),
+  }).catch(() => {});
+  state = { ...state, questions: state.questions.filter((q) => q.id !== id) };
   emit();
 }
 
-export async function replyQuestion(requestId: string, answers: string[][]) {
-  try {
-    await fetch(`${BASE_URL}/question/${requestId}/reply`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ answers }),
-    });
-  } catch { /* best-effort */ }
-  dismissQuestion(requestId);
+export function replyQuestion(id: string, answers: string[][]) {
+  questionAction(id, "reply", { answers });
 }
 
-export async function rejectQuestion(requestId: string) {
-  try {
-    await fetch(`${BASE_URL}/question/${requestId}/reject`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    });
-  } catch { /* best-effort */ }
-  dismissQuestion(requestId);
+export function rejectQuestion(id: string) {
+  questionAction(id, "reject");
 }
 
 let startedProject: string | null = null;
