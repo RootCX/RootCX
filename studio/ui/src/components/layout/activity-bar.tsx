@@ -24,7 +24,7 @@ export function ActivityBar() {
             <TooltipTrigger asChild>
               <button
                 className={cn(
-                  "relative flex h-12 w-12 items-center justify-center text-[18px] font-bold text-muted-foreground/50 transition-colors hover:text-muted-foreground",
+                  "relative flex h-12 w-12 select-none items-center justify-center text-[18px] font-bold text-muted-foreground/50 transition-colors hover:text-muted-foreground",
                   activeId === a.app_id && "text-foreground",
                 )}
                 onClick={() => { setActiveId(a.app_id); openAgentChat(a.app_id, a.name); }}
