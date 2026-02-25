@@ -1,4 +1,4 @@
-pub(crate) mod queue;
+pub mod queue;
 pub(crate) mod routes;
 
 use std::sync::Arc;
@@ -18,8 +18,8 @@ pub struct BrowserExtension {
 }
 
 impl BrowserExtension {
-    pub fn new() -> Self {
-        Self { queue: Arc::new(queue::BrowserQueue::new()) }
+    pub fn with_queue(queue: Arc<queue::BrowserQueue>) -> Self {
+        Self { queue }
     }
 }
 

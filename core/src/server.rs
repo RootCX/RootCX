@@ -41,7 +41,9 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         )
         .route("/api/v1/db/schemas", get(routes::list_schemas))
         .route("/api/v1/db/schemas/{schema}/tables", get(routes::list_tables))
-        .route("/api/v1/db/query", post(routes::execute_query));
+        .route("/api/v1/db/query", post(routes::execute_query))
+        .route("/api/v1/tools", get(crate::tools::routes::list_tools))
+        .route("/api/v1/tools/{tool_name}/execute", post(crate::tools::routes::execute_tool));
 
     let (auth_config, rbac_cache) = {
         let rt = runtime.lock().await;

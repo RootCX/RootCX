@@ -11,6 +11,7 @@ mod schema;
 mod schema_sync;
 mod secrets;
 pub mod server;
+pub mod tools;
 mod worker;
 mod worker_manager;
 
@@ -27,6 +28,7 @@ use rootcx_shared_types::{ForgeStatus, OsStatus, PostgresStatus, RuntimeStatus, 
 use scheduler::SchedulerHandle;
 use secrets::SecretManager;
 use sqlx::PgPool;
+use tools::ToolRegistry;
 use tracing::info;
 use worker_manager::WorkerManager;
 
@@ -40,6 +42,7 @@ pub struct Runtime {
     rbac_cache: Arc<PolicyCache>,
     secret_manager: Option<Arc<SecretManager>>,
     worker_manager: Option<Arc<WorkerManager>>,
+    tool_registry: Arc<ToolRegistry>,
     scheduler: Option<SchedulerHandle>,
     data_dir: PathBuf,
     bun_bin: PathBuf,
@@ -58,7 +61,16 @@ impl Runtime {
     ) -> Self {
         let auth_config = AuthConfig::load(&data_dir, auth_required).expect("failed to load auth config");
         let rbac_cache = Arc::new(PolicyCache::default());
-        let extensions = builtin_extensions_with_cache(Arc::clone(&auth_config), Arc::clone(&rbac_cache));
+
+        let browser_queue = Arc::new(extensions::browser::queue::BrowserQueue::new());
+        let extensions = builtin_extensions_with_cache(
+            Arc::clone(&auth_config), Arc::clone(&rbac_cache), Arc::clone(&browser_queue),
+        );
+
+        let mut tool_registry = ToolRegistry::default();
+        tool_registry.register(tools::query_data::QueryDataTool);
+        tool_registry.register(tools::mutate_data::MutateDataTool);
+        tool_registry.register(tools::browser::BrowserTool::new(browser_queue));
 
         Self {
             pg,
@@ -68,6 +80,7 @@ impl Runtime {
             rbac_cache,
             secret_manager: None,
             worker_manager: None,
+            tool_registry: Arc::new(tool_registry),
             scheduler: None,
             data_dir,
             bun_bin,
@@ -164,6 +177,10 @@ impl Runtime {
 
     pub fn worker_manager(&self) -> Option<&Arc<WorkerManager>> {
         self.worker_manager.as_ref()
+    }
+
+    pub fn tool_registry(&self) -> &Arc<ToolRegistry> {
+        &self.tool_registry
     }
 
     pub fn scheduler_wake(&self) -> Option<&Arc<tokio::sync::Notify>> {

@@ -74,7 +74,7 @@ pub async fn invoke_agent(
     Path(app_id): Path<String>,
     Json(body): Json<InvokeRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let (pool, wm, data_dir, auth_cfg, sm) = {
+    let (pool, wm, data_dir, auth_cfg, sm, tool_registry) = {
         let g = rt.lock().await;
         (
             g.pool().cloned().ok_or(ApiError::NotReady)?,
@@ -82,6 +82,7 @@ pub async fn invoke_agent(
             g.data_dir().to_path_buf(),
             g.auth_config().clone(),
             g.secret_manager().cloned().ok_or(ApiError::NotReady)?,
+            g.tool_registry().clone(),
         )
     };
 
@@ -105,7 +106,7 @@ pub async fn invoke_agent(
 
     let history = load_history(&pool, memory_enabled, &session_id).await?;
     let system_prompt = load_system_prompt(&app_id, &config, &data_dir).await?;
-    let agent_config = build_agent_config(&pool, &sm, &app_id, &config).await?;
+    let agent_config = build_agent_config(&pool, &sm, &app_id, &config, &tool_registry).await?;
 
     let agent_token = jwt::encode_access(&auth_cfg, agent_user_id(&app_id), &format!("agent:{app_id}"))
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -213,6 +214,7 @@ async fn build_agent_config(
     sm: &SecretManager,
     app_id: &str,
     config: &JsonValue,
+    tool_registry: &crate::tools::ToolRegistry,
 ) -> Result<JsonValue, ApiError> {
     let enabled_tools = extract_enabled_tools(config);
     let data_contract: JsonValue = sqlx::query_scalar(
@@ -223,6 +225,8 @@ async fn build_agent_config(
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("app '{app_id}' not found")))?;
 
+    let tool_descriptors = tool_registry.descriptors_for(&enabled_tools, &data_contract);
+
     let mut provider = config.get("provider").cloned().unwrap_or(json!(null));
     resolve_secret_refs(pool, sm, &mut provider).await?;
 
@@ -230,9 +234,8 @@ async fn build_agent_config(
         "provider": provider,
         "limits": config.get("limits"),
         "_appId": app_id,
-        "_enabledTools": enabled_tools,
+        "_toolDescriptors": tool_descriptors,
         "_graphPath": config.get("graph"),
-        "_dataContract": data_contract,
     }))
 }
 

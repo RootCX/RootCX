@@ -1,17 +1,25 @@
-import { useSyncExternalStore, useState } from "react";
+import { useSyncExternalStore, useState, useEffect } from "react";
 import { subscribe, getSnapshot, uninstallAgent } from "@/extensions/agents/store";
+import { subscribe as subscribeTools, getSnapshot as getToolsSnapshot, loadProject as loadToolsProject } from "@/extensions/agent-tools/store";
 import { openAgentChat } from "@/extensions/agents";
-import { Trash2, Database } from "lucide-react";
+import { Trash2, Database, Wrench } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { views } from "@/core/studio";
 import { cn } from "@/lib/utils";
 import { useLayout } from "./layout-store";
+import { useProjectContext } from "./app-context";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 
 const INDICATOR = "absolute left-0 top-1/2 h-6 w-0.5 -translate-y-1/2 rounded-r bg-foreground";
 
 export function ActivityBar() {
   const { agents } = useSyncExternalStore(subscribe, getSnapshot);
+  const { isAgent } = useSyncExternalStore(subscribeTools, getToolsSnapshot);
+  const { projectPath } = useProjectContext();
+
+  useEffect(() => {
+    if (projectPath) loadToolsProject(projectPath);
+  }, [projectPath]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ appId: string; x: number; y: number } | null>(null);
   const { state, dispatch } = useLayout();
@@ -23,6 +31,15 @@ export function ActivityBar() {
   const toggleDatabase = () => {
     if (dbVisible) dispatch({ type: "TOGGLE_VIEW", viewId: "database" });
     else dispatch({ type: "SHOW_VIEW", viewId: "database", zone: "sidebar" });
+  };
+
+  const toolsVisible =
+    Object.values(state.zones).some((ids) => ids.includes("agent-tools")) &&
+    !state.hidden.has("agent-tools");
+
+  const toggleTools = () => {
+    if (toolsVisible) dispatch({ type: "TOGGLE_VIEW", viewId: "agent-tools" });
+    else dispatch({ type: "SHOW_VIEW", viewId: "agent-tools", zone: "sidebar" });
   };
 
   return (
@@ -46,6 +63,27 @@ export function ActivityBar() {
             <div className="text-[10px] text-muted-foreground">Browse schemas and tables</div>
           </TooltipContent>
         </Tooltip>
+
+        {isAgent && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                className={cn(
+                  "relative flex h-12 w-12 select-none items-center justify-center text-muted-foreground/50 transition-colors hover:text-muted-foreground",
+                  toolsVisible && "text-foreground",
+                )}
+                onClick={toggleTools}
+              >
+                {toolsVisible && <span className={INDICATOR} />}
+                <Wrench className="h-5 w-5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="right" sideOffset={4}>
+              <div className="text-xs font-semibold">Agent Tools</div>
+              <div className="text-[10px] text-muted-foreground">Configure agent tool access</div>
+            </TooltipContent>
+          </Tooltip>
+        )}
 
         {agents.length > 0 && <div className="my-1 h-px w-6 bg-border" />}
 

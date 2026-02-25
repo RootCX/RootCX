@@ -1,6 +1,6 @@
 pub mod auth;
 mod config;
-mod crud;
+pub(crate) mod crud;
 mod deploy;
 mod introspection;
 mod jobs;

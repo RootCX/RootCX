@@ -267,7 +267,7 @@ Added alongside `dataContract` in `manifest.json`:
 
 ### Access & tools
 
-Unlisted = denied. Full tool catalog in **Agent Tools Reference** instruction.
+Unlisted = denied.
 `<collection>` in access → auto-enables `query_data` + `mutate_data`.
 Cross-app: `app:<appId>/<entity>`.
 

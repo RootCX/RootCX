@@ -13,7 +13,7 @@ use crate::api_error::ApiError;
 use crate::extensions::rbac::AccessGrant;
 use crate::manifest::{field_type_map, map_field_type, quote_ident};
 
-fn table(app_id: &str, entity: &str) -> String {
+pub(crate) fn table(app_id: &str, entity: &str) -> String {
     format!("{}.{}", quote_ident(app_id), quote_ident(entity))
 }
 
@@ -62,7 +62,7 @@ fn json_value_to_string(val: &JsonValue) -> String {
     }
 }
 
-fn validate_sort_field(field: Option<&String>, types: &HashMap<String, String>) -> String {
+pub(crate) fn validate_sort_field(field: Option<&String>, types: &HashMap<String, String>) -> String {
     match field {
         Some(f)
             if types.contains_key(f.as_str())
@@ -74,15 +74,14 @@ fn validate_sort_field(field: Option<&String>, types: &HashMap<String, String>) 
     }
 }
 
-fn validate_order(s: Option<&String>) -> &'static str {
+pub(crate) fn validate_order(s: Option<&String>) -> &'static str {
     match s.map(String::as_str) {
         Some("asc" | "ASC") => "ASC",
         _ => "DESC",
     }
 }
 
-/// All values bound as text with SQL casts — avoids heterogeneous typed binds.
-fn build_where_clause(
+pub(crate) fn build_where_clause(
     clause: &JsonValue,
     types: &HashMap<String, String>,
     binds: &mut Vec<String>,
@@ -143,7 +142,7 @@ fn push_ownership(
     Ok(())
 }
 
-fn join_where(conditions: &[String]) -> String {
+pub(crate) fn join_where(conditions: &[String]) -> String {
     if conditions.is_empty() { String::new() } else { format!(" WHERE {}", conditions.join(" AND ")) }
 }
 
@@ -468,10 +467,9 @@ pub async fn delete_record(
     Ok(Json(serde_json::json!({ "message": format!("record '{id}' deleted") })))
 }
 
-type QA<'q> = sqlx::query::QueryAs<'q, sqlx::Postgres, (JsonValue,), sqlx::postgres::PgArguments>;
+pub(crate) type QA<'q> = sqlx::query::QueryAs<'q, sqlx::Postgres, (JsonValue,), sqlx::postgres::PgArguments>;
 
-/// Bind a JSON value as the native PG type derived from `map_field_type`.
-fn bind_typed<'q>(q: QA<'q>, val: &'q JsonValue, manifest_type: Option<&String>) -> QA<'q> {
+pub(crate) fn bind_typed<'q>(q: QA<'q>, val: &'q JsonValue, manifest_type: Option<&String>) -> QA<'q> {
     let pg = manifest_type.map(|t| map_field_type(t));
     match val {
         JsonValue::Null => match pg {

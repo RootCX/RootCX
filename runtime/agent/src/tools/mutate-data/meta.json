@@ -1,7 +1,0 @@
-{
-  "name": "mutate_data",
-  "accessEntity": null,
-  "implicit": true,
-  "description": "Create, update, or delete records in collections.",
-  "whenToUse": "Auto-loaded when any data entity is in the access list. Do not add as a tool: entry."
-}

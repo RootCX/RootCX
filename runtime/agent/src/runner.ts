@@ -10,29 +10,15 @@ import type { BaseChatModel } from "@langchain/core/language_models/chat_models"
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import { buildProvider, type ProviderConfig } from "./providers/index.js";
 import { buildDefaultGraph } from "./default-graph.js";
-import { buildToolRegistry } from "./tools/registry.js";
+import { buildTools, type ToolDescriptor } from "./tools/generic.js";
 import type { IpcWriter } from "./ipc.js";
-
-export interface FieldSchema {
-    name: string;
-    type: string;
-    required?: boolean;
-    enumValues?: string[];
-    references?: { entity: string; field: string };
-}
-
-export interface EntitySchema {
-    entityName: string;
-    fields: FieldSchema[];
-}
 
 export interface AgentConfig {
     provider: ProviderConfig;
     limits?: { maxTurns?: number };
     _appId: string;
-    _enabledTools: string[];
+    _toolDescriptors: ToolDescriptor[];
     _graphPath?: string;
-    _dataContract?: EntitySchema[];
 }
 
 interface RunAgentParams {
@@ -52,18 +38,16 @@ export async function runAgent(params: RunAgentParams) {
     if (!runtimeUrl) throw new Error("ROOTCX_RUNTIME_URL not set");
 
     const model = await buildProvider(config.provider);
-    const tools = await buildToolRegistry(config._enabledTools, {
-        appId: config._appId,
-        runtimeUrl,
-        authToken,
-        dataContract: config._dataContract ?? [],
-    });
-
+    const tools = buildTools(config._toolDescriptors, config._appId, runtimeUrl, authToken);
     const graph = await loadGraph(config._graphPath, model, tools);
 
     const messages: BaseMessage[] = [
         new SystemMessage(systemPrompt),
-        ...deserializeHistory(history),
+        ...history.map((m) =>
+            m.role === "user"
+                ? new HumanMessage(String(m.content ?? ""))
+                : new AIMessage(String(m.content ?? "")),
+        ),
         new HumanMessage(message),
     ];
 
@@ -71,118 +55,54 @@ export async function runAgent(params: RunAgentParams) {
     let turns = 0;
     let fullResponse = "";
 
-    const stream = graph.streamEvents(
+    for await (const event of graph.streamEvents(
         { messages },
         { version: "v2", recursionLimit: maxTurns ? maxTurns * 2 : 1000 },
-    );
-
-    for await (const event of stream) {
+    )) {
         if (event.event === "on_chat_model_stream") {
-            const chunk = event.data?.chunk;
-            const delta = typeof chunk?.content === "string" ? chunk.content : "";
+            const delta = typeof event.data?.chunk?.content === "string" ? event.data.chunk.content : "";
             if (delta) {
                 fullResponse += delta;
-                writer.send({
-                    type: "agent_chunk",
-                    invoke_id: invokeId,
-                    delta,
-                });
+                writer.send({ type: "agent_chunk", invoke_id: invokeId, delta });
             }
         } else if (event.event === "on_chat_model_end") {
-            turns++;
-            if (maxTurns && turns > maxTurns) {
-                writer.send({
-                    type: "agent_error",
-                    invoke_id: invokeId,
-                    error: `Max turns (${maxTurns}) exceeded`,
-                });
+            if (maxTurns && ++turns > maxTurns) {
+                writer.send({ type: "agent_error", invoke_id: invokeId, error: `Max turns (${maxTurns}) exceeded` });
                 return;
             }
         } else if (event.event === "on_tool_start") {
-            const toolName = event.name ?? "unknown";
             const input = event.data?.input;
-            const inputStr = input ? JSON.stringify(input) : "";
-            writer.send({
-                type: "log",
-                level: "info",
-                message: `[agent] tool_start: ${toolName}${inputStr ? ` ${inputStr}` : ""}`,
-            });
+            writer.send({ type: "log", level: "info", message: `[agent] tool_start: ${event.name ?? "unknown"}${input ? ` ${JSON.stringify(input)}` : ""}` });
         } else if (event.event === "on_tool_end") {
-            const toolName = event.name ?? "unknown";
-            const output = event.data?.output;
-            const preview = typeof output === "string"
-                ? output.slice(0, 500)
-                : typeof output?.content === "string"
-                    ? output.content.slice(0, 500)
-                    : "";
-            writer.send({
-                type: "log",
-                level: "info",
-                message: `[agent] tool_end: ${toolName}${preview ? ` (${preview.length > 200 ? preview.slice(0, 200) + "…" : preview})` : ""}`,
-            });
+            const out = event.data?.output;
+            const preview = (typeof out === "string" ? out : typeof out?.content === "string" ? out.content : "").slice(0, 200);
+            writer.send({ type: "log", level: "info", message: `[agent] tool_end: ${event.name ?? "unknown"}${preview ? ` (${preview})` : ""}` });
         } else if (event.event === "on_tool_error") {
-            const toolName = event.name ?? "unknown";
-            const error = event.data?.error;
-            writer.send({
-                type: "log",
-                level: "error",
-                message: `[agent] tool_error: ${toolName}: ${error instanceof Error ? error.message : String(error ?? "unknown")}`,
-            });
+            const e = event.data?.error;
+            writer.send({ type: "log", level: "error", message: `[agent] tool_error: ${event.name ?? "unknown"}: ${e instanceof Error ? e.message : String(e ?? "unknown")}` });
         }
     }
 
-    writer.send({
-        type: "agent_done",
-        invoke_id: invokeId,
-        response: fullResponse,
-    });
+    writer.send({ type: "agent_done", invoke_id: invokeId, response: fullResponse });
 }
 
-async function importGraph(
-    path: string,
-    model: BaseChatModel,
-    tools: StructuredToolInterface[],
-) {
-    const mod = await import(path);
-    return typeof mod.default === "function"
-        ? mod.default(model, tools)
-        : mod.default;
-}
-
-async function loadGraph(
-    graphPath: string | undefined,
-    model: BaseChatModel,
-    tools: StructuredToolInterface[],
-) {
+async function loadGraph(graphPath: string | undefined, model: BaseChatModel, tools: StructuredToolInterface[]) {
     if (graphPath) {
         const resolved = resolve(graphPath);
-        if (!await fileExists(resolved)) {
-            throw new Error(`graph file not found: ${resolved}`);
-        }
+        if (!await fileExists(resolved)) throw new Error(`graph file not found: ${resolved}`);
         return importGraph(resolved, model, tools);
     }
-
     for (const candidate of [resolve("agent/graph.ts"), resolve("agent/graph.js")]) {
-        if (await fileExists(candidate)) {
-            return importGraph(candidate, model, tools);
-        }
+        if (await fileExists(candidate)) return importGraph(candidate, model, tools);
     }
-
     return buildDefaultGraph(model, tools);
 }
 
-async function fileExists(path: string): Promise<boolean> {
-    try {
-        await fsAccess(path, constants.R_OK);
-        return true;
-    } catch {
-        return false;
-    }
+async function importGraph(path: string, model: BaseChatModel, tools: StructuredToolInterface[]) {
+    const mod = await import(path);
+    return typeof mod.default === "function" ? mod.default(model, tools) : mod.default;
 }
 
-function deserializeHistory(history: Array<Record<string, unknown>>): BaseMessage[] {
-    return history.map((msg) => {
-        const content = String(msg.content ?? "");
-        return msg.role === "user" ? new HumanMessage(content) : new AIMessage(content);
-    });
+async function fileExists(path: string): Promise<boolean> {
+    try { await fsAccess(path, constants.R_OK); return true; } catch { return false; }
 }

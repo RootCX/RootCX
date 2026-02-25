@@ -264,3 +264,11 @@ pub struct AgentAccessEntry {
     pub entity: String,
     pub actions: Vec<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDescriptor {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}

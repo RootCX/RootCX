@@ -1,7 +1,0 @@
-{
-  "name": "browser",
-  "accessEntity": "tool:browser",
-  "implicit": false,
-  "description": "Control the user's browser to navigate pages, click elements, fill forms, and extract content.",
-  "whenToUse": "Default for web interaction — no external API keys needed."
-}

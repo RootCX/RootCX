@@ -1,0 +1,54 @@
+use axum::Json;
+use axum::extract::{Path, State};
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+
+use crate::api_error::ApiError;
+use crate::auth::identity::Identity;
+use crate::routes::SharedRuntime;
+use super::ToolContext;
+
+#[derive(Serialize)]
+pub struct ToolSummary {
+    pub name: String,
+    pub description: String,
+}
+
+pub async fn list_tools(
+    State(rt): State<SharedRuntime>,
+) -> Result<Json<Vec<ToolSummary>>, ApiError> {
+    let g = rt.lock().await;
+    let tools = g.tool_registry()
+        .all_summaries()
+        .into_iter()
+        .map(|(name, description)| ToolSummary { name, description })
+        .collect();
+    Ok(Json(tools))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecuteToolRequest {
+    pub app_id: String,
+    pub args: JsonValue,
+}
+
+pub async fn execute_tool(
+    _identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path(tool_name): Path<String>,
+    Json(body): Json<ExecuteToolRequest>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let (tool, pool) = {
+        let g = rt.lock().await;
+        let tool = g.tool_registry().get(&tool_name).cloned()
+            .ok_or_else(|| ApiError::NotFound(format!("unknown tool: '{tool_name}'")))?;
+        let pool = g.pool().cloned().ok_or(ApiError::NotReady)?;
+        (tool, pool)
+    };
+
+    let result = tool.execute(&ToolContext {
+        pool, app_id: body.app_id, args: body.args,
+    }).await.map_err(ApiError::Internal)?;
+    Ok(Json(result))
+}
