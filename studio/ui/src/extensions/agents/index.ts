@@ -1,5 +1,6 @@
 import { lazy } from "react";
 import { Bot } from "lucide-react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { views, commands, layout } from "@/core/studio";
 import { startPolling, clearChat } from "./store";
 
@@ -20,7 +21,11 @@ export function openAgentChat(appId: string, name?: string) {
     views.register(id, {
       title: name ?? appId, icon: Bot, defaultZone: "editor", component: panelFor(appId),
       closeable: true,
-      onClose: () => { views.unregister(id); clearChat(appId); },
+      onClose: async () => {
+        if (await ask("Close this conversation?", { title: "Close", kind: "warning", okLabel: "Close", cancelLabel: "Cancel" })) {
+          views.unregister(id); clearChat(appId);
+        }
+      },
     });
   layout.showView(id);
 }

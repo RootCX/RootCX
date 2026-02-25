@@ -15,6 +15,7 @@ export const activate = () => {
     title: "Query",
     icon: SquareTerminal,
     defaultZone: "editor",
+    closeable: true,
     component: lazy(() => import("./query-tab")),
   });
 
