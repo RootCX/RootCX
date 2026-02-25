@@ -16,10 +16,10 @@ pub use types::{AnswerValue as Answer, PresetInfo, Question, RuntimePaths};
 
 fn sanitize_name(name: &str) -> String {
     name.chars()
-        .filter(|c| c.is_alphanumeric() || *c == '-' || *c == ' ')
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == ' ')
         .collect::<String>()
         .to_lowercase()
-        .replace(' ', "-")
+        .replace(' ', "_")
 }
 
 /// Orchestrates scaffold: resolve preset → build context → run layers.
@@ -35,15 +35,13 @@ pub async fn create(
     let preset = registry.get(preset_id)?;
     let layers = preset.layers(&answers);
 
-    let name = sanitize_name(name);
-    let app_id = name.clone();
-    let lib_name = app_id.replace('-', "_");
+    let app_id = sanitize_name(name);
     let identifier = format!("com.rootcx.{app_id}");
     let mut h = std::hash::DefaultHasher::new();
-    name.hash(&mut h);
+    app_id.hash(&mut h);
     let port = 3000 + (h.finish() % 6000) as u16;
 
-    let ctx = ScaffoldContext { name: name.to_string(), app_id, lib_name, identifier, port, runtime, answers, ai_config };
+    let ctx = ScaffoldContext { app_id, identifier, port, runtime, answers, ai_config };
 
     let emitter = Emitter::new(root.to_path_buf());
     for layer in &layers {
@@ -58,10 +56,10 @@ mod tests {
 
     #[test]
     fn sanitize_name_strips_dangerous_chars() {
-        assert_eq!(sanitize_name("My App"), "my-app");
+        assert_eq!(sanitize_name("My App"), "my_app");
         assert_eq!(sanitize_name("evil</title><script>"), "eviltitlescript");
         assert_eq!(sanitize_name("test\"inject"), "testinject");
         assert_eq!(sanitize_name("a{b}c"), "abc");
-        assert_eq!(sanitize_name("hello-world"), "hello-world");
+        assert_eq!(sanitize_name("hello_world"), "hello_world");
     }
 }

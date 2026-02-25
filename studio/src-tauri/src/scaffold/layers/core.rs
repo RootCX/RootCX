@@ -11,13 +11,13 @@ pub struct CoreLayer;
 impl Layer for CoreLayer {
     fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> LayerFuture<'a> {
         Box::pin(async move {
-            let ScaffoldContext { name, app_id, port, .. } = ctx;
+            let ScaffoldContext { app_id, port, .. } = ctx;
             let sdk_dep = format!("file:{}", ctx.runtime.sdk.display());
             let ui_dep = format!("file:{}", ctx.runtime.ui.display());
 
             let permissions = matches!(ctx.answers.get("permissions"), Some(AnswerValue::Bool(true)));
             let mut manifest = serde_json::json!({
-                "appId": app_id, "name": name, "version": "0.0.1",
+                "appId": app_id, "name": app_id, "version": "0.0.1",
                 "description": "", "dataContract": []
             });
             if permissions {
@@ -73,7 +73,7 @@ impl Layer for CoreLayer {
 
             e.write("index.html", &format!(r#"<!DOCTYPE html>
 <html lang="en">
-<head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>{name}</title></head>
+<head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>{app_id}</title></head>
 <body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body>
 </html>
 "#)).await?;

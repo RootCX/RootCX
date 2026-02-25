@@ -97,9 +97,7 @@ pub struct EntityFieldDef {
 }
 
 pub struct ScaffoldContext {
-    pub name: String,
     pub app_id: String,
-    pub lib_name: String,
     pub identifier: String,
     pub port: u16,
     pub runtime: RuntimePaths,

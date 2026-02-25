@@ -12,6 +12,7 @@ pub async fn install_app(
     manifest: &AppManifest,
     extensions: &[Box<dyn RuntimeExtension>],
 ) -> Result<(), RuntimeError> {
+    validate_manifest(manifest)?;
     let app_id = &manifest.app_id;
 
     if !manifest.data_contract.is_empty() {
@@ -258,8 +259,31 @@ pub async fn field_type_map(
 }
 
 pub fn quote_ident(ident: &str) -> String {
-    let sanitized: String = ident.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect();
-    format!("\"{}\"", sanitized)
+    format!("\"{}\"", ident)
+}
+
+/// Reject identifiers that aren't valid unquoted PostgreSQL names.
+fn validate_ident(value: &str, label: &str) -> Result<(), RuntimeError> {
+    if !value.is_empty()
+        && value.as_bytes()[0].is_ascii_lowercase()
+        && value.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
+        return Ok(());
+    }
+    Err(RuntimeError::Schema(sqlx::Error::Protocol(format!(
+        "{label} '{value}' must be snake_case (lowercase letters, digits, underscores; start with a letter)"
+    ))))
+}
+
+fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
+    validate_ident(&manifest.app_id, "appId")?;
+    for entity in &manifest.data_contract {
+        validate_ident(&entity.entity_name, "entity name")?;
+        for field in &entity.fields {
+            validate_ident(&field.name, "field name")?;
+        }
+    }
+    Ok(())
 }
 
 async fn register_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), RuntimeError> {
@@ -312,15 +336,22 @@ mod tests {
     }
 
     #[test]
-    fn quote_ident_cases() {
-        for (input, expected) in [
-            ("users", "\"users\""),
-            ("users; DROP TABLE--", "\"usersDROPTABLE\""),
-            ("my_table_2", "\"my_table_2\""),
-            ("", "\"\""),
-            ("!@#$%^&*()", "\"\""),
-        ] {
-            assert_eq!(quote_ident(input), expected, "quote_ident({input:?})");
+    fn quote_ident_wraps() {
+        assert_eq!(quote_ident("users"), "\"users\"");
+        assert_eq!(quote_ident("my_table_2"), "\"my_table_2\"");
+    }
+
+    #[test]
+    fn validate_ident_accepts_snake_case() {
+        for id in ["app", "my_app", "sdr_agent", "app123", "a"] {
+            assert!(validate_ident(id, "test").is_ok(), "should accept: {id}");
+        }
+    }
+
+    #[test]
+    fn validate_ident_rejects_invalid() {
+        for id in ["", "sdr-agent", "MyApp", "123app", "app id", "app;drop", "!@#"] {
+            assert!(validate_ident(id, "test").is_err(), "should reject: {id}");
         }
     }
 

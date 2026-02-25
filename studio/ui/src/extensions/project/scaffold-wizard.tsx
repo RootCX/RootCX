@@ -57,7 +57,7 @@ function resolveVisible(questions: Question[], answers: Record<string, boolean |
 
 function Wizard({ onDone }: { onDone: (r: WizardResult | null) => void }) {
     const [step, setStep] = useState(0); // 0=name, 1+=question index into visibleQs
-    const [name, setName] = useState("my-project");
+    const [name, setName] = useState("my_project");
     const [path, setPath] = useState("");
     const [allQuestions, setAllQuestions] = useState<Question[]>([]);
     const [answers, setAnswers] = useState<Record<string, boolean | string>>({});
@@ -125,9 +125,9 @@ function Wizard({ onDone }: { onDone: (r: WizardResult | null) => void }) {
                             ref={inputRef}
                             type="text"
                             value={name}
-                            onChange={(e) => setName(e.target.value.replace(/\s/g, "-"))}
+                            onChange={(e) => setName(e.target.value.replace(/[\s-]/g, "_"))}
                             onKeyDown={(e) => e.key === "Enter" && submitName()}
-                            placeholder="project-name"
+                            placeholder="project_name"
                             className="w-full bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none"
                         />
                     </div>

@@ -14,13 +14,13 @@ impl Layer for AgentLayer {
 
             let manifest = serde_json::json!({
                 "appId": ctx.app_id,
-                "name": ctx.name,
+                "name": ctx.app_id,
                 "version": "0.0.1",
                 "description": "",
                 "dataContract": [],
                 "agent": {
-                    "name": ctx.name,
-                    "description": format!("AI agent for {}", ctx.name),
+                    "name": ctx.app_id,
+                    "description": format!("AI agent for {}", ctx.app_id),
                     "provider": provider,
                     "systemPrompt": "./agent/system.md",
                     "memory": { "enabled": true },
@@ -42,7 +42,7 @@ Describe what this agent does.
 ## Rules
 - Be specific about constraints
 - Reference entity names from the manifest
-"#, ctx.name)).await?;
+"#, ctx.app_id)).await?;
 
             e.write("backend/agent/graph.ts", r#"import { StateGraph, MessagesAnnotation } from "@langchain/langgraph";
 import { ToolNode } from "@langchain/langgraph/prebuilt";

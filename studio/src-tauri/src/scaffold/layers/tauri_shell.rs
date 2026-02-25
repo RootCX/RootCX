@@ -11,7 +11,7 @@ pub struct TauriLayer;
 impl Layer for TauriLayer {
     fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> LayerFuture<'a> {
         Box::pin(async move {
-            let ScaffoldContext { name, app_id, lib_name, identifier, port, .. } = ctx;
+            let ScaffoldContext { app_id, identifier, port, .. } = ctx;
             let client_dep = ctx.runtime.client_crate.display();
 
             e.write_bytes("src-tauri/icons/icon.png", ICON).await?;
@@ -25,7 +25,7 @@ version = "0.0.1"
 edition = "2021"
 
 [lib]
-name = "{lib_name}_lib"
+name = "{app_id}_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -48,7 +48,7 @@ rootcx-runtime = {{ path = "{client_dep}" }}
                 "src-tauri/tauri.conf.json",
                 &format!(
                     r#"{{
-  "productName": "{name}",
+  "productName": "{app_id}",
   "version": "0.0.1",
   "identifier": "{identifier}",
   "build": {{
@@ -58,7 +58,7 @@ rootcx-runtime = {{ path = "{client_dep}" }}
     "frontendDist": "../dist"
   }},
   "app": {{
-    "windows": [{{ "title": "{name}", "width": 900, "height": 600 }}],
+    "windows": [{{ "title": "{app_id}", "width": 900, "height": 600 }}],
     "security": {{ "csp": "{SCAFFOLD_CSP}" }}
   }},
   "bundle": {{ "active": true, "icon": ["icons/icon.png"] }}
@@ -105,7 +105,7 @@ rootcx-runtime = {{ path = "{client_dep}" }}
                     r#"#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {{
-    {lib_name}_lib::run();
+    {app_id}_lib::run();
 }}
 "#
                 ),

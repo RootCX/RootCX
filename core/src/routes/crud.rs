@@ -513,10 +513,8 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn table_sanitizes_inputs() {
-        let result = table("my;app", "drop--table");
-        assert!(!result.contains(';') && !result.contains('-'));
-        assert_eq!(result, "\"myapp\".\"droptable\"");
+    fn table_quotes_identifiers() {
+        assert_eq!(table("my_app", "contacts"), "\"my_app\".\"contacts\"");
     }
 
     #[test]

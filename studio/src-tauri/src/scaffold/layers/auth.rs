@@ -10,7 +10,7 @@ pub struct AuthLayer {
 impl Layer for AuthLayer {
     fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> LayerFuture<'a> {
         Box::pin(async move {
-            let content = if self.include_auth { auth_app(&ctx.name) } else { simple_app(&ctx.name) };
+            let content = if self.include_auth { auth_app(&ctx.app_id) } else { simple_app(&ctx.app_id) };
             e.write("src/App.tsx", &content).await
         })
     }
