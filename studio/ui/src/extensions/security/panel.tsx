@@ -1,5 +1,5 @@
 import { useState, useEffect, useSyncExternalStore } from "react";
-import { ChevronRight, ChevronDown, Shield, Users, KeyRound, UserPlus, X, RefreshCw } from "lucide-react";
+import { ChevronRight, ChevronDown, Shield, Users, KeyRound, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useProjectContext } from "@/components/layout/app-context";
@@ -49,84 +49,69 @@ function RoleNode({ role, depth }: { role: Role; depth: number }) {
   );
 }
 
-function AssignPicker({ userId, available, onDone }: { userId: string; available: Role[]; onDone: () => void }) {
+function RoleChip({ role, active, disabled, onClick }: { role: string; active: boolean; disabled?: boolean; onClick: () => void }) {
   return (
-    <div className="flex flex-col gap-0.5 px-1 py-0.5">
-      {available.map((r) => (
-        <button key={r.name} onClick={() => { assignRole(userId, r.name); onDone(); }}
-          className="rounded px-1 py-0.5 text-left text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground">
-          + {r.name}
-        </button>
-      ))}
-      <button onClick={onDone} className="px-1 py-0.5 text-[10px] text-muted-foreground/50 hover:text-muted-foreground">Cancel</button>
+    <button onClick={disabled ? undefined : onClick} className={cn(
+      "rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors",
+      disabled && "cursor-default opacity-50",
+      active ? "bg-primary text-primary-foreground" : "border border-border text-muted-foreground/60",
+      !disabled && (active ? "hover:bg-primary/80" : "hover:border-muted-foreground hover:text-muted-foreground"),
+    )}>
+      {role}
+    </button>
+  );
+}
+
+function UserRow({ user, assignments, roles, isAdmin }: { user: User; assignments: Assignment[]; roles: Role[]; isAdmin: boolean }) {
+  const assigned = new Set(assignments.filter((a) => a.userId === user.id).map((a) => a.role));
+  return (
+    <div className="flex items-center gap-2 px-3 py-1.5">
+      <Users className="h-3.5 w-3.5 shrink-0 text-blue-400" />
+      <span className="min-w-0 shrink-0 truncate text-xs">{user.displayName || user.username}</span>
+      <div className="ml-auto flex flex-wrap items-center gap-1">
+        {roles.map((r) => (
+          <RoleChip key={r.name} role={r.name} active={assigned.has(r.name)} disabled={!isAdmin}
+            onClick={() => assigned.has(r.name) ? revokeRole(user.id, r.name) : assignRole(user.id, r.name)} />
+        ))}
+      </div>
     </div>
   );
 }
 
-function UserNode({ user, assignments, roles, depth }: { user: User; assignments: Assignment[]; roles: Role[]; depth: number }) {
-  const [expanded, setExpanded] = useState(false);
-  const [picking, setPicking] = useState(false);
-  const mine = assignments.filter((a) => a.userId === user.id);
-  const available = roles.filter((r) => !mine.some((a) => a.role === r.name));
-
+function PolicyGroup({ role, items }: { role: string; items: Policy[] }) {
+  const [open, setOpen] = useState(false);
   return (
     <div>
-      <button onClick={() => setExpanded((e) => !e)} className={ROW} style={indent(depth)}>
-        {expanded ? <ChevronDown className={CHEVRON} /> : <ChevronRight className={CHEVRON} />}
-        <Users className="h-3.5 w-3.5 shrink-0 text-blue-400" />
-        <span className="truncate">{user.displayName || user.username}</span>
-        <span className="ml-auto shrink-0 pr-2 text-[10px] text-muted-foreground/50">
-          {mine.length} role{mine.length !== 1 ? "s" : ""}
-        </span>
+      <button onClick={() => setOpen((o) => !o)} className={ROW} style={indent(1)}>
+        {open ? <ChevronDown className={CHEVRON} /> : <ChevronRight className={CHEVRON} />}
+        <Shield className="h-3.5 w-3.5 shrink-0 text-amber-400" />
+        <span className="truncate">{role}</span>
+        <span className="ml-auto shrink-0 pr-2 text-[10px] text-muted-foreground/50">{items.length}</span>
       </button>
-      {expanded && (
-        <div style={indent(depth + 1)}>
-          {mine.map((a) => (
-            <div key={a.role} className="group flex items-center gap-1 px-1 py-0.5 text-[10px] text-muted-foreground">
-              <KeyRound className="h-3 w-3 shrink-0 text-muted-foreground/60" />
-              <span>{a.role}</span>
-              <button onClick={() => revokeRole(user.id, a.role)} title="Revoke"
-                className="ml-auto opacity-0 transition-opacity group-hover:opacity-100 hover:text-red-400">
-                <X className="h-3 w-3" />
-              </button>
-            </div>
-          ))}
-          {available.length > 0 && (picking
-            ? <AssignPicker userId={user.id} available={available} onDone={() => setPicking(false)} />
-            : <button onClick={() => setPicking(true)} className="flex items-center gap-1 px-1 py-0.5 text-[10px] text-muted-foreground hover:text-foreground">
-                <UserPlus className="h-3 w-3" /> Assign role
-              </button>
-          )}
+      {open && items.map((p) => (
+        <div key={p.entity} className="flex items-center gap-1 px-1 py-0.5 text-[10px] text-muted-foreground" style={indent(2)}>
+          <KeyRound className="h-3 w-3 shrink-0 text-muted-foreground/60" />
+          <span className="text-blue-400">{p.entity}</span>
+          <span className="text-muted-foreground/50">[{p.actions.join(", ")}]{p.ownership && " owner"}</span>
         </div>
-      )}
-    </div>
-  );
-}
-
-function PolicyRow({ policy, depth }: { policy: Policy; depth: number }) {
-  return (
-    <div className="flex w-full items-center gap-1 px-1 py-0.5 text-xs text-muted-foreground" style={indent(depth)}>
-      <span className="w-3.5 shrink-0" />
-      <KeyRound className="h-3 w-3 shrink-0 text-muted-foreground/60" />
-      <span className="truncate">
-        <span className="text-foreground">{policy.role}</span>{" \u2192 "}
-        <span className="text-blue-400">{policy.entity}</span>
-        <span className="ml-1 text-[10px] text-muted-foreground/50">
-          [{policy.actions.join(", ")}]{policy.ownership && " owner"}
-        </span>
-      </span>
+      ))}
     </div>
   );
 }
 
 export default function SecurityPanel() {
   const { projectPath } = useProjectContext();
-  const { appId, roles, users, assignments, policies, loading, error } = useSyncExternalStore(subscribe, getSnapshot);
+  const { appId, roles, users, assignments, policies, loading, error, isAdmin } = useSyncExternalStore(subscribe, getSnapshot);
 
   useEffect(() => { if (projectPath) loadProject(projectPath); }, [projectPath]);
 
   if (!projectPath)
     return <div className="flex h-full items-center justify-center p-6 text-xs text-muted-foreground">No project opened</div>;
+
+  const byRole = policies.reduce<Record<string, Policy[]>>((acc, p) => {
+    (acc[p.role] ??= []).push(p);
+    return acc;
+  }, {});
 
   return (
     <div className="flex h-full flex-col">
@@ -147,14 +132,16 @@ export default function SecurityPanel() {
             {roles.map((r) => <RoleNode key={r.name} role={r} depth={1} />)}
           </Section>
         )}
-        {users.length > 0 && (
+        {roles.length > 0 && (
           <Section title="Users" icon={Users} count={users.length}>
-            {users.map((u) => <UserNode key={u.id} user={u} assignments={assignments} roles={roles} depth={1} />)}
+            {users.length > 0
+              ? users.map((u) => <UserRow key={u.id} user={u} assignments={assignments} roles={roles} isAdmin={isAdmin} />)
+              : <div className="px-3 py-2 text-[10px] text-muted-foreground">No users registered</div>}
           </Section>
         )}
-        {policies.length > 0 && (
+        {Object.keys(byRole).length > 0 && (
           <Section title="Policies" icon={KeyRound} count={policies.length}>
-            {policies.map((p, i) => <PolicyRow key={`${p.role}-${p.entity}-${i}`} policy={p} depth={1} />)}
+            {Object.entries(byRole).map(([role, items]) => <PolicyGroup key={role} role={role} items={items} />)}
           </Section>
         )}
       </div>

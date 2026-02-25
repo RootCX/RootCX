@@ -208,6 +208,12 @@ pub async fn logout(
     Ok(Json(json!({ "message": "logged out" })))
 }
 
+pub async fn auth_mode(
+    axum::Extension(auth_config): axum::Extension<Arc<AuthConfig>>,
+) -> Json<JsonValue> {
+    Json(json!({ "authRequired": !auth_config.public }))
+}
+
 pub async fn list_users(
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<AuthUserResponse>>, ApiError> {

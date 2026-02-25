@@ -15,6 +15,8 @@ import { views as viewRegistry, executeCommand, workspace, layout } from "@/core
 import { CommandPaletteOverlay } from "@/extensions/command-palette/palette";
 import { showAISetupDialog } from "@/components/ai-setup-dialog";
 import { aiConfigStore } from "@/lib/ai-models";
+import { useAuth } from "@/core/auth";
+import { LoginScreen } from "@/components/login-screen";
 
 const WelcomePanel = lazy(() => import("@/extensions/welcome/panel"));
 
@@ -122,6 +124,15 @@ export function DockLayout() {
   const views = useViews();
   const defaultState = useMemo(() => buildDefaultState(views), [views]);
   const validIds = useMemo(() => new Set(views.map((v) => v.id)), [views]);
+  const { user, loading, authRequired } = useAuth();
+
+  if (loading) {
+    return <div className="flex h-screen w-screen items-center justify-center bg-background text-xs text-muted-foreground">Loading...</div>;
+  }
+
+  if (authRequired && !user) {
+    return <LoginScreen />;
+  }
 
   return (
     <ProjectProvider>

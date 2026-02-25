@@ -2,7 +2,8 @@ import { useSyncExternalStore, useState, useEffect } from "react";
 import { subscribe as subscribeTools, getSnapshot as getToolsSnapshot, loadProject as loadToolsProject } from "@/extensions/agent-tools/store";
 import { openAgentChat } from "@/extensions/agents";
 import { uninstallAgent } from "@/extensions/agents/store";
-import { Trash2, Database, Wrench, FolderOpen, Hammer, Shield, type LucideIcon } from "lucide-react";
+import { Trash2, Database, Wrench, FolderOpen, Hammer, Shield, LogOut, type LucideIcon } from "lucide-react";
+import { useAuth, logout } from "@/core/auth";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { views } from "@/core/studio";
 import { cn } from "@/lib/utils";
@@ -35,7 +36,9 @@ export function ActivityBar() {
 
   const [agentActive, setAgentActive] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  const [userMenu, setUserMenu] = useState<{ x: number; y: number } | null>(null);
   const { state, dispatch } = useLayout();
+  const { user } = useAuth();
 
   const items = isAgent ? [...NAV_ITEMS, TOOLS_ITEM] : NAV_ITEMS;
 
@@ -86,6 +89,26 @@ export function ActivityBar() {
             </Tooltip>
           </>
         )}
+
+        {user && user.id !== "anonymous" && (
+          <div className="mt-auto mb-2">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  className="relative flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border border-border/60 text-xs font-medium text-muted-foreground transition-colors hover:border-border hover:text-foreground"
+                  onClick={(e) => { e.preventDefault(); setUserMenu({ x: e.clientX, y: e.clientY }); }}
+                >
+                  {(user.displayName || user.username)[0].toUpperCase()}
+                  <span className="absolute bottom-0 right-0 h-2 w-2 rounded-full border border-sidebar bg-emerald-500" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right" sideOffset={4}>
+                <div className="text-xs font-semibold">{user.displayName || user.username}</div>
+                {user.email && <div className="text-[10px] text-muted-foreground">{user.email}</div>}
+              </TooltipContent>
+            </Tooltip>
+          </div>
+        )}
       </div>
 
       {menu && appId && (
@@ -105,6 +128,20 @@ export function ActivityBar() {
               }}
             >
               <Trash2 className="h-3 w-3" /> Delete
+            </button>
+          </div>
+        </>
+      )}
+      {userMenu && user && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setUserMenu(null)} onContextMenu={(e) => { e.preventDefault(); setUserMenu(null); }} />
+          <div className="fixed z-50 min-w-[160px] rounded-[5px] border border-[#454545] bg-[#252526] p-[4px] shadow-[0_2px_8px_rgba(0,0,0,0.5)]" style={{ left: userMenu.x, top: userMenu.y - 40 }}>
+            <div className="px-2 py-1 text-[11px] text-muted-foreground/60">{user.displayName || user.username}</div>
+            <button
+              className="flex w-full items-center gap-2 rounded-[3px] px-2 py-[3px] text-[13px] text-foreground hover:bg-[#2a2d2e]"
+              onClick={() => { setUserMenu(null); logout(); }}
+            >
+              <LogOut className="h-3 w-3" /> Sign out
             </button>
           </div>
         </>

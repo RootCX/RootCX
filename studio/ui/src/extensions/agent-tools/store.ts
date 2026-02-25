@@ -1,8 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { notify } from "@/core/notifications";
 import { executeCommand } from "@/core/studio";
-
-const BASE = "http://localhost:9100";
+import { fetchCore } from "@/core/auth";
 
 const IMPLICIT_TOOLS = new Set(["query_data", "mutate_data"]);
 
@@ -62,7 +61,7 @@ interface ToolInfo {
 }
 
 async function fetchAvailableTools(): Promise<ToolInfo[]> {
-  const res = await fetch(`${BASE}/api/v1/tools`);
+  const res = await fetchCore("/api/v1/tools");
   if (!res.ok) throw new Error("failed to fetch tools");
   return res.json();
 }

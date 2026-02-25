@@ -1,6 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-
-const BASE = "http://localhost:9100";
+import { fetchCore } from "@/core/auth";
 
 export interface ColumnInfo {
   column_name: string;
@@ -50,7 +49,7 @@ function errMsg(e: unknown): string {
 }
 
 async function fetchTables(appId: string) {
-  const res = await fetch(`${BASE}/api/v1/db/schemas/${encodeURIComponent(appId)}/tables`);
+  const res = await fetchCore(`/api/v1/db/schemas/${encodeURIComponent(appId)}/tables`);
   if (!res.ok) throw new Error(await res.text().catch(() => "failed to fetch tables"));
   return (await res.json()) as TableInfo[];
 }
@@ -92,7 +91,7 @@ export async function executeQuery(sql: string) {
   emit();
   const start = performance.now();
   try {
-    const res = await fetch(`${BASE}/api/v1/db/query`, {
+    const res = await fetchCore("/api/v1/db/query", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sql, schema: state.appId }),

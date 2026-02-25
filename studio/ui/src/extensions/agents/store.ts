@@ -1,7 +1,6 @@
 import type { AgentMessage } from "@/types";
 import { dismiss } from "@/core/notifications";
-
-const BASE = "http://localhost:9100";
+import { fetchCore } from "@/core/auth";
 
 interface AgentChatState {
   messages: AgentMessage[];
@@ -31,7 +30,7 @@ export const getSnapshot = () => snapshot;
 export async function checkDeployment(appId: string): Promise<boolean> {
   let ok = false;
   try {
-    const r = await fetch(`${BASE}/api/v1/apps/${appId}/worker/status`);
+    const r = await fetchCore(`/api/v1/apps/${appId}/worker/status`);
     ok = r.ok && (await r.json()).status === "running";
   } catch {}
   state = { ...state, deployed: { ...state.deployed, [appId]: ok } };
@@ -74,7 +73,7 @@ export async function sendAgentMessage(appId: string, message: string) {
     const body: Record<string, string> = { message };
     if (chat.sessionId) body.session_id = chat.sessionId;
 
-    const res = await fetch(`${BASE}/api/v1/apps/${appId}/agent/invoke`, {
+    const res = await fetchCore(`/api/v1/apps/${appId}/agent/invoke`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -161,7 +160,7 @@ export function clearChat(appId: string) {
 }
 
 export async function uninstallAgent(appId: string) {
-  const res = await fetch(`${BASE}/api/v1/apps/${appId}`, { method: "DELETE" });
+  const res = await fetchCore(`/api/v1/apps/${appId}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await res.text().catch(() => "uninstall failed"));
   abortControllers.get(appId)?.abort();
   const { [appId]: _, ...chats } = state.chats;
