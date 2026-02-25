@@ -193,3 +193,12 @@ export function clearChat(appId: string) {
   state = { ...state, chats: rest };
   emit();
 }
+
+export async function uninstallAgent(appId: string) {
+  const res = await fetch(`${BASE}/api/v1/apps/${appId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await res.text().catch(() => "uninstall failed"));
+  abortControllers.get(appId)?.abort();
+  clearChat(appId);
+  state = { ...state, agents: state.agents.filter((a) => a.app_id !== appId) };
+  emit();
+}
