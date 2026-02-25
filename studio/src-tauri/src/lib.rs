@@ -18,6 +18,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            commands::set_auth_token,
             commands::get_os_status,
             commands::boot_runtime,
             commands::shutdown_runtime,

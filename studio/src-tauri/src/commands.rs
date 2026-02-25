@@ -10,6 +10,11 @@ use crate::state::{AppState, RecentProject};
 use crate::terminal::TerminalState;
 
 #[tauri::command]
+pub fn set_auth_token(state: State<'_, AppState>, token: String) {
+    state.set_auth_token(if token.is_empty() { None } else { Some(token) });
+}
+
+#[tauri::command]
 pub async fn get_os_status(state: State<'_, AppState>) -> Result<OsStatus, String> {
     Ok(state.status().await)
 }

@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { commands, workspace, layout } from "@/core/studio";
 import { dismiss } from "@/core/notifications";
 import { showMigrationDialog } from "./migration-dialog";
@@ -44,6 +44,11 @@ export function activate() {
   });
 }
 
+function logError(step: string, err: unknown): false {
+  emit("run-output", `\x1b[31m[${step}] ${err instanceof Error ? err.message : err}\x1b[0m\r\n`);
+  return false;
+}
+
 async function executeStep(step: string, projectPath: string): Promise<boolean> {
   switch (step) {
     case "verify_schema": {
@@ -52,11 +57,14 @@ async function executeStep(step: string, projectPath: string): Promise<boolean> 
         if (!result.compliant) {
           return await showMigrationDialog(result.changes);
         }
-      } catch (e) { console.error("verify_schema failed:", e); }
+      } catch (e) { return logError("verify_schema", e); }
       return true;
     }
     case "sync_manifest": {
-      try { await invoke("sync_manifest", { projectPath }); dismiss("agent-tools-changed"); } catch (e) { console.warn("sync_manifest failed:", e); }
+      try {
+        await invoke("sync_manifest", { projectPath });
+        dismiss("agent-tools-changed");
+      } catch (e) { return logError("sync_manifest", e); }
       return true;
     }
     case "deploy_backend": {
@@ -64,7 +72,7 @@ async function executeStep(step: string, projectPath: string): Promise<boolean> 
         const entries = await invoke<{ name: string; is_dir: boolean }[]>("read_dir", { path: projectPath });
         if (entries.some((e) => e.is_dir && e.name === "backend"))
           await invoke("deploy_backend", { projectPath });
-      } catch (e) { console.warn("deploy_backend failed:", e); }
+      } catch (e) { return logError("deploy_backend", e); }
       return true;
     }
     default:

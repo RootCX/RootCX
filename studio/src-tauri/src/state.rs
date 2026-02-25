@@ -181,6 +181,10 @@ impl AppState {
         }
     }
 
+    pub fn set_auth_token(&self, token: Option<String>) {
+        self.client.set_token(token);
+    }
+
     pub async fn boot(&self) -> Result<(), String> {
         if !self.client.is_available().await {
             return Err(format!("core daemon not reachable at {DAEMON_URL}"));

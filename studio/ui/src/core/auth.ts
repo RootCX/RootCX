@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 const BASE = "http://localhost:9100";
 const REFRESH_KEY = "rootcx_refresh_token";
@@ -23,6 +24,7 @@ const listeners = new Set<() => void>();
 let snapshot = state;
 
 function emit() { snapshot = { ...state }; listeners.forEach((fn) => fn()); }
+function syncToken() { invoke("set_auth_token", { token: accessToken ?? "" }).catch(() => {}); }
 function clearTokens() { accessToken = null; refreshToken = null; localStorage.removeItem(REFRESH_KEY); }
 
 export const subscribe = (fn: () => void) => (listeners.add(fn), () => listeners.delete(fn));
@@ -71,6 +73,7 @@ export async function login(username: string, password: string) {
   accessToken = data.accessToken;
   refreshToken = data.refreshToken;
   if (refreshToken) localStorage.setItem(REFRESH_KEY, refreshToken);
+  syncToken();
   state = { ...state, user: data.user };
   emit();
 }
@@ -94,6 +97,7 @@ export async function logout() {
     }).catch(() => {});
   }
   clearTokens();
+  syncToken();
   state = { ...state, user: null };
   emit();
 }
@@ -107,6 +111,7 @@ async function doRefresh() {
   });
   if (!res.ok) { clearTokens(); throw new Error("refresh failed"); }
   accessToken = (await res.json()).accessToken;
+  syncToken();
 }
 
 async function fetchMe(): Promise<AuthUser> {
