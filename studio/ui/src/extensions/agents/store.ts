@@ -198,7 +198,7 @@ export async function uninstallAgent(appId: string) {
   const res = await fetch(`${BASE}/api/v1/apps/${appId}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await res.text().catch(() => "uninstall failed"));
   abortControllers.get(appId)?.abort();
-  clearChat(appId);
-  state = { ...state, agents: state.agents.filter((a) => a.app_id !== appId) };
+  const { [appId]: _, ...chats } = state.chats;
+  state = { ...state, chats, agents: state.agents.filter((a) => a.app_id !== appId) };
   emit();
 }

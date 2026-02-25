@@ -15,13 +15,7 @@ export class Registry<T> {
     this.items.set(id, item);
     this.snapshot = null;
     this.notify();
-    return {
-      dispose: () => {
-        this.items.delete(id);
-        this.snapshot = null;
-        this.notify();
-      },
-    };
+    return { dispose: () => this.unregister(id) };
   }
 
   unregister(id: string) {
