@@ -1,0 +1,7 @@
+{
+  "name": "query_data",
+  "accessEntity": null,
+  "implicit": true,
+  "description": "Query records from collections with filters, sorting, and pagination.",
+  "whenToUse": "Auto-loaded when any data entity is in the access list. Do not add as a tool: entry."
+}

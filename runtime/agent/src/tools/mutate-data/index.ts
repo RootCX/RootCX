@@ -1,14 +1,9 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
-import type { EntitySchema } from "../runner.js";
-import { formatSchema } from "./schema.js";
+import { formatSchema } from "../schema.js";
+import type { ToolContext } from "../types.js";
 
-export function createMutateDataTool(
-    appId: string,
-    runtimeUrl: string,
-    authToken: string,
-    dataContract: EntitySchema[],
-) {
+export function createTool({ appId, runtimeUrl, authToken, dataContract }: ToolContext) {
     return tool(
         async ({ entity, action, data, id }) => {
             const basePath = `/api/v1/apps/${appId}/collections/${entity}`;

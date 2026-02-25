@@ -1,37 +1,39 @@
+import { readdirSync, readFileSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import type { StructuredToolInterface } from "@langchain/core/tools";
-import type { EntitySchema } from "../runner.js";
-import { createQueryDataTool } from "./query-data.js";
-import { createMutateDataTool } from "./mutate-data.js";
-import { createWebSearchTool } from "./web-search.js";
-import { createWebFetchTool } from "./web-fetch.js";
-import { createBrowserTool } from "./browser.js";
+import type { ToolContext } from "./types.js";
 
-export interface ToolContext {
-    appId: string;
-    runtimeUrl: string;
-    authToken: string;
-    dataContract: EntitySchema[];
+export type { ToolContext };
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const discovered = new Map<string, { dirName: string; factory?: (ctx: ToolContext) => StructuredToolInterface }>();
+
+for (const entry of readdirSync(__dirname, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    try {
+        const { name } = JSON.parse(readFileSync(join(__dirname, entry.name, "meta.json"), "utf-8"));
+        discovered.set(name, { dirName: entry.name });
+    } catch {}
 }
 
-type ToolFactory = (ctx: ToolContext) => StructuredToolInterface;
-
-const TOOL_FACTORIES: Record<string, ToolFactory> = {
-    query_data: (ctx) => createQueryDataTool(ctx.appId, ctx.runtimeUrl, ctx.authToken, ctx.dataContract),
-    mutate_data: (ctx) => createMutateDataTool(ctx.appId, ctx.runtimeUrl, ctx.authToken, ctx.dataContract),
-    web_search: () => createWebSearchTool(),
-    web_fetch: () => createWebFetchTool(),
-    browser: (ctx) => createBrowserTool(ctx.runtimeUrl, ctx.authToken),
-};
-
-export function buildToolRegistry(
+export async function buildToolRegistry(
     enabledTools: string[],
     ctx: ToolContext,
-): StructuredToolInterface[] {
-    return enabledTools
-        .filter((name) => {
-            if (name in TOOL_FACTORIES) return true;
-            console.warn(`Unknown tool "${name}" — not found in TOOL_FACTORIES, skipping`);
-            return false;
-        })
-        .map((name) => TOOL_FACTORIES[name](ctx));
+): Promise<StructuredToolInterface[]> {
+    const tools: StructuredToolInterface[] = [];
+    for (const name of enabledTools) {
+        const entry = discovered.get(name);
+        if (!entry) {
+            console.warn(`Unknown tool "${name}", skipping`);
+            continue;
+        }
+        if (!entry.factory) {
+            const mod = await import(`./${entry.dirName}/index.js`);
+            entry.factory = mod.createTool;
+        }
+        tools.push(entry.factory!(ctx));
+    }
+    return tools;
 }

@@ -1,7 +1,7 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
-import type { EntitySchema } from "../runner.js";
-import { formatSchema } from "./schema.js";
+import { formatSchema } from "../schema.js";
+import type { ToolContext } from "../types.js";
 
 const WHERE_DSL = `\
 WHERE DSL (MongoDB-style):
@@ -11,12 +11,7 @@ WHERE DSL (MongoDB-style):
 - Logic: $and:[...] $or:[...] $not:{...} — nestable. Top-level keys are AND-ed.
 Example: {"$or":[{"status":"active"},{"role":"admin"}],"age":{"$gte":18}}`;
 
-export function createQueryDataTool(
-    appId: string,
-    runtimeUrl: string,
-    authToken: string,
-    dataContract: EntitySchema[],
-) {
+export function createTool({ appId, runtimeUrl, authToken, dataContract }: ToolContext) {
     const headers = { Authorization: `Bearer ${authToken}` };
 
     return tool(

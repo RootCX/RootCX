@@ -52,7 +52,7 @@ export async function runAgent(params: RunAgentParams) {
     if (!runtimeUrl) throw new Error("ROOTCX_RUNTIME_URL not set");
 
     const model = await buildProvider(config.provider);
-    const tools = buildToolRegistry(config._enabledTools, {
+    const tools = await buildToolRegistry(config._enabledTools, {
         appId: config._appId,
         runtimeUrl,
         authToken,

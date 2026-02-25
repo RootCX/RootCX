@@ -258,7 +258,7 @@ Added alongside `dataContract` in `manifest.json`:
   "limits": { "maxTurns": 10 },
   "access": [
     { "entity": "<collection>", "actions": ["read", "create", "update", "delete"] },
-    { "entity": "tool:web_search", "actions": ["use"] }
+    { "entity": "tool:browser", "actions": [] }
   ]
 }
 ```
@@ -267,15 +267,9 @@ Added alongside `dataContract` in `manifest.json`:
 
 ### Access & tools
 
-Everything not listed in `access` = denied.
-
-| `entity` pattern | Actions | Auto-loaded tool |
-|-----------------|---------|-----------------|
-| `<collection>` | read/create/update/delete | `query_data`, `mutate_data` |
-| `tool:web_search` | use | `web_search` (Brave/Tavily) |
-| `tool:web_fetch` | use | `web_fetch` |
-| `tool:invoke_agent` | use | `invoke_agent` |
-| `app:<appId>/<entity>` | read/create/update/delete | `query_data`, `mutate_data` |
+Unlisted = denied. Full tool catalog in **Agent Tools Reference** instruction.
+`<collection>` in access → auto-enables `query_data` + `mutate_data`.
+Cross-app: `app:<appId>/<entity>`.
 
 ### graph.ts contract
 

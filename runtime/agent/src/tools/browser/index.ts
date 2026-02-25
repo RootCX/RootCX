@@ -1,5 +1,6 @@
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
+import type { ToolContext } from "../types.js";
 
 const MAX_SNAPSHOT = 30_000;
 
@@ -10,7 +11,7 @@ function formatSnapshot(data: { text?: string; title?: string; url?: string }): 
     return header + body;
 }
 
-export function createBrowserTool(runtimeUrl: string, authToken: string) {
+export function createTool({ runtimeUrl, authToken }: ToolContext) {
     const headers = { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` };
 
     async function api(path: string, body?: Record<string, unknown>): Promise<Response> {

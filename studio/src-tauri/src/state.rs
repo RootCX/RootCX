@@ -15,6 +15,7 @@ static LOG_HTTP: LazyLock<reqwest::Client> =
     LazyLock::new(|| reqwest::Client::new());
 
 const ROOTCX_RUNTIME_INSTRUCTIONS: &str = include_str!("../../../.agents/instructions/rootcx-runtime.md");
+const AGENT_TOOLS_MD: &str = include_str!(concat!(env!("OUT_DIR"), "/agent-tools.md"));
 
 fn default_mcp_servers() -> serde_json::Value {
     serde_json::json!({
@@ -111,6 +112,10 @@ async fn ensure_instructions() -> Result<(), String> {
     tokio::fs::write(dir.join("rootcx-runtime.md"), ROOTCX_RUNTIME_INSTRUCTIONS.as_bytes())
         .await
         .map_err(|e| format!("failed to write instruction file: {e}"))?;
+
+    tokio::fs::write(dir.join("agent-tools.md"), AGENT_TOOLS_MD.as_bytes())
+        .await
+        .map_err(|e| format!("failed to write tools instruction file: {e}"))?;
     Ok(())
 }
 
