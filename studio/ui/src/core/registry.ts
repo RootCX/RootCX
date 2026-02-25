@@ -24,6 +24,12 @@ export class Registry<T> {
     };
   }
 
+  unregister(id: string) {
+    if (!this.items.delete(id)) return;
+    this.snapshot = null;
+    this.notify();
+  }
+
   get(id: string): T | undefined {
     return this.items.get(id);
   }

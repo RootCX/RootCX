@@ -187,3 +187,9 @@ export function abortAgent(appId: string) {
   abortControllers.get(appId)?.abort();
   patchChat(appId, { streaming: false });
 }
+
+export function clearChat(appId: string) {
+  const { [appId]: _, ...rest } = state.chats;
+  state = { ...state, chats: rest };
+  emit();
+}
