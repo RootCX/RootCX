@@ -12,6 +12,7 @@ import { activate as settings } from "./settings";
 import { activate as agents } from "./agents";
 import { activate as database } from "./database";
 import { activate as agentTools } from "./agent-tools";
+import { activate as security } from "./security";
 
 export function activateBuiltins() {
   commandPalette();
@@ -28,4 +29,5 @@ export function activateBuiltins() {
   agents();
   database();
   agentTools();
+  security();
 }

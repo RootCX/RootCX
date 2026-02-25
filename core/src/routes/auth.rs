@@ -208,6 +208,19 @@ pub async fn logout(
     Ok(Json(json!({ "message": "logged out" })))
 }
 
+pub async fn list_users(
+    State(rt): State<SharedRuntime>,
+) -> Result<Json<Vec<AuthUserResponse>>, ApiError> {
+    let pool = super::pool(&rt).await?;
+    let rows: Vec<UserRow> = sqlx::query_as(
+        "SELECT id, username, email, display_name, created_at
+         FROM rootcx_system.users WHERE is_system = false ORDER BY username",
+    )
+    .fetch_all(&pool)
+    .await?;
+    Ok(Json(rows.into_iter().map(user_response).collect()))
+}
+
 pub async fn me(State(rt): State<SharedRuntime>, identity: Identity) -> Result<Json<AuthUserResponse>, ApiError> {
     let pool = super::pool(&rt).await?;
 

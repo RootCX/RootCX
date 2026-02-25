@@ -49,6 +49,33 @@ pub(crate) struct EntityPermission {
     ownership: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PolicyResponse {
+    role: String,
+    entity: String,
+    actions: Vec<String>,
+    ownership: bool,
+}
+
+pub(crate) async fn list_policies(
+    State(rt): State<SharedRuntime>,
+    Path(app_id): Path<String>,
+) -> Result<Json<Vec<PolicyResponse>>, ApiError> {
+    let pool = routes::pool(&rt).await?;
+    let rows: Vec<(String, String, Vec<String>, bool)> = sqlx::query_as(
+        "SELECT role, entity, actions, ownership FROM rootcx_system.rbac_policies WHERE app_id = $1 ORDER BY role, entity",
+    )
+    .bind(&app_id)
+    .fetch_all(&pool)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(role, entity, actions, ownership)| PolicyResponse { role, entity, actions, ownership })
+            .collect(),
+    ))
+}
+
 pub(crate) async fn list_roles(
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,

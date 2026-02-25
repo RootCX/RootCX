@@ -2,7 +2,7 @@ import { useSyncExternalStore, useState, useEffect } from "react";
 import { subscribe as subscribeTools, getSnapshot as getToolsSnapshot, loadProject as loadToolsProject } from "@/extensions/agent-tools/store";
 import { openAgentChat } from "@/extensions/agents";
 import { uninstallAgent } from "@/extensions/agents/store";
-import { Trash2, Database, Wrench, FolderOpen, Hammer, type LucideIcon } from "lucide-react";
+import { Trash2, Database, Wrench, FolderOpen, Hammer, Shield, type LucideIcon } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { views } from "@/core/studio";
 import { cn } from "@/lib/utils";
@@ -19,6 +19,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "explorer", icon: FolderOpen, label: "Explorer", desc: "Browse project files", zone: "sidebar" },
   { id: "forge", icon: Hammer, label: "AI Forge", desc: "Chat with AI assistant", zone: "editor" },
   { id: "database", icon: Database, label: "Database", desc: "Browse schemas and tables", zone: "sidebar" },
+  { id: "security", icon: Shield, label: "Security", desc: "Manage roles and permissions", zone: "sidebar" },
 ];
 
 const TOOLS_ITEM: NavItem = { id: "agent-tools", icon: Wrench, label: "Agent Tools", desc: "Configure agent tool access", zone: "sidebar" };

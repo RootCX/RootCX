@@ -170,6 +170,7 @@ impl RuntimeExtension for RbacExtension {
     fn routes(&self) -> Option<Router<SharedRuntime>> {
         Some(
             Router::new()
+                .route("/api/v1/apps/{app_id}/policies", get(routes::list_policies))
                 .route("/api/v1/apps/{app_id}/roles", get(routes::list_roles))
                 .route("/api/v1/apps/{app_id}/roles/assignments", get(routes::list_assignments))
                 .route("/api/v1/apps/{app_id}/roles/assign", post(routes::assign_role))

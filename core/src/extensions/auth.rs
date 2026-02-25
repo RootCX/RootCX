@@ -58,6 +58,7 @@ impl RuntimeExtension for AuthExtension {
                 .route("/api/v1/auth/refresh", post(crate::routes::auth::refresh))
                 .route("/api/v1/auth/logout", post(crate::routes::auth::logout))
                 .route("/api/v1/auth/me", get(crate::routes::auth::me))
+                .route("/api/v1/users", get(crate::routes::auth::list_users))
                 .layer(axum::Extension(Arc::clone(&self.config))),
         )
     }
