@@ -2,88 +2,69 @@ import { useSyncExternalStore, useState, useEffect } from "react";
 import { subscribe, getSnapshot, uninstallAgent } from "@/extensions/agents/store";
 import { subscribe as subscribeTools, getSnapshot as getToolsSnapshot, loadProject as loadToolsProject } from "@/extensions/agent-tools/store";
 import { openAgentChat } from "@/extensions/agents";
-import { Trash2, Database, Wrench } from "lucide-react";
+import { Trash2, Database, Wrench, FolderOpen, Hammer, type LucideIcon } from "lucide-react";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { views } from "@/core/studio";
 import { cn } from "@/lib/utils";
-import { useLayout } from "./layout-store";
+import { useLayout, type ZoneId, type LayoutState } from "./layout-store";
 import { useProjectContext } from "./app-context";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 
 const INDICATOR = "absolute left-0 top-1/2 h-6 w-0.5 -translate-y-1/2 rounded-r bg-foreground";
+const BTN = "relative flex h-12 w-12 select-none items-center justify-center text-muted-foreground/50 transition-colors hover:text-muted-foreground";
+
+interface NavItem { id: string; icon: LucideIcon; label: string; desc: string; zone: ZoneId }
+
+const NAV_ITEMS: NavItem[] = [
+  { id: "explorer", icon: FolderOpen, label: "Explorer", desc: "Browse project files", zone: "sidebar" },
+  { id: "forge", icon: Hammer, label: "AI Forge", desc: "Chat with AI assistant", zone: "editor" },
+  { id: "database", icon: Database, label: "Database", desc: "Browse schemas and tables", zone: "sidebar" },
+];
+
+const TOOLS_ITEM: NavItem = { id: "agent-tools", icon: Wrench, label: "Agent Tools", desc: "Configure agent tool access", zone: "sidebar" };
+
+const isVisible = (state: LayoutState, id: string) =>
+  Object.values(state.zones).some((ids) => ids.includes(id)) && !state.hidden.has(id);
 
 export function ActivityBar() {
   const { agents } = useSyncExternalStore(subscribe, getSnapshot);
   const { isAgent } = useSyncExternalStore(subscribeTools, getToolsSnapshot);
   const { projectPath } = useProjectContext();
 
-  useEffect(() => {
-    if (projectPath) loadToolsProject(projectPath);
-  }, [projectPath]);
+  useEffect(() => { if (projectPath) loadToolsProject(projectPath) }, [projectPath]);
+
   const [activeId, setActiveId] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ appId: string; x: number; y: number } | null>(null);
   const { state, dispatch } = useLayout();
 
-  const dbVisible =
-    Object.values(state.zones).some((ids) => ids.includes("database")) &&
-    !state.hidden.has("database");
+  const items = isAgent ? [...NAV_ITEMS, TOOLS_ITEM] : NAV_ITEMS;
 
-  const toggleDatabase = () => {
-    if (dbVisible) dispatch({ type: "TOGGLE_VIEW", viewId: "database" });
-    else dispatch({ type: "SHOW_VIEW", viewId: "database", zone: "sidebar" });
-  };
-
-  const toolsVisible =
-    Object.values(state.zones).some((ids) => ids.includes("agent-tools")) &&
-    !state.hidden.has("agent-tools");
-
-  const toggleTools = () => {
-    if (toolsVisible) dispatch({ type: "TOGGLE_VIEW", viewId: "agent-tools" });
-    else dispatch({ type: "SHOW_VIEW", viewId: "agent-tools", zone: "sidebar" });
+  const toggle = ({ id, zone }: NavItem) => {
+    if (isVisible(state, id)) dispatch({ type: "TOGGLE_VIEW", viewId: id });
+    else dispatch({ type: "SHOW_VIEW", viewId: id, zone });
   };
 
   return (
     <TooltipProvider delayDuration={300}>
       <div className="flex w-12 shrink-0 flex-col items-center border-r border-border bg-sidebar">
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              className={cn(
-                "relative flex h-12 w-12 select-none items-center justify-center text-muted-foreground/50 transition-colors hover:text-muted-foreground",
-                dbVisible && "text-foreground",
-              )}
-              onClick={toggleDatabase}
-            >
-              {dbVisible && <span className={INDICATOR} />}
-              <Database className="h-5 w-5" />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent side="right" sideOffset={4}>
-            <div className="text-xs font-semibold">Database</div>
-            <div className="text-[10px] text-muted-foreground">Browse schemas and tables</div>
-          </TooltipContent>
-        </Tooltip>
-
-        {isAgent && (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                className={cn(
-                  "relative flex h-12 w-12 select-none items-center justify-center text-muted-foreground/50 transition-colors hover:text-muted-foreground",
-                  toolsVisible && "text-foreground",
-                )}
-                onClick={toggleTools}
-              >
-                {toolsVisible && <span className={INDICATOR} />}
-                <Wrench className="h-5 w-5" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="right" sideOffset={4}>
-              <div className="text-xs font-semibold">Agent Tools</div>
-              <div className="text-[10px] text-muted-foreground">Configure agent tool access</div>
-            </TooltipContent>
-          </Tooltip>
-        )}
+        {items.map((item) => {
+          const visible = isVisible(state, item.id);
+          const Icon = item.icon;
+          return (
+            <Tooltip key={item.id}>
+              <TooltipTrigger asChild>
+                <button className={cn(BTN, visible && "text-foreground")} onClick={() => toggle(item)}>
+                  {visible && <span className={INDICATOR} />}
+                  <Icon className="h-5 w-5" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="right" sideOffset={4}>
+                <div className="text-xs font-semibold">{item.label}</div>
+                <div className="text-[10px] text-muted-foreground">{item.desc}</div>
+              </TooltipContent>
+            </Tooltip>
+          );
+        })}
 
         {agents.length > 0 && <div className="my-1 h-px w-6 bg-border" />}
 
@@ -91,10 +72,7 @@ export function ActivityBar() {
           <Tooltip key={a.app_id}>
             <TooltipTrigger asChild>
               <button
-                className={cn(
-                  "relative flex h-12 w-12 select-none items-center justify-center text-[18px] font-bold text-muted-foreground/50 transition-colors hover:text-muted-foreground",
-                  activeId === a.app_id && "text-foreground",
-                )}
+                className={cn(BTN, "text-[18px] font-bold", activeId === a.app_id && "text-foreground")}
                 onClick={() => { setActiveId(a.app_id); openAgentChat(a.app_id, a.name); }}
                 onContextMenu={(e) => { e.preventDefault(); setMenu({ appId: a.app_id, x: e.clientX, y: e.clientY }); }}
               >
