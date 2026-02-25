@@ -18,6 +18,7 @@ import { useProjectContext } from "@/components/layout/app-context";
 import { showAISetupDialog } from "@/components/ai-setup-dialog";
 import { SendHorizontal, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
+import Markdown from "react-markdown";
 import type { Message, Part, Permission, Session } from "@opencode-ai/sdk";
 
 const toolStatusLabel: Record<string, string> = {
@@ -26,14 +27,40 @@ const toolStatusLabel: Record<string, string> = {
   error: "err",
 };
 
+const heading = (p: React.HTMLAttributes<HTMLHeadingElement>) => <h3 className="mt-2 mb-1 text-xs font-semibold text-foreground" {...p} />;
+const mdComponents = {
+  p: (p: React.HTMLAttributes<HTMLParagraphElement>) => <p className="my-1 first:mt-0 last:mb-0" {...p} />,
+  strong: (p: React.HTMLAttributes<HTMLElement>) => <strong className="font-semibold text-foreground" {...p} />,
+  ul: (p: React.HTMLAttributes<HTMLUListElement>) => <ul className="my-1 list-disc pl-4" {...p} />,
+  ol: (p: React.OlHTMLAttributes<HTMLOListElement>) => <ol className="my-1 list-decimal pl-4" {...p} />,
+  li: (p: React.HTMLAttributes<HTMLLIElement>) => <li className="my-0.5" {...p} />,
+  h1: heading, h2: heading, h3: heading,
+  code: ({ className, children, ...rest }: React.HTMLAttributes<HTMLElement>) =>
+    className ? (
+      <pre className="my-1 overflow-x-auto rounded border border-border bg-accent px-2 py-1.5 font-mono text-[10px] leading-snug">
+        <code {...rest}>{children}</code>
+      </pre>
+    ) : (
+      <code className="rounded bg-accent px-1 py-0.5 font-mono text-[10px]" {...rest}>{children}</code>
+    ),
+  pre: ({ children }: React.HTMLAttributes<HTMLPreElement>) => <>{children}</>,
+  a: (p: React.AnchorHTMLAttributes<HTMLAnchorElement>) => (
+    <a className="text-primary underline underline-offset-2" target="_blank" rel="noopener noreferrer" {...p} />
+  ),
+  hr: () => <hr className="my-2 border-border" />,
+  blockquote: (p: React.HTMLAttributes<HTMLQuoteElement>) => (
+    <blockquote className="my-1 border-l-2 border-border pl-2 text-muted-foreground" {...p} />
+  ),
+} as Record<string, React.ComponentType>;
+
 function PartView({ part }: { part: Part }) {
   if (part.type === "text" || part.type === "reasoning") {
     return (
       <div className={cn(
-        "whitespace-pre-wrap break-words text-xs leading-relaxed",
+        "break-words text-xs leading-relaxed",
         part.type === "reasoning" && "italic text-muted-foreground",
       )}>
-        {part.text}
+        <Markdown components={mdComponents}>{part.text}</Markdown>
       </div>
     );
   }
