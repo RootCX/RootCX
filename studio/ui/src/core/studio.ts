@@ -9,6 +9,7 @@ export interface View {
   icon: LucideIcon;
   defaultZone: ZoneId;
   component: React.LazyExoticComponent<ComponentType>;
+  defaultActive?: boolean;
   closeable?: boolean;
   onClose?: () => void;
 }

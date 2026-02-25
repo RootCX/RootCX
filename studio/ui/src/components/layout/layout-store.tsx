@@ -25,13 +25,19 @@ export type Action =
 const STORAGE_KEY = `studio:layout:${windowLabel}`;
 const ZONE_IDS: ZoneId[] = ["sidebar", "editor", "bottom", "right"];
 
+const DEFAULT_VISIBLE = new Set(["forge", "explorer", "welcome"]);
+
 export function buildDefaultState(
-  views: { id: string; defaultZone: ZoneId }[],
+  views: { id: string; defaultZone: ZoneId; defaultActive?: boolean }[],
 ): LayoutState {
   const zones = Object.fromEntries(ZONE_IDS.map((z) => [z, []])) as unknown as Record<ZoneId, string[]>;
   for (const v of views) zones[v.defaultZone].push(v.id);
   const active = Object.fromEntries(ZONE_IDS.map((z) => [z, zones[z][0] ?? null])) as Record<ZoneId, string | null>;
   const hidden = new Set<string>();
+  for (const v of views) {
+    if (v.defaultActive) active[v.defaultZone] = v.id;
+    if (!DEFAULT_VISIBLE.has(v.id)) hidden.add(v.id);
+  }
   return { zones, active, hidden };
 }
 

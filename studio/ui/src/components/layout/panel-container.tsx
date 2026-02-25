@@ -132,6 +132,23 @@ export function PanelContainer({ zone }: { zone: ZoneId }) {
     return <div ref={ref} className="h-full" />;
   }
 
+  if (resolved.length === 1) {
+    const view = resolved[0];
+    return (
+      <div ref={ref} className="flex h-full flex-col">
+        <Suspense
+          fallback={
+            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+              Loading...
+            </div>
+          }
+        >
+          <view.component />
+        </Suspense>
+      </div>
+    );
+  }
+
   return (
     <div ref={ref} className="flex h-full flex-col">
       <Tabs

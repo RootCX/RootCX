@@ -8,7 +8,8 @@ export const activate = () => {
   views.register("forge", {
     title: "AI Forge",
     icon: Bot,
-    defaultZone: "sidebar",
+    defaultZone: "editor",
+    defaultActive: true,
     component: lazy(() => import("./panel")),
   });
 
@@ -24,7 +25,7 @@ export const activate = () => {
   commands.register("forge.abort", {
     title: "Abort Session",
     category: "AI Forge",
-    handler: () => abortSession(),
+    handler: abortSession,
   });
 
   statusBar.register("forge.status", {

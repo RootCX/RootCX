@@ -15,8 +15,8 @@ export function activateBuiltins() {
   commandPalette();
   project();
   explorer();
-  forge();
   welcome();
+  forge();
   console();
   output();
   coreStatus();
