@@ -5,6 +5,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
 import { StatusBar } from "./status-bar";
+import { NotificationBar } from "./notification-bar";
 import { PanelContainer } from "./panel-container";
 import { ActivityBar } from "./activity-bar";
 import { ProjectProvider, useProjectContext } from "./app-context";
@@ -82,6 +83,7 @@ function Shell() {
     <div className="flex h-screen w-screen overflow-hidden">
       <ActivityBar />
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <NotificationBar />
         <ResizablePanelGroup orientation="vertical" className="flex-1 overflow-hidden">
           <ResizablePanel id="top-area" defaultSize={hasBottom ? "70%" : "100%"}>
             <ResizablePanelGroup orientation="horizontal" className="h-full overflow-hidden">

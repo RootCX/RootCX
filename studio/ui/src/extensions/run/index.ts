@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { commands, workspace, layout } from "@/core/studio";
+import { dismiss } from "@/core/notifications";
 import { showMigrationDialog } from "./migration-dialog";
 import type { SchemaVerification } from "@/types";
 
@@ -55,7 +56,7 @@ async function executeStep(step: string, projectPath: string): Promise<boolean> 
       return true;
     }
     case "sync_manifest": {
-      try { await invoke("sync_manifest", { projectPath }); } catch (e) { console.warn("sync_manifest failed:", e); }
+      try { await invoke("sync_manifest", { projectPath }); dismiss("agent-tools-changed"); } catch (e) { console.warn("sync_manifest failed:", e); }
       return true;
     }
     case "deploy_backend": {

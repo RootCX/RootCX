@@ -1,4 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
+import { notify } from "@/core/notifications";
+import { executeCommand } from "@/core/studio";
 
 const BASE = "http://localhost:9100";
 
@@ -130,6 +132,10 @@ export async function toggleTool(name: string) {
 
   manifest.agent.access = access;
   await writeManifest(state.projectPath, manifest);
+  notify("agent-tools-changed", "Tool access changed — re-run to apply", "warning", {
+    label: "Run",
+    run: () => executeCommand("rootcx.run"),
+  });
 
   state = {
     ...state,
