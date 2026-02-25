@@ -1,5 +1,7 @@
 import { Suspense, useEffect, useRef, useCallback } from "react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { X } from "lucide-react";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { views, type View } from "@/core/studio";
 import type { Entry } from "@/core/registry";
 import { useLayout, type ZoneId } from "./layout-store";
@@ -147,6 +149,19 @@ export function PanelContainer({ zone }: { zone: ZoneId }) {
                 onPointerDown={(e) => startDrag(e, view.id)}
               >
                 {view.title}
+                {view.closeable && (
+                  <span
+                    className="ml-1.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-muted group-hover:opacity-100 group-data-[state=active]:opacity-60"
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      if (await ask("Close this conversation?", { title: "Close", kind: "warning", okLabel: "Close", cancelLabel: "Cancel" }))
+                        view.onClose?.();
+                    }}
+                  >
+                    <X className="h-3 w-3" />
+                  </span>
+                )}
               </TabsTrigger>
             ))}
           </TabsList>

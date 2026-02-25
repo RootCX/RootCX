@@ -9,6 +9,8 @@ export interface View {
   icon: LucideIcon;
   defaultZone: ZoneId;
   component: React.LazyExoticComponent<ComponentType>;
+  closeable?: boolean;
+  onClose?: () => void;
 }
 
 export interface Command {

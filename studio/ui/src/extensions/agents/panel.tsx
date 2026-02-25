@@ -1,8 +1,6 @@
 import { useState, useRef, useEffect, useSyncExternalStore } from "react";
-import { subscribe, getSnapshot, sendAgentMessage, abortAgent, clearChat } from "./store";
-import { ask } from "@tauri-apps/plugin-dialog";
-import { SendHorizontal, Square, EllipsisVertical, Trash2 } from "lucide-react";
-import { views } from "@/core/studio";
+import { subscribe, getSnapshot, sendAgentMessage, abortAgent } from "./store";
+import { SendHorizontal, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const bubbleBase = "min-w-0 overflow-hidden rounded-md px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words";
@@ -30,7 +28,6 @@ export default function AgentChatPanel({ appId }: { appId: string }) {
   const error = chat?.error ?? null;
 
   const [input, setInput] = useState("");
-  const [menuOpen, setMenuOpen] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, streamed, error]);
@@ -44,35 +41,9 @@ export default function AgentChatPanel({ appId }: { appId: string }) {
 
   return (
     <div className="flex h-full min-w-0 flex-col overflow-hidden">
-      <div className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-1.5">
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-xs font-semibold">{agent?.name ?? appId}</div>
-          {agent?.description && <div className="truncate text-[10px] text-muted-foreground">{agent.description}</div>}
-        </div>
-        <div className="relative">
-          <button onClick={() => setMenuOpen(!menuOpen)} className="rounded p-0.5 text-muted-foreground hover:text-foreground">
-            <EllipsisVertical className="h-3.5 w-3.5" />
-          </button>
-          {menuOpen && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
-              <div className="absolute right-0 top-full z-50 mt-1 min-w-[120px] rounded-md border border-border bg-panel py-1 shadow-lg">
-                <button
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-destructive hover:bg-accent"
-                  onClick={async () => {
-                    setMenuOpen(false);
-                    if (await ask("Delete this conversation?", { title: "Delete", kind: "warning", okLabel: "Delete", cancelLabel: "Cancel" })) {
-                      views.unregister(`agent-chat:${appId}`);
-                      clearChat(appId);
-                    }
-                  }}
-                >
-                  <Trash2 className="h-3 w-3" /> Delete
-                </button>
-              </div>
-            </>
-          )}
-        </div>
+      <div className="shrink-0 border-b border-border px-3 py-1.5">
+        <div className="truncate text-xs font-semibold">{agent?.name ?? appId}</div>
+        {agent?.description && <div className="truncate text-[10px] text-muted-foreground">{agent.description}</div>}
       </div>
 
       <div className="min-h-0 min-w-0 flex-1 space-y-2 overflow-y-auto overflow-x-hidden p-3">
