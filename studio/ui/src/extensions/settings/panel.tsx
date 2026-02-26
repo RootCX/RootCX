@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { aiConfigStore } from "@/lib/ai-models";
 import { showAISetupDialog } from "@/components/ai-setup-dialog";
 import { listSecrets, setSecret, deleteSecret } from "@/core/api";
@@ -16,7 +17,7 @@ function AIProviderSection() {
         <div className="flex items-center gap-2">
           <span className="h-2 w-2 rounded-full bg-green-500" />
           <span className="flex-1 text-[10px] text-foreground">{aiConfigStore.providerName()}</span>
-          <button className="text-[10px] text-primary hover:underline" onClick={showAISetupDialog}>Change</button>
+          <Button size="xs" variant="link" onClick={showAISetupDialog}>Change</Button>
         </div>
       ) : (
         <Button size="xs" onClick={showAISetupDialog}>Configure AI Provider</Button>
@@ -59,8 +60,6 @@ export default function SettingsPanel() {
     } catch (e) { setError(errMsg(e)); }
   };
 
-  const inp = "h-6 rounded-md border border-input bg-background px-2 font-mono text-[10px] text-foreground placeholder:text-muted-foreground focus:border-ring focus:outline-none";
-
   return (
     <div className="flex flex-col gap-3 p-3">
       <AIProviderSection />
@@ -76,11 +75,11 @@ export default function SettingsPanel() {
               <span className="flex-1 font-mono text-[10px] text-foreground">{key}</span>
               {confirmDelete === key ? (
                 <div className="flex gap-1">
-                  <button className="text-[10px] text-red-400 hover:text-red-300" onClick={() => handleDelete(key)}>confirm</button>
-                  <button className="text-[10px] text-muted-foreground hover:text-foreground" onClick={() => setConfirmDelete(null)}>cancel</button>
+                  <Button size="xs" variant="ghost" className="text-red-400 hover:text-red-300" onClick={() => handleDelete(key)}>confirm</Button>
+                  <Button size="xs" variant="ghost" onClick={() => setConfirmDelete(null)}>cancel</Button>
                 </div>
               ) : (
-                <button className="text-[10px] text-muted-foreground hover:text-red-400" onClick={() => setConfirmDelete(key)}>delete</button>
+                <Button size="xs" variant="ghost" className="text-muted-foreground hover:text-red-400" onClick={() => setConfirmDelete(key)}>delete</Button>
               )}
             </div>
           ))}
@@ -90,9 +89,9 @@ export default function SettingsPanel() {
       )}
 
       <div className="flex gap-1.5">
-        <input type="text" className={`${inp} w-2/5`} placeholder="KEY" value={newKey}
+        <Input size="xs" className="w-2/5 font-mono" placeholder="KEY" value={newKey}
           onChange={(e) => setNewKey(e.target.value.replace(/[^A-Za-z0-9_]/g, "").toUpperCase())} />
-        <input type="password" className={`${inp} flex-1`} placeholder="value" value={newValue}
+        <Input size="xs" type="password" className="flex-1 font-mono" placeholder="value" value={newValue}
           onChange={(e) => setNewValue(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleAdd()} />
         <Button size="xs" onClick={handleAdd} disabled={!newKey.trim() || !newValue.trim()}>Add</Button>
       </div>

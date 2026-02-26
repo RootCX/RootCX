@@ -170,7 +170,7 @@ function UsersView({ users, roles, assignments, isAdmin }: {
           <Popover key={u.id}>
             <PopoverTrigger asChild>
               <div>
-                <ListRow onClick={() => {}}>
+                <ListRow className="cursor-pointer">
                   <span className="min-w-[80px] truncate text-xs" title={u.username}>
                     {u.displayName || u.username}
                   </span>
@@ -289,9 +289,9 @@ function RoleDetailView({ role, availablePermissions, isAdmin, onBack }: {
     <div className="flex h-full flex-col">
       {/* Header */}
       <div className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1.5">
-        <button onClick={onBack} className="rounded p-0.5 hover:bg-accent">
+        <Button size="icon-xs" variant="ghost" onClick={onBack}>
           <ArrowLeft className="h-3.5 w-3.5" />
-        </button>
+        </Button>
         <div className="flex-1 min-w-0">
           <div className="text-xs font-medium truncate">
             {role.name}
@@ -340,12 +340,9 @@ function RoleDetailView({ role, availablePermissions, isAdmin, onBack }: {
                 <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{ns}</span>
                 <span className="text-[10px] text-muted-foreground">{selectedCount}/{perms.length}</span>
                 {!isBuiltIn && isAdmin && !isWildcard && (
-                  <button
-                    onClick={() => toggleGroup(ns, perms)}
-                    className="ml-auto text-[10px] text-primary hover:underline"
-                  >
+                  <Button size="xs" variant="link" className="ml-auto" onClick={() => toggleGroup(ns, perms)}>
                     {selectedCount === perms.length ? "Clear" : "Select all"}
-                  </button>
+                  </Button>
                 )}
               </div>
               {perms.map((p) => {

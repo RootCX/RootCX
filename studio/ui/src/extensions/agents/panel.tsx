@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useSyncExternalStore } from "react";
 import { subscribe, getSnapshot, sendAgentMessage, abortAgent } from "./store";
 import { SendHorizontal, Square, Unplug } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Button } from "@/components/ui/button";
 
 const bubbleBase = "min-w-0 overflow-hidden rounded-md px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words";
 
@@ -78,13 +79,13 @@ export default function AgentChatPanel({ appId, name }: { appId: string; name?: 
           />
           <div className="flex items-center justify-end px-2 py-1">
             {streaming ? (
-              <button className="rounded-md p-1 text-destructive hover:bg-destructive/10" onClick={() => abortAgent(appId)}>
+              <Button size="icon-xs" variant="ghost" className="text-destructive hover:bg-destructive/10" onClick={() => abortAgent(appId)}>
                 <Square className="h-4 w-4" />
-              </button>
+              </Button>
             ) : (
-              <button className="rounded-md p-1 text-muted-foreground hover:text-foreground disabled:opacity-30" disabled={!input.trim() || !isDeployed} onClick={submit}>
+              <Button size="icon-xs" variant="ghost" disabled={!input.trim() || !isDeployed} onClick={submit}>
                 <SendHorizontal className="h-4 w-4" />
-              </button>
+              </Button>
             )}
           </div>
         </div>
