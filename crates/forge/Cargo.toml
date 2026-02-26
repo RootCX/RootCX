@@ -1,0 +1,23 @@
+[package]
+name = "rootcx-forge"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+bytes = "1"
+futures = "0.3"
+glob = "0.3"
+regex = "1"
+async-trait = "0.1"
+aws-config = "1"
+aws-sdk-bedrockruntime = "1"
+aws-smithy-types = "1"

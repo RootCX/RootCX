@@ -1,43 +1,15 @@
-import {
-  createOpencodeClient,
-  type Session,
-  type Message,
-  type Part,
-  type Permission,
-  type Event,
-} from "@opencode-ai/sdk/client";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
-let BASE_URL = "http://127.0.0.1:4096";
-let client = createOpencodeClient({ baseUrl: BASE_URL });
-
-export function setForgePort(port: number) {
-  BASE_URL = `http://127.0.0.1:${port}`;
-  client = createOpencodeClient({ baseUrl: BASE_URL });
-}
-
-export interface QuestionOption {
-  label: string;
-  description: string;
-}
-
-export interface QuestionInfo {
-  question: string;
-  header: string;
-  options: QuestionOption[];
-  multiple?: boolean;
-  custom?: boolean;
-}
-
-export interface QuestionRequest {
-  id: string;
-  sessionID: string;
-  questions: QuestionInfo[];
-  tool?: { messageID: string; callID: string };
-}
+export interface Session { id: string; title: string; directory: string; created_at: string; updated_at: string }
+export interface Message { id: string; session_id: string; role: "user" | "assistant"; error: { name?: string; message?: string } | null; created_at: string; completed_at: string | null }
+export interface Part { id: string; message_id: string; part_type: string; content: string; tool_name: string | null; tool_state: { status: string; title?: string } | null; created_at: string }
+export interface Permission { id: string; session_id: string; tool: string; title: string; description: string }
+export interface QuestionOption { label: string; description: string }
+export interface QuestionInfo { question: string; header: string; options: QuestionOption[]; multiple?: boolean; custom?: boolean }
+export interface QuestionRequest { id: string; session_id: string; questions: QuestionInfo[] }
 
 export interface ForgeState {
-  connected: boolean;
   sessionId: string | null;
   sessions: Session[];
   messages: Message[];
@@ -50,7 +22,7 @@ export interface ForgeState {
 
 type Listener = () => void;
 
-const EMPTY_SESSION = {
+const EMPTY = {
   sessionId: null as string | null,
   messages: [] as Message[],
   parts: new Map<string, Part[]>(),
@@ -60,299 +32,124 @@ const EMPTY_SESSION = {
   error: null as string | null,
 };
 
-let state: ForgeState = {
-  connected: false,
-  sessionId: null,
-  sessions: [],
-  messages: [],
-  parts: new Map(),
-  permissions: [],
-  questions: [],
-  streaming: false,
-  error: null,
-};
+let state: ForgeState = { ...EMPTY, sessions: [] };
 const listeners = new Set<Listener>();
 let snapshot = state;
-let eventStream: AsyncGenerator<unknown> | null = null;
 
 function emit() {
   snapshot = { ...state, parts: new Map(state.parts) };
   listeners.forEach((fn) => fn());
 }
 
-export function subscribe(fn: Listener): () => void {
-  listeners.add(fn);
-  return () => listeners.delete(fn);
+export const subscribe = (fn: Listener) => { listeners.add(fn); return () => listeners.delete(fn); };
+export const getSnapshot = () => snapshot;
+
+// --- Events ---
+
+listen<{ info: Message; parts?: Part[] }>("forge://message-updated", (e) => {
+  const { info, parts: msgParts } = e.payload;
+  if (info.session_id !== state.sessionId) return;
+  const idx = state.messages.findIndex((m) => m.id === info.id);
+  const messages = idx >= 0 ? state.messages.map((m, i) => (i === idx ? info : m)) : [...state.messages, info];
+  const parts = msgParts ? new Map(state.parts).set(info.id, msgParts) : state.parts;
+  state = { ...state, messages, parts, streaming: info.role === "assistant" && !info.completed_at && !info.error };
+  emit();
+});
+
+listen<{ part: Part }>("forge://part-updated", (e) => {
+  const part = e.payload.part;
+  if (!state.messages.some((m) => m.id === part.message_id)) return;
+  const parts = new Map(state.parts);
+  const arr = parts.get(part.message_id) || [];
+  const i = arr.findIndex((p) => p.id === part.id);
+  parts.set(part.message_id, i >= 0 ? arr.map((p, j) => (j === i ? part : p)) : [...arr, part]);
+  state = { ...state, parts };
+  emit();
+});
+
+listen<Permission>("forge://permission-updated", (e) => {
+  if (e.payload.session_id === state.sessionId) { state = { ...state, permissions: [...state.permissions, e.payload] }; emit(); }
+});
+
+listen<{ permissionID: string }>("forge://permission-replied", (e) => {
+  state = { ...state, permissions: state.permissions.filter((p) => p.id !== e.payload.permissionID) }; emit();
+});
+
+listen<QuestionRequest>("forge://question-asked", (e) => {
+  if (e.payload.session_id === state.sessionId) { state = { ...state, questions: [...state.questions, e.payload] }; emit(); }
+});
+
+for (const evt of ["forge://question-replied", "forge://question-rejected"] as const) {
+  listen<{ requestID: string }>(evt, (e) => {
+    state = { ...state, questions: state.questions.filter((q) => q.id !== e.payload.requestID) }; emit();
+  });
 }
 
-export function getSnapshot(): ForgeState {
-  return snapshot;
-}
+listen<{ sessionID: string }>("forge://session-idle", (e) => {
+  if (e.payload.sessionID === state.sessionId) { state = { ...state, streaming: false }; emit(); }
+});
 
-// ── SSE event loop ──
+listen<{ error: string }>("forge://error", (e) => {
+  state = { ...state, error: e.payload.error, streaming: false }; emit();
+});
 
-async function connectEvents() {
-  if (eventStream) return;
-  try {
-    const result = await client.event.subscribe({ query: {} });
-    eventStream = result.stream;
-    state = { ...state, connected: true };
-    emit();
-
-    loadSessions();
-
-    for await (const event of eventStream) {
-      handleEvent(event as Event);
-    }
-  } catch {
-    // stream ended or connection failed
-  } finally {
-    eventStream = null;
-    state = { ...state, connected: false };
-    emit();
-    setTimeout(connectEvents, 3000);
-  }
-}
-
-function handleEvent(event: Event) {
-  switch (event.type) {
-    case "message.updated": {
-      const msg = event.properties.info;
-      if (msg.sessionID !== state.sessionId) break;
-      const idx = state.messages.findIndex((m) => m.id === msg.id);
-      const messages =
-        idx >= 0
-          ? state.messages.map((m, i) => (i === idx ? msg : m))
-          : [...state.messages, msg];
-      state = {
-        ...state,
-        messages,
-        streaming: msg.role === "assistant" && !msg.time.completed && !msg.error,
-      };
-      emit();
-      break;
-    }
-    case "message.removed": {
-      if (event.properties.sessionID !== state.sessionId) break;
-      state = {
-        ...state,
-        messages: state.messages.filter((m) => m.id !== event.properties.messageID),
-      };
-      emit();
-      break;
-    }
-    case "message.part.updated": {
-      const part = event.properties.part;
-      if (part.sessionID !== state.sessionId) break;
-      const parts = new Map(state.parts);
-      const existing = parts.get(part.messageID) || [];
-      const partIdx = existing.findIndex((p) => p.id === part.id);
-      if (partIdx >= 0) {
-        const updated = [...existing];
-        updated[partIdx] = part;
-        parts.set(part.messageID, updated);
-      } else {
-        parts.set(part.messageID, [...existing, part]);
-      }
-      state = { ...state, parts };
-      emit();
-      break;
-    }
-    case "message.part.removed": {
-      const { messageID, partID } = event.properties;
-      if (!state.parts.has(messageID)) break;
-      const parts = new Map(state.parts);
-      parts.set(messageID, (parts.get(messageID) || []).filter((p) => p.id !== partID));
-      state = { ...state, parts };
-      emit();
-      break;
-    }
-    case "permission.updated": {
-      const perm = event.properties;
-      if (perm.sessionID !== state.sessionId) break;
-      state = { ...state, permissions: [...state.permissions, perm] };
-      emit();
-      break;
-    }
-    case "permission.replied": {
-      state = {
-        ...state,
-        permissions: state.permissions.filter((p) => p.id !== event.properties.permissionID),
-      };
-      emit();
-      break;
-    }
-    case "session.updated": {
-      const session = event.properties.info;
-      state = { ...state, sessions: state.sessions.map((s) => (s.id === session.id ? session : s)) };
-      emit();
-      break;
-    }
-    case "session.created": {
-      state = { ...state, sessions: [event.properties.info, ...state.sessions] };
-      emit();
-      break;
-    }
-    case "session.deleted": {
-      const session = event.properties.info;
-      state = {
-        ...state,
-        sessions: state.sessions.filter((s) => s.id !== session.id),
-        ...(state.sessionId === session.id ? EMPTY_SESSION : {}),
-      };
-      emit();
-      break;
-    }
-    case "session.idle": {
-      if (event.properties.sessionID === state.sessionId) {
-        state = { ...state, streaming: false };
-        emit();
-      }
-      break;
-    }
-    default: {
-      // Question events (v2 API, not typed in SDK Event union)
-      const { type, properties } = event as { type: string; properties: Record<string, unknown> };
-      if (type === "question.asked") {
-        const q = properties as unknown as QuestionRequest;
-        if (q.sessionID === state.sessionId && !state.questions.some((e) => e.id === q.id)) {
-          state = { ...state, questions: [...state.questions, q] };
-          emit();
-        }
-      } else if (type === "question.replied" || type === "question.rejected") {
-        state = { ...state, questions: state.questions.filter((q) => q.id !== properties.requestID) };
-        emit();
-      }
-    }
-  }
-}
-
-// ── API actions ──
+// --- Actions ---
 
 export async function loadSessions() {
-  try {
-    const result = await client.session.list();
-    if (result.data) {
-      state = { ...state, sessions: result.data };
-      emit();
-    }
-  } catch { /* ignore */ }
+  try { state = { ...state, sessions: await invoke<Session[]>("forge_list_sessions") }; emit(); } catch {}
 }
 
 export async function selectSession(sessionId: string) {
-  state = { ...state, ...EMPTY_SESSION, sessionId };
+  state = { ...state, ...EMPTY, sessionId };
   emit();
   try {
-    const result = await client.session.messages({ path: { id: sessionId } });
-    if (result.data) {
-      const messages = result.data.map((m) => m.info);
-      const parts = new Map(result.data.map((m) => [m.info.id, m.parts]));
-      state = { ...state, messages, parts };
-      emit();
-    }
-  } catch { /* ignore */ }
+    const data = await invoke<{ info: Message; parts: Part[] }[]>("forge_get_messages", { sessionId });
+    state = { ...state, messages: data.map((m) => m.info), parts: new Map(data.map((m) => [m.info.id, m.parts] as [string, Part[]])) };
+    emit();
+  } catch {}
 }
 
 export async function createSession() {
   try {
-    const result = await client.session.create();
-    if (result.data) {
-      const session = result.data;
-      state = { ...state, ...EMPTY_SESSION, sessionId: session.id, sessions: [session, ...state.sessions] };
-      emit();
-      return session.id;
-    }
-  } catch (err) {
-    state = { ...state, error: err instanceof Error ? err.message : String(err) };
+    const s = await invoke<Session>("forge_create_session");
+    state = { ...state, ...EMPTY, sessionId: s.id, sessions: [s, ...state.sessions] };
     emit();
+    return s.id;
+  } catch (e) {
+    state = { ...state, error: e instanceof Error ? e.message : String(e) }; emit(); return null;
   }
-  return null;
 }
 
 export async function sendMessage(prompt: string) {
-  let sessionId = state.sessionId;
-  if (!sessionId) {
-    sessionId = await createSession();
-    if (!sessionId) return;
-  }
-  state = { ...state, streaming: true, error: null };
-  emit();
-  try {
-    await client.session.promptAsync({
-      path: { id: sessionId },
-      body: { parts: [{ type: "text", text: prompt }] },
-    });
-  } catch (err) {
-    state = { ...state, streaming: false, error: err instanceof Error ? err.message : String(err) };
-    emit();
-  }
+  const sid = state.sessionId ?? await createSession();
+  if (!sid) return;
+  state = { ...state, streaming: true, error: null }; emit();
+  try { await invoke("forge_send_message", { sessionId: sid, text: prompt }); }
+  catch (e) { state = { ...state, streaming: false, error: e instanceof Error ? e.message : String(e) }; emit(); }
 }
 
 export async function abortSession() {
   if (!state.sessionId) return;
-  try { await client.session.abort({ path: { id: state.sessionId } }); } catch { /* best-effort */ }
-  state = { ...state, streaming: false };
-  emit();
+  invoke("forge_abort", { sessionId: state.sessionId }).catch(() => {});
+  state = { ...state, streaming: false }; emit();
 }
 
-export async function replyPermission(permissionId: string, response: "once" | "always" | "reject") {
-  if (!state.sessionId) return;
-  try {
-    await client.postSessionIdPermissionsPermissionId({
-      path: { id: state.sessionId, permissionID: permissionId },
-      body: { response },
-    });
-  } catch { /* best-effort */ }
-}
-
-function questionAction(id: string, action: "reply" | "reject", body?: unknown) {
-  fetch(`${BASE_URL}/question/${id}/${action}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    ...(body != null && { body: JSON.stringify(body) }),
-  }).catch(() => {});
-  state = { ...state, questions: state.questions.filter((q) => q.id !== id) };
-  emit();
+export function replyPermission(id: string, response: "once" | "always" | "reject") {
+  const perm = state.permissions.find((p) => p.id === id);
+  invoke("forge_reply_permission", { id, sessionId: state.sessionId, tool: perm?.tool ?? "", response }).catch(() => {});
 }
 
 export function replyQuestion(id: string, answers: string[][]) {
-  questionAction(id, "reply", { answers });
+  invoke("forge_reply_question", { id, answers }).catch(() => {});
+  state = { ...state, questions: state.questions.filter((q) => q.id !== id) }; emit();
 }
 
 export function rejectQuestion(id: string) {
-  questionAction(id, "reject");
+  invoke("forge_reject_question", { id }).catch(() => {});
+  state = { ...state, questions: state.questions.filter((q) => q.id !== id) }; emit();
 }
 
-let startedProject: string | null = null;
+export function setCwd(path: string) { invoke("forge_set_cwd", { path }).catch(() => {}); }
+export function reloadConfig() { invoke("forge_reload_config").catch(() => {}); }
 
-export async function startForProject(projectPath: string): Promise<void> {
-  if (startedProject === projectPath) return;
-  startedProject = projectPath;
-  try {
-    await invoke("start_forge", { projectPath });
-    const status = await invoke<{ port?: number }>("get_forge_status");
-    if (status.port) {
-      setForgePort(status.port);
-      if (eventStream) {
-        eventStream.return(undefined);
-        eventStream = null;
-        connectEvents();
-      }
-    }
-  } catch {
-    startedProject = null;
-  }
-}
-
-// Resolve the real Forge port before first connection attempt
-(async () => {
-  try {
-    const status = await invoke<{ port?: number }>("get_forge_status");
-    if (status.port) {
-      setForgePort(status.port);
-    }
-  } catch {
-    // Forge may not be running yet — connectEvents will retry
-  }
-  connectEvents();
-})();
+loadSessions();

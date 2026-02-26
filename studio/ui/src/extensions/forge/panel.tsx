@@ -2,8 +2,9 @@ import { useState, useRef, useEffect, useSyncExternalStore } from "react";
 import {
   subscribe, getSnapshot, sendMessage, abortSession,
   createSession, selectSession, replyPermission,
-  replyQuestion, rejectQuestion, startForProject,
+  replyQuestion, rejectQuestion, setCwd,
   type QuestionRequest, type QuestionInfo,
+  type Message, type Part, type Permission, type Session,
 } from "./store";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/logo";
@@ -12,7 +13,6 @@ import { showAISetupDialog } from "@/components/ai-setup-dialog";
 import { ArrowUp, Square, Plus, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import Markdown from "react-markdown";
-import type { Message, Part, Permission, Session } from "@opencode-ai/sdk";
 
 const heading = (p: React.HTMLAttributes<HTMLHeadingElement>) => (
   <h3 className="mt-4 mb-2 text-[15px] font-semibold text-foreground" {...p} />
@@ -39,26 +39,25 @@ const TOOL_STATUS: Record<string, string> = { completed: "done", running: "runni
 const NO_PARTS: Part[] = [];
 
 function PartView({ part }: { part: Part }) {
-  if (part.type === "text" || part.type === "reasoning") {
+  if (part.part_type === "text" || part.part_type === "reasoning") {
     return (
-      <div className={cn("break-words text-[14px] leading-[1.7]", part.type === "reasoning" && "italic text-muted-foreground/80")}>
-        <Markdown components={mdComponents}>{part.text}</Markdown>
+      <div className={cn("break-words text-[14px] leading-[1.7]", part.part_type === "reasoning" && "italic text-muted-foreground/80")}>
+        <Markdown components={mdComponents}>{part.content}</Markdown>
       </div>
     );
   }
-  if (part.type === "tool") {
+  if (part.part_type === "tool" && part.tool_state) {
+    const status = part.tool_state.status;
     return (
       <div className="flex min-w-0 items-center gap-2 py-0.5 text-xs text-muted-foreground">
         <span className={cn(
           "h-1.5 w-1.5 shrink-0 rounded-full",
-          part.state.status === "running" ? "bg-primary animate-[pulse-dot_1.5s_infinite]"
-            : part.state.status === "error" ? "bg-destructive" : "bg-green-500",
+          status === "running" ? "bg-primary animate-[pulse-dot_1.5s_infinite]"
+            : status === "error" ? "bg-destructive" : "bg-green-500",
         )} />
-        <span className="shrink-0 font-mono text-foreground/70">{part.tool}</span>
-        <span className="shrink-0 text-muted-foreground/50">{TOOL_STATUS[part.state.status] ?? ""}</span>
-        {"title" in part.state && part.state.title && (
-          <span className="min-w-0 truncate text-muted-foreground/40">{part.state.title}</span>
-        )}
+        <span className="shrink-0 font-mono text-foreground/70">{part.tool_name}</span>
+        <span className="shrink-0 text-muted-foreground/50">{TOOL_STATUS[status] ?? ""}</span>
+        {part.tool_state.title && <span className="min-w-0 truncate text-muted-foreground/40">{part.tool_state.title}</span>}
       </div>
     );
   }
@@ -81,7 +80,7 @@ function MessageView({ msg, parts }: { msg: Message; parts: Part[] }) {
         ) : (
           msg.role === "assistant" && msg.error && (
             <span className="text-sm text-destructive/80">
-              {msg.error.name}: {"message" in msg.error.data ? String(msg.error.data.message) : "Unknown error"}
+              {msg.error.name ?? "Error"}: {msg.error.message ?? "Unknown error"}
             </span>
           )
         )}
@@ -96,10 +95,7 @@ function PermissionCard({ perm }: { perm: Permission }) {
   return (
     <div className="rounded-xl border border-yellow-500/20 bg-yellow-500/5 px-5 py-4">
       <div className="mb-2 text-sm font-medium text-yellow-200/90">{perm.title}</div>
-      <div className="mb-3 truncate font-mono text-xs text-muted-foreground/60">
-        {perm.type}
-        {perm.pattern && `: ${Array.isArray(perm.pattern) ? perm.pattern.join(", ") : perm.pattern}`}
-      </div>
+      <div className="mb-3 truncate font-mono text-xs text-muted-foreground/60">{perm.description}</div>
       <div className="flex gap-2">
         <Button size="sm" variant="outline" className={cn(PERM_BTN, "border-yellow-500/20 hover:bg-yellow-500/10")} onClick={() => replyPermission(perm.id, "once")}>Allow Once</Button>
         <Button size="sm" variant="outline" className={cn(PERM_BTN, "border-yellow-500/20 hover:bg-yellow-500/10")} onClick={() => replyPermission(perm.id, "always")}>Always Allow</Button>
@@ -226,9 +222,9 @@ function SessionSelector({ sessions, currentId, onSelect, onCreate }: {
   );
 }
 
-function Composer({ input, setInput, onSubmit, onAbort, connected, streaming, className }: {
+function Composer({ input, setInput, onSubmit, onAbort, streaming, className }: {
   input: string; setInput: (v: string) => void; onSubmit: () => void; onAbort: () => void;
-  connected: boolean; streaming: boolean; className?: string;
+  streaming: boolean; className?: string;
 }) {
   return (
     <div className={cn("mx-auto w-full max-w-3xl", className)}>
@@ -236,16 +232,13 @@ function Composer({ input, setInput, onSubmit, onAbort, connected, streaming, cl
         <textarea
           rows={3}
           className="w-full resize-none bg-transparent px-5 pt-4 pb-1 text-[14px] leading-relaxed text-foreground placeholder:text-muted-foreground/40 focus:outline-none"
-          placeholder={!connected ? "Connecting..." : streaming ? "Thinking..." : "What do you want to build?"}
+          placeholder={streaming ? "Thinking..." : "What do you want to build?"}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSubmit(); } }}
-          disabled={streaming || !connected}
+          disabled={streaming}
         />
         <div className="flex items-center justify-end px-3 pb-3">
-          {!connected && (
-            <button className="mr-auto text-xs text-primary/70 transition-colors hover:text-primary" onClick={() => showAISetupDialog()}>Configure AI</button>
-          )}
           {streaming ? (
             <button className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-foreground transition-colors hover:bg-muted-foreground/20" onClick={onAbort}>
               <Square className="h-3.5 w-3.5" />
@@ -253,8 +246,8 @@ function Composer({ input, setInput, onSubmit, onAbort, connected, streaming, cl
           ) : (
             <button
               className={cn("flex h-8 w-8 items-center justify-center rounded-full transition-all",
-                input.trim() && connected ? "bg-primary text-primary-foreground hover:bg-primary/90" : "bg-muted text-muted-foreground/30")}
-              disabled={!input.trim() || !connected}
+                input.trim() ? "bg-primary text-primary-foreground hover:bg-primary/90" : "bg-muted text-muted-foreground/30")}
+              disabled={!input.trim()}
               onClick={onSubmit}
             >
               <ArrowUp className="h-4 w-4" />
@@ -267,13 +260,13 @@ function Composer({ input, setInput, onSubmit, onAbort, connected, streaming, cl
 }
 
 export default function ForgePanel() {
-  const { connected, sessionId, sessions, messages, parts, permissions, questions, streaming, error } =
+  const { sessionId, sessions, messages, parts, permissions, questions, streaming, error } =
     useSyncExternalStore(subscribe, getSnapshot);
   const { projectPath } = useProjectContext();
   const [input, setInput] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => { if (projectPath) startForProject(projectPath); }, [projectPath]);
+  useEffect(() => { if (projectPath) setCwd(projectPath); }, [projectPath]);
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, parts, questions, permissions]);
 
   const submit = () => {
@@ -282,7 +275,7 @@ export default function ForgePanel() {
     setInput("");
   };
 
-  const composerProps = { input, setInput, onSubmit: submit, onAbort: abortSession, connected, streaming };
+  const composerProps = { input, setInput, onSubmit: submit, onAbort: abortSession, streaming };
   const sessionProps = { sessions, currentId: sessionId, onSelect: selectSession, onCreate: createSession };
   const hasContent = messages.length + permissions.length + questions.length > 0 || !!error;
 
@@ -314,7 +307,12 @@ export default function ForgePanel() {
           {messages.map((msg) => <MessageView key={msg.id} msg={msg} parts={parts.get(msg.id) ?? NO_PARTS} />)}
           {permissions.map((perm) => <PermissionCard key={perm.id} perm={perm} />)}
           {questions.length > 0 && <QuestionsPanel requests={questions} />}
-          {error && <div className="rounded-xl border border-destructive/20 bg-destructive/5 px-5 py-3 text-sm text-destructive/80">{error}</div>}
+          {error && (
+            <div className="rounded-xl border border-destructive/20 bg-destructive/5 px-5 py-3 text-sm text-destructive/80">
+              <div>{error}</div>
+              <button className="mt-2 text-xs text-primary hover:text-primary/80 underline" onClick={() => showAISetupDialog()}>Configure AI</button>
+            </div>
+          )}
           <div ref={endRef} />
         </div>
       </div>

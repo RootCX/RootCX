@@ -18,6 +18,7 @@ serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 rootcx-browser.workspace = true
+rootcx-forge.workspace = true
 rootcx-platform.workspace = true
 rootcx-runtime.workspace = true
 rootcx-shared-types.workspace = true

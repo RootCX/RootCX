@@ -1,10 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
-use crate::forge::{ForgeManager, is_forge_available};
 use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
 use rootcx_runtime::RuntimeClient;
-use rootcx_shared_types::{AiConfig, ForgeStatus, OsStatus, ServiceState};
+use rootcx_shared_types::OsStatus;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -14,35 +13,16 @@ pub(crate) const DAEMON_URL: &str = "http://localhost:9100";
 static LOG_HTTP: LazyLock<reqwest::Client> =
     LazyLock::new(|| reqwest::Client::new());
 
-const ROOTCX_RUNTIME_INSTRUCTIONS: &str = include_str!("../../../.agents/instructions/rootcx-runtime.md");
-const AGENT_TOOLS_MD: &str = include_str!(concat!(env!("OUT_DIR"), "/agent-tools.md"));
-
-fn default_mcp_servers() -> serde_json::Value {
-    serde_json::json!({
-        "shadcn": {
-            "type": "local",
-            "command": ["npx", "shadcn@latest", "mcp"],
-            "enabled": true
-        }
-    })
-}
-
 #[derive(Clone)]
 pub struct AppState {
     client: RuntimeClient,
-    forge: Option<Arc<Mutex<ForgeManager>>>,
     watchers: Arc<Mutex<Vec<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>>>>,
     active_app_id: Arc<Mutex<Option<String>>>,
     app_handle: AppHandle,
     log_stream_abort: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
 }
 
-fn home_dir() -> Result<PathBuf, String> { rootcx_platform::dirs::home_dir().map_err(|e| e.to_string()) }
 pub fn config_dir() -> Result<PathBuf, String> { rootcx_platform::dirs::config_dir().map_err(|e| e.to_string()) }
-
-fn config_path() -> Result<PathBuf, String> {
-    Ok(config_dir()?.join("config.json"))
-}
 
 pub fn instructions_dir() -> Result<PathBuf, String> {
     Ok(config_dir()?.join("instructions"))
@@ -106,35 +86,6 @@ pub fn clear_recent_projects() {
     }
 }
 
-async fn ensure_instructions() -> Result<(), String> {
-    let dir = instructions_dir()?;
-    tokio::fs::create_dir_all(&dir).await.map_err(|e| format!("failed to create instructions dir: {e}"))?;
-    tokio::fs::write(dir.join("rootcx-runtime.md"), ROOTCX_RUNTIME_INSTRUCTIONS.as_bytes())
-        .await
-        .map_err(|e| format!("failed to write instruction file: {e}"))?;
-
-    tokio::fs::write(dir.join("agent-tools.md"), AGENT_TOOLS_MD.as_bytes())
-        .await
-        .map_err(|e| format!("failed to write tools instruction file: {e}"))?;
-    Ok(())
-}
-
-async fn write_forge_config(forge_model: &str) -> Result<PathBuf, String> {
-    let mut config = serde_json::json!({ "model": forge_model });
-    config["mcp"] = default_mcp_servers();
-    if let Ok(dir) = instructions_dir() {
-        config["instructions"] = serde_json::json!([dir.join("*.md").to_string_lossy().as_ref()]);
-    }
-
-    let path = config_path()?;
-    if let Some(dir) = path.parent() {
-        tokio::fs::create_dir_all(dir).await.map_err(|e| format!("failed to create config dir: {e}"))?;
-    }
-    let json = serde_json::to_string_pretty(&config).map_err(|e| format!("serialize: {e}"))?;
-    tokio::fs::write(&path, json.as_bytes()).await.map_err(|e| format!("write config: {e}"))?;
-    Ok(path)
-}
-
 async fn read_manifest(project_path: &str) -> Result<rootcx_shared_types::AppManifest, String> {
     let contents = tokio::fs::read_to_string(Path::new(project_path).join("manifest.json"))
         .await
@@ -145,40 +96,18 @@ async fn read_manifest(project_path: &str) -> Result<rootcx_shared_types::AppMan
 const DEPLOY_EXCLUDE: &[&str] = &["node_modules", ".git", ".rootcx", "bun.lock", "src-tauri"];
 
 impl AppState {
-    async fn platform_env(&self) -> Result<std::collections::HashMap<String, String>, String> {
-        self.client.get_platform_env().await.map_err(|e| format!("failed to load platform secrets: {e}"))
-    }
-
-    async fn forge_model_from_core(&self) -> String {
-        match self.client.get_forge_config().await {
-            Ok(v) => v
-                .get("model")
-                .and_then(|m| m.as_str())
-                .map(String::from)
-                .unwrap_or_else(|| AiConfig::default().forge_model_string()),
-            Err(e) => {
-                warn!("failed to fetch forge config from core: {e}");
-                AiConfig::default().forge_model_string()
-            }
-        }
-    }
-
     pub fn from_tauri(app: &tauri::App) -> Self {
-        let forge = if is_forge_available() {
-            info!("forge binary found, AI features enabled");
-            Some(Arc::new(Mutex::new(ForgeManager::new())))
-        } else {
-            info!("forge binary not found in PATH, AI features disabled");
-            None
-        };
         Self {
             client: RuntimeClient::new(DAEMON_URL),
-            forge,
             watchers: Arc::new(Mutex::new(Vec::new())),
             active_app_id: Arc::new(Mutex::new(None)),
             app_handle: app.handle().clone(),
             log_stream_abort: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn runtime_client(&self) -> &RuntimeClient {
+        &self.client
     }
 
     pub fn set_auth_token(&self, token: Option<String>) {
@@ -190,17 +119,6 @@ impl AppState {
             return Err(format!("core daemon not reachable at {DAEMON_URL}"));
         }
         info!("connected to core daemon at {DAEMON_URL}");
-
-        if let Some(ref f) = self.forge {
-            ensure_instructions().await?;
-            let model = self.forge_model_from_core().await;
-            let cfg = write_forge_config(&model).await?;
-            let cwd = home_dir()?;
-            let env = self.platform_env().await.unwrap_or_default();
-            if let Err(e) = f.lock().await.start(&cwd, Some(cfg.as_path()), env).await {
-                warn!("forge sidecar start failed (non-fatal): {e}");
-            }
-        }
 
         self.reconnect_or_cleanup().await;
         crate::browser::spawn_listener();
@@ -295,17 +213,8 @@ impl AppState {
         *abort_store.lock().await = Some(task.abort_handle());
     }
 
-    pub async fn get_ai_config(&self) -> Result<Option<AiConfig>, String> {
+    pub async fn get_ai_config(&self) -> Result<Option<rootcx_shared_types::AiConfig>, String> {
         self.client.get_ai_config().await.map_err(|e| format!("failed to get AI config: {e}"))
-    }
-
-    pub async fn start_forge(&self, project_path: &str) -> Result<(), String> {
-        if let Some(ref f) = self.forge {
-            let model = self.forge_model_from_core().await;
-            let cfg = write_forge_config(&model).await?;
-            f.lock().await.start(Path::new(project_path), Some(cfg.as_path()), self.platform_env().await?).await.map_err(|e| e.to_string())?;
-        }
-        Ok(())
     }
 
     pub async fn deploy_backend(&self, project_path: &str) -> Result<String, String> {
@@ -426,25 +335,10 @@ impl AppState {
     pub async fn shutdown(&self) {
         crate::browser::shutdown().await;
         self.stop_deployed_worker().await;
-
-        if let Some(ref f) = self.forge
-            && let Err(e) = f.lock().await.stop().await {
-                warn!("forge sidecar stop failed: {e}");
-            }
     }
 
     pub async fn status(&self) -> OsStatus {
-        let mut status = self.client.status().await.unwrap_or_else(|_| OsStatus::offline());
-
-        if let Some(ref f) = self.forge {
-            let fg = f.lock().await;
-            let running = fg.is_running().await;
-            status.forge = ForgeStatus {
-                state: if running { ServiceState::Online } else { ServiceState::Offline },
-                port: if running { Some(fg.port()) } else { None },
-            };
-        }
-        status
+        self.client.status().await.unwrap_or_else(|_| OsStatus::offline())
     }
 }
 

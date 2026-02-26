@@ -30,16 +30,6 @@ pub async fn shutdown_runtime(state: State<'_, AppState>) -> Result<(), String> 
     Ok(())
 }
 
-#[tauri::command]
-pub async fn get_forge_status(state: State<'_, AppState>) -> Result<rootcx_shared_types::ForgeStatus, String> {
-    Ok(state.status().await.forge)
-}
-
-#[tauri::command]
-pub async fn start_forge(state: State<'_, AppState>, project_path: String) -> Result<(), String> {
-    validate_fs_path(&project_path)?;
-    state.start_forge(&project_path).await
-}
 
 #[derive(Serialize)]
 pub struct DirEntry {

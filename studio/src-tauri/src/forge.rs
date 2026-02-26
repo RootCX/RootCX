@@ -1,145 +1,145 @@
-use std::sync::LazyLock;
-use std::time::Duration;
+use std::path::PathBuf;
+use std::sync::Arc;
 
-use tokio::process::{Child, Command};
+use rootcx_forge::{ForgeConfig, ForgeEngine};
+use rootcx_runtime::RuntimeClient;
+use serde_json::Value;
+use tauri::{AppHandle, Emitter, State};
 use tracing::{info, warn};
+use uuid::Uuid;
 
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(2);
-const KILL_RETRIES: usize = 10;
-const KILL_RETRY_MS: u64 = 200;
-const HEALTH_RETRIES: usize = 30;
-const HEALTH_RETRY_MS: u64 = 500;
-const DEFAULT_PORT: u16 = 4096;
+pub type ForgeState = Arc<tokio::sync::OnceCell<ForgeEngine>>;
 
-static HTTP: LazyLock<reqwest::Client> =
-    LazyLock::new(|| reqwest::Client::builder().timeout(HEALTH_TIMEOUT).build().expect("failed to build http client"));
+const PG_URL: &str = "postgres://localhost:5480/postgres";
 
-pub struct ForgeManager {
-    child: Option<Child>,
-    port: u16,
+pub fn new_state() -> ForgeState {
+    Arc::new(tokio::sync::OnceCell::new())
 }
 
-impl ForgeManager {
-    pub fn new() -> Self {
-        let port = free_port();
-        Self { child: None, port }
+pub async fn init(state: &ForgeState) {
+    info!("forge: connecting to PG at {PG_URL}");
+    match ForgeEngine::new(PG_URL).await {
+        Ok(e) => { let _ = state.set(e); info!("forge: ready"); }
+        Err(e) => warn!("forge: PG connection failed: {e}"),
     }
+}
 
-    pub fn port(&self) -> u16 {
-        self.port
+async fn build_config(client: &RuntimeClient) -> Result<ForgeConfig, String> {
+    let ai = client.get_forge_config().await.map_err(|e| e.to_string())?;
+    let env = client.get_platform_env().await.unwrap_or_default();
+
+    let provider_str = ai.get("model").and_then(|m| m.as_str()).unwrap_or("claude-sonnet-4-6");
+    let (provider, model) = parse_provider_model(provider_str);
+
+    let api_key = match provider {
+        rootcx_forge::provider::ProviderKind::Anthropic => env.get("ANTHROPIC_API_KEY").cloned(),
+        rootcx_forge::provider::ProviderKind::OpenAi => env.get("OPENAI_API_KEY").cloned(),
+        rootcx_forge::provider::ProviderKind::Bedrock => env.get("AWS_BEARER_TOKEN_BEDROCK").cloned(),
+    };
+
+    info!("forge: provider={provider:?} model={model} key={}", if api_key.is_some() { "ok" } else { "missing" });
+
+    let region = ai.get("region").and_then(|r| r.as_str()).map(String::from);
+    Ok(ForgeConfig { provider, model, api_key, region, system_prompt: None, instructions: vec![] })
+}
+
+fn parse_provider_model(s: &str) -> (rootcx_forge::provider::ProviderKind, String) {
+    use rootcx_forge::provider::ProviderKind::*;
+    if let Some(m) = s.strip_prefix("openai/") { return (OpenAi, m.into()); }
+    if s.starts_with("bedrock/") || s.starts_with("amazon-bedrock/") {
+        let model = s.split_once('/').map(|(_, m)| m).unwrap_or(s);
+        // Bedrock needs cross-region inference profile prefix
+        let model = if model.starts_with("us.") || model.starts_with("eu.") || model.starts_with("global.") {
+            model.to_string()
+        } else {
+            format!("us.{model}")
+        };
+        return (Bedrock, model);
     }
+    (Anthropic, s.strip_prefix("anthropic/").unwrap_or(s).into())
+}
 
-    pub async fn start(
-        &mut self,
-        cwd: &std::path::Path,
-        config_path: Option<&std::path::Path>,
-        env_vars: std::collections::HashMap<String, String>,
-    ) -> Result<(), ForgeError> {
-        self.stop().await?;
+fn engine(state: &ForgeState) -> Result<&ForgeEngine, String> {
+    state.get().ok_or_else(|| {
+        warn!("forge: engine requested but OnceCell is empty (init not completed yet)");
+        "forge not ready — try again in a moment".into()
+    })
+}
 
-        let port = self.port;
-        let health_url = format!("http://127.0.0.1:{port}/global/health");
-
-        if health_check_url(&health_url).await {
-            warn!("stale forge process detected on port {port}, killing it");
-            rootcx_platform::process::kill_listeners_on_port(port).await;
-
-            for _ in 0..KILL_RETRIES {
-                tokio::time::sleep(Duration::from_millis(KILL_RETRY_MS)).await;
-                if !health_check_url(&health_url).await {
-                    break;
-                }
-            }
+fn emit_fn(app: AppHandle) -> rootcx_forge::engine::EmitFn {
+    Arc::new(move |event: &str, payload: Value| {
+        match app.emit(event, &payload) {
+            Ok(()) => tracing::debug!("forge emit OK: {event}"),
+            Err(e) => tracing::error!("forge emit FAILED: {event} -> {e}"),
         }
+    })
+}
 
-        info!(?cwd, ?config_path, port, "starting forge sidecar");
+#[tauri::command]
+pub async fn forge_set_cwd(state: State<'_, ForgeState>, path: String) -> Result<(), String> {
+    engine(&state)?.set_cwd(PathBuf::from(path)).await;
+    Ok(())
+}
 
-        let port_str = port.to_string();
-        let mut cmd = Command::new(rootcx_platform::bin::binary_name("opencode"));
-        cmd.args(["serve", "--port", &port_str, "--hostname", "127.0.0.1"])
-            .current_dir(cwd)
-            .stdout(std::process::Stdio::inherit())
-            .stderr(std::process::Stdio::inherit())
-            .kill_on_drop(true);
-
-        if let Some(path) = config_path {
-            cmd.env("OPENCODE_CONFIG", path);
-        }
-
-        for (k, v) in &env_vars {
-            cmd.env(k, v);
-        }
-
-        let child = cmd.spawn().map_err(|e| ForgeError::SpawnFailed(e.to_string()))?;
-
-        self.child = Some(child);
-
-        for i in 0..HEALTH_RETRIES {
-            tokio::time::sleep(Duration::from_millis(HEALTH_RETRY_MS)).await;
-            if health_check_url(&health_url).await {
-                info!("forge sidecar healthy after {}ms", (i + 1) * HEALTH_RETRY_MS as usize);
-                return Ok(());
-            }
-        }
-
-        warn!("forge sidecar started but health check timed out");
-        Ok(())
-    }
-
-    pub async fn stop(&mut self) -> Result<(), ForgeError> {
-        if let Some(mut child) = self.child.take() {
-            if let Some(pid) = child.id() {
-                rootcx_platform::process::kill_gracefully(pid, Duration::from_secs(3)).await;
-                if matches!(child.try_wait(), Ok(Some(_))) {
-                    info!("forge sidecar exited gracefully");
-                    return Ok(());
-                }
-            }
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            info!("forge sidecar stopped");
-        }
-        Ok(())
-    }
-
-    pub async fn is_running(&self) -> bool {
-        let url = format!("http://127.0.0.1:{}/global/health", self.port);
-        health_check_url(&url).await
+async fn ensure_config(engine: &ForgeEngine, client: &RuntimeClient) {
+    if engine.config().await.api_key.is_some() { return; }
+    match build_config(client).await {
+        Ok(c) => engine.set_config(c).await,
+        Err(e) => warn!("forge: config load failed: {e}"),
     }
 }
 
-async fn health_check_url(url: &str) -> bool {
-    HTTP.get(url).send().await.is_ok()
+#[tauri::command]
+pub async fn forge_reload_config(state: State<'_, ForgeState>, app_state: State<'_, crate::state::AppState>) -> Result<(), String> {
+    let e = engine(&state)?;
+    let c = build_config(app_state.runtime_client()).await?;
+    e.set_config(c).await;
+    Ok(())
 }
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").and_then(|l| l.local_addr()).map(|a| a.port()).unwrap_or(DEFAULT_PORT)
+#[tauri::command]
+pub async fn forge_create_session(state: State<'_, ForgeState>) -> Result<rootcx_forge::session::Session, String> {
+    engine(&state)?.create_session().await.map_err(|e| e.to_string())
 }
 
-pub fn is_forge_available() -> bool {
-    std::process::Command::new(rootcx_platform::bin::binary_name("opencode"))
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok()
+#[tauri::command]
+pub async fn forge_list_sessions(state: State<'_, ForgeState>) -> Result<Vec<rootcx_forge::session::Session>, String> {
+    engine(&state)?.list_sessions().await.map_err(|e| e.to_string())
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum ForgeError {
-    #[error("failed to spawn forge sidecar: {0}")]
-    SpawnFailed(String),
+#[tauri::command]
+pub async fn forge_get_messages(state: State<'_, ForgeState>, session_id: Uuid) -> Result<Vec<rootcx_forge::session::MessageWithParts>, String> {
+    engine(&state)?.get_messages(session_id).await.map_err(|e| e.to_string())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[tauri::command]
+pub async fn forge_send_message(app: AppHandle, state: State<'_, ForgeState>, app_state: State<'_, crate::state::AppState>, session_id: Uuid, text: String) -> Result<(), String> {
+    let e = engine(&state)?;
+    ensure_config(e, app_state.runtime_client()).await;
+    e.send_message(session_id, text, emit_fn(app)).await;
+    Ok(())
+}
 
-    #[test]
-    fn forge_uses_random_port() {
-        let fm1 = ForgeManager::new();
-        let fm2 = ForgeManager::new();
-        assert_ne!(fm1.port(), 0);
-        assert_ne!(fm2.port(), 0);
-    }
+#[tauri::command]
+pub async fn forge_abort(state: State<'_, ForgeState>, session_id: Uuid) -> Result<(), String> {
+    engine(&state)?.abort(session_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn forge_reply_permission(state: State<'_, ForgeState>, id: Uuid, session_id: Uuid, tool: String, response: String) -> Result<(), String> {
+    engine(&state)?.reply_permission(id, session_id, &tool, &response).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn forge_reply_question(state: State<'_, ForgeState>, id: Uuid, answers: Vec<Vec<String>>) -> Result<(), String> {
+    engine(&state)?.reply_question(id, answers).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn forge_reject_question(state: State<'_, ForgeState>, id: Uuid) -> Result<(), String> {
+    engine(&state)?.reject_question(id).await;
+    Ok(())
 }

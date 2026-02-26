@@ -17,8 +17,7 @@ export const activate = () => {
     title: "Send Message",
     category: "AI Forge",
     handler: (prompt: unknown) => {
-      if (typeof prompt !== "string") return;
-      sendMessage(prompt);
+      if (typeof prompt === "string") sendMessage(prompt);
     },
   });
 

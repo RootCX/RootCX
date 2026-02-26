@@ -82,9 +82,7 @@ function AISetupWizard({ preselect, onDone }: { preselect?: string; onDone: (ok:
       await saveAiConfig(defaultAiConfig(selected.id));
 
       setSavingStatus("Starting AI engine...");
-      if (workspace.projectPath) {
-        await invoke("start_forge", { projectPath: workspace.projectPath });
-      }
+      await invoke("forge_reload_config").catch(() => {});
       await aiConfigStore.refresh();
       onDone(true);
     } catch (e) {
