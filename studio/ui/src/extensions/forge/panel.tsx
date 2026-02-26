@@ -307,10 +307,30 @@ export default function ForgePanel() {
   const { sessionId, sessions, messages, parts, permissions, questions, streaming, error } = useSyncExternalStore(subscribe, getSnapshot);
   const { projectPath } = useProjectContext();
   const [input, setInput] = useState("");
-  const endRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stick = useRef(true);
+  const lastTop = useRef(0);
+  const msgCount = useRef(0);
 
   useEffect(() => { if (projectPath) setCwd(projectPath); }, [projectPath]);
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, parts, questions, permissions]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      if (el.scrollTop < lastTop.current - 5) stick.current = false;
+      else if (el.scrollHeight - el.scrollTop - el.clientHeight < 5) stick.current = true;
+      lastTop.current = el.scrollTop;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
+    if (messages.length > msgCount.current) stick.current = true;
+    msgCount.current = messages.length;
+    if (stick.current) scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight);
+  }, [messages, parts, questions, permissions]);
 
   const submit = async () => {
     if (!input.trim() || streaming) return;
@@ -360,13 +380,12 @@ export default function ForgePanel() {
   return (
     <div className="flex h-full min-w-0 flex-col overflow-hidden">
       <div className="flex shrink-0 items-center justify-end px-4 py-2"><SessionSelector {...sessionProps} /></div>
-      <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
+      <div ref={scrollRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
         <div className="mx-auto w-full max-w-3xl space-y-5 px-6 py-6">
           {items}
           {permissions.map((perm) => <PermissionCard key={perm.id} perm={perm} />)}
           {questions.length > 0 && <QuestionsPanel requests={questions} />}
           {error && <div className="rounded-xl border border-destructive/20 bg-destructive/5 px-5 py-3 text-sm text-destructive/80">{error}</div>}
-          <div ref={endRef} />
         </div>
       </div>
       <div className="shrink-0 px-6 pb-5 pt-2">
