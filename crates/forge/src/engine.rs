@@ -14,7 +14,7 @@ use crate::permission::{PendingPermissions, PermissionResponse};
 use crate::provider::{
     self, ChatMessage, ContentBlock, LlmProvider, Role, StopReason, StreamEvent, ToolDef,
 };
-use crate::question::PendingQuestions;
+use crate::question::{PendingQuestions, QuestionInfo, QuestionResponse};
 use crate::session;
 use crate::tools;
 use crate::ForgeConfig;
@@ -241,6 +241,10 @@ async fn execute_with_permission(
     tool_name: &str,
     args: &Value,
 ) -> Result<Result<String, String>, ForgeError> {
+    if tool_name == "question" {
+        return execute_question(ctx, args).await;
+    }
+
     if tools::needs_permission(tool_name)
         && !ctx.permissions.is_allowed(ctx.session_id, tool_name).await
     {
@@ -264,6 +268,36 @@ async fn execute_with_permission(
     }
 
     Ok(tools::execute(tool_name, args.clone(), &ctx.cwd).await)
+}
+
+async fn execute_question(
+    ctx: &LoopContext,
+    args: &Value,
+) -> Result<Result<String, String>, ForgeError> {
+    let questions: Vec<QuestionInfo> = serde_json::from_value(
+        args.get("questions").cloned().unwrap_or(json!([])),
+    )
+    .map_err(|e| ForgeError::Other(format!("invalid question args: {e}")))?;
+
+    if questions.is_empty() {
+        return Ok(Err("questions array must not be empty".into()));
+    }
+
+    let (req, rx) = ctx.questions.ask(ctx.session_id, questions).await;
+    (ctx.emit)("forge://question-asked", serde_json::to_value(&req).unwrap());
+
+    let (event, result) = match rx.await.unwrap_or(QuestionResponse::Rejected) {
+        QuestionResponse::Answered(a) => (
+            "forge://question-replied",
+            Ok(serde_json::to_string(&a).unwrap_or_default()),
+        ),
+        QuestionResponse::Rejected => (
+            "forge://question-rejected",
+            Err("User skipped the question.".into()),
+        ),
+    };
+    (ctx.emit)(event, json!({"requestID": req.id}));
+    Ok(result)
 }
 
 async fn build_history(
@@ -375,6 +409,8 @@ fn format_tool_title(name: &str, args: &Value) -> String {
         "grep" => format!("Searching for {}", args["pattern"].as_str().unwrap_or("...")),
         "glob" => format!("Finding {}", args["pattern"].as_str().unwrap_or("...")),
         "ls" => format!("Listing {}", args["path"].as_str().unwrap_or("...")),
+        "web_fetch" => format!("Fetching {}", args["url"].as_str().unwrap_or("URL")),
+        "question" => "Asking user...".to_string(),
         _ => name.to_string(),
     }
 }

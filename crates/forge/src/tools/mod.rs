@@ -1,6 +1,7 @@
 pub mod fs;
 pub mod search;
 pub mod shell;
+pub mod web;
 
 use std::path::Path;
 
@@ -95,6 +96,52 @@ pub fn tool_schemas() -> Vec<ToolDef> {
                 "required": ["path"]
             }),
         },
+        ToolDef {
+            name: "web_fetch".into(),
+            description: "Fetch a URL and return its contents as readable text. HTML pages are converted to plain text.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "URL to fetch" },
+                    "max_length": { "type": "integer", "description": "Max output length in chars (default 30000)" }
+                },
+                "required": ["url"]
+            }),
+        },
+        ToolDef {
+            name: "question".into(),
+            description: "Ask the user questions to gather preferences, clarify instructions, or get decisions on implementation choices.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": { "type": "string", "description": "The question to ask" },
+                                "header": { "type": "string", "description": "Short label (max 12 chars)" },
+                                "options": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": { "type": "string" },
+                                            "description": { "type": "string" }
+                                        },
+                                        "required": ["label", "description"]
+                                    }
+                                },
+                                "multiple": { "type": "boolean", "description": "Allow selecting multiple options" },
+                                "custom": { "type": "boolean", "description": "Allow custom text input" }
+                            },
+                            "required": ["question", "header", "options"]
+                        }
+                    }
+                },
+                "required": ["questions"]
+            }),
+        },
     ]
 }
 
@@ -107,6 +154,7 @@ pub async fn execute(name: &str, args: Value, cwd: &Path) -> Result<String, Stri
         "grep" => search::grep(args, cwd).await,
         "glob" => fs::glob_files(args, cwd).await,
         "ls" => fs::ls(args, cwd).await,
+        "web_fetch" => web::fetch(args, cwd).await,
         _ => Err(format!("unknown tool: {name}")),
     }
 }

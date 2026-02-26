@@ -36,7 +36,7 @@ const mdComponents = {
 } as Record<string, React.ComponentType>;
 
 const NO_PARTS: Part[] = [];
-const TOOL_LABELS: Record<string, string> = { read: "Reading", write: "Writing", edit: "Editing", bash: "Running command", grep: "Searching", glob: "Finding files", ls: "Browsing" };
+const TOOL_LABELS: Record<string, string> = { read: "Reading", write: "Writing", edit: "Editing", bash: "Running command", grep: "Searching", glob: "Finding files", ls: "Browsing", web_fetch: "Fetching" };
 const FADE_MASK = "linear-gradient(to bottom, transparent 0%, black 12px, black calc(100% - 12px), transparent 100%)";
 const toolTitle = (t: Part) => t.tool_state?.title ?? TOOL_LABELS[t.tool_name ?? ""] ?? t.tool_name;
 
@@ -76,7 +76,7 @@ function ToolDetailView({ part }: { part: Part }) {
   const inp = part.tool_input ?? {};
   const summary = (inp.command as string) ? `$ ${inp.command}`
     : (inp.pattern as string) ? `/${inp.pattern}/`
-    : (inp.file_path as string) ?? (inp.path as string) ?? null;
+    : (inp.url as string) ?? (inp.file_path as string) ?? (inp.path as string) ?? null;
   const lines = part.tool_state?.status !== "running" && part.content ? part.content.split("\n") : null;
   const preview = lines ? (lines.length > 8 ? lines.slice(0, 8).join("\n") + "\n…" : part.content) : null;
   return (
@@ -179,7 +179,7 @@ function QuestionFieldView({ info, index, answers, setAnswers }: {
           </button>
         ))}
       </div>
-      {info.custom !== false && (
+      {info.custom && (
         <input
           type="text"
           className="rounded-xl border border-border/50 bg-transparent px-4 py-2.5 text-sm text-foreground placeholder:text-muted-foreground/40 focus:border-border focus:outline-none"
@@ -205,20 +205,23 @@ function QuestionsPanel({ requests }: { requests: QuestionRequest[] }) {
       return next;
     });
   }, [requests]);
-  const get = (r: QuestionRequest) => allAnswers[r.id] ?? emptyAnswers(r);
+  const get = (id: string) => allAnswers[id] ?? [];
 
   return (
     <div className="flex flex-col gap-5 rounded-2xl border border-border/50 bg-card/50 p-5">
       {requests.flatMap((req) =>
         req.questions.map((q, qi) => (
           <QuestionFieldView
-            key={`${req.id}-${qi}`} info={q} index={qi} answers={get(req)}
-            setAnswers={(fn) => setAllAnswers((prev) => ({ ...prev, [req.id]: typeof fn === "function" ? fn(get(req)) : fn }))}
+            key={`${req.id}-${qi}`} info={q} index={qi} answers={get(req.id)}
+            setAnswers={(fn) => setAllAnswers((prev) => {
+              const cur = prev[req.id] ?? emptyAnswers(req);
+              return { ...prev, [req.id]: typeof fn === "function" ? fn(cur) : fn };
+            })}
           />
         )),
       )}
       <div className="flex gap-2 border-t border-border/30 pt-4">
-        <Button size="sm" className="h-9 rounded-xl px-5 text-sm" disabled={!requests.every((r) => get(r).every((a) => a.length > 0))} onClick={() => requests.forEach((r) => replyQuestion(r.id, get(r)))}>Submit</Button>
+        <Button size="sm" className="h-9 rounded-xl px-5 text-sm" disabled={!requests.every((r) => get(r.id).every((a) => a.length > 0))} onClick={() => requests.forEach((r) => replyQuestion(r.id, get(r.id)))}>Submit</Button>
         <Button size="sm" variant="ghost" className="h-9 rounded-xl px-4 text-sm text-muted-foreground" onClick={() => requests.forEach((r) => rejectQuestion(r.id))}>Skip</Button>
       </div>
     </div>
