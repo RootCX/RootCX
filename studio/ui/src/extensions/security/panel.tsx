@@ -1,100 +1,176 @@
-import { useState, useEffect, useSyncExternalStore } from "react";
-import { ChevronRight, ChevronDown, Shield, Users, KeyRound, RefreshCw } from "lucide-react";
+import { useEffect, useSyncExternalStore } from "react";
+import { Shield, Users, KeyRound, RefreshCw, Lock } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { useProjectContext } from "@/components/layout/app-context";
 import {
   subscribe, getSnapshot, loadProject, refresh, assignRole, revokeRole,
   type Role, type User, type Assignment, type Policy,
 } from "./store";
 
-const indent = (d: number) => ({ paddingLeft: `${d * 12 + 4}px` });
-const CHEVRON = "h-3.5 w-3.5 shrink-0 text-muted-foreground";
-const ROW = "flex w-full items-center gap-1 px-1 py-0.5 text-left text-xs hover:bg-accent";
+const ALL_ACTIONS = ["create", "read", "update", "delete"] as const;
 
-function Section({ title, icon: Icon, count, children }: { title: string; icon: typeof Shield; count: number; children: React.ReactNode }) {
-  const [open, setOpen] = useState(true);
+function ToggleCell({ active, disabled, onClick }: { active: boolean; disabled: boolean; onClick: () => void }) {
   return (
-    <div>
-      <button onClick={() => setOpen((o) => !o)} className="flex w-full items-center gap-1.5 px-3 py-1 text-left text-[10px] font-semibold uppercase tracking-wider text-muted-foreground hover:bg-accent">
-        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        <Icon className="h-3 w-3" />
-        {title}
-        <span className="ml-auto text-[9px] font-normal">{count}</span>
-      </button>
-      {open && children}
+    <button
+      onClick={disabled ? undefined : onClick}
+      className={cn(
+        "flex h-6 w-6 items-center justify-center rounded transition-colors",
+        disabled ? "cursor-default" : "cursor-pointer",
+        !disabled && "hover:bg-accent",
+      )}
+    >
+      <span className={cn(
+        "h-3 w-3 rounded-full border-2 transition-colors",
+        active
+          ? "border-primary bg-primary"
+          : disabled
+            ? "border-muted-foreground/30"
+            : "border-muted-foreground/50 hover:border-muted-foreground",
+      )} />
+    </button>
+  );
+}
+
+function AssignmentMatrix({ users, roles, assignments, isAdmin }: {
+  users: User[]; roles: Role[]; assignments: Assignment[]; isAdmin: boolean;
+}) {
+  const assignedSet = new Set(assignments.map((a) => `${a.userId}::${a.role}`));
+
+  if (users.length === 0) {
+    return <div className="flex items-center justify-center p-6 text-[10px] text-muted-foreground">No users registered</div>;
+  }
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full border-collapse text-[10px]">
+        <thead>
+          <tr>
+            <th className="sticky left-0 z-10 bg-background px-2 py-1.5 text-left font-medium text-muted-foreground">
+              <Users className="inline h-3 w-3 mr-1" />User
+            </th>
+            {roles.map((r) => (
+              <th key={r.name} className="px-1 py-1.5 text-center font-medium text-muted-foreground">
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span className="cursor-default">{r.name}</span>
+                  </TooltipTrigger>
+                  {r.description && (
+                    <TooltipContent side="top">
+                      <p>{r.description}</p>
+                      {r.inherits.length > 0 && <p className="mt-0.5 opacity-70">Inherits: {r.inherits.join(", ")}</p>}
+                    </TooltipContent>
+                  )}
+                </Tooltip>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {users.map((u) => (
+            <tr key={u.id} className="border-t border-border/50 hover:bg-accent/30">
+              <td className="sticky left-0 z-10 bg-background px-2 py-0.5 text-xs">
+                <span className="truncate block max-w-[100px]" title={u.username}>
+                  {u.displayName || u.username}
+                </span>
+              </td>
+              {roles.map((r) => {
+                const key = `${u.id}::${r.name}`;
+                const active = assignedSet.has(key);
+                return (
+                  <td key={r.name} className="px-1 py-0.5">
+                    <ToggleCell
+                      active={active}
+                      disabled={!isAdmin}
+                      onClick={() => active ? revokeRole(u.id, r.name) : assignRole(u.id, r.name)}
+                    />
+                  </td>
+                );
+              })}
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
 
-function RoleNode({ role, depth }: { role: Role; depth: number }) {
-  const [expanded, setExpanded] = useState(false);
-  const hasDetails = role.description || role.inherits.length > 0;
+function ActionCell({ granted, ownership }: { granted: Set<string>; ownership: boolean }) {
+  const hasWildcard = granted.has("*");
   return (
-    <div>
-      <button onClick={() => hasDetails && setExpanded((e) => !e)} className={ROW} style={indent(depth)}>
-        {hasDetails
-          ? (expanded ? <ChevronDown className={CHEVRON} /> : <ChevronRight className={CHEVRON} />)
-          : <span className="w-3.5 shrink-0" />}
-        <Shield className="h-3.5 w-3.5 shrink-0 text-amber-400" />
-        <span className="truncate">{role.name}</span>
-      </button>
-      {expanded && (
-        <div className="space-y-0.5 px-1 py-0.5 text-[10px] text-muted-foreground" style={indent(depth + 1)}>
-          {role.description && <div>{role.description}</div>}
-          {role.inherits.length > 0 && <div>Inherits: {role.inherits.join(", ")}</div>}
-        </div>
+    <div className="flex items-center justify-center gap-px">
+      {ALL_ACTIONS.map((a) => (
+        <span key={a} className={cn(
+          "inline-block w-3 text-center font-mono text-[9px] leading-none",
+          hasWildcard || granted.has(a) ? "text-foreground font-semibold" : "text-muted-foreground/25",
+        )}>
+          {a[0]}
+        </span>
+      ))}
+      {ownership && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Lock className="ml-0.5 h-2.5 w-2.5 text-amber-400/70" />
+          </TooltipTrigger>
+          <TooltipContent side="top">Owner-restricted</TooltipContent>
+        </Tooltip>
       )}
     </div>
   );
 }
 
-function RoleChip({ role, active, disabled, onClick }: { role: string; active: boolean; disabled?: boolean; onClick: () => void }) {
-  return (
-    <button onClick={disabled ? undefined : onClick} className={cn(
-      "rounded-full px-2 py-0.5 text-[10px] font-medium transition-colors",
-      disabled && "cursor-default opacity-50",
-      active ? "bg-primary text-primary-foreground" : "border border-border text-muted-foreground/60",
-      !disabled && (active ? "hover:bg-primary/80" : "hover:border-muted-foreground hover:text-muted-foreground"),
-    )}>
-      {role}
-    </button>
-  );
-}
+function PolicyMatrix({ roles, policies }: { roles: Role[]; policies: Policy[] }) {
+  const entities = [...new Set(policies.map((p) => p.entity))].sort();
+  const policyMap = new Map<string, Map<string, { actions: Set<string>; ownership: boolean }>>();
+  for (const p of policies) {
+    if (!policyMap.has(p.role)) policyMap.set(p.role, new Map());
+    policyMap.get(p.role)!.set(p.entity, { actions: new Set(p.actions), ownership: p.ownership });
+  }
 
-function UserRow({ user, assignments, roles, isAdmin }: { user: User; assignments: Assignment[]; roles: Role[]; isAdmin: boolean }) {
-  const assigned = new Set(assignments.filter((a) => a.userId === user.id).map((a) => a.role));
-  return (
-    <div className="flex items-center gap-2 px-3 py-1.5">
-      <Users className="h-3.5 w-3.5 shrink-0 text-blue-400" />
-      <span className="min-w-0 shrink-0 truncate text-xs">{user.displayName || user.username}</span>
-      <div className="ml-auto flex flex-wrap items-center gap-1">
-        {roles.map((r) => (
-          <RoleChip key={r.name} role={r.name} active={assigned.has(r.name)} disabled={!isAdmin}
-            onClick={() => assigned.has(r.name) ? revokeRole(user.id, r.name) : assignRole(user.id, r.name)} />
-        ))}
-      </div>
-    </div>
-  );
-}
+  if (entities.length === 0) {
+    return <div className="flex items-center justify-center p-6 text-[10px] text-muted-foreground">No policies configured</div>;
+  }
 
-function PolicyGroup({ role, items }: { role: string; items: Policy[] }) {
-  const [open, setOpen] = useState(false);
   return (
-    <div>
-      <button onClick={() => setOpen((o) => !o)} className={ROW} style={indent(1)}>
-        {open ? <ChevronDown className={CHEVRON} /> : <ChevronRight className={CHEVRON} />}
-        <Shield className="h-3.5 w-3.5 shrink-0 text-amber-400" />
-        <span className="truncate">{role}</span>
-        <span className="ml-auto shrink-0 pr-2 text-[10px] text-muted-foreground/50">{items.length}</span>
-      </button>
-      {open && items.map((p) => (
-        <div key={p.entity} className="flex items-center gap-1 px-1 py-0.5 text-[10px] text-muted-foreground" style={indent(2)}>
-          <KeyRound className="h-3 w-3 shrink-0 text-muted-foreground/60" />
-          <span className="text-blue-400">{p.entity}</span>
-          <span className="text-muted-foreground/50">[{p.actions.join(", ")}]{p.ownership && " owner"}</span>
-        </div>
-      ))}
+    <div className="overflow-x-auto">
+      <table className="w-full border-collapse text-[10px]">
+        <thead>
+          <tr>
+            <th className="sticky left-0 z-10 bg-background px-2 py-1.5 text-left font-medium text-muted-foreground">
+              <Shield className="inline h-3 w-3 mr-1" />Role
+            </th>
+            {entities.map((e) => (
+              <th key={e} className="px-1 py-1.5 text-center font-medium text-muted-foreground">
+                {e === "*" ? <span className="text-amber-400">all</span> : e}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {roles.map((r) => {
+            const roleMap = policyMap.get(r.name);
+            return (
+              <tr key={r.name} className="border-t border-border/50 hover:bg-accent/30">
+                <td className="sticky left-0 z-10 bg-background px-2 py-0.5 text-xs font-medium">
+                  {r.name}
+                </td>
+                {entities.map((e) => {
+                  const cell = roleMap?.get(e);
+                  return (
+                    <td key={e} className="px-1 py-0.5 text-center">
+                      {cell
+                        ? <ActionCell granted={cell.actions} ownership={cell.ownership} />
+                        : <span className="text-muted-foreground/20">—</span>}
+                    </td>
+                  );
+                })}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -105,46 +181,43 @@ export default function SecurityPanel() {
 
   useEffect(() => { if (projectPath) loadProject(projectPath); }, [projectPath]);
 
-  if (!projectPath)
+  if (!projectPath) {
     return <div className="flex h-full items-center justify-center p-6 text-xs text-muted-foreground">No project opened</div>;
-
-  const byRole = policies.reduce<Record<string, Policy[]>>((acc, p) => {
-    (acc[p.role] ??= []).push(p);
-    return acc;
-  }, {});
+  }
 
   return (
-    <div className="flex h-full flex-col">
-      <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
-        <span className="truncate text-xs font-medium uppercase tracking-wider text-muted-foreground">{appId ?? "Security"}</span>
-        <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => refresh()}>
-          <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
-        </Button>
-      </div>
+    <TooltipProvider delayDuration={200}>
+      <div className="flex h-full flex-col">
+        <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
+          <span className="truncate text-xs font-medium uppercase tracking-wider text-muted-foreground">{appId ?? "Security"}</span>
+          <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => refresh()}>
+            <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
+          </Button>
+        </div>
 
-      {error && <div className="px-3 py-2 text-xs text-red-400">{error}</div>}
-      {loading && roles.length === 0 && <div className="flex animate-pulse items-center justify-center p-6 text-xs text-muted-foreground">Loading...</div>}
-      {!loading && !error && roles.length === 0 && appId && <div className="flex items-center justify-center p-6 text-xs text-muted-foreground">No RBAC configured</div>}
+        {error && <div className="px-3 py-2 text-xs text-red-400">{error}</div>}
+        {loading && roles.length === 0 && <div className="flex animate-pulse items-center justify-center p-6 text-xs text-muted-foreground">Loading...</div>}
+        {!loading && !error && roles.length === 0 && appId && <div className="flex items-center justify-center p-6 text-xs text-muted-foreground">No RBAC configured</div>}
 
-      <div className="flex-1 overflow-y-auto py-1">
         {roles.length > 0 && (
-          <Section title="Roles" icon={Shield} count={roles.length}>
-            {roles.map((r) => <RoleNode key={r.name} role={r} depth={1} />)}
-          </Section>
-        )}
-        {roles.length > 0 && (
-          <Section title="Users" icon={Users} count={users.length}>
-            {users.length > 0
-              ? users.map((u) => <UserRow key={u.id} user={u} assignments={assignments} roles={roles} isAdmin={isAdmin} />)
-              : <div className="px-3 py-2 text-[10px] text-muted-foreground">No users registered</div>}
-          </Section>
-        )}
-        {Object.keys(byRole).length > 0 && (
-          <Section title="Policies" icon={KeyRound} count={policies.length}>
-            {Object.entries(byRole).map(([role, items]) => <PolicyGroup key={role} role={role} items={items} />)}
-          </Section>
+          <Tabs defaultValue="assignments" className="flex flex-1 flex-col overflow-hidden">
+            <TabsList className="shrink-0 border-b border-border px-1">
+              <TabsTrigger value="assignments" className="gap-1">
+                <Users className="h-3 w-3" />Assignments
+              </TabsTrigger>
+              <TabsTrigger value="policies" className="gap-1">
+                <KeyRound className="h-3 w-3" />Policies
+              </TabsTrigger>
+            </TabsList>
+            <TabsContent value="assignments" className="flex-1 overflow-auto p-1">
+              <AssignmentMatrix users={users} roles={roles} assignments={assignments} isAdmin={isAdmin} />
+            </TabsContent>
+            <TabsContent value="policies" className="flex-1 overflow-auto p-1">
+              <PolicyMatrix roles={roles} policies={policies} />
+            </TabsContent>
+          </Tabs>
         )}
       </div>
-    </div>
+    </TooltipProvider>
   );
 }
