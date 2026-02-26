@@ -6,7 +6,7 @@ export type {
   RegisterInput,
   RoleDefinition,
   RoleAssignment,
-  EntityPermission,
+  PermissionDeclaration,
   EffectivePermissions,
   WhereOperator,
   WhereValue,

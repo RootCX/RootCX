@@ -1,7 +1,5 @@
 pub(crate) mod routes;
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use axum::Router;
 use axum::routing::{get, post};
@@ -11,7 +9,6 @@ use uuid::Uuid;
 
 use super::RuntimeExtension;
 use crate::RuntimeError;
-use crate::extensions::rbac::PolicyCache;
 use crate::routes::SharedRuntime;
 use rootcx_shared_types::AppManifest;
 
@@ -28,15 +25,7 @@ pub fn agent_user_id(app_id: &str) -> Uuid {
     Uuid::new_v5(&AGENT_UUID_NAMESPACE, format!("agent:{app_id}").as_bytes())
 }
 
-pub struct AgentExtension {
-    rbac_cache: Arc<PolicyCache>,
-}
-
-impl AgentExtension {
-    pub fn with_cache(rbac_cache: Arc<PolicyCache>) -> Self {
-        Self { rbac_cache }
-    }
-}
+pub struct AgentExtension;
 
 #[async_trait]
 impl RuntimeExtension for AgentExtension {
@@ -92,6 +81,12 @@ impl RuntimeExtension for AgentExtension {
             "access": def.access,
         });
 
+        // Build permissions from agent access entries
+        let agent_permissions: Vec<String> = def.access.iter()
+            .filter(|e| !e.entity.starts_with("tool:"))
+            .flat_map(|e| e.actions.iter().map(move |a| format!("{}.{}", e.entity, a)))
+            .collect();
+
         let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
 
         sqlx::query(
@@ -110,13 +105,14 @@ impl RuntimeExtension for AgentExtension {
         .map_err(RuntimeError::Schema)?;
 
         sqlx::query(
-            "INSERT INTO rootcx_system.rbac_roles (app_id, name, description, inherits)
-             VALUES ($1, $2, $3, '{}')
-             ON CONFLICT (app_id, name) DO UPDATE SET description = EXCLUDED.description"
+            "INSERT INTO rootcx_system.rbac_roles (app_id, name, description, inherits, permissions)
+             VALUES ($1, $2, $3, '{}', $4)
+             ON CONFLICT (app_id, name) DO UPDATE SET description = EXCLUDED.description, permissions = EXCLUDED.permissions"
         )
         .bind(app_id)
         .bind(&role_name)
         .bind(format!("Auto-created role for agent {}", def.name))
+        .bind(&agent_permissions)
         .execute(&mut *tx)
         .await
         .map_err(RuntimeError::Schema)?;
@@ -144,33 +140,7 @@ impl RuntimeExtension for AgentExtension {
         .await
         .map_err(RuntimeError::Schema)?;
 
-        sqlx::query("DELETE FROM rootcx_system.rbac_policies WHERE app_id = $1 AND role = $2")
-            .bind(app_id)
-            .bind(&role_name)
-            .execute(&mut *tx)
-            .await
-            .map_err(RuntimeError::Schema)?;
-
-        let data_entries: Vec<_> = def.access.iter()
-            .filter(|e| !e.entity.starts_with("tool:"))
-            .collect();
-        if !data_entries.is_empty() {
-            let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
-                "INSERT INTO rootcx_system.rbac_policies (app_id, role, entity, actions, ownership) "
-            );
-            qb.push_values(&data_entries, |mut b, entry| {
-                let actions: Vec<&str> = entry.actions.iter().map(String::as_str).collect();
-                b.push_bind(app_id.to_string())
-                    .push_bind(role_name.clone())
-                    .push_bind(entry.entity.clone())
-                    .push_bind(actions)
-                    .push_bind(false);
-            });
-            qb.build().execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
-        }
-
         tx.commit().await.map_err(RuntimeError::Schema)?;
-        self.rbac_cache.invalidate(app_id);
         info!(app = %app_id, "agent registered");
         Ok(())
     }

@@ -45,19 +45,18 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .route("/api/v1/tools", get(crate::tools::routes::list_tools))
         .route("/api/v1/tools/{tool_name}/execute", post(crate::tools::routes::execute_tool));
 
-    let (auth_config, rbac_cache) = {
+    let auth_config = {
         let rt = runtime.lock().await;
         for ext in rt.extensions() {
             if let Some(ext_router) = ext.routes() {
                 router = router.merge(ext_router);
             }
         }
-        (rt.auth_config().clone(), rt.rbac_cache().clone())
+        rt.auth_config().clone()
     };
 
     let router = router
         .layer(axum::Extension(auth_config))
-        .layer(axum::Extension(rbac_cache))
         .layer(CorsLayer::permissive())
         .with_state(runtime);
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;

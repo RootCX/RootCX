@@ -19,7 +19,7 @@ function AIProviderSection() {
           <button className="text-[10px] text-primary hover:underline" onClick={showAISetupDialog}>Change</button>
         </div>
       ) : (
-        <Button size="sm" className="h-7 text-[10px]" onClick={showAISetupDialog}>Configure AI Provider</Button>
+        <Button size="xs" onClick={showAISetupDialog}>Configure AI Provider</Button>
       )}
     </>
   );
@@ -94,7 +94,7 @@ export default function SettingsPanel() {
           onChange={(e) => setNewKey(e.target.value.replace(/[^A-Za-z0-9_]/g, "").toUpperCase())} />
         <input type="password" className={`${inp} flex-1`} placeholder="value" value={newValue}
           onChange={(e) => setNewValue(e.target.value)} onKeyDown={(e) => e.key === "Enter" && handleAdd()} />
-        <Button size="sm" className="h-6 px-2 text-[10px]" onClick={handleAdd} disabled={!newKey.trim() || !newValue.trim()}>Add</Button>
+        <Button size="xs" onClick={handleAdd} disabled={!newKey.trim() || !newValue.trim()}>Add</Button>
       </div>
 
       {error && <div className="rounded-md border border-red-800 bg-red-950 px-2 py-1 text-[10px] text-red-300">{error}</div>}

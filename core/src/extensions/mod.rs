@@ -43,17 +43,16 @@ pub trait RuntimeExtension: Send + Sync {
 
 /// Build all built-in extensions in correct bootstrap order.
 /// Auth must come before RBAC (rbac_assignments references users table).
-pub fn builtin_extensions_with_cache(
+pub fn builtin_extensions(
     auth_config: Arc<AuthConfig>,
-    rbac_cache: Arc<rbac::PolicyCache>,
     browser_queue: Arc<browser::queue::BrowserQueue>,
 ) -> Vec<Box<dyn RuntimeExtension>> {
     vec![
         Box::new(audit::AuditExtension),
         Box::new(logs::LogsExtension),
         Box::new(auth::AuthExtension { config: auth_config }),
-        Box::new(rbac::RbacExtension::with_cache(Arc::clone(&rbac_cache))),
-        Box::new(agents::AgentExtension::with_cache(rbac_cache)),
+        Box::new(rbac::RbacExtension),
+        Box::new(agents::AgentExtension),
         Box::new(browser::BrowserExtension::with_queue(browser_queue)),
     ]
 }

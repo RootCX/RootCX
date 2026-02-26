@@ -28,6 +28,7 @@ export interface RoleDefinition {
   name: string;
   description: string | null;
   inherits: string[];
+  permissions: string[];
 }
 
 export interface RoleAssignment {
@@ -36,14 +37,14 @@ export interface RoleAssignment {
   assignedAt: string;
 }
 
-export interface EntityPermission {
-  actions: string[];
-  ownership: boolean;
+export interface PermissionDeclaration {
+  key: string;
+  description: string;
 }
 
 export interface EffectivePermissions {
   roles: string[];
-  permissions: Record<string, EntityPermission>;
+  permissions: string[];
 }
 
 export type WhereOperator =
@@ -296,6 +297,53 @@ export class RuntimeClient {
       ? `/api/v1/apps/${enc(appId)}/permissions/${enc(userId)}`
       : `/api/v1/apps/${enc(appId)}/permissions`;
     const res = await this.authFetch(`${this.baseUrl}${path}`);
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async getAvailablePermissions(appId: string): Promise<PermissionDeclaration[]> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/permissions/available`,
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async createRole(
+    appId: string,
+    data: { name: string; description?: string; inherits?: string[]; permissions?: string[] },
+  ): Promise<{ message: string }> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/roles`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async updateRole(
+    appId: string,
+    roleName: string,
+    data: { description?: string; inherits?: string[]; permissions?: string[] },
+  ): Promise<{ message: string }> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/roles/${enc(roleName)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async deleteRole(appId: string, roleName: string): Promise<{ message: string }> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/roles/${enc(roleName)}`,
+      { method: "DELETE" },
+    );
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }

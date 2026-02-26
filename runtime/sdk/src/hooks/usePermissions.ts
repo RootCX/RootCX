@@ -5,10 +5,10 @@ import { useRuntimeClient } from "../components/RuntimeProvider";
 export interface UsePermissionsResult {
   /** Resolved roles for the current user in this app. */
   roles: string[];
-  /** Per-entity effective permissions. */
-  permissions: Record<string, { actions: string[]; ownership: boolean }>;
-  /** Check if the current user can perform an action on an entity. */
-  can: (action: string, entity: string) => boolean;
+  /** Flat list of permission strings the user has. */
+  permissions: string[];
+  /** Check if the current user has a given permission. */
+  can: (permission: string) => boolean;
   /** True while the initial fetch is in flight. */
   loading: boolean;
   /** Error message if the fetch failed. */
@@ -43,29 +43,16 @@ export function usePermissions(appId: string): UsePermissionsResult {
   }, [fetchPerms]);
 
   const can = useCallback(
-    (action: string, entity: string): boolean => {
+    (permission: string): boolean => {
       if (!data) return false;
-      // Check exact entity match
-      const ep = data.permissions[entity];
-      if (ep && (ep.actions.includes(action) || ep.actions.includes("*"))) {
-        return true;
-      }
-      // Check wildcard entity
-      const wildcard = data.permissions["*"];
-      if (
-        wildcard &&
-        (wildcard.actions.includes(action) || wildcard.actions.includes("*"))
-      ) {
-        return true;
-      }
-      return false;
+      return data.permissions.includes(permission) || data.permissions.includes("*");
     },
     [data],
   );
 
   return {
     roles: data?.roles ?? [],
-    permissions: data?.permissions ?? {},
+    permissions: data?.permissions ?? [],
     can,
     loading,
     error,

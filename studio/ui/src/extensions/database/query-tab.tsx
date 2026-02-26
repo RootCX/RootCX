@@ -93,7 +93,7 @@ export default function QueryTab() {
       <div className="flex shrink-0 flex-col border-b border-border">
         <div className="flex items-center justify-between px-3 py-1">
           <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/50">Query</span>
-          <Button size="sm" variant="ghost" className="h-6 gap-1 px-2 text-xs" onClick={runQuery} disabled={queryLoading || !trimmed}>
+          <Button size="xs" variant="ghost" className="gap-1" onClick={runQuery} disabled={queryLoading || !trimmed}>
             <Play className="h-3 w-3" />
             Run
             <kbd className="ml-1 text-[9px] text-muted-foreground/50">{navigator.platform.includes("Mac") ? "⌘" : "Ctrl"}↵</kbd>

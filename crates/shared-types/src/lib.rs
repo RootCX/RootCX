@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -113,29 +111,15 @@ pub struct InstalledApp {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PermissionsContract {
-    pub roles: HashMap<String, RoleDefinition>,
     #[serde(default)]
-    pub default_role: Option<String>,
-    pub policies: Vec<PolicyRule>,
+    pub permissions: Vec<PermissionDeclaration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RoleDefinition {
+pub struct PermissionDeclaration {
+    pub key: String,
     #[serde(default)]
-    pub description: Option<String>,
-    #[serde(default)]
-    pub inherits: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PolicyRule {
-    pub role: String,
-    pub entity: String,
-    pub actions: Vec<String>,
-    #[serde(default)]
-    pub ownership: bool,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -94,15 +94,15 @@ export default function DatabasePanel() {
         </span>
         <div className="flex items-center gap-0.5">
           <Button
-            size="sm"
+            size="xs"
             variant="secondary"
-            className="h-6 gap-1 px-2 text-[10px]"
+            className="gap-1"
             onClick={() => executeCommand("database.newQuery")}
           >
             <Plus className="h-3 w-3" />
             New Query
           </Button>
-          <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => refresh()}>
+          <Button size="icon-xs" variant="ghost" onClick={() => refresh()}>
             <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
           </Button>
         </div>

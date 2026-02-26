@@ -1,196 +1,409 @@
-import { useEffect, useSyncExternalStore } from "react";
-import { Shield, Users, KeyRound, RefreshCw, Lock } from "lucide-react";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { Shield, Users, Plus, Trash2, RefreshCw, ChevronRight, Search, ArrowLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { ListRow } from "@/components/ui/list-row";
+import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
+import { ToggleDot } from "@/components/ui/toggle-dot";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import {
+  Dialog, DialogTrigger, DialogContent,
+  DialogHeader, DialogBody, DialogFooter,
+  DialogTitle, DialogDescription,
+} from "@/components/ui/dialog";
 import { useProjectContext } from "@/components/layout/app-context";
 import {
   subscribe, getSnapshot, loadProject, refresh, assignRole, revokeRole,
-  type Role, type User, type Assignment, type Policy,
+  createRole, updateRole, deleteRole,
+  type Role, type User, type Assignment, type PermissionDeclaration,
 } from "./store";
 
-const ALL_ACTIONS = ["create", "read", "update", "delete"] as const;
+// ── Helpers ─────────────────────────────────────────────────────────────────
 
-function ToggleCell({ active, disabled, onClick }: { active: boolean; disabled: boolean; onClick: () => void }) {
+/** Group permissions by namespace (first segment before "."). */
+function groupPermissions(perms: PermissionDeclaration[]) {
+  const groups = new Map<string, PermissionDeclaration[]>();
+  for (const p of perms) {
+    const dot = p.key.indexOf(".");
+    const ns = dot >= 0 ? p.key.slice(0, dot) : p.key;
+    if (!groups.has(ns)) groups.set(ns, []);
+    groups.get(ns)!.push(p);
+  }
+  return [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+// ── Create Role Dialog ──────────────────────────────────────────────────────
+
+function CreateRoleDialog({ onCreated }: { onCreated: (name: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+
+  const reset = () => { setName(""); setDescription(""); };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    createRole(trimmed, description.trim() || undefined);
+    setOpen(false);
+    reset();
+    onCreated(trimmed);
+  };
+
   return (
-    <button
-      onClick={disabled ? undefined : onClick}
-      className={cn(
-        "flex h-6 w-6 items-center justify-center rounded transition-colors",
-        disabled ? "cursor-default" : "cursor-pointer",
-        !disabled && "hover:bg-accent",
-      )}
-    >
-      <span className={cn(
-        "h-3 w-3 rounded-full border-2 transition-colors",
-        active
-          ? "border-primary bg-primary"
-          : disabled
-            ? "border-muted-foreground/30"
-            : "border-muted-foreground/50 hover:border-muted-foreground",
-      )} />
-    </button>
+    <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) reset(); }}>
+      <DialogTrigger asChild>
+        <Button size="xs" variant="outline" className="w-full gap-1">
+          <Plus className="h-3 w-3" /> New role
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-sm">
+        <form onSubmit={handleSubmit}>
+          <DialogHeader>
+            <DialogTitle>Create role</DialogTitle>
+            <DialogDescription>
+              Roles group permissions and can be assigned to users.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody className="space-y-2.5">
+            <div className="space-y-1">
+              <Label htmlFor="role-name" size="xs">Name</Label>
+              <Input
+                id="role-name"
+                autoFocus
+                size="xs"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. editor"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="role-desc" size="xs">Description</Label>
+              <Input
+                id="role-desc"
+                size="xs"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="Optional"
+              />
+            </div>
+          </DialogBody>
+          <DialogFooter>
+            <Button type="button" variant="ghost" size="xs" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+            <Button type="submit" size="xs" disabled={!name.trim()}>
+              Create
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
-function AssignmentMatrix({ users, roles, assignments, isAdmin }: {
+// ── Delete Confirmation ─────────────────────────────────────────────────────
+
+function DeleteRoleButton({ roleName, onDeleted }: { roleName: string; onDeleted: () => void }) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button size="icon-xs" variant="ghost" className="text-muted-foreground hover:text-destructive">
+          <Trash2 className="h-3 w-3" />
+        </Button>
+      </DialogTrigger>
+      <DialogContent className="max-w-xs">
+        <DialogHeader>
+          <DialogTitle>Delete role</DialogTitle>
+          <DialogDescription>
+            This will remove <strong>{roleName}</strong> and unassign it from all users. This cannot be undone.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button size="xs" variant="ghost" onClick={() => setOpen(false)}>
+            Cancel
+          </Button>
+          <Button size="xs" variant="destructive" onClick={() => { deleteRole(roleName); setOpen(false); onDeleted(); }}>
+            Delete
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ── Sub-views ───────────────────────────────────────────────────────────────
+
+type View = "users" | "roles" | { role: string };
+
+function UsersView({ users, roles, assignments, isAdmin }: {
   users: User[]; roles: Role[]; assignments: Assignment[]; isAdmin: boolean;
 }) {
-  const assignedSet = new Set(assignments.map((a) => `${a.userId}::${a.role}`));
+  const assignedMap = useMemo(() => {
+    const m = new Map<string, string[]>();
+    for (const a of assignments) {
+      if (!m.has(a.userId)) m.set(a.userId, []);
+      m.get(a.userId)!.push(a.role);
+    }
+    return m;
+  }, [assignments]);
 
   if (users.length === 0) {
     return <div className="flex items-center justify-center p-6 text-[10px] text-muted-foreground">No users registered</div>;
   }
 
+  const toggleRole = (userId: string, role: string, hasIt: boolean) => {
+    if (hasIt) revokeRole(userId, role);
+    else assignRole(userId, role);
+  };
+
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full border-collapse text-[10px]">
-        <thead>
-          <tr>
-            <th className="sticky left-0 z-10 bg-background px-2 py-1.5 text-left font-medium text-muted-foreground">
-              <Users className="inline h-3 w-3 mr-1" />User
-            </th>
-            {roles.map((r) => (
-              <th key={r.name} className="px-1 py-1.5 text-center font-medium text-muted-foreground">
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <span className="cursor-default">{r.name}</span>
-                  </TooltipTrigger>
-                  {r.description && (
-                    <TooltipContent side="top">
-                      <p>{r.description}</p>
-                      {r.inherits.length > 0 && <p className="mt-0.5 opacity-70">Inherits: {r.inherits.join(", ")}</p>}
-                    </TooltipContent>
-                  )}
-                </Tooltip>
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {users.map((u) => (
-            <tr key={u.id} className="border-t border-border/50 hover:bg-accent/30">
-              <td className="sticky left-0 z-10 bg-background px-2 py-0.5 text-xs">
-                <span className="truncate block max-w-[100px]" title={u.username}>
-                  {u.displayName || u.username}
-                </span>
-              </td>
+    <div className="space-y-1 p-2">
+      {users.map((u) => {
+        const userRoles = new Set(assignedMap.get(u.id) ?? []);
+        return (
+          <Popover key={u.id}>
+            <PopoverTrigger asChild>
+              <div>
+                <ListRow onClick={() => {}}>
+                  <span className="min-w-[80px] truncate text-xs" title={u.username}>
+                    {u.displayName || u.username}
+                  </span>
+                  <div className="flex flex-1 flex-wrap items-center gap-1">
+                    {[...userRoles].map((r) => (
+                      <span
+                        key={r}
+                        className={cn(
+                          "rounded-full px-2 py-0.5 text-[10px] font-medium",
+                          r === "admin" ? "bg-amber-500/20 text-amber-400" : "bg-accent text-accent-foreground",
+                        )}
+                      >
+                        {r}
+                      </span>
+                    ))}
+                    {userRoles.size === 0 && (
+                      <span className="text-[10px] text-muted-foreground">No roles</span>
+                    )}
+                  </div>
+                  <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+                </ListRow>
+              </div>
+            </PopoverTrigger>
+            <PopoverContent className="min-w-[160px]">
+              <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                Roles for {u.displayName || u.username}
+              </div>
               {roles.map((r) => {
-                const key = `${u.id}::${r.name}`;
-                const active = assignedSet.has(key);
+                const hasIt = userRoles.has(r.name);
                 return (
-                  <td key={r.name} className="px-1 py-0.5">
-                    <ToggleCell
-                      active={active}
-                      disabled={!isAdmin}
-                      onClick={() => active ? revokeRole(u.id, r.name) : assignRole(u.id, r.name)}
-                    />
-                  </td>
+                  <ListRow
+                    key={r.name}
+                    onClick={isAdmin ? () => toggleRole(u.id, r.name, hasIt) : undefined}
+                  >
+                    <ToggleDot active={hasIt} disabled={!isAdmin} />
+                    <Shield className={cn("h-3 w-3 shrink-0", r.name === "admin" ? "text-amber-400" : "text-muted-foreground")} />
+                    <span className="text-xs">{r.name}</span>
+                  </ListRow>
                 );
               })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+            </PopoverContent>
+          </Popover>
+        );
+      })}
     </div>
   );
 }
 
-function ActionCell({ granted, ownership }: { granted: Set<string>; ownership: boolean }) {
-  const hasWildcard = granted.has("*");
+function RolesListView({ roles, isAdmin, onSelect, onCreated }: {
+  roles: Role[]; isAdmin: boolean;
+  onSelect: (name: string) => void; onCreated: (name: string) => void;
+}) {
   return (
-    <div className="flex items-center justify-center gap-px">
-      {ALL_ACTIONS.map((a) => (
-        <span key={a} className={cn(
-          "inline-block w-3 text-center font-mono text-[9px] leading-none",
-          hasWildcard || granted.has(a) ? "text-foreground font-semibold" : "text-muted-foreground/25",
-        )}>
-          {a[0]}
-        </span>
+    <div className="space-y-1 p-2">
+      {roles.map((r) => (
+        <ListRow key={r.name} onClick={() => onSelect(r.name)}>
+          <Shield className={cn("h-3.5 w-3.5 shrink-0", r.name === "admin" ? "text-amber-400" : "text-muted-foreground")} />
+          <div className="flex-1 min-w-0">
+            <div className="text-xs font-medium truncate">{r.name}</div>
+            {r.description && <div className="text-[10px] text-muted-foreground truncate">{r.description}</div>}
+          </div>
+          <span className="shrink-0 rounded-full bg-accent px-1.5 py-0.5 text-[9px] text-muted-foreground">
+            {r.permissions.includes("*") ? "all" : r.permissions.length}
+          </span>
+          <ChevronRight className="h-3 w-3 shrink-0 text-muted-foreground" />
+        </ListRow>
       ))}
-      {ownership && (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Lock className="ml-0.5 h-2.5 w-2.5 text-amber-400/70" />
-          </TooltipTrigger>
-          <TooltipContent side="top">Owner-restricted</TooltipContent>
-        </Tooltip>
-      )}
+      {isAdmin && <CreateRoleDialog onCreated={onCreated} />}
     </div>
   );
 }
 
-function PolicyMatrix({ roles, policies }: { roles: Role[]; policies: Policy[] }) {
-  const entities = [...new Set(policies.map((p) => p.entity))].sort();
-  const policyMap = new Map<string, Map<string, { actions: Set<string>; ownership: boolean }>>();
-  for (const p of policies) {
-    if (!policyMap.has(p.role)) policyMap.set(p.role, new Map());
-    policyMap.get(p.role)!.set(p.entity, { actions: new Set(p.actions), ownership: p.ownership });
-  }
+function RoleDetailView({ role, availablePermissions, isAdmin, onBack }: {
+  role: Role; availablePermissions: PermissionDeclaration[];
+  isAdmin: boolean; onBack: () => void;
+}) {
+  const [search, setSearch] = useState("");
+  const isBuiltIn = role.name === "admin";
+  const isWildcard = role.permissions.includes("*");
 
-  if (entities.length === 0) {
-    return <div className="flex items-center justify-center p-6 text-[10px] text-muted-foreground">No policies configured</div>;
-  }
+  const grouped = useMemo(() => groupPermissions(availablePermissions), [availablePermissions]);
+
+  const filtered = useMemo(() => {
+    if (!search) return grouped;
+    const q = search.toLowerCase();
+    return grouped
+      .map(([ns, perms]) => [ns, perms.filter((p) => p.key.toLowerCase().includes(q) || p.description.toLowerCase().includes(q))] as const)
+      .filter(([, perms]) => perms.length > 0)
+      .map(([ns, perms]) => [ns, [...perms]] as [string, PermissionDeclaration[]]);
+  }, [grouped, search]);
+
+  const togglePermission = (key: string) => {
+    if (isBuiltIn || !isAdmin) return;
+    const next = role.permissions.includes(key)
+      ? role.permissions.filter((p) => p !== key)
+      : [...role.permissions, key];
+    updateRole(role.name, { permissions: next });
+  };
+
+  const toggleGroup = (_ns: string, permsInGroup: PermissionDeclaration[]) => {
+    if (isBuiltIn || !isAdmin) return;
+    const keys = permsInGroup.map((p) => p.key);
+    const allSelected = keys.every((k) => role.permissions.includes(k));
+    let next: string[];
+    if (allSelected) {
+      next = role.permissions.filter((p) => !keys.includes(p));
+    } else {
+      const current = new Set(role.permissions);
+      keys.forEach((k) => current.add(k));
+      next = [...current];
+    }
+    updateRole(role.name, { permissions: next });
+  };
 
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full border-collapse text-[10px]">
-        <thead>
-          <tr>
-            <th className="sticky left-0 z-10 bg-background px-2 py-1.5 text-left font-medium text-muted-foreground">
-              <Shield className="inline h-3 w-3 mr-1" />Role
-            </th>
-            {entities.map((e) => (
-              <th key={e} className="px-1 py-1.5 text-center font-medium text-muted-foreground">
-                {e === "*" ? <span className="text-amber-400">all</span> : e}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {roles.map((r) => {
-            const roleMap = policyMap.get(r.name);
-            return (
-              <tr key={r.name} className="border-t border-border/50 hover:bg-accent/30">
-                <td className="sticky left-0 z-10 bg-background px-2 py-0.5 text-xs font-medium">
-                  {r.name}
-                </td>
-                {entities.map((e) => {
-                  const cell = roleMap?.get(e);
-                  return (
-                    <td key={e} className="px-1 py-0.5 text-center">
-                      {cell
-                        ? <ActionCell granted={cell.actions} ownership={cell.ownership} />
-                        : <span className="text-muted-foreground/20">—</span>}
-                    </td>
-                  );
-                })}
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+    <div className="flex h-full flex-col">
+      {/* Header */}
+      <div className="flex shrink-0 items-center gap-2 border-b border-border px-2 py-1.5">
+        <button onClick={onBack} className="rounded p-0.5 hover:bg-accent">
+          <ArrowLeft className="h-3.5 w-3.5" />
+        </button>
+        <div className="flex-1 min-w-0">
+          <div className="text-xs font-medium truncate">
+            {role.name}
+            {isBuiltIn && <span className="ml-1 text-[9px] text-amber-400">(built-in)</span>}
+          </div>
+          {role.description && <div className="text-[10px] text-muted-foreground truncate">{role.description}</div>}
+        </div>
+        {!isBuiltIn && isAdmin && (
+          <DeleteRoleButton roleName={role.name} onDeleted={onBack} />
+        )}
+      </div>
+
+      {/* Inherits */}
+      {role.inherits.length > 0 && (
+        <div className="shrink-0 border-b border-border px-3 py-1.5 text-[10px] text-muted-foreground">
+          Inherits: {role.inherits.join(", ")}
+        </div>
+      )}
+
+      {/* Search */}
+      <div className="shrink-0 border-b border-border px-2 py-1">
+        <div className="relative">
+          <Search className="absolute left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Filter permissions…"
+            size="xs"
+            className="pl-6"
+          />
+        </div>
+      </div>
+
+      {/* Permission groups */}
+      <div className="flex-1 overflow-auto">
+        {isWildcard && (
+          <div className="px-3 py-2 text-[10px] text-amber-400">
+            This role has wildcard access — all permissions are granted.
+          </div>
+        )}
+        {filtered.map(([ns, perms]) => {
+          const selectedCount = perms.filter((p) => isWildcard || role.permissions.includes(p.key)).length;
+          return (
+            <div key={ns} className="border-b border-border/50">
+              <div className="flex items-center gap-2 px-3 py-1.5">
+                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{ns}</span>
+                <span className="text-[10px] text-muted-foreground">{selectedCount}/{perms.length}</span>
+                {!isBuiltIn && isAdmin && !isWildcard && (
+                  <button
+                    onClick={() => toggleGroup(ns, perms)}
+                    className="ml-auto text-[10px] text-primary hover:underline"
+                  >
+                    {selectedCount === perms.length ? "Clear" : "Select all"}
+                  </button>
+                )}
+              </div>
+              {perms.map((p) => {
+                const canToggle = !isBuiltIn && isAdmin && !isWildcard;
+                return (
+                  <ListRow
+                    key={p.key}
+                    onClick={canToggle ? () => togglePermission(p.key) : undefined}
+                  >
+                    <ToggleDot
+                      active={isWildcard || role.permissions.includes(p.key)}
+                      disabled={!canToggle}
+                    />
+                    <code className="text-xs">{p.key}</code>
+                    <span className="text-xs text-muted-foreground">{p.description}</span>
+                  </ListRow>
+                );
+              })}
+            </div>
+          );
+        })}
+        {filtered.length === 0 && availablePermissions.length > 0 && (
+          <div className="p-3 text-[10px] text-muted-foreground">No permissions match your filter.</div>
+        )}
+        {availablePermissions.length === 0 && (
+          <div className="p-3 text-[10px] text-muted-foreground">No permissions declared in manifest.</div>
+        )}
+      </div>
     </div>
   );
 }
+
+// ── Main panel ──────────────────────────────────────────────────────────────
 
 export default function SecurityPanel() {
   const { projectPath } = useProjectContext();
-  const { appId, roles, users, assignments, policies, loading, error, isAdmin } = useSyncExternalStore(subscribe, getSnapshot);
+  const { appId, roles, users, assignments, availablePermissions, loading, error, isAdmin } = useSyncExternalStore(subscribe, getSnapshot);
+
+  const [view, setView] = useState<View>("users");
 
   useEffect(() => { if (projectPath) loadProject(projectPath); }, [projectPath]);
+
+  // Reset to users view when project changes
+  useEffect(() => { setView("users"); }, [appId]);
 
   if (!projectPath) {
     return <div className="flex h-full items-center justify-center p-6 text-xs text-muted-foreground">No project opened</div>;
   }
 
+  const selectedRole = typeof view === "object" ? roles.find((r) => r.name === view.role) : null;
+
   return (
     <TooltipProvider delayDuration={200}>
       <div className="flex h-full flex-col">
+        {/* Top bar */}
         <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
           <span className="truncate text-xs font-medium uppercase tracking-wider text-muted-foreground">{appId ?? "Security"}</span>
-          <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => refresh()}>
+          <Button size="icon-xs" variant="ghost" onClick={() => refresh()}>
             <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
           </Button>
         </div>
@@ -199,23 +412,54 @@ export default function SecurityPanel() {
         {loading && roles.length === 0 && <div className="flex animate-pulse items-center justify-center p-6 text-xs text-muted-foreground">Loading...</div>}
         {!loading && !error && roles.length === 0 && appId && <div className="flex items-center justify-center p-6 text-xs text-muted-foreground">No RBAC configured</div>}
 
-        {roles.length > 0 && (
-          <Tabs defaultValue="assignments" className="flex flex-1 flex-col overflow-hidden">
-            <TabsList className="shrink-0 border-b border-border px-1">
-              <TabsTrigger value="assignments" className="gap-1">
-                <Users className="h-3 w-3" />Assignments
-              </TabsTrigger>
-              <TabsTrigger value="policies" className="gap-1">
-                <KeyRound className="h-3 w-3" />Policies
-              </TabsTrigger>
-            </TabsList>
-            <TabsContent value="assignments" className="flex-1 overflow-auto p-1">
-              <AssignmentMatrix users={users} roles={roles} assignments={assignments} isAdmin={isAdmin} />
-            </TabsContent>
-            <TabsContent value="policies" className="flex-1 overflow-auto p-1">
-              <PolicyMatrix roles={roles} policies={policies} />
-            </TabsContent>
-          </Tabs>
+        {roles.length > 0 && !selectedRole && (
+          <>
+            {/* Nav tabs */}
+            <div className="flex shrink-0 border-b border-border">
+              <button
+                onClick={() => setView("users")}
+                className={cn(
+                  "flex-1 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider",
+                  view === "users" ? "border-b-2 border-primary text-foreground" : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <Users className="mr-1 inline h-3 w-3" />Users
+              </button>
+              <button
+                onClick={() => setView("roles")}
+                className={cn(
+                  "flex-1 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider",
+                  view === "roles" ? "border-b-2 border-primary text-foreground" : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <Shield className="mr-1 inline h-3 w-3" />Roles
+              </button>
+            </div>
+
+            {/* View content */}
+            <div className="flex-1 overflow-auto">
+              {view === "users" && (
+                <UsersView users={users} roles={roles} assignments={assignments} isAdmin={isAdmin} />
+              )}
+              {view === "roles" && (
+                <RolesListView
+                  roles={roles}
+                  isAdmin={isAdmin}
+                  onSelect={(name) => setView({ role: name })}
+                  onCreated={(name) => setView({ role: name })}
+                />
+              )}
+            </div>
+          </>
+        )}
+
+        {selectedRole && (
+          <RoleDetailView
+            role={selectedRole}
+            availablePermissions={availablePermissions}
+            isAdmin={isAdmin}
+            onBack={() => setView("roles")}
+          />
         )}
       </div>
     </TooltipProvider>

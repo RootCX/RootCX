@@ -133,7 +133,7 @@ export default function ExplorerPanel() {
         <span className="truncate text-xs font-medium uppercase tracking-wider text-muted-foreground">
           {folderName}
         </span>
-        <Button size="icon" variant="ghost" className="h-6 w-6" onClick={() => executeCommand("project.open")}>
+        <Button size="icon-xs" variant="ghost" onClick={() => executeCommand("project.open")}>
           <FolderOpen className="h-3.5 w-3.5" />
         </Button>
       </div>

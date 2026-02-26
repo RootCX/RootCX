@@ -7,7 +7,7 @@ use crate::RuntimeError;
 use crate::manifest::{json_to_sql_default, map_field_type, quote_ident};
 use rootcx_shared_types::{EntityContract, FieldContract, SchemaChange, SchemaVerification};
 
-const PROTECTED_COLUMNS: &[&str] = &["id", "created_at", "updated_at", "owner_id"];
+const PROTECTED_COLUMNS: &[&str] = &["id", "created_at", "updated_at"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DbColumn {
@@ -595,7 +595,6 @@ mod tests {
             db_col("id", "uuid", true),
             db_col("created_at", "timestamp with time zone", true),
             db_col("updated_at", "timestamp with time zone", true),
-            db_col("owner_id", "uuid", false),
             db_col("name", "text", false),
         ];
         let manifest = vec![mfield("name", "text")];

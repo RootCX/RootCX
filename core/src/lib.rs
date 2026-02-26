@@ -21,8 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use auth::AuthConfig;
-use extensions::rbac::PolicyCache;
-use extensions::{RuntimeExtension, builtin_extensions_with_cache};
+use extensions::{RuntimeExtension, builtin_extensions};
 use rootcx_postgres_mgmt::PostgresManager;
 use rootcx_shared_types::{ForgeStatus, OsStatus, PostgresStatus, RuntimeStatus, ServiceState};
 use scheduler::SchedulerHandle;
@@ -39,7 +38,6 @@ pub struct Runtime {
     pool: Option<PgPool>,
     extensions: Vec<Box<dyn RuntimeExtension>>,
     auth_config: Arc<auth::AuthConfig>,
-    rbac_cache: Arc<PolicyCache>,
     secret_manager: Option<Arc<SecretManager>>,
     worker_manager: Option<Arc<WorkerManager>>,
     tool_registry: Arc<ToolRegistry>,
@@ -60,11 +58,10 @@ impl Runtime {
         auth_required: Option<bool>,
     ) -> Self {
         let auth_config = AuthConfig::load(&data_dir, auth_required).expect("failed to load auth config");
-        let rbac_cache = Arc::new(PolicyCache::default());
 
         let browser_queue = Arc::new(extensions::browser::queue::BrowserQueue::new());
-        let extensions = builtin_extensions_with_cache(
-            Arc::clone(&auth_config), Arc::clone(&rbac_cache), Arc::clone(&browser_queue),
+        let extensions = builtin_extensions(
+            Arc::clone(&auth_config), Arc::clone(&browser_queue),
         );
 
         let mut tool_registry = ToolRegistry::default();
@@ -77,7 +74,6 @@ impl Runtime {
             pool: None,
             extensions,
             auth_config,
-            rbac_cache,
             secret_manager: None,
             worker_manager: None,
             tool_registry: Arc::new(tool_registry),
@@ -157,10 +153,6 @@ impl Runtime {
 
     pub fn auth_config(&self) -> &Arc<auth::AuthConfig> {
         &self.auth_config
-    }
-
-    pub fn rbac_cache(&self) -> &Arc<PolicyCache> {
-        &self.rbac_cache
     }
 
     pub fn pool(&self) -> Option<&PgPool> {
