@@ -17,7 +17,9 @@ export const studioTheme = EditorView.theme(
       backgroundColor: bg,
       fontSize: "13px",
       fontFamily: '"JetBrains Mono", "Fira Code", ui-monospace, monospace',
+      height: "100%",
     },
+    ".cm-scroller": { overflow: "auto" },
     ".cm-content": { caretColor: cursor, padding: "4px 0" },
     ".cm-cursor, .cm-dropCursor": { borderLeftColor: cursor },
     "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection": {
