@@ -10,6 +10,7 @@ use axum::Router;
 use axum::routing::{get, post};
 use sqlx::PgPool;
 use tracing::info;
+use uuid::Uuid;
 
 pub use grant::AccessGrant;
 pub use policy::PolicyCache;
@@ -108,7 +109,7 @@ impl RuntimeExtension for RbacExtension {
         Ok(())
     }
 
-    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest) -> Result<(), RuntimeError> {
+    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, installed_by: Uuid) -> Result<(), RuntimeError> {
         let contract = match &manifest.permissions {
             Some(c) => c,
             None => return Ok(()),
@@ -161,8 +162,20 @@ impl RuntimeExtension for RbacExtension {
                 .execute(pool).await.map_err(RuntimeError::Schema)?;
         }
 
-        self.cache.invalidate(app_id);
-        self.cache.populate(app_id, contract);
+        if contract.roles.contains_key("admin") {
+            sqlx::query(
+                "INSERT INTO rootcx_system.rbac_assignments (user_id, app_id, role) \
+                 VALUES ($1, $2, 'admin') ON CONFLICT DO NOTHING",
+            )
+            .bind(installed_by)
+            .bind(app_id)
+            .execute(pool)
+            .await
+            .map_err(RuntimeError::Schema)?;
+            info!(app = %app_id, user = %installed_by, "installer promoted to admin");
+        }
+
+        self.cache.update(app_id, contract);
         info!(app = %app_id, roles = contract.roles.len(), policies = contract.policies.len(), "RBAC policies synced");
         Ok(())
     }

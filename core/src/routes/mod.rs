@@ -52,13 +52,13 @@ pub async fn get_status(
 }
 
 pub async fn install_app(
-    _identity: Identity,
+    identity: Identity,
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
     Json(manifest): Json<AppManifest>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let g = rt.lock().await;
     let pool = g.pool().cloned().ok_or(ApiError::NotReady)?;
-    crate::manifest::install_app(&pool, &manifest, g.extensions()).await?;
+    crate::manifest::install_app(&pool, &manifest, g.extensions(), identity.user_id).await?;
     Ok(Json(json!({ "message": format!("app '{}' installed", manifest.app_id) })))
 }
 

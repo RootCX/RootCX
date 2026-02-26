@@ -36,7 +36,7 @@ impl PolicyCache {
         self.inner.read().unwrap().get(app_id).cloned()
     }
 
-    pub fn populate(&self, app_id: &str, contract: &PermissionsContract) {
+    pub fn update(&self, app_id: &str, contract: &PermissionsContract) {
         self.inner.write().unwrap().insert(
             app_id.to_string(),
             CachedApp {

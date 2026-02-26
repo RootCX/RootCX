@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use sqlx::PgPool;
 use tracing::info;
+use uuid::Uuid;
 
 use crate::RuntimeError;
 use crate::extensions::RuntimeExtension;
@@ -11,6 +12,7 @@ pub async fn install_app(
     pool: &PgPool,
     manifest: &AppManifest,
     extensions: &[Box<dyn RuntimeExtension>],
+    installed_by: Uuid,
 ) -> Result<(), RuntimeError> {
     validate_manifest(manifest)?;
     let app_id = &manifest.app_id;
@@ -51,7 +53,7 @@ pub async fn install_app(
     }
 
     for ext in extensions {
-        ext.on_app_installed(pool, manifest).await?;
+        ext.on_app_installed(pool, manifest, installed_by).await?;
     }
 
     info!(

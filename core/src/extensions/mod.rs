@@ -10,6 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::Router;
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::RuntimeError;
 use crate::auth::AuthConfig;
@@ -31,7 +32,7 @@ pub trait RuntimeExtension: Send + Sync {
         Ok(())
     }
 
-    async fn on_app_installed(&self, _pool: &PgPool, _manifest: &AppManifest) -> Result<(), RuntimeError> {
+    async fn on_app_installed(&self, _pool: &PgPool, _manifest: &AppManifest, _installed_by: Uuid) -> Result<(), RuntimeError> {
         Ok(())
     }
 

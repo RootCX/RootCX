@@ -74,7 +74,7 @@ impl RuntimeExtension for AgentExtension {
         Ok(())
     }
 
-    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest) -> Result<(), RuntimeError> {
+    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, _installed_by: uuid::Uuid) -> Result<(), RuntimeError> {
         let def = match &manifest.agent {
             Some(d) => d,
             None => return Ok(()),

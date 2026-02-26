@@ -152,15 +152,27 @@ pub(crate) async fn revoke_role(
     let pool = routes::pool(&rt).await?;
     require_admin(&pool, &cache, &app_id, identity.user_id).await?;
 
-    let r = sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1 AND app_id = $2 AND role = $3")
-        .bind(body.user_id)
-        .bind(&app_id)
-        .bind(&body.role)
-        .execute(&pool)
-        .await?;
+    let r = sqlx::query(
+        "DELETE FROM rootcx_system.rbac_assignments \
+         WHERE user_id = $1 AND app_id = $2 AND role = $3 \
+         AND (role != 'admin' OR \
+              (SELECT COUNT(*) FROM rootcx_system.rbac_assignments WHERE app_id = $2 AND role = 'admin') > 1)",
+    )
+    .bind(body.user_id)
+    .bind(&app_id)
+    .bind(&body.role)
+    .execute(&pool)
+    .await?;
 
     if r.rows_affected() == 0 {
-        return Err(ApiError::NotFound(format!("assignment not found for role '{}'", body.role)));
+        let is_last_admin = body.role == "admin"
+            && sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM rootcx_system.rbac_assignments WHERE app_id = $1 AND role = 'admin'")
+                .bind(&app_id).fetch_one(&pool).await? <= 1;
+        return Err(if is_last_admin {
+            ApiError::BadRequest("cannot revoke the last admin of an app".into())
+        } else {
+            ApiError::NotFound(format!("assignment not found for role '{}'", body.role))
+        });
     }
     Ok(Json(json!({ "message": format!("role '{}' revoked", body.role) })))
 }
