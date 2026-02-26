@@ -85,6 +85,11 @@ for (const evt of ["forge://question-replied", "forge://question-rejected"] as c
   });
 }
 
+listen<{ session: Session }>("forge://session-updated", (e) => {
+  state = { ...state, sessions: state.sessions.map((s) => (s.id === e.payload.session.id ? e.payload.session : s)) };
+  emit();
+});
+
 listen<{ sessionID: string }>("forge://session-idle", (e) => {
   if (e.payload.sessionID === state.sessionId) { state = { ...state, streaming: false }; emit(); }
 });

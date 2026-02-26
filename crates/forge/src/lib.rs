@@ -118,6 +118,7 @@ impl ForgeEngine {
                 &config.provider, &config.model, config.api_key.as_deref(), config.region.as_deref(),
             ),
             compactor: Box::new(compactor::LlmSummarizer),
+            config,
             permissions: self.permissions.clone(),
             questions: self.questions.clone(),
             emit: emit_fn,

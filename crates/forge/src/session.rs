@@ -156,6 +156,15 @@ pub async fn get_session(pool: &PgPool, session_id: Uuid) -> Result<Session, For
         .await?)
 }
 
+pub async fn update_title(pool: &PgPool, session_id: Uuid, title: &str) -> Result<(), ForgeError> {
+    sqlx::query("UPDATE forge.sessions SET title = $1 WHERE id = $2")
+        .bind(title)
+        .bind(session_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn set_summary_message_id(
     pool: &PgPool,
     session_id: Uuid,

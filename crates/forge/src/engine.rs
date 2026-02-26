@@ -17,6 +17,7 @@ use crate::provider::{
 use crate::question::PendingQuestions;
 use crate::session;
 use crate::tools;
+use crate::ForgeConfig;
 
 const MAX_TURNS: usize = 50;
 const COMPACT_THRESHOLD_PCT: usize = 80;
@@ -31,6 +32,7 @@ pub struct LoopContext {
     pub system_prompt: String,
     pub provider: Box<dyn LlmProvider>,
     pub compactor: Box<dyn Compactor>,
+    pub config: ForgeConfig,
     pub permissions: Arc<PendingPermissions>,
     pub questions: Arc<PendingQuestions>,
     pub emit: EmitFn,
@@ -59,6 +61,11 @@ pub async fn agentic_loop(mut ctx: LoopContext, user_text: &str) -> Result<(), F
         "parts": [user_part],
     }));
 
+    if messages.is_empty() {
+        tokio::spawn(generate_title(
+            ctx.pool.clone(), ctx.session_id, user_text.to_string(), ctx.config.clone(), ctx.emit.clone(),
+        ));
+    }
     messages.push(ChatMessage {
         role: Role::User,
         content: vec![ContentBlock::Text { text: user_text.to_string() }],
@@ -328,6 +335,32 @@ async fn build_history(
         }
     }
     Ok((messages, summary_text))
+}
+
+async fn generate_title(pool: PgPool, session_id: Uuid, user_text: String, config: ForgeConfig, emit: EmitFn) {
+    let provider = provider::build_provider(
+        &config.provider, &config.model, config.api_key.as_deref(), config.region.as_deref(),
+    );
+    let messages = [ChatMessage {
+        role: Role::User,
+        content: vec![ContentBlock::Text { text: user_text }],
+    }];
+    let Ok(mut stream) = provider.stream(
+        "Generate a short title (3-6 words) for this conversation. Reply with ONLY the title, nothing else.",
+        &messages, &[],
+    ).await else { return };
+
+    let mut title = String::new();
+    while let Some(event) = stream.next().await {
+        if let Ok(StreamEvent::TextDelta(t)) = event { title.push_str(&t) }
+    }
+
+    let title = title.trim();
+    if title.is_empty() { return }
+    if session::update_title(&pool, session_id, title).await.is_err() { return }
+    if let Ok(s) = session::get_session(&pool, session_id).await {
+        (emit)("forge://session-updated", json!({ "session": s }));
+    }
 }
 
 fn format_tool_title(name: &str, args: &Value) -> String {
