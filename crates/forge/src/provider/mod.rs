@@ -74,6 +74,23 @@ pub trait LlmProvider: Send + Sync {
         messages: &[ChatMessage],
         tools: &[ToolDef],
     ) -> Result<EventStream, ForgeError>;
+
+    fn context_window(&self) -> usize;
+}
+
+pub fn estimate_tokens(system: &str, messages: &[ChatMessage]) -> usize {
+    let mut chars = system.len();
+    for msg in messages {
+        chars += 4; // per-message overhead
+        for block in &msg.content {
+            chars += match block {
+                ContentBlock::Text { text } => text.len(),
+                ContentBlock::ToolUse { name, input, .. } => name.len() + input.to_string().len(),
+                ContentBlock::ToolResult { content, .. } => content.len(),
+            };
+        }
+    }
+    chars / 4
 }
 
 pub fn build_provider(

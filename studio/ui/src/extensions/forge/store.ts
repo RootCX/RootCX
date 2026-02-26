@@ -1,9 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
-export interface Session { id: string; title: string; directory: string; created_at: string; updated_at: string }
+export interface Session { id: string; title: string; directory: string; summary_message_id: string | null; created_at: string; updated_at: string }
 export interface Message { id: string; session_id: string; role: "user" | "assistant"; error: { name?: string; message?: string } | null; created_at: string; completed_at: string | null }
-export interface Part { id: string; message_id: string; part_type: string; content: string; tool_name: string | null; tool_state: { status: string; title?: string } | null; created_at: string }
+export interface Part { id: string; message_id: string; part_type: string; content: string; tool_name: string | null; tool_state: { status: string; title?: string } | null; tool_input: Record<string, unknown> | null; created_at: string }
 export interface Permission { id: string; session_id: string; tool: string; title: string; description: string }
 export interface QuestionOption { label: string; description: string }
 export interface QuestionInfo { question: string; header: string; options: QuestionOption[]; multiple?: boolean; custom?: boolean }

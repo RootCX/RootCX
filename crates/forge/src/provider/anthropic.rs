@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bytes::Bytes;
 use futures::StreamExt;
 use serde_json::{json, Value};
@@ -75,6 +77,8 @@ impl Anthropic {
 
 #[async_trait::async_trait]
 impl LlmProvider for Anthropic {
+    fn context_window(&self) -> usize { 200_000 }
+
     async fn stream(
         &self,
         system: &str,
@@ -114,24 +118,23 @@ impl LlmProvider for Anthropic {
         >;
         let bs: ByteStream = Box::pin(byte_stream);
 
+        // tool_ids: maps content_block index → tool_use_id for correlating delta/stop events
         let stream = futures::stream::unfold(
-            (bs, String::new()),
-            |(mut bs, mut buf): (ByteStream, String)| async move {
+            (bs, String::new(), HashMap::<u64, String>::new()),
+            |(mut bs, mut buf, mut tool_ids): (ByteStream, String, HashMap<u64, String>)| async move {
                 loop {
                     if let Some(pos) = buf.find("\n\n") {
                         let event_block = buf[..pos].to_string();
                         buf.drain(..pos + 2);
 
-                        if let Some(evt) = parse_sse_event(&event_block) {
-                            return Some((evt, (bs, buf)));
+                        if let Some(evt) = parse_sse_event(&event_block, &mut tool_ids) {
+                            return Some((evt, (bs, buf, tool_ids)));
                         }
                         continue;
                     }
 
                     match bs.next().await {
-                        Some(Ok(chunk)) => {
-                            buf.push_str(&String::from_utf8_lossy(&chunk));
-                        }
+                        Some(Ok(chunk)) => buf.push_str(&String::from_utf8_lossy(&chunk)),
                         _ => return None,
                     }
                 }
@@ -142,7 +145,10 @@ impl LlmProvider for Anthropic {
     }
 }
 
-fn parse_sse_event(block: &str) -> Option<Result<StreamEvent, ForgeError>> {
+fn parse_sse_event(
+    block: &str,
+    tool_ids: &mut HashMap<u64, String>,
+) -> Option<Result<StreamEvent, ForgeError>> {
     let mut event_type = "";
     let mut data = String::new();
 
@@ -165,45 +171,40 @@ fn parse_sse_event(block: &str) -> Option<Result<StreamEvent, ForgeError>> {
 
     match event_type {
         "content_block_start" => {
-            let block = &json["content_block"];
-            match block["type"].as_str()? {
-                "tool_use" => Some(Ok(StreamEvent::ToolCallStart {
-                    id: block["id"].as_str()?.to_string(),
-                    name: block["name"].as_str()?.to_string(),
-                })),
+            let idx = json["index"].as_u64()?;
+            let cb = &json["content_block"];
+            match cb["type"].as_str()? {
+                "tool_use" => {
+                    let id = cb["id"].as_str()?.to_string();
+                    tool_ids.insert(idx, id.clone());
+                    Some(Ok(StreamEvent::ToolCallStart {
+                        id,
+                        name: cb["name"].as_str()?.to_string(),
+                    }))
+                }
                 "thinking" => {
-                    let text = block["thinking"].as_str().unwrap_or("");
-                    if text.is_empty() {
-                        None
-                    } else {
-                        Some(Ok(StreamEvent::ReasoningDelta(text.to_string())))
-                    }
+                    let text = cb["thinking"].as_str().unwrap_or("");
+                    if text.is_empty() { None } else { Some(Ok(StreamEvent::ReasoningDelta(text.to_string()))) }
                 }
                 _ => None,
             }
         }
         "content_block_delta" => {
+            let idx = json["index"].as_u64()?;
             let delta = &json["delta"];
             match delta["type"].as_str()? {
-                "text_delta" => {
-                    Some(Ok(StreamEvent::TextDelta(delta["text"].as_str()?.to_string())))
-                }
-                "thinking_delta" => Some(Ok(StreamEvent::ReasoningDelta(
-                    delta["thinking"].as_str()?.to_string(),
-                ))),
+                "text_delta" => Some(Ok(StreamEvent::TextDelta(delta["text"].as_str()?.to_string()))),
+                "thinking_delta" => Some(Ok(StreamEvent::ReasoningDelta(delta["thinking"].as_str()?.to_string()))),
                 "input_json_delta" => {
-                    let id = json["index"].as_u64().map(|i| i.to_string()).unwrap_or_default();
-                    Some(Ok(StreamEvent::ToolCallDelta {
-                        id,
-                        json: delta["partial_json"].as_str()?.to_string(),
-                    }))
+                    let id = tool_ids.get(&idx)?.clone();
+                    Some(Ok(StreamEvent::ToolCallDelta { id, json: delta["partial_json"].as_str()?.to_string() }))
                 }
                 _ => None,
             }
         }
         "content_block_stop" => {
-            let idx = json["index"].as_u64().map(|i| i.to_string()).unwrap_or_default();
-            Some(Ok(StreamEvent::ToolCallEnd { id: idx }))
+            let idx = json["index"].as_u64()?;
+            tool_ids.remove(&idx).map(|id| Ok(StreamEvent::ToolCallEnd { id }))
         }
         "message_delta" => {
             let reason = match json["delta"]["stop_reason"].as_str()? {
@@ -215,9 +216,7 @@ fn parse_sse_event(block: &str) -> Option<Result<StreamEvent, ForgeError>> {
             Some(Ok(StreamEvent::Done(reason)))
         }
         "error" => {
-            let msg = json["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
+            let msg = json["error"]["message"].as_str().unwrap_or("unknown error");
             Some(Ok(StreamEvent::Error(msg.to_string())))
         }
         _ => None,

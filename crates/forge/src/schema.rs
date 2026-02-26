@@ -30,6 +30,8 @@ const DDL: &[&str] = &[
     )",
     "CREATE INDEX IF NOT EXISTS idx_forge_messages_session ON forge.messages(session_id)",
     "CREATE INDEX IF NOT EXISTS idx_forge_parts_message ON forge.parts(message_id)",
+    "ALTER TABLE forge.sessions ADD COLUMN IF NOT EXISTS summary_message_id UUID REFERENCES forge.messages(id) ON DELETE SET NULL",
+    "ALTER TABLE forge.parts ADD COLUMN IF NOT EXISTS tool_input JSONB",
 ];
 
 pub async fn bootstrap(pool: &PgPool) -> Result<(), ForgeError> {

@@ -13,6 +13,7 @@ pub struct Session {
     pub id: Uuid,
     pub title: String,
     pub directory: String,
+    pub summary_message_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -36,6 +37,7 @@ pub struct Part {
     pub content: String,
     pub tool_name: Option<String>,
     pub tool_state: Option<Value>,
+    pub tool_input: Option<Value>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -115,11 +117,12 @@ pub async fn upsert_part(
     content: &str,
     tool_name: Option<&str>,
     tool_state: Option<&Value>,
+    tool_input: Option<&Value>,
 ) -> Result<Part, ForgeError> {
     Ok(sqlx::query_as(
-        r#"INSERT INTO forge.parts (id, message_id, type, content, tool_name, tool_state)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           ON CONFLICT (id) DO UPDATE SET content = $4, tool_state = $6
+        r#"INSERT INTO forge.parts (id, message_id, type, content, tool_name, tool_state, tool_input)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           ON CONFLICT (id) DO UPDATE SET content = $4, tool_state = $6, tool_input = COALESCE(forge.parts.tool_input, $7)
            RETURNING *"#,
     )
     .bind(id)
@@ -128,6 +131,7 @@ pub async fn upsert_part(
     .bind(content)
     .bind(tool_name)
     .bind(tool_state)
+    .bind(tool_input)
     .fetch_one(pool)
     .await?)
 }
@@ -142,19 +146,65 @@ pub async fn get_messages_with_parts(
     .bind(session_id)
     .fetch_all(pool)
     .await?;
+    join_parts(pool, messages).await
+}
 
-    let msg_ids: Vec<Uuid> = messages.iter().map(|m| m.id).collect();
-    let parts: Vec<Part> = if msg_ids.is_empty() {
+pub async fn get_session(pool: &PgPool, session_id: Uuid) -> Result<Session, ForgeError> {
+    Ok(sqlx::query_as("SELECT * FROM forge.sessions WHERE id = $1")
+        .bind(session_id)
+        .fetch_one(pool)
+        .await?)
+}
+
+pub async fn set_summary_message_id(
+    pool: &PgPool,
+    session_id: Uuid,
+    message_id: Uuid,
+) -> Result<(), ForgeError> {
+    sqlx::query("UPDATE forge.sessions SET summary_message_id = $1 WHERE id = $2")
+        .bind(message_id)
+        .bind(session_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn get_parts_for_message(pool: &PgPool, message_id: Uuid) -> Result<Vec<Part>, ForgeError> {
+    Ok(sqlx::query_as("SELECT * FROM forge.parts WHERE message_id = $1 ORDER BY created_at")
+        .bind(message_id)
+        .fetch_all(pool)
+        .await?)
+}
+
+pub async fn get_messages_after(
+    pool: &PgPool,
+    session_id: Uuid,
+    after_message_id: Uuid,
+) -> Result<Vec<MessageWithParts>, ForgeError> {
+    let boundary: Message = sqlx::query_as("SELECT * FROM forge.messages WHERE id = $1")
+        .bind(after_message_id)
+        .fetch_one(pool)
+        .await?;
+    let messages: Vec<Message> = sqlx::query_as(
+        "SELECT * FROM forge.messages WHERE session_id = $1 AND created_at > $2 ORDER BY created_at",
+    )
+    .bind(session_id)
+    .bind(boundary.created_at)
+    .fetch_all(pool)
+    .await?;
+    join_parts(pool, messages).await
+}
+
+async fn join_parts(pool: &PgPool, messages: Vec<Message>) -> Result<Vec<MessageWithParts>, ForgeError> {
+    let ids: Vec<Uuid> = messages.iter().map(|m| m.id).collect();
+    let parts: Vec<Part> = if ids.is_empty() {
         vec![]
     } else {
-        sqlx::query_as(
-            "SELECT * FROM forge.parts WHERE message_id = ANY($1) ORDER BY created_at",
-        )
-        .bind(&msg_ids)
-        .fetch_all(pool)
-        .await?
+        sqlx::query_as("SELECT * FROM forge.parts WHERE message_id = ANY($1) ORDER BY created_at")
+            .bind(&ids)
+            .fetch_all(pool)
+            .await?
     };
-
     let mut grouped: HashMap<Uuid, Vec<Part>> = HashMap::new();
     for p in parts {
         grouped.entry(p.message_id).or_default().push(p);

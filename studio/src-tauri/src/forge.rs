@@ -17,11 +17,23 @@ pub fn new_state() -> ForgeState {
 }
 
 pub async fn init(state: &ForgeState) {
+    ensure_instructions().await;
     info!("forge: connecting to PG at {PG_URL}");
     match ForgeEngine::new(PG_URL).await {
         Ok(e) => { let _ = state.set(e); info!("forge: ready"); }
         Err(e) => warn!("forge: PG connection failed: {e}"),
     }
+}
+
+const RUNTIME_INSTRUCTIONS: &str = include_str!("../../../.agents/instructions/rootcx-runtime.md");
+
+async fn ensure_instructions() {
+    let dir = match crate::state::instructions_dir() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+    let _ = tokio::fs::create_dir_all(&dir).await;
+    let _ = tokio::fs::write(dir.join("rootcx-runtime.md"), RUNTIME_INSTRUCTIONS).await;
 }
 
 async fn build_config(client: &RuntimeClient) -> Result<ForgeConfig, String> {
@@ -40,7 +52,10 @@ async fn build_config(client: &RuntimeClient) -> Result<ForgeConfig, String> {
     info!("forge: provider={provider:?} model={model} key={}", if api_key.is_some() { "ok" } else { "missing" });
 
     let region = ai.get("region").and_then(|r| r.as_str()).map(String::from);
-    Ok(ForgeConfig { provider, model, api_key, region, system_prompt: None, instructions: vec![] })
+    let instructions = crate::state::instructions_dir()
+        .map(|d| vec![format!("{}/*.md", d.display())])
+        .unwrap_or_default();
+    Ok(ForgeConfig { provider, model, api_key, region, system_prompt: None, instructions })
 }
 
 fn parse_provider_model(s: &str) -> (rootcx_forge::provider::ProviderKind, String) {
@@ -68,9 +83,8 @@ fn engine(state: &ForgeState) -> Result<&ForgeEngine, String> {
 
 fn emit_fn(app: AppHandle) -> rootcx_forge::engine::EmitFn {
     Arc::new(move |event: &str, payload: Value| {
-        match app.emit(event, &payload) {
-            Ok(()) => tracing::debug!("forge emit OK: {event}"),
-            Err(e) => tracing::error!("forge emit FAILED: {event} -> {e}"),
+        if let Err(e) = app.emit(event, &payload) {
+            tracing::error!("forge emit {event}: {e}");
         }
     })
 }

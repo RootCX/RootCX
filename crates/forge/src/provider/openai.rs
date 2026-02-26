@@ -116,6 +116,13 @@ impl OpenAi {
 
 #[async_trait::async_trait]
 impl LlmProvider for OpenAi {
+    fn context_window(&self) -> usize {
+        if self.model.contains("gpt-4.1") { 1_000_000 }
+        else if self.model.contains("gpt-4o") || self.model.contains("gpt-4-turbo") { 128_000 }
+        else if self.model.starts_with("o1") || self.model.starts_with("o3") { 200_000 }
+        else { 128_000 }
+    }
+
     async fn stream(
         &self,
         system: &str,

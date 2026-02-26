@@ -110,6 +110,10 @@ impl Bedrock {
 
 #[async_trait::async_trait]
 impl LlmProvider for Bedrock {
+    fn context_window(&self) -> usize {
+        if self.model.contains("claude") { 200_000 } else { 128_000 }
+    }
+
     async fn stream(
         &self,
         system: &str,
@@ -144,22 +148,31 @@ impl LlmProvider for Bedrock {
             .send()
             .await
             .map_err(|e| {
-                tracing::error!(model = %self.model, region = %self.region, "bedrock: {e:#}");
-                ForgeError::Provider(format!("{e:#}"))
+                let detail = e.as_service_error()
+                    .map(|se| format!("{se:?}"))
+                    .unwrap_or_else(|| format!("{e:#}"));
+                tracing::error!(model = %self.model, region = %self.region, "bedrock: {detail}");
+                ForgeError::Provider(detail)
             })?;
 
         let stream_handle = output.stream;
 
-        let stream = futures::stream::unfold(stream_handle, |mut s| async move {
-            match s.recv().await {
-                Ok(Some(event)) => {
-                    let evt = convert_event(event);
-                    Some((evt, s))
+        // current_tool_id: correlates ContentBlockDelta/Stop (index-based) to the tool_use_id from Start
+        let stream = futures::stream::unfold(
+            (stream_handle, None::<String>),
+            |(mut s, mut tool_id)| async move {
+                loop {
+                    match s.recv().await {
+                        Ok(Some(event)) => match convert_event(event, &mut tool_id) {
+                            Some(evt) => return Some((evt, (s, tool_id))),
+                            None => continue,
+                        },
+                        Ok(None) => return None,
+                        Err(e) => return Some((Err(ForgeError::Provider(e.to_string())), (s, tool_id))),
+                    }
                 }
-                Ok(None) => None,
-                Err(e) => Some((Err(ForgeError::Provider(e.to_string())), s)),
-            }
-        });
+            },
+        );
 
         Ok(Box::pin(stream))
     }
@@ -167,27 +180,37 @@ impl LlmProvider for Bedrock {
 
 fn convert_event(
     event: bedrock::types::ConverseStreamOutput,
-) -> Result<StreamEvent, ForgeError> {
+    current_tool_id: &mut Option<String>,
+) -> Option<Result<StreamEvent, ForgeError>> {
     use bedrock::types::{ContentBlockDelta as D, ContentBlockStart as S, ConverseStreamOutput as E};
 
-    Ok(match event {
+    Some(Ok(match event {
         E::ContentBlockStart(b) => match b.start {
-            Some(S::ToolUse(tu)) => StreamEvent::ToolCallStart { id: tu.tool_use_id, name: tu.name },
-            _ => return Err(ForgeError::Stream("unexpected block start".into())),
+            Some(S::ToolUse(tu)) => {
+                *current_tool_id = Some(tu.tool_use_id.clone());
+                StreamEvent::ToolCallStart { id: tu.tool_use_id, name: tu.name }
+            }
+            _ => return None,
         },
         E::ContentBlockDelta(b) => match b.delta {
             Some(D::Text(t)) => StreamEvent::TextDelta(t),
-            Some(D::ToolUse(tu)) => StreamEvent::ToolCallDelta { id: b.content_block_index.to_string(), json: tu.input },
-            _ => return Err(ForgeError::Stream("unexpected block delta".into())),
+            Some(D::ToolUse(tu)) => StreamEvent::ToolCallDelta {
+                id: current_tool_id.clone().unwrap_or_default(),
+                json: tu.input,
+            },
+            _ => return None,
         },
-        E::ContentBlockStop(b) => StreamEvent::ToolCallEnd { id: b.content_block_index.to_string() },
+        E::ContentBlockStop(_) => match current_tool_id.take() {
+            Some(id) => StreamEvent::ToolCallEnd { id },
+            None => return None, // text block stop
+        },
         E::MessageStop(s) => StreamEvent::Done(match s.stop_reason {
             bedrock::types::StopReason::ToolUse => StopReason::ToolUse,
             bedrock::types::StopReason::MaxTokens => StopReason::MaxTokens,
             _ => StopReason::EndTurn,
         }),
-        _ => return Err(ForgeError::Stream("unexpected stream event".into())),
-    })
+        _ => return None,
+    }))
 }
 
 fn json_to_document(value: &serde_json::Value) -> Document {

@@ -1,3 +1,4 @@
+pub mod compactor;
 pub mod engine;
 pub mod error;
 pub mod permission;
@@ -17,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::{AbortHandle, JoinHandle};
-use tracing::info;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,7 +56,7 @@ impl ForgeEngine {
     pub async fn new(pg_url: &str) -> Result<Self, ForgeError> {
         let pool = PgPool::connect(pg_url).await?;
         schema::bootstrap(&pool).await?;
-        info!("forge engine initialized");
+        tracing::info!("forge engine initialized");
 
         Ok(Self {
             pool,
@@ -100,8 +100,6 @@ impl ForgeEngine {
         session::get_messages_with_parts(&self.pool, session_id).await
     }
 
-    /// Send a message — spawns the agentic loop in background, returns immediately.
-    /// Events are emitted via `emit_fn`.
     pub async fn send_message(
         &self,
         session_id: Uuid,
@@ -116,10 +114,10 @@ impl ForgeEngine {
             session_id,
             cwd: self.cwd.read().await.clone(),
             system_prompt,
-            provider_kind: config.provider,
-            model: config.model,
-            api_key: config.api_key,
-            region: config.region,
+            provider: provider::build_provider(
+                &config.provider, &config.model, config.api_key.as_deref(), config.region.as_deref(),
+            ),
+            compactor: Box::new(compactor::LlmSummarizer),
             permissions: self.permissions.clone(),
             questions: self.questions.clone(),
             emit: emit_fn,

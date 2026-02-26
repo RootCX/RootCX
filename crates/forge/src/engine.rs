@@ -8,17 +8,19 @@ use sqlx::PgPool;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use crate::compactor::Compactor;
 use crate::error::ForgeError;
 use crate::permission::{PendingPermissions, PermissionResponse};
 use crate::provider::{
-    self, ChatMessage, ContentBlock, LlmProvider, ProviderKind, Role, StopReason, StreamEvent,
-    ToolDef,
+    self, ChatMessage, ContentBlock, LlmProvider, Role, StopReason, StreamEvent, ToolDef,
 };
 use crate::question::PendingQuestions;
 use crate::session;
 use crate::tools;
 
 const MAX_TURNS: usize = 50;
+const COMPACT_THRESHOLD_PCT: usize = 80;
+const COMPACT_KEEP: usize = 4;
 
 pub type EmitFn = Arc<dyn Fn(&str, Value) + Send + Sync>;
 
@@ -27,32 +29,31 @@ pub struct LoopContext {
     pub session_id: Uuid,
     pub cwd: PathBuf,
     pub system_prompt: String,
-    pub provider_kind: ProviderKind,
-    pub model: String,
-    pub api_key: Option<String>,
-    pub region: Option<String>,
+    pub provider: Box<dyn LlmProvider>,
+    pub compactor: Box<dyn Compactor>,
     pub permissions: Arc<PendingPermissions>,
     pub questions: Arc<PendingQuestions>,
     pub emit: EmitFn,
 }
 
-pub async fn agentic_loop(ctx: LoopContext, user_text: &str) -> Result<(), ForgeError> {
+pub async fn agentic_loop(mut ctx: LoopContext, user_text: &str) -> Result<(), ForgeError> {
     let tool_defs = tools::tool_schemas();
 
-    let mut messages = build_history(&ctx.pool, ctx.session_id).await?;
+    ctx.system_prompt.push_str(&format!(
+        "\n\nWorking directory: {}\nPlatform: {} {}",
+        ctx.cwd.display(), std::env::consts::OS, std::env::consts::ARCH,
+    ));
 
-    let user_msg =
-        session::insert_message(&ctx.pool, ctx.session_id, "user").await?;
+    let (mut messages, summary) = build_history(&ctx.pool, ctx.session_id).await?;
+    let base_system_prompt = ctx.system_prompt.clone();
+    if let Some(ref s) = summary {
+        ctx.system_prompt = format!("{base_system_prompt}\n\n[Previous conversation summary]\n{s}");
+    }
+
+    let user_msg = session::insert_message(&ctx.pool, ctx.session_id, "user").await?;
     let user_part = session::upsert_part(
-        &ctx.pool,
-        Uuid::new_v4(),
-        user_msg.id,
-        "text",
-        user_text,
-        None,
-        None,
-    )
-    .await?;
+        &ctx.pool, Uuid::new_v4(), user_msg.id, "text", user_text, None, None, None,
+    ).await?;
     (ctx.emit)("forge://message-updated", json!({
         "info": user_msg,
         "parts": [user_part],
@@ -60,25 +61,41 @@ pub async fn agentic_loop(ctx: LoopContext, user_text: &str) -> Result<(), Forge
 
     messages.push(ChatMessage {
         role: Role::User,
-        content: vec![ContentBlock::Text {
-            text: user_text.to_string(),
-        }],
+        content: vec![ContentBlock::Text { text: user_text.to_string() }],
     });
 
-    let provider = provider::build_provider(&ctx.provider_kind, &ctx.model, ctx.api_key.as_deref(), ctx.region.as_deref());
-
     for turn in 0..MAX_TURNS {
+        let estimated = provider::estimate_tokens(&ctx.system_prompt, &messages);
+        let window = ctx.provider.context_window();
+        if estimated > window * COMPACT_THRESHOLD_PCT / 100 && messages.len() > COMPACT_KEEP + 2 {
+            info!(estimated, window, "compacting conversation");
+            (ctx.emit)("forge://compacting", json!({"sessionID": ctx.session_id}));
+
+            let keep = COMPACT_KEEP.min(messages.len() - 1);
+            let summary_text = ctx.compactor
+                .compact(ctx.provider.as_ref(), &messages, keep)
+                .await?;
+
+            let summary_msg = session::insert_message(&ctx.pool, ctx.session_id, "user").await?;
+            session::upsert_part(
+                &ctx.pool, Uuid::new_v4(), summary_msg.id, "text",
+                &summary_text, None, None, None,
+            ).await?;
+            session::complete_message(&ctx.pool, summary_msg.id).await?;
+            session::set_summary_message_id(&ctx.pool, ctx.session_id, summary_msg.id).await?;
+
+            messages.drain(..messages.len() - keep);
+
+            ctx.system_prompt = format!(
+                "{base_system_prompt}\n\n[Conversation compacted]\n{summary_text}"
+            );
+
+            (ctx.emit)("forge://compacted", json!({"sessionID": ctx.session_id}));
+        }
+
         info!(turn, session_id = %ctx.session_id, "agentic turn");
 
-        let result = run_turn(
-            &ctx,
-            provider.as_ref(),
-            &tool_defs,
-            &mut messages,
-        )
-        .await;
-
-        match result {
+        match run_turn(&ctx, &tool_defs, &mut messages).await {
             Ok(TurnResult::Done) => break,
             Ok(TurnResult::ContinueWithTools) => continue,
             Err(ForgeError::PermissionRejected) => {
@@ -108,7 +125,6 @@ enum TurnResult {
 
 async fn run_turn(
     ctx: &LoopContext,
-    provider: &dyn LlmProvider,
     tool_defs: &[ToolDef],
     messages: &mut Vec<ChatMessage>,
 ) -> Result<TurnResult, ForgeError> {
@@ -116,15 +132,16 @@ async fn run_turn(
         session::insert_message(&ctx.pool, ctx.session_id, "assistant").await?;
     (ctx.emit)("forge://message-updated", json!({"info": assistant_msg}));
 
-    let mut event_stream = provider.stream(&ctx.system_prompt, messages, tool_defs).await?;
+    let mut event_stream = ctx.provider.stream(&ctx.system_prompt, messages, tool_defs).await?;
 
     let mut text_buf = String::new();
     let mut reasoning_buf = String::new();
     let text_part_id = Uuid::new_v4();
     let reasoning_part_id = Uuid::new_v4();
-    let mut tool_calls: HashMap<String, (String, String)> = HashMap::new(); // id -> (name, json_args)
+    let mut tool_calls: HashMap<String, (String, String)> = HashMap::new();
     let mut stop_reason = StopReason::EndTurn;
     let mut assistant_content: Vec<ContentBlock> = Vec::new();
+    let mut tool_results: Vec<ContentBlock> = Vec::new();
 
     while let Some(event) = event_stream.next().await {
         let event = event?;
@@ -132,14 +149,14 @@ async fn run_turn(
             StreamEvent::TextDelta(t) => {
                 text_buf.push_str(&t);
                 let part = session::upsert_part(
-                    &ctx.pool, text_part_id, assistant_msg.id, "text", &text_buf, None, None,
+                    &ctx.pool, text_part_id, assistant_msg.id, "text", &text_buf, None, None, None,
                 ).await?;
                 (ctx.emit)("forge://part-updated", json!({"part": part}));
             }
             StreamEvent::ReasoningDelta(t) => {
                 reasoning_buf.push_str(&t);
                 let part = session::upsert_part(
-                    &ctx.pool, reasoning_part_id, assistant_msg.id, "reasoning", &reasoning_buf, None, None,
+                    &ctx.pool, reasoning_part_id, assistant_msg.id, "reasoning", &reasoning_buf, None, None, None,
                 ).await?;
                 (ctx.emit)("forge://part-updated", json!({"part": part}));
             }
@@ -155,11 +172,8 @@ async fn run_turn(
                 if let Some((name, args_json)) = tool_calls.remove(&id) {
                     let args: Value = serde_json::from_str(&args_json).unwrap_or(json!({}));
 
-                    // Record tool_use in assistant content
                     assistant_content.push(ContentBlock::ToolUse {
-                        id: id.clone(),
-                        name: name.clone(),
-                        input: args.clone(),
+                        id: id.clone(), name: name.clone(), input: args.clone(),
                     });
 
                     let tool_part_id = Uuid::new_v4();
@@ -167,6 +181,7 @@ async fn run_turn(
                     let part = session::upsert_part(
                         &ctx.pool, tool_part_id, assistant_msg.id, "tool", "", Some(&name),
                         Some(&json!({"status": "running", "title": title})),
+                        Some(&args),
                     ).await?;
                     (ctx.emit)("forge://part-updated", json!({"part": part}));
 
@@ -178,14 +193,12 @@ async fn run_turn(
                     let part = session::upsert_part(
                         &ctx.pool, tool_part_id, assistant_msg.id, "tool", &content, Some(&name),
                         Some(&json!({"status": status, "title": title})),
+                        Some(&args),
                     ).await?;
                     (ctx.emit)("forge://part-updated", json!({"part": part}));
 
-                    messages.push(ChatMessage {
-                        role: Role::User,
-                        content: vec![ContentBlock::ToolResult {
-                            tool_use_id: id, content, is_error,
-                        }],
+                    tool_results.push(ContentBlock::ToolResult {
+                        tool_use_id: id, content, is_error,
                     });
                 }
             }
@@ -198,21 +211,14 @@ async fn run_turn(
         }
     }
 
-    // Build assistant message content
     if !text_buf.is_empty() {
-        assistant_content.insert(
-            0,
-            ContentBlock::Text {
-                text: text_buf,
-            },
-        );
+        assistant_content.insert(0, ContentBlock::Text { text: text_buf });
     }
 
-    // Add assistant message to conversation history
-    messages.push(ChatMessage {
-        role: Role::Assistant,
-        content: assistant_content,
-    });
+    messages.push(ChatMessage { role: Role::Assistant, content: assistant_content });
+    if !tool_results.is_empty() {
+        messages.push(ChatMessage { role: Role::User, content: tool_results });
+    }
 
     let completed = session::complete_message(&ctx.pool, assistant_msg.id).await?;
     (ctx.emit)("forge://message-updated", json!({"info": completed}));
@@ -253,12 +259,26 @@ async fn execute_with_permission(
     Ok(tools::execute(tool_name, args.clone(), &ctx.cwd).await)
 }
 
-/// Reconstruct LLM conversation from DB.
-/// Tool parts are split: ToolUse in assistant msg, ToolResult in synthetic user msg.
-async fn build_history(pool: &PgPool, session_id: Uuid) -> Result<Vec<ChatMessage>, ForgeError> {
-    let rows = session::get_messages_with_parts(pool, session_id).await?;
-    let mut messages = Vec::new();
+async fn build_history(
+    pool: &PgPool,
+    session_id: Uuid,
+) -> Result<(Vec<ChatMessage>, Option<String>), ForgeError> {
+    let session = session::get_session(pool, session_id).await?;
 
+    let (rows, summary_text) = if let Some(summary_id) = session.summary_message_id {
+        let summary_parts = session::get_parts_for_message(pool, summary_id).await?;
+        let text: String = summary_parts.iter()
+            .filter(|p| p.part_type == "text")
+            .map(|p| p.content.as_str())
+            .collect::<Vec<_>>()
+            .join("");
+        let rows = session::get_messages_after(pool, session_id, summary_id).await?;
+        (rows, if text.is_empty() { None } else { Some(text) })
+    } else {
+        (session::get_messages_with_parts(pool, session_id).await?, None)
+    };
+
+    let mut messages = Vec::new();
     for row in rows {
         match row.info.role.as_str() {
             "user" => {
@@ -281,8 +301,9 @@ async fn build_history(pool: &PgPool, session_id: Uuid) -> Result<Vec<ChatMessag
                         "tool" => {
                             if let Some(name) = &p.tool_name {
                                 let id = p.id.to_string();
+                                let input = p.tool_input.clone().unwrap_or(json!({}));
                                 content.push(ContentBlock::ToolUse {
-                                    id: id.clone(), name: name.clone(), input: json!({}),
+                                    id: id.clone(), name: name.clone(), input,
                                 });
                                 tool_results.push(ContentBlock::ToolResult {
                                     tool_use_id: id,
@@ -306,7 +327,7 @@ async fn build_history(pool: &PgPool, session_id: Uuid) -> Result<Vec<ChatMessag
             _ => {}
         }
     }
-    Ok(messages)
+    Ok((messages, summary_text))
 }
 
 fn format_tool_title(name: &str, args: &Value) -> String {
