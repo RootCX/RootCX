@@ -68,6 +68,8 @@ impl Runtime {
         tool_registry.register(tools::query_data::QueryDataTool);
         tool_registry.register(tools::mutate_data::MutateDataTool);
         tool_registry.register(tools::browser::BrowserTool::new(browser_queue));
+        tool_registry.register(tools::list_apps::ListAppsTool);
+        tool_registry.register(tools::describe_app::DescribeAppTool);
 
         Self {
             pg,

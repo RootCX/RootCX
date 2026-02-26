@@ -300,7 +300,7 @@ pub async fn get_session(
 }
 
 fn extract_enabled_tools(config: &JsonValue) -> Vec<String> {
-    let mut tools = vec![];
+    let mut tools = vec!["list_apps".into(), "describe_app".into()];
     let mut has_data_access = false;
     let Some(entries) = config.get("access").and_then(|a| a.as_array()) else {
         return tools;
