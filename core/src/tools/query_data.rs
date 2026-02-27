@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value as JsonValue};
 use rootcx_shared_types::ToolDescriptor;
 
-use super::{Tool, ToolContext, str_arg};
+use super::{Tool, ToolContext, str_arg, check_permission};
 use crate::manifest::field_type_map;
 use crate::routes::crud::{
     build_where_clause, join_where, table, validate_order, validate_sort_field,
@@ -46,12 +46,7 @@ impl Tool for QueryDataTool {
         let entity = str_arg(&ctx.args, "entity")?;
         let app = ctx.args.get("app").and_then(|v| v.as_str()).unwrap_or(&ctx.app_id);
 
-        let (_, perms) = crate::extensions::rbac::policy::resolve_permissions(&ctx.pool, app, ctx.user_id)
-            .await.map_err(|e| format!("{e:?}"))?;
-        let required = format!("{entity}.read");
-        if !perms.iter().any(|p| p == "*" || *p == required) {
-            return Err(format!("permission denied: {required}"));
-        }
+        check_permission(&ctx.permissions, &format!("{entity}.read"))?;
 
         let types = field_type_map(&ctx.pool, app, entity).await.map_err(|e| e.to_string())?;
         let tbl = table(app, entity);

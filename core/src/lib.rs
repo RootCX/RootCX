@@ -12,6 +12,7 @@ mod schema_sync;
 mod secrets;
 pub mod server;
 pub mod tools;
+mod tool_executor;
 mod worker;
 mod worker_manager;
 
