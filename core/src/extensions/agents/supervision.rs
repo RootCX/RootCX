@@ -32,15 +32,9 @@ impl PolicyEvaluator {
 
         match self.config.mode {
             SupervisionMode::Autonomous => PolicyDecision::Allow,
-            SupervisionMode::Strict => {
-                if is_mutation(tool_name) {
-                    PolicyDecision::RequiresApproval {
-                        reason: format!("strict mode: {tool_name} requires approval"),
-                    }
-                } else {
-                    PolicyDecision::Allow
-                }
-            }
+            SupervisionMode::Strict => PolicyDecision::RequiresApproval {
+                reason: format!("strict mode: {tool_name} requires approval"),
+            },
             SupervisionMode::Supervised => self.check_policies(tool_name, args),
         }
     }
@@ -104,10 +98,6 @@ impl PolicyEvaluator {
     }
 }
 
-fn is_mutation(tool_name: &str) -> bool {
-    matches!(tool_name, "mutate_data")
-}
-
 fn tool_action(tool_name: &str) -> &str {
     match tool_name {
         "query_data" => "query",
@@ -148,10 +138,11 @@ mod tests {
     }
 
     #[test]
-    fn strict_requires_approval_for_mutations() {
+    fn strict_requires_approval_for_all() {
         let mut eval = PolicyEvaluator::new(config(SupervisionMode::Strict, vec![]));
         assert!(matches!(eval.evaluate("mutate_data", &json!({})), PolicyDecision::RequiresApproval { .. }));
-        assert!(matches!(eval.evaluate("query_data", &json!({})), PolicyDecision::Allow));
+        assert!(matches!(eval.evaluate("query_data", &json!({})), PolicyDecision::RequiresApproval { .. }));
+        assert!(matches!(eval.evaluate("browser", &json!({})), PolicyDecision::RequiresApproval { .. }));
     }
 
     #[test]

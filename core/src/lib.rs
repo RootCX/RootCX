@@ -30,6 +30,7 @@ use secrets::SecretManager;
 use sqlx::PgPool;
 use tools::ToolRegistry;
 use tracing::info;
+use extensions::agents::approvals::PendingApprovals;
 use worker_manager::WorkerManager;
 
 const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -42,6 +43,7 @@ pub struct Runtime {
     secret_manager: Option<Arc<SecretManager>>,
     worker_manager: Option<Arc<WorkerManager>>,
     tool_registry: Arc<ToolRegistry>,
+    pending_approvals: PendingApprovals,
     scheduler: Option<SchedulerHandle>,
     data_dir: PathBuf,
     bun_bin: PathBuf,
@@ -80,6 +82,7 @@ impl Runtime {
             secret_manager: None,
             worker_manager: None,
             tool_registry: Arc::new(tool_registry),
+            pending_approvals: PendingApprovals::new(),
             scheduler: None,
             data_dir,
             bun_bin,
@@ -107,7 +110,7 @@ impl Runtime {
         let apps_dir = self.data_dir.join("apps");
         std::fs::create_dir_all(&apps_dir).map_err(|e| RuntimeError::Worker(format!("create apps dir: {e}")))?;
         let runtime_url = format!("http://127.0.0.1:{api_port}");
-        let wm = Arc::new(WorkerManager::new(apps_dir, runtime_url, self.bun_bin.clone(), Arc::clone(&self.tool_registry)));
+        let wm = Arc::new(WorkerManager::new(apps_dir, runtime_url, self.bun_bin.clone(), Arc::clone(&self.tool_registry), self.pending_approvals.clone()));
         self.scheduler = Some(scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm)));
         self.worker_manager = Some(wm);
 
@@ -176,6 +179,10 @@ impl Runtime {
 
     pub fn tool_registry(&self) -> &Arc<ToolRegistry> {
         &self.tool_registry
+    }
+
+    pub fn pending_approvals(&self) -> &PendingApprovals {
+        &self.pending_approvals
     }
 
     pub fn scheduler_wake(&self) -> Option<&Arc<tokio::sync::Notify>> {

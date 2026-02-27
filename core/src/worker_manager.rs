@@ -12,6 +12,7 @@ use crate::RuntimeError;
 use crate::extensions::logs::LogEntry;
 use crate::ipc::{AgentInvokePayload, RpcCaller};
 use crate::secrets::SecretManager;
+use crate::extensions::agents::approvals::PendingApprovals;
 use crate::tools::ToolRegistry;
 use crate::worker::{self, AgentEvent, SupervisorHandle, WorkerConfig, WorkerStatus};
 
@@ -21,11 +22,12 @@ pub struct WorkerManager {
     runtime_url: String,
     bun_bin: PathBuf,
     tool_registry: Arc<ToolRegistry>,
+    pending_approvals: PendingApprovals,
 }
 
 impl WorkerManager {
-    pub fn new(apps_dir: PathBuf, runtime_url: String, bun_bin: PathBuf, tool_registry: Arc<ToolRegistry>) -> Self {
-        Self { workers: Arc::new(RwLock::new(HashMap::new())), apps_dir, runtime_url, bun_bin, tool_registry }
+    pub fn new(apps_dir: PathBuf, runtime_url: String, bun_bin: PathBuf, tool_registry: Arc<ToolRegistry>, pending_approvals: PendingApprovals) -> Self {
+        Self { workers: Arc::new(RwLock::new(HashMap::new())), apps_dir, runtime_url, bun_bin, tool_registry, pending_approvals }
     }
 
     async fn get_handle(&self, app_id: &str) -> Result<SupervisorHandle, RuntimeError> {
@@ -56,6 +58,7 @@ impl WorkerManager {
             pool: pool.clone(),
             js_runtime: self.bun_bin.clone(),
             tool_registry: Arc::clone(&self.tool_registry),
+            pending_approvals: self.pending_approvals.clone(),
         };
 
         let handle = worker::spawn_supervisor(config);
