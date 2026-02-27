@@ -10,6 +10,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "@rootcx/ui": path.resolve(__dirname, "../../runtime/ui/src"),
     },
   },
 

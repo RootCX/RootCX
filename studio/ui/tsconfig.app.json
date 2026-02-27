@@ -25,7 +25,8 @@
     "noUncheckedSideEffectImports": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@rootcx/ui": ["../../runtime/ui/src/index.ts"]
     }
   },
   "include": ["src"]
