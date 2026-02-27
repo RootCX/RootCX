@@ -229,6 +229,8 @@ pub struct AgentDefinition {
     pub limits: Option<AgentLimits>,
     #[serde(default)]
     pub access: Vec<AgentAccessEntry>,
+    #[serde(default)]
+    pub supervision: Option<SupervisionConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,6 +243,44 @@ pub struct AgentMemory {
 pub struct AgentLimits {
     #[serde(default)]
     pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub max_context_tokens: Option<u64>,
+    #[serde(default)]
+    pub keep_recent_messages: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupervisionConfig {
+    pub mode: SupervisionMode,
+    #[serde(default)]
+    pub policies: Vec<SupervisionPolicy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SupervisionMode {
+    Autonomous,
+    Supervised,
+    Strict,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SupervisionPolicy {
+    pub action: String,
+    #[serde(default)]
+    pub entity: Option<String>,
+    #[serde(default)]
+    pub requires: Option<String>,
+    #[serde(default)]
+    pub rate_limit: Option<RateLimit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimit {
+    pub max: u32,
+    pub window: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

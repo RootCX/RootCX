@@ -14,6 +14,7 @@ use tracing::error;
 use uuid::Uuid;
 
 use super::agent_user_id;
+use super::approvals::{ApprovalReply, ApprovalResponse, PendingApprovals};
 use crate::api_error::ApiError;
 use crate::auth::jwt;
 use crate::auth::identity::Identity;
@@ -21,6 +22,12 @@ use crate::ipc::{AgentInvokePayload, RpcCaller};
 use crate::routes::{self, SharedRuntime};
 use crate::secrets::SecretManager;
 use crate::worker::AgentEvent;
+
+static APPROVALS: std::sync::OnceLock<PendingApprovals> = std::sync::OnceLock::new();
+
+fn approvals() -> &'static PendingApprovals {
+    APPROVALS.get_or_init(PendingApprovals::new)
+}
 
 #[derive(Deserialize)]
 pub struct InvokeRequest {
@@ -43,11 +50,50 @@ pub(crate) struct SessionRow {
     messages: JsonValue,
     created_at: String,
     updated_at: String,
+    #[sqlx(default)]
+    title: Option<String>,
+    #[sqlx(default)]
+    status: Option<String>,
+    #[sqlx(default)]
+    total_tokens: Option<i64>,
+    #[sqlx(default)]
+    turn_count: Option<i32>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct MessageRow {
+    id: String,
+    role: String,
+    content: Option<String>,
+    token_count: Option<i32>,
+    is_summary: bool,
+    created_at: String,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct ToolCallRow {
+    id: String,
+    tool_name: String,
+    input: JsonValue,
+    output: Option<JsonValue>,
+    error: Option<String>,
+    status: String,
+    duration_ms: Option<i32>,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct SessionEventEntry {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(flatten)]
+    data: JsonValue,
 }
 
 struct PersistCtx {
     pool: PgPool,
     app_id: String,
+    session_id: String,
     user_id: Uuid,
     user_message: String,
 }
@@ -120,6 +166,7 @@ pub async fn invoke_agent(
         Some(PersistCtx {
             pool: pool.clone(),
             app_id: app_id.clone(),
+            session_id: session_id.clone(),
             user_id: identity.user_id,
             user_message: body.message.clone(),
         })
@@ -164,7 +211,7 @@ fn build_sse_stream(
                     }
                     Some(AgentEvent::Done { response, tokens }) => {
                         if let Some(ref pctx) = ctx {
-                            if let Err(e) = persist_session(&pctx.pool, &sid, &pctx.app_id, pctx.user_id, &pctx.user_message, &response).await {
+                            if let Err(e) = persist_session(pctx, &response, tokens).await {
                                 error!(session_id = %sid, "failed to persist session: {e}");
                             }
                         }
@@ -179,11 +226,236 @@ fn build_sse_stream(
                             .data(json!({"error": error, "session_id": &*sid}).to_string());
                         Some((Ok(event), (rx, None)))
                     }
+                    Some(AgentEvent::ToolCallStarted { call_id, tool_name, input }) => {
+                        if let Some(ref pctx) = ctx {
+                            let _ = persist_tool_call_start(&pctx.pool, &pctx.session_id, &call_id, &tool_name, &input).await;
+                        }
+                        let event = Event::default()
+                            .event("tool_call_started")
+                            .data(json!({"call_id": call_id, "tool_name": tool_name, "input": input, "session_id": &*sid}).to_string());
+                        Some((Ok(event), (rx, ctx)))
+                    }
+                    Some(AgentEvent::ToolCallCompleted { call_id, tool_name, output, error, duration_ms }) => {
+                        if let Some(ref pctx) = ctx {
+                            let _ = persist_tool_call_end(&pctx.pool, &call_id, output.as_ref(), error.as_deref(), duration_ms).await;
+                        }
+                        let event = Event::default()
+                            .event("tool_call_completed")
+                            .data(json!({
+                                "call_id": call_id, "tool_name": tool_name,
+                                "output": output, "error": error,
+                                "duration_ms": duration_ms, "session_id": &*sid
+                            }).to_string());
+                        Some((Ok(event), (rx, ctx)))
+                    }
+                    Some(AgentEvent::ApprovalRequired { approval_id, tool_name, args, reason }) => {
+                        let event = Event::default()
+                            .event("approval_required")
+                            .data(json!({
+                                "approval_id": approval_id, "tool_name": tool_name,
+                                "args": args, "reason": reason, "session_id": &*sid
+                            }).to_string());
+                        Some((Ok(event), (rx, ctx)))
+                    }
+                    Some(AgentEvent::SessionCompacted { summary }) => {
+                        if let Some(ref pctx) = ctx {
+                            let _ = persist_message(&pctx.pool, &pctx.session_id, "system", &summary, None, true).await;
+                        }
+                        let event = Event::default()
+                            .event("session_compacted")
+                            .data(json!({"summary": summary, "session_id": &*sid}).to_string());
+                        Some((Ok(event), (rx, ctx)))
+                    }
                     None => None,
                 }
             }
         },
     )
+}
+
+pub async fn list_sessions(
+    State(rt): State<SharedRuntime>,
+    Path(app_id): Path<String>,
+) -> Result<Json<Vec<SessionRow>>, ApiError> {
+    let pool = routes::pool(&rt).await?;
+    let rows = sqlx::query_as::<_, SessionRow>(
+        "SELECT id::text, messages, created_at::text, updated_at::text,
+                title, status, total_tokens, turn_count
+         FROM rootcx_system.agent_sessions
+         WHERE app_id = $1
+         ORDER BY updated_at DESC",
+    )
+    .bind(&app_id)
+    .fetch_all(&pool)
+    .await?;
+    Ok(Json(rows))
+}
+
+pub async fn get_session(
+    State(rt): State<SharedRuntime>,
+    Path((app_id, session_id)): Path<(String, String)>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let pool = routes::pool(&rt).await?;
+    let session = sqlx::query_as::<_, SessionRow>(
+        "SELECT id::text, messages, created_at::text, updated_at::text,
+                title, status, total_tokens, turn_count
+         FROM rootcx_system.agent_sessions
+         WHERE app_id = $1 AND id = $2::uuid",
+    )
+    .bind(&app_id)
+    .bind(&session_id)
+    .fetch_optional(&pool)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("session '{session_id}' not found")))?;
+
+    let messages = sqlx::query_as::<_, MessageRow>(
+        "SELECT id::text, role, content, token_count, is_summary, created_at::text
+         FROM rootcx_system.agent_messages
+         WHERE session_id = $1::uuid
+         ORDER BY created_at ASC",
+    )
+    .bind(&session_id)
+    .fetch_all(&pool)
+    .await?;
+
+    let response = if messages.is_empty() {
+        json!({
+            "id": session.id,
+            "title": session.title,
+            "status": session.status,
+            "totalTokens": session.total_tokens,
+            "turnCount": session.turn_count,
+            "messages": session.messages,
+            "createdAt": session.created_at,
+            "updatedAt": session.updated_at,
+        })
+    } else {
+        let tool_calls = sqlx::query_as::<_, ToolCallRow>(
+            "SELECT id::text, tool_name, input, output, error, status, duration_ms, created_at::text
+             FROM rootcx_system.agent_tool_calls
+             WHERE session_id = $1::uuid
+             ORDER BY created_at ASC",
+        )
+        .bind(&session_id)
+        .fetch_all(&pool)
+        .await?;
+
+        let structured_messages: Vec<JsonValue> = messages.iter().map(|m| {
+            let mut msg = json!({
+                "id": m.id,
+                "role": m.role,
+                "content": m.content,
+                "tokenCount": m.token_count,
+                "isSummary": m.is_summary,
+                "createdAt": m.created_at,
+            });
+            if m.role == "assistant" {
+                let msg_tools: Vec<&ToolCallRow> = tool_calls.iter()
+                    .filter(|tc| tc.created_at >= m.created_at)
+                    .collect();
+                if !msg_tools.is_empty() {
+                    msg["toolCalls"] = json!(msg_tools);
+                }
+            }
+            msg
+        }).collect();
+
+        json!({
+            "id": session.id,
+            "title": session.title,
+            "status": session.status,
+            "totalTokens": session.total_tokens,
+            "turnCount": session.turn_count,
+            "messages": structured_messages,
+            "createdAt": session.created_at,
+            "updatedAt": session.updated_at,
+        })
+    };
+
+    Ok(Json(response))
+}
+
+pub async fn get_session_events(
+    State(rt): State<SharedRuntime>,
+    Path((_app_id, session_id)): Path<(String, String)>,
+) -> Result<Json<Vec<SessionEventEntry>>, ApiError> {
+    let pool = routes::pool(&rt).await?;
+
+    let messages = sqlx::query_as::<_, MessageRow>(
+        "SELECT id::text, role, content, token_count, is_summary, created_at::text
+         FROM rootcx_system.agent_messages
+         WHERE session_id = $1::uuid ORDER BY created_at ASC",
+    )
+    .bind(&session_id)
+    .fetch_all(&pool)
+    .await?;
+
+    let tool_calls = sqlx::query_as::<_, ToolCallRow>(
+        "SELECT id::text, tool_name, input, output, error, status, duration_ms, created_at::text
+         FROM rootcx_system.agent_tool_calls
+         WHERE session_id = $1::uuid ORDER BY created_at ASC",
+    )
+    .bind(&session_id)
+    .fetch_all(&pool)
+    .await?;
+
+    let mut events: Vec<SessionEventEntry> = Vec::new();
+
+    for m in &messages {
+        events.push(SessionEventEntry {
+            event_type: "message".into(),
+            data: json!({
+                "id": m.id, "role": m.role, "content": m.content,
+                "tokenCount": m.token_count, "isSummary": m.is_summary,
+                "at": m.created_at,
+            }),
+        });
+    }
+
+    for tc in &tool_calls {
+        events.push(SessionEventEntry {
+            event_type: "tool_call".into(),
+            data: json!({
+                "id": tc.id, "toolName": tc.tool_name, "input": tc.input,
+                "output": tc.output, "error": tc.error, "status": tc.status,
+                "durationMs": tc.duration_ms, "at": tc.created_at,
+            }),
+        });
+    }
+
+    events.sort_by(|a, b| {
+        let a_at = a.data.get("at").and_then(|v| v.as_str()).unwrap_or("");
+        let b_at = b.data.get("at").and_then(|v| v.as_str()).unwrap_or("");
+        a_at.cmp(b_at)
+    });
+
+    Ok(Json(events))
+}
+
+pub async fn list_approvals(
+    State(_rt): State<SharedRuntime>,
+    Path(app_id): Path<String>,
+) -> Result<Json<Vec<super::approvals::ApprovalRequest>>, ApiError> {
+    Ok(Json(approvals().list(&app_id).await))
+}
+
+pub async fn reply_approval(
+    State(_rt): State<SharedRuntime>,
+    Path((_app_id, approval_id)): Path<(String, String)>,
+    Json(body): Json<ApprovalReply>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let response = match body.action {
+        super::approvals::ApprovalAction::Approve => ApprovalResponse::Approved,
+        super::approvals::ApprovalAction::Reject => ApprovalResponse::Rejected {
+            reason: body.reason.unwrap_or_else(|| "rejected by user".into()),
+        },
+    };
+    let found = approvals().reply(&approval_id, response).await;
+    if found {
+        Ok(Json(json!({"status": "ok"})))
+    } else {
+        Err(ApiError::NotFound(format!("approval '{approval_id}' not found")))
+    }
 }
 
 async fn load_history(
@@ -194,6 +466,21 @@ async fn load_history(
     if !memory_enabled {
         return Ok(vec![]);
     }
+
+    let messages: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT role, content FROM rootcx_system.agent_messages
+         WHERE session_id = $1::uuid ORDER BY created_at ASC",
+    )
+    .bind(session_id)
+    .fetch_all(pool)
+    .await?;
+
+    if !messages.is_empty() {
+        return Ok(messages.into_iter().map(|(role, content)| {
+            json!({"role": role, "content": content.unwrap_or_default()})
+        }).collect());
+    }
+
     match sqlx::query_scalar::<_, JsonValue>(
         "SELECT messages FROM rootcx_system.agent_sessions WHERE id = $1::uuid",
     )
@@ -216,7 +503,7 @@ async fn build_agent_config(
     config: &JsonValue,
     tool_registry: &crate::tools::ToolRegistry,
 ) -> Result<JsonValue, ApiError> {
-    let enabled_tools = extract_enabled_tools(config);
+    let enabled_tools = extract_enabled_tools(app_id, config, pool).await?;
     let data_contract: JsonValue = sqlx::query_scalar(
         "SELECT COALESCE(manifest->'dataContract', '[]'::jsonb) FROM rootcx_system.apps WHERE id = $1",
     )
@@ -236,6 +523,7 @@ async fn build_agent_config(
         "_appId": app_id,
         "_toolDescriptors": tool_descriptors,
         "_graphPath": config.get("graph"),
+        "_supervision": config.get("supervision"),
     }))
 }
 
@@ -264,60 +552,41 @@ async fn resolve_secret_refs(
     Ok(())
 }
 
-pub async fn list_sessions(
-    State(rt): State<SharedRuntime>,
-    Path(app_id): Path<String>,
-) -> Result<Json<Vec<SessionRow>>, ApiError> {
-    let pool = routes::pool(&rt).await?;
-    let rows = sqlx::query_as::<_, SessionRow>(
-        "SELECT id::text, messages, created_at::text, updated_at::text
-         FROM rootcx_system.agent_sessions
-         WHERE app_id = $1
-         ORDER BY updated_at DESC",
-    )
-    .bind(&app_id)
-    .fetch_all(&pool)
-    .await?;
-    Ok(Json(rows))
-}
-
-pub async fn get_session(
-    State(rt): State<SharedRuntime>,
-    Path((app_id, session_id)): Path<(String, String)>,
-) -> Result<Json<SessionRow>, ApiError> {
-    let pool = routes::pool(&rt).await?;
-    let row = sqlx::query_as::<_, SessionRow>(
-        "SELECT id::text, messages, created_at::text, updated_at::text
-         FROM rootcx_system.agent_sessions
-         WHERE app_id = $1 AND id = $2::uuid",
-    )
-    .bind(&app_id)
-    .bind(&session_id)
-    .fetch_optional(&pool)
-    .await?
-    .ok_or_else(|| ApiError::NotFound(format!("session '{session_id}' not found")))?;
-    Ok(Json(row))
-}
-
-fn extract_enabled_tools(config: &JsonValue) -> Vec<String> {
+async fn extract_enabled_tools(app_id: &str, config: &JsonValue, pool: &PgPool) -> Result<Vec<String>, ApiError> {
     let mut tools = vec!["list_apps".into(), "describe_app".into()];
     let mut has_data_access = false;
-    let Some(entries) = config.get("access").and_then(|a| a.as_array()) else {
-        return tools;
-    };
-    for entry in entries {
-        let Some(entity) = entry.get("entity").and_then(|e| e.as_str()) else { continue };
-        if let Some(tool_name) = entity.strip_prefix("tool:") {
-            tools.push(tool_name.to_string());
-        } else {
+
+    if let Some(entries) = config.get("access").and_then(|a| a.as_array()) {
+        for entry in entries {
+            let Some(entity) = entry.get("entity").and_then(|e| e.as_str()) else { continue };
+            if let Some(tool_name) = entity.strip_prefix("tool:") {
+                tools.push(tool_name.to_string());
+            } else {
+                has_data_access = true;
+            }
+        }
+    }
+
+    if !has_data_access {
+        let has_entities: bool = sqlx::query_scalar(
+            "SELECT jsonb_array_length(COALESCE(manifest->'dataContract', '[]'::jsonb)) > 0
+             FROM rootcx_system.apps WHERE id = $1",
+        )
+        .bind(app_id)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or(false);
+
+        if has_entities {
             has_data_access = true;
         }
     }
+
     if has_data_access {
         tools.push("query_data".into());
         tools.push("mutate_data".into());
     }
-    tools
+    Ok(tools)
 }
 
 async fn load_system_prompt(
@@ -336,30 +605,112 @@ async fn load_system_prompt(
     })
 }
 
-async fn persist_session(
-    pool: &PgPool,
-    session_id: &str,
-    app_id: &str,
-    user_id: Uuid,
-    user_message: &str,
-    assistant_response: &str,
-) -> Result<(), sqlx::Error> {
-    let new_messages = json!([
-        {"role": "user", "content": user_message},
-        {"role": "assistant", "content": assistant_response}
-    ]);
+async fn ensure_session(pool: &PgPool, session_id: &str, app_id: &str, user_id: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO rootcx_system.agent_sessions (id, app_id, user_id, messages)
-         VALUES ($1::uuid, $2, $3, $4)
-         ON CONFLICT (id) DO UPDATE SET
-             messages = rootcx_system.agent_sessions.messages || $4,
-             updated_at = now()",
+        "INSERT INTO rootcx_system.agent_sessions (id, app_id, user_id)
+         VALUES ($1::uuid, $2, $3)
+         ON CONFLICT (id) DO NOTHING",
     )
     .bind(session_id)
     .bind(app_id)
     .bind(user_id)
-    .bind(&new_messages)
     .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn persist_message(
+    pool: &PgPool,
+    session_id: &str,
+    role: &str,
+    content: &str,
+    token_count: Option<i32>,
+    is_summary: bool,
+) -> Result<Uuid, sqlx::Error> {
+    let id: Uuid = sqlx::query_scalar(
+        "INSERT INTO rootcx_system.agent_messages (session_id, role, content, token_count, is_summary)
+         VALUES ($1::uuid, $2, $3, $4, $5)
+         RETURNING id",
+    )
+    .bind(session_id)
+    .bind(role)
+    .bind(content)
+    .bind(token_count.unwrap_or(0))
+    .bind(is_summary)
+    .fetch_one(pool)
+    .await?;
+    Ok(id)
+}
+
+async fn persist_tool_call_start(
+    pool: &PgPool,
+    session_id: &str,
+    call_id: &str,
+    tool_name: &str,
+    input: &JsonValue,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO rootcx_system.agent_tool_calls (id, session_id, tool_name, input, status)
+         VALUES ($1::uuid, $2::uuid, $3, $4, 'running')
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(call_id)
+    .bind(session_id)
+    .bind(tool_name)
+    .bind(input)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn persist_tool_call_end(
+    pool: &PgPool,
+    call_id: &str,
+    output: Option<&JsonValue>,
+    error: Option<&str>,
+    duration_ms: u64,
+) -> Result<(), sqlx::Error> {
+    let status = if error.is_some() { "failed" } else { "completed" };
+    sqlx::query(
+        "UPDATE rootcx_system.agent_tool_calls
+         SET output = $2, error = $3, status = $4, duration_ms = $5
+         WHERE id = $1::uuid",
+    )
+    .bind(call_id)
+    .bind(output)
+    .bind(error)
+    .bind(status)
+    .bind(duration_ms as i32)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn persist_session(
+    pctx: &PersistCtx,
+    assistant_response: &str,
+    tokens: Option<u64>,
+) -> Result<(), sqlx::Error> {
+    ensure_session(&pctx.pool, &pctx.session_id, &pctx.app_id, pctx.user_id).await?;
+    persist_message(&pctx.pool, &pctx.session_id, "user", &pctx.user_message, None, false).await?;
+    persist_message(&pctx.pool, &pctx.session_id, "assistant", assistant_response, tokens.map(|t| t as i32), false).await?;
+
+    let new_messages = json!([
+        {"role": "user", "content": pctx.user_message},
+        {"role": "assistant", "content": assistant_response}
+    ]);
+    sqlx::query(
+        "UPDATE rootcx_system.agent_sessions SET
+            messages = agent_sessions.messages || $2,
+            total_tokens = COALESCE(agent_sessions.total_tokens, 0) + $3,
+            turn_count = COALESCE(agent_sessions.turn_count, 0) + 1,
+            updated_at = now()
+         WHERE id = $1::uuid",
+    )
+    .bind(&pctx.session_id)
+    .bind(&new_messages)
+    .bind(tokens.unwrap_or(0) as i64)
+    .execute(&pctx.pool)
     .await?;
     Ok(())
 }

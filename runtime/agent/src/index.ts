@@ -1,4 +1,5 @@
 import { IpcReader, IpcWriter } from "./ipc.js";
+import { IpcToolBridge } from "./ipc-tool-bridge.js";
 import { runAgent, type AgentConfig } from "./runner.js";
 
 function assertInvoke(msg: Record<string, unknown>): asserts msg is {
@@ -14,9 +15,14 @@ function assertInvoke(msg: Record<string, unknown>): asserts msg is {
 
 const reader = new IpcReader(process.stdin);
 const writer = new IpcWriter(process.stdout);
+const bridge = new IpcToolBridge(writer);
 
 reader.on("discover", () => {
     writer.send({ type: "discover", capabilities: ["agent"] });
+});
+
+reader.on("agent_tool_result", (msg) => {
+    bridge.handleResult(msg as { call_id: string; result?: unknown; error?: string });
 });
 
 reader.on("agent_invoke", async (msg) => {
@@ -30,6 +36,7 @@ reader.on("agent_invoke", async (msg) => {
             authToken: msg.auth_token,
             history: (msg.history as Array<Record<string, unknown>>) ?? [],
             writer,
+            bridge,
         });
     } catch (err) {
         writer.send({
