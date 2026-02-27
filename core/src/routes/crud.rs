@@ -496,40 +496,74 @@ pub async fn delete_record(
 
 pub(crate) type QA<'q> = sqlx::query::QueryAs<'q, sqlx::Postgres, (JsonValue,), sqlx::postgres::PgArguments>;
 
+/// Bind using the manifest type (not the JSON payload) so the parameter OID
+/// is stable across sqlx's prepared-statement cache.
 pub(crate) fn bind_typed<'q>(q: QA<'q>, val: &'q JsonValue, manifest_type: Option<&String>) -> QA<'q> {
     let pg = manifest_type.map(|t| map_field_type(t));
-    match val {
-        JsonValue::Null => match pg {
-            Some("UUID") => q.bind(None::<Uuid>),
-            Some("DATE") => q.bind(None::<NaiveDate>),
-            Some("TIMESTAMPTZ") => q.bind(None::<DateTime<Utc>>),
-            Some("BOOLEAN") => q.bind(None::<bool>),
+
+    if val.is_null() {
+        return match pg {
             Some("DOUBLE PRECISION") => q.bind(None::<f64>),
-            Some("JSONB") => q.bind(None::<JsonValue>),
-            Some("TEXT[]") => q.bind(None::<Vec<String>>),
+            Some("BOOLEAN")         => q.bind(None::<bool>),
+            Some("UUID")            => q.bind(None::<Uuid>),
+            Some("DATE")            => q.bind(None::<NaiveDate>),
+            Some("TIMESTAMPTZ")     => q.bind(None::<DateTime<Utc>>),
+            Some("JSONB")           => q.bind(None::<JsonValue>),
+            Some("TEXT[]")          => q.bind(None::<Vec<String>>),
             Some("DOUBLE PRECISION[]") => q.bind(None::<Vec<f64>>),
             _ => q.bind(None::<String>),
+        };
+    }
+
+    match pg {
+        Some("DOUBLE PRECISION") => q.bind(coerce_f64(val)),
+        Some("BOOLEAN") => q.bind(coerce_bool(val)),
+        Some("UUID") => q.bind(coerce_str(val).and_then(|s| s.parse::<Uuid>().ok())),
+        Some("DATE") => q.bind(coerce_str(val).and_then(|s| s.parse::<NaiveDate>().ok())),
+        Some("TIMESTAMPTZ") => q.bind(coerce_str(val).and_then(|s| s.parse::<DateTime<Utc>>().ok())),
+        Some("JSONB") => q.bind(val),
+        Some("TEXT[]") => q.bind(coerce_str_vec(val)),
+        Some("DOUBLE PRECISION[]") => q.bind(coerce_f64_vec(val)),
+        _ => match val {
+            JsonValue::String(s) => q.bind(s.as_str()),
+            _ => q.bind(json_value_to_string(val)),
         },
-        JsonValue::Bool(b) => q.bind(b),
-        JsonValue::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                q.bind(i)
-            } else {
-                q.bind(n.as_f64().unwrap_or(0.0))
-            }
-        }
-        JsonValue::String(s) => match pg {
-            Some("UUID") => q.bind(s.parse::<Uuid>().ok()),
-            Some("DATE") => q.bind(s.parse::<NaiveDate>().ok()),
-            Some("TIMESTAMPTZ") => q.bind(s.parse::<DateTime<Utc>>().ok()),
-            _ => q.bind(s.as_str()),
-        },
-        JsonValue::Array(arr) => match pg {
-            Some("TEXT[]") => q.bind(arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>()),
-            Some("DOUBLE PRECISION[]") => q.bind(arr.iter().filter_map(|v| v.as_f64()).collect::<Vec<_>>()),
-            _ => q.bind(val),
-        },
-        _ => q.bind(val),
+    }
+}
+
+fn coerce_f64(val: &JsonValue) -> f64 {
+    match val {
+        JsonValue::Number(n) => n.as_f64().unwrap_or(0.0),
+        JsonValue::String(s) => s.parse().unwrap_or(0.0),
+        JsonValue::Bool(b) => if *b { 1.0 } else { 0.0 },
+        _ => 0.0,
+    }
+}
+
+fn coerce_bool(val: &JsonValue) -> bool {
+    match val {
+        JsonValue::Bool(b) => *b,
+        JsonValue::Number(n) => n.as_i64().is_some_and(|i| i != 0),
+        JsonValue::String(s) => matches!(s.as_str(), "true" | "1"),
+        _ => false,
+    }
+}
+
+fn coerce_str(val: &JsonValue) -> Option<&str> {
+    val.as_str()
+}
+
+fn coerce_str_vec<'a>(val: &'a JsonValue) -> Vec<&'a str> {
+    match val {
+        JsonValue::Array(arr) => arr.iter().filter_map(|v| v.as_str()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn coerce_f64_vec(val: &JsonValue) -> Vec<f64> {
+    match val {
+        JsonValue::Array(arr) => arr.iter().filter_map(|v| v.as_f64()).collect(),
+        _ => Vec::new(),
     }
 }
 
