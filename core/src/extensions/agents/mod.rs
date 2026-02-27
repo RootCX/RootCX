@@ -78,13 +78,12 @@ impl RuntimeExtension for AgentExtension {
             "graph": def.graph,
             "memory": def.memory,
             "limits": def.limits,
-            "access": def.access,
         });
 
-        // Build permissions from agent access entries
-        let agent_permissions: Vec<String> = def.access.iter()
-            .filter(|e| !e.entity.starts_with("tool:"))
-            .flat_map(|e| e.actions.iter().map(move |a| format!("{}.{}", e.entity, a)))
+        // Derive RBAC permissions from the app's data contract
+        let agent_permissions: Vec<String> = manifest.data_contract.iter()
+            .flat_map(|e| ["create", "read", "update", "delete"].iter()
+                .map(move |a| format!("{}.{}", e.entity_name, a)))
             .collect();
 
         let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;

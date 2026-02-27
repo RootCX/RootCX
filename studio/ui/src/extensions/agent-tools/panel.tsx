@@ -1,21 +1,15 @@
 import { useSyncExternalStore } from "react";
-import { Lock } from "lucide-react";
 import { useProjectContext } from "@/components/layout/app-context";
 import { ListRow } from "@/components/ui/list-row";
-import { ToggleDot } from "@/components/ui/toggle-dot";
-import { subscribe, getSnapshot, toggleTool, type ToolEntry } from "./store";
+import { subscribe, getSnapshot, type ToolEntry } from "./store";
 
 function ToolRow({ tool }: { tool: ToolEntry }) {
   return (
-    <ListRow onClick={tool.implicit ? undefined : () => toggleTool(tool.name)} className="px-3 py-1.5">
+    <ListRow className="px-3 py-1.5">
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1 text-xs font-medium">
-          {tool.name}
-          {tool.implicit && <Lock className="h-3 w-3 text-muted-foreground/50" />}
-        </div>
+        <div className="text-xs font-medium">{tool.name}</div>
         <div className="truncate text-[10px] text-muted-foreground">{tool.description.split("\n")[0]}</div>
       </div>
-      <ToggleDot active={tool.enabled} disabled={tool.implicit} />
     </ListRow>
   );
 }
