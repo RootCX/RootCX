@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { AuthGate, useRuntimeClient } from "@rootcx/runtime";
-import { Button } from "@rootcx/ui";
+import { Button, ChatScrollArea, Markdown } from "@rootcx/ui";
 import { IconLogout, IconArrowUp, IconSquareFilled, IconChevronDown } from "@tabler/icons-react";
 
 const APP_ID = "__APP_ID__";
@@ -184,28 +184,6 @@ function Chat({ user, onLogout }: { user: { username: string }; onLogout: () => 
   const [streaming, setStreaming] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const stick = useRef(true);
-  const lastTop = useRef(0);
-  const msgCount = useRef(0);
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const onScroll = () => {
-      if (el.scrollTop < lastTop.current - 5) stick.current = false;
-      else if (el.scrollHeight - el.scrollTop - el.clientHeight < 5) stick.current = true;
-      lastTop.current = el.scrollTop;
-    };
-    el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
-  }, []);
-
-  useEffect(() => {
-    if (messages.length > msgCount.current) stick.current = true;
-    msgCount.current = messages.length;
-    if (stick.current) scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight);
-  }, [messages]);
 
   const authHeaders = useCallback((): Record<string, string> => {
     const token = client.getAccessToken();
@@ -367,8 +345,8 @@ function Chat({ user, onLogout }: { user: { username: string }; onLogout: () => 
 
       if (msg.content || msg.error) {
         items.push(
-          <div key={msg.id} className="w-full text-[14px] leading-[1.7]">
-            {msg.content && <div className="whitespace-pre-wrap">{msg.content}</div>}
+          <div key={msg.id} className="w-full">
+            {msg.content && <Markdown>{msg.content}</Markdown>}
             {msg.error && (
               <div className="mt-2 rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-2.5 text-sm text-destructive/80">
                 {msg.error}
@@ -410,11 +388,9 @@ function Chat({ user, onLogout }: { user: { username: string }; onLogout: () => 
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
       <Header user={user} onLogout={onLogout} />
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
-        <div className="mx-auto w-full max-w-3xl space-y-5 px-6 py-6">
-          {items}
-        </div>
-      </div>
+      <ChatScrollArea className="flex-1" contentClassName="mx-auto w-full max-w-3xl space-y-5 px-6 py-6">
+        {items}
+      </ChatScrollArea>
       <div className="shrink-0 px-6 pb-5 pt-2">
         <Composer input={input} setInput={setInput} onSubmit={sendMessage} onAbort={abort} streaming={streaming} liveTools={liveTools} />
       </div>

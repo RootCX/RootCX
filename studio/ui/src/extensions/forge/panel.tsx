@@ -13,27 +13,7 @@ import { showAISetupDialog } from "@/components/ai-setup-dialog";
 import { aiConfigStore } from "@/lib/ai-models";
 import { ArrowUp, Square, Plus, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
-import Markdown from "react-markdown";
-
-const heading = (p: React.HTMLAttributes<HTMLHeadingElement>) => (
-  <h3 className="mt-4 mb-2 text-[15px] font-semibold text-foreground" {...p} />
-);
-const mdComponents = {
-  p: (p: React.HTMLAttributes<HTMLParagraphElement>) => <p className="my-2 first:mt-0 last:mb-0 leading-relaxed" {...p} />,
-  strong: (p: React.HTMLAttributes<HTMLElement>) => <strong className="font-semibold text-foreground" {...p} />,
-  ul: (p: React.HTMLAttributes<HTMLUListElement>) => <ul className="my-2 list-disc pl-5 marker:text-muted-foreground/50" {...p} />,
-  ol: (p: React.OlHTMLAttributes<HTMLOListElement>) => <ol className="my-2 list-decimal pl-5" {...p} />,
-  li: (p: React.HTMLAttributes<HTMLLIElement>) => <li className="my-1 leading-relaxed" {...p} />,
-  h1: heading, h2: heading, h3: heading,
-  code: ({ className, children, ...rest }: React.HTMLAttributes<HTMLElement>) =>
-    className
-      ? <pre className="my-3 overflow-x-auto rounded-lg bg-[#141414] px-4 py-3 font-mono text-[13px] leading-relaxed text-foreground/90"><code {...rest}>{children}</code></pre>
-      : <code className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[13px] text-foreground/90" {...rest}>{children}</code>,
-  pre: ({ children }: React.HTMLAttributes<HTMLPreElement>) => <>{children}</>,
-  a: (p: React.AnchorHTMLAttributes<HTMLAnchorElement>) => <a className="text-primary hover:text-primary/80 underline underline-offset-2 transition-colors" target="_blank" rel="noopener noreferrer" {...p} />,
-  hr: () => <hr className="my-4 border-border/50" />,
-  blockquote: (p: React.HTMLAttributes<HTMLQuoteElement>) => <blockquote className="my-2 border-l-2 border-primary/30 pl-4 text-muted-foreground italic" {...p} />,
-} as Record<string, React.ComponentType>;
+import { Markdown, ChatScrollArea } from "@rootcx/ui";
 
 const NO_PARTS: Part[] = [];
 const TOOL_LABELS: Record<string, string> = { read: "Reading", write: "Writing", edit: "Editing", bash: "Running command", grep: "Searching", glob: "Finding files", ls: "Browsing", web_fetch: "Fetching" };
@@ -43,9 +23,7 @@ const toolTitle = (t: Part) => t.tool_state?.title ?? TOOL_LABELS[t.tool_name ??
 function PartView({ part }: { part: Part }) {
   if (part.part_type !== "text" && part.part_type !== "reasoning") return null;
   return (
-    <div className={cn("break-words text-[14px] leading-[1.7]", part.part_type === "reasoning" && "italic text-muted-foreground/80")}>
-      <Markdown components={mdComponents}>{part.content}</Markdown>
-    </div>
+    <Markdown className={cn(part.part_type === "reasoning" && "italic text-muted-foreground/80")}>{part.content}</Markdown>
   );
 }
 
@@ -307,30 +285,8 @@ export default function ForgePanel() {
   const { sessionId, sessions, messages, parts, permissions, questions, streaming, error } = useSyncExternalStore(subscribe, getSnapshot);
   const { projectPath } = useProjectContext();
   const [input, setInput] = useState("");
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const stick = useRef(true);
-  const lastTop = useRef(0);
-  const msgCount = useRef(0);
 
   useEffect(() => { if (projectPath) setCwd(projectPath); }, [projectPath]);
-
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const onScroll = () => {
-      if (el.scrollTop < lastTop.current - 5) stick.current = false;
-      else if (el.scrollHeight - el.scrollTop - el.clientHeight < 5) stick.current = true;
-      lastTop.current = el.scrollTop;
-    };
-    el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
-  }, []);
-
-  useEffect(() => {
-    if (messages.length > msgCount.current) stick.current = true;
-    msgCount.current = messages.length;
-    if (stick.current) scrollRef.current?.scrollTo(0, scrollRef.current.scrollHeight);
-  }, [messages, parts, questions, permissions]);
 
   const submit = async () => {
     if (!input.trim() || streaming) return;
@@ -380,14 +336,12 @@ export default function ForgePanel() {
   return (
     <div className="flex h-full min-w-0 flex-col overflow-hidden">
       <div className="flex shrink-0 items-center justify-end px-4 py-2"><SessionSelector {...sessionProps} /></div>
-      <div ref={scrollRef} className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden">
-        <div className="mx-auto w-full max-w-3xl space-y-5 px-6 py-6">
-          {items}
-          {permissions.map((perm) => <PermissionCard key={perm.id} perm={perm} />)}
-          {questions.length > 0 && <QuestionsPanel requests={questions} />}
-          {error && <div className="rounded-xl border border-destructive/20 bg-destructive/5 px-5 py-3 text-sm text-destructive/80">{error}</div>}
-        </div>
-      </div>
+      <ChatScrollArea className="min-w-0 flex-1" contentClassName="mx-auto w-full max-w-3xl space-y-5 px-6 py-6">
+        {items}
+        {permissions.map((perm) => <PermissionCard key={perm.id} perm={perm} />)}
+        {questions.length > 0 && <QuestionsPanel requests={questions} />}
+        {error && <div className="rounded-xl border border-destructive/20 bg-destructive/5 px-5 py-3 text-sm text-destructive/80">{error}</div>}
+      </ChatScrollArea>
       <div className="shrink-0 px-6 pb-5 pt-2">
         <Composer input={input} setInput={setInput} onSubmit={submit} onAbort={abortSession} streaming={streaming} liveTools={liveTools} />
       </div>

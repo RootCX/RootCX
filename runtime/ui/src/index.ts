@@ -15,3 +15,6 @@ export * from "./forms";
 
 // Feedback
 export * from "./feedback";
+
+// Chat
+export * from "./chat";
