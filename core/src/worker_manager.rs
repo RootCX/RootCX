@@ -12,6 +12,7 @@ use crate::RuntimeError;
 use crate::extensions::logs::LogEntry;
 use crate::ipc::{AgentInvokePayload, RpcCaller};
 use crate::secrets::SecretManager;
+use crate::tools::ToolRegistry;
 use crate::worker::{self, AgentEvent, SupervisorHandle, WorkerConfig, WorkerStatus};
 
 pub struct WorkerManager {
@@ -19,11 +20,12 @@ pub struct WorkerManager {
     apps_dir: PathBuf,
     runtime_url: String,
     bun_bin: PathBuf,
+    tool_registry: Arc<ToolRegistry>,
 }
 
 impl WorkerManager {
-    pub fn new(apps_dir: PathBuf, runtime_url: String, bun_bin: PathBuf) -> Self {
-        Self { workers: Arc::new(RwLock::new(HashMap::new())), apps_dir, runtime_url, bun_bin }
+    pub fn new(apps_dir: PathBuf, runtime_url: String, bun_bin: PathBuf, tool_registry: Arc<ToolRegistry>) -> Self {
+        Self { workers: Arc::new(RwLock::new(HashMap::new())), apps_dir, runtime_url, bun_bin, tool_registry }
     }
 
     async fn get_handle(&self, app_id: &str) -> Result<SupervisorHandle, RuntimeError> {
@@ -53,6 +55,7 @@ impl WorkerManager {
             runtime_url: self.runtime_url.clone(),
             pool: pool.clone(),
             js_runtime: self.bun_bin.clone(),
+            tool_registry: Arc::clone(&self.tool_registry),
         };
 
         let handle = worker::spawn_supervisor(config);

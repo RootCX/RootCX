@@ -1,5 +1,6 @@
 import { DynamicStructuredTool } from "@langchain/core/tools";
 import { z } from "zod";
+import type { IpcToolBridge } from "../ipc-tool-bridge.js";
 
 export interface ToolDescriptor {
     name: string;
@@ -9,22 +10,17 @@ export interface ToolDescriptor {
 
 export function buildTools(
     descriptors: ToolDescriptor[],
-    appId: string,
-    runtimeUrl: string,
-    authToken: string,
+    invokeId: string,
+    bridge: IpcToolBridge,
 ): DynamicStructuredTool[] {
-    const headers = { "Content-Type": "application/json", Authorization: `Bearer ${authToken}` };
     return descriptors.map((d) => new DynamicStructuredTool({
         name: d.name,
         description: d.description,
         schema: toZod(d.inputSchema) as z.ZodObject<any>,
         func: async (args: Record<string, unknown>) => {
             try {
-                const res = await fetch(`${runtimeUrl}/api/v1/tools/${d.name}/execute`, {
-                    method: "POST", headers, body: JSON.stringify({ appId, args }),
-                });
-                if (!res.ok) return `Error ${res.status}: ${await res.text()}`;
-                return JSON.stringify(await res.json());
+                const result = await bridge.callTool(invokeId, d.name, args);
+                return JSON.stringify(result);
             } catch (err) {
                 return `Tool error: ${err instanceof Error ? err.message : String(err)}`;
             }

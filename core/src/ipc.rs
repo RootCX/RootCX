@@ -44,6 +44,14 @@ pub enum OutboundMessage {
     Rpc { id: String, method: String, params: JsonValue, caller: Option<RpcCaller> },
     Job { id: String, payload: JsonValue },
     AgentInvoke(AgentInvokePayload),
+    AgentToolResult {
+        invoke_id: String,
+        call_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<JsonValue>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     Shutdown,
 }
 
@@ -86,6 +94,17 @@ pub enum InboundMessage {
     AgentError {
         invoke_id: String,
         error: String,
+    },
+    AgentToolCall {
+        invoke_id: String,
+        call_id: String,
+        tool_name: String,
+        #[serde(default)]
+        args: JsonValue,
+    },
+    AgentSessionCompacted {
+        invoke_id: String,
+        summary: String,
     },
 }
 
@@ -181,6 +200,10 @@ mod tests {
             (OutboundMessage::Rpc { id: "r1".into(), method: "echo".into(), params: json!({}), caller: None }, "rpc"),
             (OutboundMessage::Job { id: "j1".into(), payload: json!({}) }, "job"),
             (OutboundMessage::Shutdown, "shutdown"),
+            (OutboundMessage::AgentToolResult {
+                invoke_id: "i1".into(), call_id: "c1".into(),
+                result: Some(json!({"data": []})), error: None,
+            }, "agent_tool_result"),
         ];
         for (msg, expected_type) in cases {
             let v: JsonValue = serde_json::to_value(&msg).unwrap();
@@ -255,6 +278,28 @@ mod tests {
     fn inbound_invalid_type_fails() {
         let result = serde_json::from_str::<InboundMessage>(r#"{"type":"unknown"}"#);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn inbound_agent_tool_call() {
+        let msg: InboundMessage = serde_json::from_str(
+            r#"{"type":"agent_tool_call","invoke_id":"i1","call_id":"c1","tool_name":"query_data","args":{"entity":"Users"}}"#
+        ).unwrap();
+        let InboundMessage::AgentToolCall { invoke_id, call_id, tool_name, args } = msg else { panic!("expected AgentToolCall") };
+        assert_eq!(invoke_id, "i1");
+        assert_eq!(call_id, "c1");
+        assert_eq!(tool_name, "query_data");
+        assert_eq!(args, json!({"entity": "Users"}));
+    }
+
+    #[test]
+    fn inbound_agent_session_compacted() {
+        let msg: InboundMessage = serde_json::from_str(
+            r#"{"type":"agent_session_compacted","invoke_id":"i1","summary":"conversation about users"}"#
+        ).unwrap();
+        let InboundMessage::AgentSessionCompacted { invoke_id, summary } = msg else { panic!("expected AgentSessionCompacted") };
+        assert_eq!(invoke_id, "i1");
+        assert_eq!(summary, "conversation about users");
     }
 
     #[test]

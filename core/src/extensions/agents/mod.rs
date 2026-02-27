@@ -1,4 +1,6 @@
+pub(crate) mod approvals;
 pub(crate) mod routes;
+pub(crate) mod supervision;
 
 use async_trait::async_trait;
 use axum::Router;
@@ -56,6 +58,35 @@ impl RuntimeExtension for AgentExtension {
                 ON rootcx_system.agent_sessions (app_id)",
             "CREATE INDEX IF NOT EXISTS idx_agent_sessions_user
                 ON rootcx_system.agent_sessions (user_id)",
+            "ALTER TABLE rootcx_system.agent_sessions ADD COLUMN IF NOT EXISTS title TEXT",
+            "ALTER TABLE rootcx_system.agent_sessions ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'",
+            "ALTER TABLE rootcx_system.agent_sessions ADD COLUMN IF NOT EXISTS total_tokens BIGINT DEFAULT 0",
+            "ALTER TABLE rootcx_system.agent_sessions ADD COLUMN IF NOT EXISTS turn_count INTEGER DEFAULT 0",
+            "CREATE TABLE IF NOT EXISTS rootcx_system.agent_messages (
+                id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                session_id  UUID NOT NULL REFERENCES rootcx_system.agent_sessions(id) ON DELETE CASCADE,
+                role        TEXT NOT NULL,
+                content     TEXT,
+                token_count INTEGER DEFAULT 0,
+                is_summary  BOOLEAN NOT NULL DEFAULT false,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            )",
+            "CREATE INDEX IF NOT EXISTS idx_agent_messages_session
+                ON rootcx_system.agent_messages (session_id, created_at)",
+            "CREATE TABLE IF NOT EXISTS rootcx_system.agent_tool_calls (
+                id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                session_id  UUID NOT NULL REFERENCES rootcx_system.agent_sessions(id) ON DELETE CASCADE,
+                message_id  UUID REFERENCES rootcx_system.agent_messages(id) ON DELETE SET NULL,
+                tool_name   TEXT NOT NULL,
+                input       JSONB NOT NULL,
+                output      JSONB,
+                error       TEXT,
+                status      TEXT NOT NULL DEFAULT 'pending',
+                duration_ms INTEGER,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            )",
+            "CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_session
+                ON rootcx_system.agent_tool_calls (session_id, created_at)",
         ] {
             sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
         }
@@ -78,6 +109,7 @@ impl RuntimeExtension for AgentExtension {
             "graph": def.graph,
             "memory": def.memory,
             "limits": def.limits,
+            "supervision": def.supervision,
         });
 
         // Derive RBAC permissions from the app's data contract
@@ -150,7 +182,10 @@ impl RuntimeExtension for AgentExtension {
                 .route("/api/v1/apps/{app_id}/agent", get(routes::get_agent))
                 .route("/api/v1/apps/{app_id}/agent/invoke", post(routes::invoke_agent))
                 .route("/api/v1/apps/{app_id}/agent/sessions", get(routes::list_sessions))
-                .route("/api/v1/apps/{app_id}/agent/sessions/{session_id}", get(routes::get_session)),
+                .route("/api/v1/apps/{app_id}/agent/sessions/{session_id}", get(routes::get_session))
+                .route("/api/v1/apps/{app_id}/agent/sessions/{session_id}/events", get(routes::get_session_events))
+                .route("/api/v1/apps/{app_id}/agent/approvals", get(routes::list_approvals))
+                .route("/api/v1/apps/{app_id}/agent/approvals/{approval_id}", post(routes::reply_approval)),
         )
     }
 }
