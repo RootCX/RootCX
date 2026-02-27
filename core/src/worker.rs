@@ -445,10 +445,29 @@ async fn supervisor_loop(
                                     }
                                 }
 
+                                let agent_uid = crate::extensions::agents::agent_user_id(&aid);
+                                let tool_perm = format!("tool.{tname}");
+                                if let Ok((_, perms)) = crate::extensions::rbac::policy::resolve_permissions(&pool, &aid, agent_uid).await {
+                                    if !perms.iter().any(|p| p == "*" || p == &tool_perm) {
+                                        let err_msg = format!("permission denied: {tool_perm}");
+                                        let _ = out_tx.send(OutboundMessage::AgentToolResult {
+                                            invoke_id: iid.clone(), call_id: cid.clone(),
+                                            result: None, error: Some(err_msg.clone()),
+                                        }).await;
+                                        if let Some(tx) = stream_tx {
+                                            let _ = tx.send(AgentEvent::ToolCallCompleted {
+                                                call_id: cid, tool_name: tname,
+                                                output: None, error: Some(err_msg), duration_ms: 0,
+                                            }).await;
+                                        }
+                                        return;
+                                    }
+                                }
+
                                 let start = Instant::now();
                                 let (result, err) = match tool {
                                     Some(t) => {
-                                        let ctx = ToolContext { pool, app_id: aid, args };
+                                        let ctx = ToolContext { pool, app_id: aid.clone(), user_id: agent_uid, args };
                                         match t.execute(&ctx).await {
                                             Ok(v) => (Some(v), None),
                                             Err(e) => (None, Some(e)),
