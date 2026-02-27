@@ -32,6 +32,14 @@ impl Tool for MutateDataTool {
     async fn execute(&self, ctx: &ToolContext) -> Result<JsonValue, String> {
         let entity = str_arg(&ctx.args, "entity")?;
         let action = str_arg(&ctx.args, "action")?;
+
+        let (_, perms) = crate::extensions::rbac::policy::resolve_permissions(&ctx.pool, &ctx.app_id, ctx.user_id)
+            .await.map_err(|e| format!("{e:?}"))?;
+        let required = format!("{entity}.{action}");
+        if !perms.iter().any(|p| p == "*" || *p == required) {
+            return Err(format!("permission denied: {required}"));
+        }
+
         let tbl = table(&ctx.app_id, entity);
 
         match action {

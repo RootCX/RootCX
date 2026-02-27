@@ -255,21 +255,15 @@ Added alongside `dataContract` in `manifest.json`:
   "systemPrompt": "./agent/system.md",
   "graph": "./agent/graph.ts",
   "memory": { "enabled": true },
-  "limits": { "maxTurns": 10 },
-  "access": [
-    { "entity": "<collection>", "actions": ["read", "create", "update", "delete"] },
-    { "entity": "tool:browser", "actions": [] }
-  ]
+  "limits": { "maxTurns": 10 }
 }
 ```
 
 **`provider` is required.** Tagged union: `{ "type": "anthropic"|"openai"|"bedrock", "model": "<model>" }`. Bedrock also accepts `"region"`.
 
-### Access & tools
+### Tools & permissions
 
-Unlisted = denied.
-`<collection>` in access → auto-enables `query_data` + `mutate_data`.
-Cross-app: `app:<appId>/<entity>`.
+All registered tools are available to every agent. RBAC permissions are derived automatically from `dataContract` (full CRUD per entity).
 
 ### graph.ts contract
 
@@ -283,7 +277,7 @@ import type { StructuredToolInterface } from "@langchain/core/tools";
 // Must default-export this signature:
 export default function buildGraph(
   model: BaseChatModel,       // LLM provided by runtime
-  tools: StructuredToolInterface[], // tools from manifest access
+  tools: StructuredToolInterface[], // all registered platform tools
 ): CompiledStateGraph
 ```
 

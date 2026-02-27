@@ -34,7 +34,7 @@ pub struct ExecuteToolRequest {
 }
 
 pub async fn execute_tool(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(tool_name): Path<String>,
     Json(body): Json<ExecuteToolRequest>,
@@ -48,7 +48,7 @@ pub async fn execute_tool(
     };
 
     let result = tool.execute(&ToolContext {
-        pool, app_id: body.app_id, args: body.args,
+        pool, app_id: body.app_id, user_id: identity.user_id, args: body.args,
     }).await.map_err(ApiError::Internal)?;
     Ok(Json(result))
 }

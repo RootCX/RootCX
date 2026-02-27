@@ -511,7 +511,9 @@ async fn build_agent_config(
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("app '{app_id}' not found")))?;
 
-    let tool_descriptors = tool_registry.all_descriptors(&data_contract);
+    let agent_uid = super::agent_user_id(app_id);
+    let (_, perms) = crate::extensions::rbac::policy::resolve_permissions(pool, app_id, agent_uid).await?;
+    let tool_descriptors = tool_registry.descriptors_for_permissions(&perms, &data_contract);
 
     let mut provider = config.get("provider").cloned().unwrap_or(json!(null));
     resolve_secret_refs(pool, sm, &mut provider).await?;

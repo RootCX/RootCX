@@ -94,7 +94,7 @@ impl RuntimeExtension for AgentExtension {
         Ok(())
     }
 
-    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, _installed_by: uuid::Uuid) -> Result<(), RuntimeError> {
+    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, _installed_by: uuid::Uuid, _tool_names: &[String]) -> Result<(), RuntimeError> {
         let def = match &manifest.agent {
             Some(d) => d,
             None => return Ok(()),
@@ -112,11 +112,14 @@ impl RuntimeExtension for AgentExtension {
             "supervision": def.supervision,
         });
 
-        // Derive RBAC permissions from the app's data contract
-        let agent_permissions: Vec<String> = manifest.data_contract.iter()
-            .flat_map(|e| ["create", "read", "update", "delete"].iter()
-                .map(move |a| format!("{}.{}", e.entity_name, a)))
-            .collect();
+        // All catalogued permissions — RbacExtension already derived them from dataContract
+        let agent_permissions: Vec<String> = sqlx::query_scalar(
+            "SELECT key FROM rootcx_system.rbac_permissions WHERE app_id = $1",
+        )
+        .bind(app_id)
+        .fetch_all(pool)
+        .await
+        .map_err(RuntimeError::Schema)?;
 
         let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
 

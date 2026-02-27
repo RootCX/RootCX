@@ -11,11 +11,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
+use uuid::Uuid;
 use rootcx_shared_types::ToolDescriptor;
 
 pub struct ToolContext {
     pub pool: PgPool,
     pub app_id: String,
+    pub user_id: Uuid,
     pub args: JsonValue,
 }
 
@@ -38,13 +40,15 @@ impl ToolRegistry {
         self.tools.insert(name, (Arc::new(tool), desc));
     }
 
-    pub fn all_descriptors(&self, data_contract: &JsonValue) -> Vec<ToolDescriptor> {
-        self.tools.values().map(|(tool, base)| {
+    pub fn descriptors_for_permissions(&self, permissions: &[String], data_contract: &JsonValue) -> Vec<ToolDescriptor> {
+        self.tools.values().filter_map(|(tool, base)| {
+            let perm = format!("tool.{}", base.name);
+            if !permissions.iter().any(|p| p == "*" || p == &perm) { return None; }
             let mut desc = base.clone();
             if tool.enriches_with_schema() {
                 desc.description.push_str(&format_data_contract(data_contract));
             }
-            desc
+            Some(desc)
         }).collect()
     }
 

@@ -45,6 +45,14 @@ impl Tool for QueryDataTool {
     async fn execute(&self, ctx: &ToolContext) -> Result<JsonValue, String> {
         let entity = str_arg(&ctx.args, "entity")?;
         let app = ctx.args.get("app").and_then(|v| v.as_str()).unwrap_or(&ctx.app_id);
+
+        let (_, perms) = crate::extensions::rbac::policy::resolve_permissions(&ctx.pool, app, ctx.user_id)
+            .await.map_err(|e| format!("{e:?}"))?;
+        let required = format!("{entity}.read");
+        if !perms.iter().any(|p| p == "*" || *p == required) {
+            return Err(format!("permission denied: {required}"));
+        }
+
         let types = field_type_map(&ctx.pool, app, entity).await.map_err(|e| e.to_string())?;
         let tbl = table(app, entity);
 

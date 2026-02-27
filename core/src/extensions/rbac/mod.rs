@@ -62,43 +62,35 @@ impl RuntimeExtension for RbacExtension {
         Ok(())
     }
 
-    async fn on_table_created(
-        &self,
-        _pool: &PgPool,
-        _manifest: &AppManifest,
-        _schema: &str,
-        _table: &str,
-    ) -> Result<(), RuntimeError> {
-        // No more owner_id injection
-        Ok(())
-    }
-
-    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, installed_by: Uuid) -> Result<(), RuntimeError> {
+    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, installed_by: Uuid, tool_names: &[String]) -> Result<(), RuntimeError> {
         let app_id = &manifest.app_id;
 
-        // Sync declared permissions from manifest
+        let mut perms: Vec<(String, String)> = Vec::new();
         if let Some(contract) = &manifest.permissions {
-            // Delete old permissions and re-insert from manifest
-            sqlx::query("DELETE FROM rootcx_system.rbac_permissions WHERE app_id = $1")
-                .bind(app_id)
-                .execute(pool)
-                .await
-                .map_err(RuntimeError::Schema)?;
-
-            for perm in &contract.permissions {
-                sqlx::query(
-                    "INSERT INTO rootcx_system.rbac_permissions (app_id, key, description) VALUES ($1, $2, $3)",
-                )
-                .bind(app_id)
-                .bind(&perm.key)
-                .bind(&perm.description)
-                .execute(pool)
-                .await
-                .map_err(RuntimeError::Schema)?;
-            }
-
-            info!(app = %app_id, permissions = contract.permissions.len(), "permissions synced from manifest");
+            perms.extend(contract.permissions.iter().map(|p| (p.key.clone(), p.description.clone())));
         }
+        for entity in &manifest.data_contract {
+            for action in ["create", "read", "update", "delete"] {
+                perms.push((
+                    format!("{}.{action}", entity.entity_name),
+                    format!("{action} {}", entity.entity_name),
+                ));
+            }
+        }
+        for name in tool_names {
+            perms.push((format!("tool.{name}"), format!("use {name} tool")));
+        }
+
+        // Single atomic sync: delete stale + insert current
+        let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
+        sqlx::query("DELETE FROM rootcx_system.rbac_permissions WHERE app_id = $1")
+            .bind(app_id).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
+        for (key, desc) in &perms {
+            sqlx::query("INSERT INTO rootcx_system.rbac_permissions (app_id, key, description) VALUES ($1, $2, $3)")
+                .bind(app_id).bind(key).bind(desc)
+                .execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
+        }
+        tx.commit().await.map_err(RuntimeError::Schema)?;
 
         // Create built-in admin role with wildcard permission if not exists
         sqlx::query(
