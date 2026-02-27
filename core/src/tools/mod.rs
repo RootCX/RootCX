@@ -38,14 +38,13 @@ impl ToolRegistry {
         self.tools.insert(name, (Arc::new(tool), desc));
     }
 
-    pub fn descriptors_for(&self, names: &[String], data_contract: &JsonValue) -> Vec<ToolDescriptor> {
-        names.iter().filter_map(|name| {
-            let (tool, base) = self.tools.get(name)?;
+    pub fn all_descriptors(&self, data_contract: &JsonValue) -> Vec<ToolDescriptor> {
+        self.tools.values().map(|(tool, base)| {
             let mut desc = base.clone();
             if tool.enriches_with_schema() {
                 desc.description.push_str(&format_data_contract(data_contract));
             }
-            Some(desc)
+            desc
         }).collect()
     }
 

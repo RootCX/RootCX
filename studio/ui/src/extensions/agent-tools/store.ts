@@ -1,15 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
-import { notify } from "@/core/notifications";
-import { executeCommand } from "@/core/studio";
 import { fetchCore } from "@/core/auth";
-
-const IMPLICIT_TOOLS = new Set(["query_data", "mutate_data"]);
 
 export interface ToolEntry {
   name: string;
   description: string;
-  enabled: boolean;
-  implicit: boolean;
 }
 
 interface State {
@@ -36,23 +30,13 @@ export const getSnapshot = () => snapshot;
 interface Manifest {
   appId: string;
   name?: string;
-  agent?: {
-    access?: Array<{ entity: string; actions?: string[] }>;
-    [key: string]: unknown;
-  };
+  agent?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
 async function readManifest(projectPath: string): Promise<Manifest> {
   const raw = await invoke<string>("read_file", { path: `${projectPath}/manifest.json` });
   return JSON.parse(raw);
-}
-
-async function writeManifest(projectPath: string, manifest: Manifest) {
-  await invoke("write_file", {
-    path: `${projectPath}/manifest.json`,
-    contents: JSON.stringify(manifest, null, 2) + "\n",
-  });
 }
 
 interface ToolInfo {
@@ -66,28 +50,6 @@ async function fetchAvailableTools(): Promise<ToolInfo[]> {
   return res.json();
 }
 
-function buildToolEntries(
-  available: ToolInfo[],
-  access: Array<{ entity: string; actions?: string[] }>,
-  hasEntities: boolean,
-): ToolEntry[] {
-  const enabledTools = new Set(
-    access
-      .filter((a) => a.entity.startsWith("tool:"))
-      .map((a) => a.entity.slice(5)),
-  );
-
-  return available.map((t) => {
-    const implicit = IMPLICIT_TOOLS.has(t.name);
-    return {
-      name: t.name,
-      description: t.description,
-      enabled: implicit ? hasEntities : enabledTools.has(t.name),
-      implicit,
-    };
-  });
-}
-
 export async function loadProject(projectPath: string) {
   state = { ...state, loading: true, projectPath };
   emit();
@@ -98,13 +60,11 @@ export async function loadProject(projectPath: string) {
       emit();
       return;
     }
-    const access = manifest.agent.access ?? [];
-    const hasEntities = access.some((a) => !a.entity.startsWith("tool:"));
     const available = await fetchAvailableTools();
     state = {
       ...state,
       isAgent: true,
-      tools: buildToolEntries(available, access, hasEntities),
+      tools: available.map((t) => ({ name: t.name, description: t.description })),
       loading: false,
       appId: manifest.appId,
       agentName: manifest.name ?? manifest.appId,
@@ -114,38 +74,4 @@ export async function loadProject(projectPath: string) {
     state = { ...state, loading: false };
     emit();
   }
-}
-
-export async function toggleTool(name: string) {
-  if (!state.projectPath) return;
-  const entry = state.tools.find((t) => t.name === name);
-  if (!entry || entry.implicit) return;
-
-  const manifest = await readManifest(state.projectPath);
-  if (!manifest.agent) return;
-
-  const access = manifest.agent.access ?? [];
-  const toolEntity = `tool:${name}`;
-  const idx = access.findIndex((a) => a.entity === toolEntity);
-
-  if (idx >= 0) {
-    access.splice(idx, 1);
-  } else {
-    access.push({ entity: toolEntity, actions: [] });
-  }
-
-  manifest.agent.access = access;
-  await writeManifest(state.projectPath, manifest);
-  notify("agent-tools-changed", "Tool access changed — re-run to apply", "warning", {
-    label: "Run",
-    run: () => executeCommand("rootcx.run"),
-  });
-
-  state = {
-    ...state,
-    tools: state.tools.map((t) =>
-      t.name === name ? { ...t, enabled: !t.enabled } : t,
-    ),
-  };
-  emit();
 }

@@ -23,8 +23,7 @@ impl Layer for AgentLayer {
                     "description": format!("AI agent for {}", ctx.app_id),
                     "provider": provider,
                     "systemPrompt": "./agent/system.md",
-                    "memory": { "enabled": true },
-                    "access": []
+                    "memory": { "enabled": true }
                 }
             });
             e.write_json("manifest.json", &manifest).await?;

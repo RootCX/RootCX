@@ -23,7 +23,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "security", icon: Shield, label: "Security", desc: "Manage roles and permissions", zone: "sidebar" },
 ];
 
-const TOOLS_ITEM: NavItem = { id: "agent-tools", icon: Wrench, label: "Agent Tools", desc: "Configure agent tool access", zone: "sidebar" };
+const TOOLS_ITEM: NavItem = { id: "agent-tools", icon: Wrench, label: "Agent Tools", desc: "View agent tools", zone: "sidebar" };
 
 const isVisible = (state: LayoutState, id: string) =>
   Object.values(state.zones).some((ids) => ids.includes(id)) && !state.hidden.has(id);

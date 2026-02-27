@@ -216,7 +216,6 @@ async fn build_agent_config(
     config: &JsonValue,
     tool_registry: &crate::tools::ToolRegistry,
 ) -> Result<JsonValue, ApiError> {
-    let enabled_tools = extract_enabled_tools(config);
     let data_contract: JsonValue = sqlx::query_scalar(
         "SELECT COALESCE(manifest->'dataContract', '[]'::jsonb) FROM rootcx_system.apps WHERE id = $1",
     )
@@ -225,7 +224,7 @@ async fn build_agent_config(
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("app '{app_id}' not found")))?;
 
-    let tool_descriptors = tool_registry.descriptors_for(&enabled_tools, &data_contract);
+    let tool_descriptors = tool_registry.all_descriptors(&data_contract);
 
     let mut provider = config.get("provider").cloned().unwrap_or(json!(null));
     resolve_secret_refs(pool, sm, &mut provider).await?;
@@ -297,27 +296,6 @@ pub async fn get_session(
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("session '{session_id}' not found")))?;
     Ok(Json(row))
-}
-
-fn extract_enabled_tools(config: &JsonValue) -> Vec<String> {
-    let mut tools = vec!["list_apps".into(), "describe_app".into()];
-    let mut has_data_access = false;
-    let Some(entries) = config.get("access").and_then(|a| a.as_array()) else {
-        return tools;
-    };
-    for entry in entries {
-        let Some(entity) = entry.get("entity").and_then(|e| e.as_str()) else { continue };
-        if let Some(tool_name) = entity.strip_prefix("tool:") {
-            tools.push(tool_name.to_string());
-        } else {
-            has_data_access = true;
-        }
-    }
-    if has_data_access {
-        tools.push("query_data".into());
-        tools.push("mutate_data".into());
-    }
-    tools
 }
 
 async fn load_system_prompt(

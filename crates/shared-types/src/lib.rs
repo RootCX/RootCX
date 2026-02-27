@@ -227,8 +227,6 @@ pub struct AgentDefinition {
     pub memory: Option<AgentMemory>,
     #[serde(default)]
     pub limits: Option<AgentLimits>,
-    #[serde(default)]
-    pub access: Vec<AgentAccessEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -241,12 +239,6 @@ pub struct AgentMemory {
 pub struct AgentLimits {
     #[serde(default)]
     pub max_turns: Option<u32>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentAccessEntry {
-    pub entity: String,
-    pub actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
