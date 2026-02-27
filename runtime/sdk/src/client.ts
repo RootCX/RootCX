@@ -103,6 +103,10 @@ export class RuntimeClient {
     this.refreshToken = refresh;
   }
 
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
   getAccessToken(): string | null {
     return this.accessToken;
   }

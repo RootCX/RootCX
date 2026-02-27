@@ -9,9 +9,7 @@ import { activate as coreStatus } from "./core-status";
 import { activate as run } from "./run";
 import { activate as editor } from "./editor";
 import { activate as settings } from "./settings";
-import { activate as agents } from "./agents";
 import { activate as database } from "./database";
-import { activate as agentTools } from "./agent-tools";
 import { activate as security } from "./security";
 
 export function activateBuiltins() {
@@ -26,8 +24,6 @@ export function activateBuiltins() {
   run();
   editor();
   settings();
-  agents();
   database();
-  agentTools();
   security();
 }

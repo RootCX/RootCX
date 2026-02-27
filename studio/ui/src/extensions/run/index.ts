@@ -1,7 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { commands, workspace, layout } from "@/core/studio";
-import { dismiss } from "@/core/notifications";
 import { showMigrationDialog } from "./migration-dialog";
 import { verifySchema, syncManifest } from "@/core/api";
 
@@ -66,7 +65,6 @@ async function executeStep(step: string, projectPath: string): Promise<boolean> 
     case "sync_manifest": {
       try {
         await syncManifest(await readManifest(projectPath));
-        dismiss("agent-tools-changed");
       } catch (e) { return logError("sync_manifest", e); }
       return true;
     }
