@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useSyncExternalStore } from "react";
-import { subscribe, getSnapshot, sendAgentMessage, abortAgent } from "./store";
-import { SendHorizontal, Square, Unplug } from "lucide-react";
+import { subscribe, getSnapshot, sendAgentMessage, abortAgent, approveToolCall, rejectToolCall } from "./store";
+import { SendHorizontal, Square, Unplug, Check, X, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import type { AgentMessage } from "@/types";
 
 const bubbleBase = "min-w-0 overflow-hidden rounded-md px-3 py-2 text-xs leading-relaxed whitespace-pre-wrap break-words";
 
@@ -19,6 +20,46 @@ function Bubble({ role, children }: { role: "user" | "assistant"; children: Reac
   );
 }
 
+function ApprovalCard({ msg, appId, pending }: { msg: AgentMessage; appId: string; pending: boolean }) {
+  const approvalId = msg.meta?.approvalId as string;
+  const toolName = msg.meta?.toolName as string;
+  return (
+    <div className="rounded-md border border-amber-700 bg-amber-950/50 px-3 py-2 text-xs">
+      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-amber-400">Approval Required</div>
+      <div className="mb-1 text-muted-foreground">{msg.content}</div>
+      <div className="mb-2 font-mono text-[10px] text-amber-300">{toolName}</div>
+      {pending && (
+        <div className="flex gap-1.5">
+          <Button size="xs" variant="outline" className="gap-1 border-green-700 text-green-400 hover:bg-green-950"
+            onClick={() => approveToolCall(appId, approvalId)}>
+            <Check className="h-3 w-3" /> Approve
+          </Button>
+          <Button size="xs" variant="outline" className="gap-1 border-red-700 text-red-400 hover:bg-red-950"
+            onClick={() => rejectToolCall(appId, approvalId)}>
+            <X className="h-3 w-3" /> Reject
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolActivity({ msg }: { msg: AgentMessage }) {
+  const isStart = msg.type === "tool_start";
+  return (
+    <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+      {isStart && <Loader2 className="h-3 w-3 animate-spin" />}
+      <span className="font-mono">{msg.content}</span>
+    </div>
+  );
+}
+
+function MessageItem({ msg, appId, isPendingApproval }: { msg: AgentMessage; appId: string; isPendingApproval: boolean }) {
+  if (msg.type === "approval") return <ApprovalCard msg={msg} appId={appId} pending={isPendingApproval} />;
+  if (msg.type === "tool_start" || msg.type === "tool_done") return <ToolActivity msg={msg} />;
+  return <Bubble role={msg.role as "user" | "assistant"}>{msg.content}</Bubble>;
+}
+
 export default function AgentChatPanel({ appId, name }: { appId: string; name?: string }) {
   const { chats, deployed } = useSyncExternalStore(subscribe, getSnapshot);
   const isDeployed = deployed[appId] === true;
@@ -27,6 +68,7 @@ export default function AgentChatPanel({ appId, name }: { appId: string; name?: 
   const streaming = chat?.streaming ?? false;
   const streamed = chat?.streamedText ?? "";
   const error = chat?.error ?? null;
+  const pendingApprovals = chat?.pendingApprovals ?? {};
   const disabled = !isDeployed || streaming;
 
   const [input, setInput] = useState("");
@@ -53,7 +95,14 @@ export default function AgentChatPanel({ appId, name }: { appId: string; name?: 
         </div>
       ) : (
         <div className="min-h-0 min-w-0 flex-1 space-y-2 overflow-y-auto overflow-x-hidden p-3">
-          {messages.map((msg, i) => <Bubble key={`${msg.role}-${i}`} role={msg.role}>{msg.content}</Bubble>)}
+          {messages.map((msg, i) => (
+            <MessageItem
+              key={`${msg.role}-${msg.type ?? ""}-${i}`}
+              msg={msg}
+              appId={appId}
+              isPendingApproval={msg.type === "approval" && !!(msg.meta?.approvalId as string) && (msg.meta?.approvalId as string) in pendingApprovals}
+            />
+          ))}
 
           {streaming && streamed && (
             <Bubble role="assistant">

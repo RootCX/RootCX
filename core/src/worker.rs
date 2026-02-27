@@ -83,6 +83,7 @@ pub struct WorkerConfig {
     pub pool: PgPool,
     pub js_runtime: PathBuf,
     pub tool_registry: Arc<ToolRegistry>,
+    pub pending_approvals: PendingApprovals,
 }
 
 #[derive(Clone)]
@@ -162,7 +163,7 @@ async fn supervisor_loop(
     let mut pending_rpcs = PendingRpcs::new();
     let mut pending_agent_streams: HashMap<String, mpsc::Sender<AgentEvent>> = HashMap::new();
     let mut policy_evaluators: HashMap<String, Arc<TokioMutex<PolicyEvaluator>>> = HashMap::new();
-    let pending_approvals = PendingApprovals::new();
+    let pending_approvals = config.pending_approvals.clone();
     let mut crash_times: Vec<Instant> = Vec::new();
     let mut restart_count: u32 = 0;
     let mut output_handles = Vec::new();
@@ -374,10 +375,15 @@ async fn supervisor_loop(
                                     match eval.lock().await.evaluate(&tool_name, &args) {
                                         PolicyDecision::Allow => {}
                                         PolicyDecision::RateLimited { retry_after_secs } => {
+                                            let err = format!("rate limited: retry after {retry_after_secs}s");
                                             let _ = out_tx.send(OutboundMessage::AgentToolResult {
-                                                invoke_id, call_id, result: None,
-                                                error: Some(format!("rate limited: retry after {retry_after_secs}s")),
+                                                invoke_id, call_id: call_id.clone(), result: None, error: Some(err.clone()),
                                             }).await;
+                                            if let Some(tx) = stream_tx {
+                                                let _ = tx.send(AgentEvent::ToolCallCompleted {
+                                                    call_id, tool_name, output: None, error: Some(err), duration_ms: 0,
+                                                }).await;
+                                            }
                                             return;
                                         }
                                         PolicyDecision::RequiresApproval { reason } => {
@@ -397,17 +403,27 @@ async fn supervisor_loop(
                                             match rx.await {
                                                 Ok(ApprovalResponse::Approved) => {}
                                                 Ok(ApprovalResponse::Rejected { reason }) => {
+                                                    let err = format!("rejected: {reason}");
                                                     let _ = out_tx.send(OutboundMessage::AgentToolResult {
-                                                        invoke_id, call_id, result: None,
-                                                        error: Some(format!("rejected: {reason}")),
+                                                        invoke_id, call_id: call_id.clone(), result: None, error: Some(err.clone()),
                                                     }).await;
+                                                    if let Some(tx) = stream_tx {
+                                                        let _ = tx.send(AgentEvent::ToolCallCompleted {
+                                                            call_id, tool_name, output: None, error: Some(err), duration_ms: 0,
+                                                        }).await;
+                                                    }
                                                     return;
                                                 }
                                                 Err(_) => {
+                                                    let err = "approval channel dropped".to_string();
                                                     let _ = out_tx.send(OutboundMessage::AgentToolResult {
-                                                        invoke_id, call_id, result: None,
-                                                        error: Some("approval channel dropped".into()),
+                                                        invoke_id, call_id: call_id.clone(), result: None, error: Some(err.clone()),
                                                     }).await;
+                                                    if let Some(tx) = stream_tx {
+                                                        let _ = tx.send(AgentEvent::ToolCallCompleted {
+                                                            call_id, tool_name, output: None, error: Some(err), duration_ms: 0,
+                                                        }).await;
+                                                    }
                                                     return;
                                                 }
                                             }

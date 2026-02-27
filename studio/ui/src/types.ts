@@ -40,6 +40,8 @@ export interface SchemaVerification {
 }
 
 export interface AgentMessage {
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   content: string;
+  type?: "approval" | "tool_start" | "tool_done";
+  meta?: Record<string, unknown>;
 }

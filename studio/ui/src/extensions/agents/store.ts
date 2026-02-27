@@ -8,6 +8,7 @@ interface AgentChatState {
   streamedText: string;
   sessionId: string | null;
   error: string | null;
+  pendingApprovals: Record<string, { toolName: string; reason: string }>;
 }
 
 interface State {
@@ -46,7 +47,7 @@ export function markUndeployed() {
 
 function chatFor(appId: string): AgentChatState {
   return (state.chats[appId] ??= {
-    messages: [], streaming: false, streamedText: "", sessionId: null, error: null,
+    messages: [], streaming: false, streamedText: "", sessionId: null, error: null, pendingApprovals: {},
   });
 }
 
@@ -116,6 +117,15 @@ async function readSSE(body: ReadableStream<Uint8Array>, appId: string) {
   }
 }
 
+function flushStreamed(appId: string) {
+  const chat = state.chats[appId];
+  if (!chat?.streamedText) return;
+  patchChat(appId, {
+    messages: [...chat.messages, { role: "assistant", content: chat.streamedText }],
+    streamedText: "",
+  });
+}
+
 function handleSSE(appId: string, event: string, data: Record<string, unknown>) {
   const chat = state.chats[appId];
   if (!chat) return;
@@ -136,7 +146,70 @@ function handleSSE(appId: string, event: string, data: Record<string, unknown>) 
     case "error":
       patchChat(appId, { streaming: false, error: (data.error as string) ?? "Unknown error", streamedText: "" });
       break;
+    case "approval_required": {
+      flushStreamed(appId);
+      const approvalId = data.approval_id as string;
+      const toolName = data.tool_name as string;
+      const reason = data.reason as string;
+      patchChat(appId, {
+        messages: [...chat.messages, {
+          role: "system", content: reason, type: "approval",
+          meta: { approvalId, toolName, args: data.args },
+        }],
+        pendingApprovals: { ...chat.pendingApprovals, [approvalId]: { toolName, reason } },
+        sessionId: sid,
+      });
+      break;
+    }
+    case "tool_call_started":
+      flushStreamed(appId);
+      patchChat(appId, {
+        messages: [...chat.messages, {
+          role: "system", content: data.tool_name as string, type: "tool_start",
+          meta: { callId: data.call_id, input: data.input },
+        }],
+        sessionId: sid,
+      });
+      break;
+    case "tool_call_completed": {
+      const err = data.error as string | undefined;
+      patchChat(appId, {
+        messages: [...chat.messages, {
+          role: "system",
+          content: err ? `${data.tool_name} failed: ${err}` : `${data.tool_name} done`,
+          type: "tool_done",
+          meta: { callId: data.call_id, error: err, durationMs: data.duration_ms },
+        }],
+        sessionId: sid,
+      });
+      break;
+    }
   }
+}
+
+export async function approveToolCall(appId: string, approvalId: string) {
+  await fetchCore(`/api/v1/apps/${appId}/agent/approvals/${approvalId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "approve" }),
+  });
+  removePendingApproval(appId, approvalId);
+}
+
+export async function rejectToolCall(appId: string, approvalId: string) {
+  await fetchCore(`/api/v1/apps/${appId}/agent/approvals/${approvalId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "reject" }),
+  });
+  removePendingApproval(appId, approvalId);
+}
+
+function removePendingApproval(appId: string, approvalId: string) {
+  const chat = state.chats[appId];
+  if (!chat) return;
+  const { [approvalId]: _, ...rest } = chat.pendingApprovals;
+  patchChat(appId, { pendingApprovals: rest });
 }
 
 function finalize(appId: string) {

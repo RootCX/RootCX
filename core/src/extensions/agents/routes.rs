@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 
 use super::agent_user_id;
-use super::approvals::{ApprovalReply, ApprovalResponse, PendingApprovals};
+use super::approvals::{ApprovalReply, ApprovalResponse};
 use super::config;
 use super::persistence::PersistCtx;
 use super::streaming;
@@ -18,12 +18,6 @@ use crate::auth::jwt;
 use crate::auth::identity::Identity;
 use crate::ipc::{AgentInvokePayload, RpcCaller};
 use crate::routes::{self, SharedRuntime};
-
-static APPROVALS: std::sync::OnceLock<PendingApprovals> = std::sync::OnceLock::new();
-
-fn approvals() -> &'static PendingApprovals {
-    APPROVALS.get_or_init(PendingApprovals::new)
-}
 
 #[derive(Deserialize)]
 pub struct InvokeRequest {
@@ -259,24 +253,26 @@ pub async fn get_session_events(
 }
 
 pub async fn list_approvals(
-    State(_rt): State<SharedRuntime>,
+    State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<super::approvals::ApprovalRequest>>, ApiError> {
-    Ok(Json(approvals().list(&app_id).await))
+    let approvals = rt.lock().await.pending_approvals().clone();
+    Ok(Json(approvals.list(&app_id).await))
 }
 
 pub async fn reply_approval(
-    State(_rt): State<SharedRuntime>,
+    State(rt): State<SharedRuntime>,
     Path((_app_id, approval_id)): Path<(String, String)>,
     Json(body): Json<ApprovalReply>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    let approvals = rt.lock().await.pending_approvals().clone();
     let response = match body.action {
         super::approvals::ApprovalAction::Approve => ApprovalResponse::Approved,
         super::approvals::ApprovalAction::Reject => ApprovalResponse::Rejected {
             reason: body.reason.unwrap_or_else(|| "rejected by user".into()),
         },
     };
-    if approvals().reply(&approval_id, response).await {
+    if approvals.reply(&approval_id, response).await {
         Ok(Json(json!({"status": "ok"})))
     } else {
         Err(ApiError::NotFound(format!("approval '{approval_id}' not found")))
