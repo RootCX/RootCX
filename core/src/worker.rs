@@ -17,7 +17,7 @@ use crate::extensions::agents::approvals::{ApprovalRequest, ApprovalResponse, Pe
 use crate::extensions::agents::supervision::{PolicyDecision, PolicyEvaluator};
 use crate::extensions::logs::{LOG_CHANNEL_CAPACITY, LogEntry, emit_log, spawn_output_reader};
 use crate::ipc::{AgentInvokePayload, InboundMessage, IpcEvent, IpcReader, IpcWriter, OutboundMessage, PendingRpcs, RpcCaller};
-use crate::tools::{ToolContext, ToolRegistry};
+use crate::tools::ToolRegistry;
 
 const MAX_CRASHES: u32 = 5;
 const CRASH_WINDOW: Duration = Duration::from_secs(60);
@@ -353,11 +353,6 @@ async fn supervisor_loop(
                             }
                         }
                         InboundMessage::AgentToolCall { invoke_id, call_id, tool_name, args } => {
-                            let tool = config.tool_registry.get(&tool_name).cloned();
-                            let pool = config.pool.clone();
-                            let aid = config.app_id.clone();
-                            let out_tx = outbound_tx.clone();
-
                             if let Some(tx) = pending_agent_streams.get(&invoke_id) {
                                 let _ = tx.send(AgentEvent::ToolCallStarted {
                                     call_id: call_id.clone(),
@@ -366,76 +361,51 @@ async fn supervisor_loop(
                                 }).await;
                             }
 
+                            let tool = config.tool_registry.get(&tool_name).cloned();
+                            let pool = config.pool.clone();
+                            let aid = config.app_id.clone();
+                            let out_tx = outbound_tx.clone();
                             let evaluator = policy_evaluators.get(&invoke_id).cloned();
                             let approvals_ref = pending_approvals.clone();
-                            let iid = invoke_id.clone();
-                            let cid = call_id.clone();
-                            let tname = tool_name.clone();
                             let stream_tx = pending_agent_streams.get(&invoke_id).cloned();
 
                             tokio::spawn(async move {
                                 if let Some(ref eval) = evaluator {
-                                    let decision = eval.lock().await.evaluate(&tname, &args);
-                                    match decision {
+                                    match eval.lock().await.evaluate(&tool_name, &args) {
                                         PolicyDecision::Allow => {}
                                         PolicyDecision::RateLimited { retry_after_secs } => {
                                             let _ = out_tx.send(OutboundMessage::AgentToolResult {
-                                                invoke_id: iid, call_id: cid.clone(),
-                                                result: None,
+                                                invoke_id, call_id, result: None,
                                                 error: Some(format!("rate limited: retry after {retry_after_secs}s")),
                                             }).await;
-                                            if let Some(tx) = stream_tx {
-                                                let _ = tx.send(AgentEvent::ToolCallCompleted {
-                                                    call_id: cid, tool_name: tname,
-                                                    output: None, error: Some("rate limited".into()), duration_ms: 0,
-                                                }).await;
-                                            }
                                             return;
                                         }
                                         PolicyDecision::RequiresApproval { reason } => {
                                             let approval_id = uuid::Uuid::new_v4().to_string();
-
                                             if let Some(ref tx) = stream_tx {
                                                 let _ = tx.send(AgentEvent::ApprovalRequired {
-                                                    approval_id: approval_id.clone(),
-                                                    tool_name: tname.clone(),
-                                                    args: args.clone(),
-                                                    reason: reason.clone(),
+                                                    approval_id: approval_id.clone(), tool_name: tool_name.clone(),
+                                                    args: args.clone(), reason: reason.clone(),
                                                 }).await;
                                             }
-
                                             let rx = approvals_ref.request(ApprovalRequest {
-                                                approval_id: approval_id.clone(),
-                                                app_id: aid.clone(),
-                                                session_id: String::new(),
-                                                invoke_id: iid.clone(),
-                                                call_id: cid.clone(),
-                                                tool_name: tname.clone(),
-                                                args: args.clone(),
-                                                reason,
+                                                approval_id, app_id: aid.clone(), session_id: String::new(),
+                                                invoke_id: invoke_id.clone(), call_id: call_id.clone(),
+                                                tool_name: tool_name.clone(), args: args.clone(), reason,
                                                 created_at: chrono::Utc::now().to_rfc3339(),
                                             }).await;
-
                                             match rx.await {
                                                 Ok(ApprovalResponse::Approved) => {}
                                                 Ok(ApprovalResponse::Rejected { reason }) => {
                                                     let _ = out_tx.send(OutboundMessage::AgentToolResult {
-                                                        invoke_id: iid, call_id: cid.clone(),
-                                                        result: None,
+                                                        invoke_id, call_id, result: None,
                                                         error: Some(format!("rejected: {reason}")),
                                                     }).await;
-                                                    if let Some(tx) = stream_tx {
-                                                        let _ = tx.send(AgentEvent::ToolCallCompleted {
-                                                            call_id: cid, tool_name: tname,
-                                                            output: None, error: Some(format!("rejected: {reason}")), duration_ms: 0,
-                                                        }).await;
-                                                    }
                                                     return;
                                                 }
                                                 Err(_) => {
                                                     let _ = out_tx.send(OutboundMessage::AgentToolResult {
-                                                        invoke_id: iid, call_id: cid.clone(),
-                                                        result: None,
+                                                        invoke_id, call_id, result: None,
                                                         error: Some("approval channel dropped".into()),
                                                     }).await;
                                                     return;
@@ -446,53 +416,13 @@ async fn supervisor_loop(
                                 }
 
                                 let agent_uid = crate::extensions::agents::agent_user_id(&aid);
-                                let tool_perm = format!("tool.{tname}");
-                                if let Ok((_, perms)) = crate::extensions::rbac::policy::resolve_permissions(&pool, &aid, agent_uid).await {
-                                    if !perms.iter().any(|p| p == "*" || p == &tool_perm) {
-                                        let err_msg = format!("permission denied: {tool_perm}");
-                                        let _ = out_tx.send(OutboundMessage::AgentToolResult {
-                                            invoke_id: iid.clone(), call_id: cid.clone(),
-                                            result: None, error: Some(err_msg.clone()),
-                                        }).await;
-                                        if let Some(tx) = stream_tx {
-                                            let _ = tx.send(AgentEvent::ToolCallCompleted {
-                                                call_id: cid, tool_name: tname,
-                                                output: None, error: Some(err_msg), duration_ms: 0,
-                                            }).await;
-                                        }
-                                        return;
-                                    }
-                                }
+                                let permissions = crate::extensions::rbac::policy::resolve_permissions(&pool, &aid, agent_uid)
+                                    .await.map(|(_, p)| p).unwrap_or_default();
 
-                                let start = Instant::now();
-                                let (result, err) = match tool {
-                                    Some(t) => {
-                                        let ctx = ToolContext { pool, app_id: aid.clone(), user_id: agent_uid, args };
-                                        match t.execute(&ctx).await {
-                                            Ok(v) => (Some(v), None),
-                                            Err(e) => (None, Some(e)),
-                                        }
-                                    }
-                                    None => (None, Some(format!("unknown tool: {tname}"))),
-                                };
-                                let duration_ms = start.elapsed().as_millis() as u64;
-
-                                let _ = out_tx.send(OutboundMessage::AgentToolResult {
-                                    invoke_id: iid.clone(),
-                                    call_id: cid.clone(),
-                                    result: result.clone(),
-                                    error: err.clone(),
-                                }).await;
-
-                                if let Some(tx) = stream_tx {
-                                    let _ = tx.send(AgentEvent::ToolCallCompleted {
-                                        call_id: cid,
-                                        tool_name: tname,
-                                        output: result,
-                                        error: err,
-                                        duration_ms,
-                                    }).await;
-                                }
+                                crate::tool_executor::execute(
+                                    tool, tool_name, args, aid, agent_uid, permissions,
+                                    pool, out_tx, stream_tx, invoke_id, call_id,
+                                ).await;
                             });
                         }
                         InboundMessage::AgentSessionCompacted { invoke_id, summary } => {

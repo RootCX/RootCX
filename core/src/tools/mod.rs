@@ -18,7 +18,13 @@ pub struct ToolContext {
     pub pool: PgPool,
     pub app_id: String,
     pub user_id: Uuid,
+    pub permissions: Vec<String>,
     pub args: JsonValue,
+}
+
+pub fn check_permission(permissions: &[String], required: &str) -> Result<(), String> {
+    if permissions.iter().any(|p| p == "*" || p == required) { Ok(()) }
+    else { Err(format!("permission denied: {required}")) }
 }
 
 #[async_trait]

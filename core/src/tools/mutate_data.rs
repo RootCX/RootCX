@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value as JsonValue};
 use rootcx_shared_types::ToolDescriptor;
 
-use super::{Tool, ToolContext, str_arg};
+use super::{Tool, ToolContext, str_arg, check_permission};
 use crate::manifest::{field_type_map, quote_ident};
 use crate::routes::crud::{bind_typed, table};
 
@@ -33,12 +33,7 @@ impl Tool for MutateDataTool {
         let entity = str_arg(&ctx.args, "entity")?;
         let action = str_arg(&ctx.args, "action")?;
 
-        let (_, perms) = crate::extensions::rbac::policy::resolve_permissions(&ctx.pool, &ctx.app_id, ctx.user_id)
-            .await.map_err(|e| format!("{e:?}"))?;
-        let required = format!("{entity}.{action}");
-        if !perms.iter().any(|p| p == "*" || *p == required) {
-            return Err(format!("permission denied: {required}"));
-        }
+        check_permission(&ctx.permissions, &format!("{entity}.{action}"))?;
 
         let tbl = table(&ctx.app_id, entity);
 
