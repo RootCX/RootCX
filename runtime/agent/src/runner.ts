@@ -12,10 +12,12 @@ import { buildProvider, type ProviderConfig } from "./providers/index.js";
 import { buildDefaultGraph } from "./default-graph.js";
 import { buildTools, type ToolDescriptor } from "./tools/generic.js";
 import type { IpcWriter } from "./ipc.js";
+import type { IpcToolBridge } from "./ipc-tool-bridge.js";
+import { compactIfNeeded } from "./compactor.js";
 
 export interface AgentConfig {
     provider: ProviderConfig;
-    limits?: { maxTurns?: number };
+    limits?: { maxTurns?: number; maxContextTokens?: number; keepRecentMessages?: number };
     _appId: string;
     _toolDescriptors: ToolDescriptor[];
     _graphPath?: string;
@@ -29,19 +31,17 @@ interface RunAgentParams {
     authToken: string;
     history: Array<Record<string, unknown>>;
     writer: IpcWriter;
+    bridge: IpcToolBridge;
 }
 
 export async function runAgent(params: RunAgentParams) {
-    const { invokeId, message, systemPrompt, config, authToken, history, writer } = params;
-
-    const runtimeUrl = process.env.ROOTCX_RUNTIME_URL;
-    if (!runtimeUrl) throw new Error("ROOTCX_RUNTIME_URL not set");
+    const { invokeId, message, systemPrompt, config, history, writer, bridge } = params;
 
     const model = await buildProvider(config.provider);
-    const tools = buildTools(config._toolDescriptors, config._appId, runtimeUrl, authToken);
+    const tools = buildTools(config._toolDescriptors, invokeId, bridge);
     const graph = await loadGraph(config._graphPath, model, tools);
 
-    const messages: BaseMessage[] = [
+    let messages: BaseMessage[] = [
         new SystemMessage(systemPrompt),
         ...history.map((m) =>
             m.role === "user"
@@ -50,6 +50,20 @@ export async function runAgent(params: RunAgentParams) {
         ),
         new HumanMessage(message),
     ];
+
+    const maxContextTokens = config.limits?.maxContextTokens ?? 100_000;
+    const keepRecentMessages = config.limits?.keepRecentMessages ?? 10;
+    const { messages: compactedMessages, compacted, summary } =
+        await compactIfNeeded(messages, maxContextTokens, keepRecentMessages, model);
+    messages = compactedMessages;
+
+    if (compacted && summary) {
+        writer.send({
+            type: "agent_session_compacted",
+            invoke_id: invokeId,
+            summary,
+        });
+    }
 
     const maxTurns = config.limits?.maxTurns;
     let turns = 0;

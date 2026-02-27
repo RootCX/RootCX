@@ -17,13 +17,31 @@ impl Layer for AgentLayer {
                 "name": ctx.app_id,
                 "version": "0.0.1",
                 "description": "",
-                "dataContract": [],
+                "dataContract": [
+                    {
+                        "entityName": "agent_tasks",
+                        "fields": [
+                            { "name": "title", "type": "text", "required": true },
+                            { "name": "status", "type": "text", "required": true, "enumValues": ["pending", "in_progress", "completed", "failed"] },
+                            { "name": "input", "type": "json" },
+                            { "name": "result", "type": "text" }
+                        ]
+                    }
+                ],
                 "agent": {
                     "name": ctx.app_id,
                     "description": format!("AI agent for {}", ctx.app_id),
                     "provider": provider,
                     "systemPrompt": "./agent/system.md",
-                    "memory": { "enabled": true }
+                    "memory": { "enabled": true },
+                    "limits": {
+                        "maxTurns": 50,
+                        "maxContextTokens": 100000,
+                        "keepRecentMessages": 10
+                    },
+                    "supervision": {
+                        "mode": "autonomous"
+                    }
                 }
             });
             e.write_json("manifest.json", &manifest).await?;
@@ -33,14 +51,23 @@ impl Layer for AgentLayer {
 ## Your role
 Describe what this agent does.
 
+## Data
+You have access to the agent_tasks entity to track your work:
+- title (text, required): Task description
+- status (text, required): pending | in_progress | completed | failed
+- input (json): Task input data
+- result (text): Task output
+
 ## Workflow
-1. Step one
-2. Step two
-3. Step three
+1. Receive a request
+2. Create an AgentTask to track it
+3. Process the request
+4. Update the task with the result
 
 ## Rules
-- Be specific about constraints
-- Reference entity names from the manifest
+- Always create a task before starting work
+- Update task status as you progress
+- Store results in the task record
 "#, ctx.app_id)).await?;
 
             e.write("backend/agent/graph.ts", r#"import { StateGraph, MessagesAnnotation } from "@langchain/langgraph";

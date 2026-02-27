@@ -1,19 +1,23 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use serde_json::Value as JsonValue;
 use tokio::process::Command;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{Mutex as TokioMutex, broadcast, mpsc, oneshot};
 use tracing::{error, info, warn};
 
 use sqlx::PgPool;
 
 use crate::RuntimeError;
+use crate::extensions::agents::approvals::{ApprovalRequest, ApprovalResponse, PendingApprovals};
+use crate::extensions::agents::supervision::{PolicyDecision, PolicyEvaluator};
 use crate::extensions::logs::{LOG_CHANNEL_CAPACITY, LogEntry, emit_log, spawn_output_reader};
 use crate::ipc::{AgentInvokePayload, InboundMessage, IpcEvent, IpcReader, IpcWriter, OutboundMessage, PendingRpcs, RpcCaller};
+use crate::tools::{ToolContext, ToolRegistry};
 
 const MAX_CRASHES: u32 = 5;
 const CRASH_WINDOW: Duration = Duration::from_secs(60);
@@ -29,6 +33,10 @@ pub enum AgentEvent {
     Chunk { delta: String },
     Done { response: String, tokens: Option<u64> },
     Error { error: String },
+    ToolCallStarted { call_id: String, tool_name: String, input: JsonValue },
+    ToolCallCompleted { call_id: String, tool_name: String, output: Option<JsonValue>, error: Option<String>, duration_ms: u64 },
+    ApprovalRequired { approval_id: String, tool_name: String, args: JsonValue, reason: String },
+    SessionCompacted { summary: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -66,7 +74,6 @@ pub enum SupervisorCommand {
     },
 }
 
-#[derive(Debug, Clone)]
 pub struct WorkerConfig {
     pub app_id: String,
     pub entry_point: PathBuf,
@@ -75,6 +82,7 @@ pub struct WorkerConfig {
     pub runtime_url: String,
     pub pool: PgPool,
     pub js_runtime: PathBuf,
+    pub tool_registry: Arc<ToolRegistry>,
 }
 
 #[derive(Clone)]
@@ -152,15 +160,25 @@ async fn supervisor_loop(
     let mut ipc_writer: Option<IpcWriter> = None;
     let mut ipc_reader: Option<IpcReader> = None;
     let mut pending_rpcs = PendingRpcs::new();
-    let mut pending_agent_streams = HashMap::new();
+    let mut pending_agent_streams: HashMap<String, mpsc::Sender<AgentEvent>> = HashMap::new();
+    let mut policy_evaluators: HashMap<String, Arc<TokioMutex<PolicyEvaluator>>> = HashMap::new();
+    let pending_approvals = PendingApprovals::new();
     let mut crash_times: Vec<Instant> = Vec::new();
     let mut restart_count: u32 = 0;
     let mut output_handles = Vec::new();
+
+    let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundMessage>(64);
 
     info!(app_id = %app_id, "supervisor started");
 
     loop {
         tokio::select! {
+            Some(msg) = outbound_rx.recv() => {
+                if let Some(ref mut w) = ipc_writer {
+                    let _ = w.send(&msg).await;
+                }
+            }
+
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
                     SupervisorCommand::Start => {
@@ -244,12 +262,22 @@ async fn supervisor_loop(
                             continue;
                         }
                         let invoke_id = payload.invoke_id.clone();
+
+                        if let Some(supervision) = payload.config
+                            .get("_supervision")
+                            .and_then(|v| serde_json::from_value::<rootcx_shared_types::SupervisionConfig>(v.clone()).ok())
+                        {
+                            policy_evaluators.insert(invoke_id.clone(),
+                                Arc::new(TokioMutex::new(PolicyEvaluator::new(supervision))));
+                        }
+
                         pending_agent_streams.insert(invoke_id.clone(), stream_tx);
                         if let Some(ref mut w) = ipc_writer {
                             if let Err(e) = w.send(&OutboundMessage::AgentInvoke(payload)).await {
                                 if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                     let _ = tx.send(AgentEvent::Error { error: e.to_string() }).await;
                                 }
+                                policy_evaluators.remove(&invoke_id);
                             }
                         }
                     }
@@ -313,14 +341,146 @@ async fn supervisor_loop(
                             }
                         }
                         InboundMessage::AgentDone { invoke_id, response, tokens } => {
+                            policy_evaluators.remove(&invoke_id);
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Done { response, tokens }).await;
                             }
                         }
                         InboundMessage::AgentError { invoke_id, error } => {
+                            policy_evaluators.remove(&invoke_id);
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Error { error }).await;
                             }
+                        }
+                        InboundMessage::AgentToolCall { invoke_id, call_id, tool_name, args } => {
+                            let tool = config.tool_registry.get(&tool_name).cloned();
+                            let pool = config.pool.clone();
+                            let aid = config.app_id.clone();
+                            let out_tx = outbound_tx.clone();
+
+                            if let Some(tx) = pending_agent_streams.get(&invoke_id) {
+                                let _ = tx.send(AgentEvent::ToolCallStarted {
+                                    call_id: call_id.clone(),
+                                    tool_name: tool_name.clone(),
+                                    input: args.clone(),
+                                }).await;
+                            }
+
+                            let evaluator = policy_evaluators.get(&invoke_id).cloned();
+                            let approvals_ref = pending_approvals.clone();
+                            let iid = invoke_id.clone();
+                            let cid = call_id.clone();
+                            let tname = tool_name.clone();
+                            let stream_tx = pending_agent_streams.get(&invoke_id).cloned();
+
+                            tokio::spawn(async move {
+                                if let Some(ref eval) = evaluator {
+                                    let decision = eval.lock().await.evaluate(&tname, &args);
+                                    match decision {
+                                        PolicyDecision::Allow => {}
+                                        PolicyDecision::RateLimited { retry_after_secs } => {
+                                            let _ = out_tx.send(OutboundMessage::AgentToolResult {
+                                                invoke_id: iid, call_id: cid.clone(),
+                                                result: None,
+                                                error: Some(format!("rate limited: retry after {retry_after_secs}s")),
+                                            }).await;
+                                            if let Some(tx) = stream_tx {
+                                                let _ = tx.send(AgentEvent::ToolCallCompleted {
+                                                    call_id: cid, tool_name: tname,
+                                                    output: None, error: Some("rate limited".into()), duration_ms: 0,
+                                                }).await;
+                                            }
+                                            return;
+                                        }
+                                        PolicyDecision::RequiresApproval { reason } => {
+                                            let approval_id = uuid::Uuid::new_v4().to_string();
+
+                                            if let Some(ref tx) = stream_tx {
+                                                let _ = tx.send(AgentEvent::ApprovalRequired {
+                                                    approval_id: approval_id.clone(),
+                                                    tool_name: tname.clone(),
+                                                    args: args.clone(),
+                                                    reason: reason.clone(),
+                                                }).await;
+                                            }
+
+                                            let rx = approvals_ref.request(ApprovalRequest {
+                                                approval_id: approval_id.clone(),
+                                                app_id: aid.clone(),
+                                                session_id: String::new(),
+                                                invoke_id: iid.clone(),
+                                                call_id: cid.clone(),
+                                                tool_name: tname.clone(),
+                                                args: args.clone(),
+                                                reason,
+                                                created_at: chrono::Utc::now().to_rfc3339(),
+                                            }).await;
+
+                                            match rx.await {
+                                                Ok(ApprovalResponse::Approved) => {}
+                                                Ok(ApprovalResponse::Rejected { reason }) => {
+                                                    let _ = out_tx.send(OutboundMessage::AgentToolResult {
+                                                        invoke_id: iid, call_id: cid.clone(),
+                                                        result: None,
+                                                        error: Some(format!("rejected: {reason}")),
+                                                    }).await;
+                                                    if let Some(tx) = stream_tx {
+                                                        let _ = tx.send(AgentEvent::ToolCallCompleted {
+                                                            call_id: cid, tool_name: tname,
+                                                            output: None, error: Some(format!("rejected: {reason}")), duration_ms: 0,
+                                                        }).await;
+                                                    }
+                                                    return;
+                                                }
+                                                Err(_) => {
+                                                    let _ = out_tx.send(OutboundMessage::AgentToolResult {
+                                                        invoke_id: iid, call_id: cid.clone(),
+                                                        result: None,
+                                                        error: Some("approval channel dropped".into()),
+                                                    }).await;
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let start = Instant::now();
+                                let (result, err) = match tool {
+                                    Some(t) => {
+                                        let ctx = ToolContext { pool, app_id: aid, args };
+                                        match t.execute(&ctx).await {
+                                            Ok(v) => (Some(v), None),
+                                            Err(e) => (None, Some(e)),
+                                        }
+                                    }
+                                    None => (None, Some(format!("unknown tool: {tname}"))),
+                                };
+                                let duration_ms = start.elapsed().as_millis() as u64;
+
+                                let _ = out_tx.send(OutboundMessage::AgentToolResult {
+                                    invoke_id: iid.clone(),
+                                    call_id: cid.clone(),
+                                    result: result.clone(),
+                                    error: err.clone(),
+                                }).await;
+
+                                if let Some(tx) = stream_tx {
+                                    let _ = tx.send(AgentEvent::ToolCallCompleted {
+                                        call_id: cid,
+                                        tool_name: tname,
+                                        output: result,
+                                        error: err,
+                                        duration_ms,
+                                    }).await;
+                                }
+                            });
+                        }
+                        InboundMessage::AgentSessionCompacted { invoke_id, summary } => {
+                            if let Some(tx) = pending_agent_streams.get(&invoke_id) {
+                                let _ = tx.send(AgentEvent::SessionCompacted { summary }).await;
+                            }
+                            info!(app_id = %app_id, "agent session compacted");
                         }
                     },
                     Some(IpcEvent::Output(line)) => {
