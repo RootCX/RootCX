@@ -56,7 +56,11 @@ impl Preset for BlankPreset {
         let is_agent = matches!(answers.get("project_type"), Some(AnswerValue::Text(v)) if v == "agent");
 
         if is_agent {
-            vec![Box::new(AgentLayer)]
+            vec![
+                Box::new(CoreLayer),
+                Box::new(TauriLayer),
+                Box::new(AgentLayer),
+            ]
         } else {
             let auth = matches!(answers.get("auth"), Some(AnswerValue::Bool(true)) | None);
             let backend = matches!(answers.get("backend"), Some(AnswerValue::Bool(true)) | None);

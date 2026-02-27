@@ -38,10 +38,3 @@ export interface SchemaVerification {
   compliant: boolean;
   changes: SchemaChange[];
 }
-
-export interface AgentMessage {
-  role: "user" | "assistant" | "system";
-  content: string;
-  type?: "approval" | "tool_start" | "tool_done";
-  meta?: Record<string, unknown>;
-}

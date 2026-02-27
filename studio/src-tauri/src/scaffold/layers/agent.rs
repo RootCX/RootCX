@@ -1,6 +1,8 @@
 use crate::scaffold::emitter::Emitter;
 use crate::scaffold::types::{Layer, LayerFuture, ScaffoldContext};
 
+const TPL_AGENT_APP: &str = include_str!("../../../templates/scaffold/agent-app.tsx");
+
 pub struct AgentLayer;
 
 impl Layer for AgentLayer {
@@ -17,17 +19,7 @@ impl Layer for AgentLayer {
                 "name": ctx.app_id,
                 "version": "0.0.1",
                 "description": "",
-                "dataContract": [
-                    {
-                        "entityName": "agent_tasks",
-                        "fields": [
-                            { "name": "title", "type": "text", "required": true },
-                            { "name": "status", "type": "text", "required": true, "enumValues": ["pending", "in_progress", "completed", "failed"] },
-                            { "name": "input", "type": "json" },
-                            { "name": "result", "type": "text" }
-                        ]
-                    }
-                ],
+                "dataContract": [],
                 "agent": {
                     "name": ctx.app_id,
                     "description": format!("AI agent for {}", ctx.app_id),
@@ -51,23 +43,9 @@ impl Layer for AgentLayer {
 ## Your role
 Describe what this agent does.
 
-## Data
-You have access to the agent_tasks entity to track your work:
-- title (text, required): Task description
-- status (text, required): pending | in_progress | completed | failed
-- input (json): Task input data
-- result (text): Task output
-
-## Workflow
-1. Receive a request
-2. Create an AgentTask to track it
-3. Process the request
-4. Update the task with the result
-
-## Rules
-- Always create a task before starting work
-- Update task status as you progress
-- Store results in the task record
+## Tools
+You have access to tools for querying and mutating data, searching the web, and fetching pages.
+Use them as needed to fulfill user requests.
 "#, ctx.app_id)).await?;
 
             e.write("backend/agent/graph.ts", r#"import { StateGraph, MessagesAnnotation } from "@langchain/langgraph";
@@ -101,13 +79,11 @@ export default function buildGraph(model: BaseChatModel, tools: StructuredToolIn
             e.write("backend/index.ts", "import \"@rootcx/agent-runtime\";\n").await?;
 
             e.write("backend/package.json", &format!(
-                r#"{{"name":"{}","version":"0.1.0","private":true,"type":"module","dependencies":{{"@rootcx/agent-runtime":"{agent_runtime_dep}"}}}}"#,
+                r#"{{"name":"{}-backend","version":"0.1.0","private":true,"type":"module","dependencies":{{"@rootcx/agent-runtime":"{agent_runtime_dep}"}}}}"#,
                 ctx.app_id
             )).await?;
 
-            e.write(".rootcx/launch.json",
-                "{\n  \"preLaunch\": [\"verify_schema\", \"sync_manifest\", \"deploy_backend\"]\n}\n"
-            ).await?;
+            e.write("src/App.tsx", &TPL_AGENT_APP.replace("__APP_ID__", &ctx.app_id)).await?;
 
             Ok(())
         })
