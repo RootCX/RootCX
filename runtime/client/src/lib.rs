@@ -98,6 +98,15 @@ impl RuntimeClient {
         check_response(resp).await?.json().await.map_err(Into::into)
     }
 
+    pub async fn bulk_create_records(&self, app_id: &str, entity: &str, data: &[JsonValue]) -> Result<Vec<JsonValue>, ClientError> {
+        let resp = self
+            .authed(self.client.post(self.api(&format!("/apps/{app_id}/collections/{entity}/bulk"))))
+            .json(&data)
+            .send()
+            .await?;
+        check_response(resp).await?.json().await.map_err(Into::into)
+    }
+
     pub async fn get_record(&self, app_id: &str, entity: &str, id: &str) -> Result<JsonValue, ClientError> {
         let resp = self
             .authed(self.client.get(self.api(&format!("/apps/{app_id}/collections/{entity}/{id}"))))

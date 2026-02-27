@@ -157,6 +157,21 @@ export class RuntimeClient {
     return res.json();
   }
 
+  async bulkCreateRecords<T = Record<string, unknown>>(
+    appId: string,
+    entity: string,
+    data: Record<string, unknown>[],
+  ): Promise<T[]> {
+    const url = `${this.baseUrl}/api/v1/apps/${enc(appId)}/collections/${enc(entity)}/bulk`;
+    const res = await this.authFetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
   async getRecord<T = Record<string, unknown>>(
     appId: string,
     entity: string,

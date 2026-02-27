@@ -9,6 +9,7 @@ export interface UseAppCollectionResult<T> {
   error: string | null;
   refetch: () => void;
   create: (record: Record<string, unknown>) => Promise<T>;
+  bulkCreate: (records: Record<string, unknown>[]) => Promise<T[]>;
   update: (id: string, patch: Record<string, unknown>) => Promise<T>;
   remove: (id: string) => Promise<void>;
 }
@@ -57,6 +58,16 @@ export function useAppCollection<T extends { id?: string } = Record<string, unkn
     [client, appId, entity],
   );
 
+  const bulkCreate = useCallback(
+    async (records: Record<string, unknown>[]): Promise<T[]> => {
+      const created = await client.bulkCreateRecords<T>(appId, entity, records);
+      setData((prev) => [...created, ...prev]);
+      setTotal((prev) => prev + created.length);
+      return created;
+    },
+    [client, appId, entity],
+  );
+
   const update = useCallback(
     async (id: string, patch: Record<string, unknown>): Promise<T> => {
       const updated = await client.updateRecord<T>(appId, entity, id, patch);
@@ -75,5 +86,5 @@ export function useAppCollection<T extends { id?: string } = Record<string, unkn
     [client, appId, entity],
   );
 
-  return { data, total, loading, error, refetch: fetchData, create, update, remove };
+  return { data, total, loading, error, refetch: fetchData, create, bulkCreate, update, remove };
 }

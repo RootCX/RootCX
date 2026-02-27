@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -6,11 +6,15 @@ use axum::http::StatusCode;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{SharedRuntime, parse_uuid, pool};
 use crate::api_error::ApiError;
 use crate::manifest::{field_type_map, map_field_type, quote_ident};
+
+pub(crate) const MAX_BULK_SIZE: usize = 1000;
+const PG_PARAM_LIMIT: usize = 65535;
 
 pub(crate) fn table(app_id: &str, entity: &str) -> String {
     format!("{}.{}", quote_ident(app_id), quote_ident(entity))
@@ -348,6 +352,88 @@ pub async fn create_record(
 
     let (row,) = query.fetch_one(&pool).await?;
     Ok((StatusCode::CREATED, Json(row)))
+}
+
+fn union_keys(objects: &[&serde_json::Map<String, JsonValue>]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut keys = Vec::new();
+    for obj in objects {
+        for k in obj.keys() {
+            if seen.insert(k) {
+                keys.push(k.clone());
+            }
+        }
+    }
+    keys
+}
+
+pub(crate) async fn bulk_insert(
+    pool: &PgPool,
+    tbl: &str,
+    types: &HashMap<String, String>,
+    objects: &[&serde_json::Map<String, JsonValue>],
+) -> Result<Vec<JsonValue>, ApiError> {
+    let keys = union_keys(objects);
+    let total_params = objects.len() * keys.len();
+    if total_params > PG_PARAM_LIMIT {
+        return Err(ApiError::BadRequest(format!(
+            "bulk insert requires {total_params} params, limit is {PG_PARAM_LIMIT}"
+        )));
+    }
+
+    let cols: Vec<String> = keys.iter().map(|k| quote_ident(k)).collect();
+    let ncols = keys.len();
+    let mut value_tuples = Vec::with_capacity(objects.len());
+    for i in 0..objects.len() {
+        let base = i * ncols + 1;
+        let phs: Vec<String> = (base..base + ncols).map(|j| format!("${j}")).collect();
+        value_tuples.push(format!("({})", phs.join(",")));
+    }
+
+    let sql = format!(
+        "INSERT INTO {tbl} ({}) VALUES {} RETURNING to_jsonb({tbl}.*) AS row",
+        cols.join(","),
+        value_tuples.join(",")
+    );
+
+    let null_val = JsonValue::Null;
+    let mut query = sqlx::query_as::<_, (JsonValue,)>(&sql);
+    for obj in objects {
+        for key in &keys {
+            query = bind_typed(query, obj.get(key.as_str()).unwrap_or(&null_val), types.get(key.as_str()));
+        }
+    }
+
+    let mut tx = pool.begin().await?;
+    let rows: Vec<(JsonValue,)> = query.fetch_all(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(rows.into_iter().map(|(r,)| r).collect())
+}
+
+pub async fn bulk_create_records(
+    State(rt): State<SharedRuntime>,
+    Path((app_id, entity)): Path<(String, String)>,
+    Json(body): Json<JsonValue>,
+) -> Result<(StatusCode, Json<Vec<JsonValue>>), ApiError> {
+    let records = body.as_array()
+        .ok_or_else(|| ApiError::BadRequest("body must be a JSON array".into()))?;
+    if records.is_empty() {
+        return Err(ApiError::BadRequest("array must not be empty".into()));
+    }
+    if records.len() > MAX_BULK_SIZE {
+        return Err(ApiError::BadRequest(format!(
+            "batch size {} exceeds max {MAX_BULK_SIZE}", records.len()
+        )));
+    }
+    let objects: Vec<&serde_json::Map<String, JsonValue>> = records.iter()
+        .map(|r| require_object(r))
+        .collect::<Result<_, _>>()?;
+
+    let db = pool(&rt).await?;
+    let tbl = table(&app_id, &entity);
+    let types = field_type_map(&db, &app_id, &entity).await?;
+    let created = bulk_insert(&db, &tbl, &types, &objects).await?;
+    Ok((StatusCode::CREATED, Json(created)))
 }
 
 pub async fn get_record(
