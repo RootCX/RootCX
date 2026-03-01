@@ -1,7 +1,10 @@
 [package]
-name = "rootcx-shared-types"
-version.workspace = true
-edition.workspace = true
+name = "rootcx-types"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "RootCX shared types"
+repository = "https://github.com/rootcx/rootcx"
 
 [dependencies]
 serde.workspace = true

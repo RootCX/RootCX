@@ -87,7 +87,7 @@ export interface QueryResult<T> {
   total: number;
 }
 
-const DEFAULT_BASE_URL = "http://localhost:9100";
+export const DEFAULT_BASE_URL = "http://localhost:9100";
 
 export class RuntimeClient {
   private baseUrl: string;

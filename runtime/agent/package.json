@@ -1,7 +1,8 @@
 {
-  "name": "@rootcx/agent-runtime",
+  "name": "@rootcx/agents",
   "version": "0.1.0",
-  "private": true,
+  "license": "Apache-2.0",
+  "publishConfig": { "access": "public" },
   "type": "module",
   "main": "src/index.ts",
   "dependencies": {

@@ -43,6 +43,6 @@ rootcx-forge = { path = "crates/forge" }
 rootcx-browser = { path = "crates/browser" }
 rootcx-core = { path = "core" }
 rootcx-platform = { path = "crates/platform" }
-rootcx-runtime = { path = "runtime/client" }
+rootcx-client = { path = "runtime/client" }
 rootcx-postgres-mgmt = { path = "crates/postgres-mgmt" }
-rootcx-shared-types = { path = "crates/shared-types" }
+rootcx-types = { path = "crates/shared-types" }

@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::RuntimeError;
 use crate::extensions::RuntimeExtension;
-use rootcx_shared_types::{AppManifest, EntityContract};
+use rootcx_types::{AppManifest, EntityContract};
 
 pub async fn install_app(
     pool: &PgPool,
@@ -165,7 +165,7 @@ pub(crate) fn build_pk_type_map(entities: &[EntityContract]) -> HashMap<String, 
     map
 }
 
-fn field_to_column(field: &rootcx_shared_types::FieldContract, pk_types: &HashMap<String, &'static str>) -> String {
+fn field_to_column(field: &rootcx_types::FieldContract, pk_types: &HashMap<String, &'static str>) -> String {
     let col_name = quote_ident(&field.name);
     let is_pk = field.is_primary_key.unwrap_or(false) || field.name == "id";
 
@@ -319,7 +319,7 @@ async fn register_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), Runti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rootcx_shared_types::{EntityContract, FieldContract, FieldReference};
+    use rootcx_types::{EntityContract, FieldContract, FieldReference};
     use serde_json::json;
 
     fn field(name: &str, field_type: &str) -> FieldContract {

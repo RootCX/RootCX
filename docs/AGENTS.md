@@ -158,7 +158,7 @@ The function receives the LLM instance and all registered tools. You wire them h
 **backend/index.ts:**
 
 ```typescript
-import "@rootcx/agent-runtime";
+import "@rootcx/agents";
 ```
 
 That's it. The runtime handles IPC, tool bridging, and graph execution.

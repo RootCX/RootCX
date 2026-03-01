@@ -1,4 +1,4 @@
-use rootcx_shared_types::OsStatus;
+use rootcx_types::OsStatus;
 use serde::Serialize;
 use tauri::{State, ipc::Channel};
 use tauri::webview::WebviewWindowBuilder;
@@ -29,7 +29,6 @@ pub async fn shutdown_runtime(state: State<'_, AppState>) -> Result<(), String> 
     state.shutdown().await;
     Ok(())
 }
-
 
 #[derive(Serialize)]
 pub struct DirEntry {
@@ -162,7 +161,6 @@ pub async fn scaffold_project(
     crate::scaffold::create(
         std::path::Path::new(&path),
         &name,
-        crate::scaffold::RuntimePaths::resolve()?,
         preset_id.as_deref().unwrap_or("blank"),
         answers.unwrap_or_default(),
         ai_config,
@@ -250,6 +248,37 @@ pub fn create_window(app_handle: tauri::AppHandle, project_path: Option<String>)
     crate::menu::track_window_focus(&window);
 
     Ok(label)
+}
+
+#[tauri::command]
+pub async fn bundle_app(
+    project_path: String,
+    app_handle: tauri::AppHandle,
+    runner: State<'_, Mutex<RunnerState>>,
+) -> Result<(), String> {
+    use tauri::Emitter;
+
+    runner.lock().await.stop();
+    let _ = app_handle.emit("run-started", ());
+
+    tokio::task::spawn_blocking(move || {
+        let handle = app_handle.clone();
+        let log = move |msg: &str| { let _ = handle.emit("run-output", format!("{msg}\r\n")); };
+        match rootcx_platform::bundle::run(project_path.into(), &log) {
+            Ok(path) => {
+                log(&format!("[bundle] done → {}", path.display()));
+                let _ = app_handle.emit("run-exited", Some(0i32));
+                Ok(())
+            }
+            Err(e) => {
+                log(&format!("[bundle] error: {e}"));
+                let _ = app_handle.emit("run-exited", Some(1i32));
+                Err(e)
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("bundle task: {e}"))?
 }
 
 #[tauri::command]

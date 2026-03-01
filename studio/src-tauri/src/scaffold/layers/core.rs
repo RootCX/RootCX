@@ -12,8 +12,6 @@ impl Layer for CoreLayer {
     fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> LayerFuture<'a> {
         Box::pin(async move {
             let ScaffoldContext { app_id, port, .. } = ctx;
-            let sdk_dep = format!("file:{}", ctx.runtime.sdk.display());
-            let ui_dep = format!("file:{}", ctx.runtime.ui.display());
 
             let permissions = matches!(ctx.answers.get("permissions"), Some(AnswerValue::Bool(true)));
             let mut manifest = serde_json::json!({
@@ -45,8 +43,8 @@ impl Layer for CoreLayer {
   "type": "module",
   "scripts": {{ "dev": "vite", "build": "vite build", "tauri": "tauri" }},
   "dependencies": {{
-    "@rootcx/runtime": "{sdk_dep}",
-    "@rootcx/ui": "{ui_dep}",
+    "@rootcx/sdk": "~0.1.0",
+    "@rootcx/ui": "~0.1.0",
     "@tabler/icons-react": "^3.30.0",
     "@tailwindcss/vite": "^4.0.0",
     "clsx": "^2.1.0",
@@ -100,6 +98,8 @@ export default defineConfig({{
                 ),
             )
             .await?;
+
+            e.write(".gitignore", "node_modules/\ndist/\ntarget/\n.bundle/\nsrc-tauri/vendor/\nsrc-tauri/resources/\n").await?;
 
             e.write("tsconfig.json", TPL_TSCONFIG).await?;
             e.write("src/main.tsx", TPL_MAIN_TSX).await?;

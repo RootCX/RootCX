@@ -16,7 +16,7 @@ use uuid::Uuid;
 use super::RuntimeExtension;
 use crate::RuntimeError;
 use crate::routes::SharedRuntime;
-use rootcx_shared_types::AppManifest;
+use rootcx_types::AppManifest;
 
 /// Fixed namespace for UUID v5 generation. Ensures `agent_user_id("my-app")`
 /// always returns the same UUID, so agents keep their identity across restarts.

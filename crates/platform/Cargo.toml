@@ -1,12 +1,17 @@
 [package]
 name = "rootcx-platform"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "RootCX platform utilities"
+repository = "https://github.com/rootcx/rootcx"
 
 [dependencies]
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+tar = "0.4"
+flate2 = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

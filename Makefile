@@ -39,6 +39,7 @@ DIST := target/dist
         build-core-dev build-frontend \
         build-core-mac-arm build-core-mac-x86 \
         build-core-linux build-core-linux-arm build-core-win \
+        pack-runtime-mac-arm pack-runtime-mac-x86 \
         dist-mac-arm dist-mac-x86 dist-mac-uni \
         dist-linux dist-linux-arm dist-win
 
@@ -128,6 +129,16 @@ build-core-win:
 	cp target/$(TARGET_WIN)/release/rootcx-core.exe studio/src-tauri/rootcx-core-$(TARGET_WIN).exe
 endif
 
+# ── Runtime .pkg installer (shared runtime, installed once) ───────────────────
+
+pack-runtime-mac-arm: require-mac deps-mac-arm build-core-mac-arm $(DIST)
+	target/$(TARGET_MAC_ARM)/release/rootcx-core pack-runtime
+	@echo "" && ls target/dist/RootCX-Runtime-*-$(TARGET_MAC_ARM).pkg
+
+pack-runtime-mac-x86: require-mac deps-mac-x86 build-core-mac-x86 $(DIST)
+	target/$(TARGET_MAC_X86)/release/rootcx-core pack-runtime
+	@echo "" && ls target/dist/RootCX-Runtime-*-$(TARGET_MAC_X86).pkg
+
 # ── Distribution ──────────────────────────────────────────────────────────────
 
 ifeq ($(OS),Windows_NT)
@@ -146,19 +157,19 @@ build-frontend:
 	pnpm --dir studio/ui install
 	pnpm --dir studio/ui build
 
-dist-mac-arm: require-mac deps-mac-arm build-core-mac-arm build-frontend
+dist-mac-arm: require-mac build-frontend
 	cargo tauri build --target $(TARGET_MAC_ARM) --bundles dmg $(TAURI_BUILD_CFG)
 	@echo "" && ls target/$(TARGET_MAC_ARM)/release/bundle/dmg/*.dmg
 
-dist-mac-x86: require-mac deps-mac-x86 build-core-mac-x86 build-frontend
+dist-mac-x86: require-mac build-frontend
 	cargo tauri build --target $(TARGET_MAC_X86) --bundles dmg $(TAURI_BUILD_CFG)
 	@echo "" && ls target/$(TARGET_MAC_X86)/release/bundle/dmg/*.dmg
 
-dist-mac-uni: require-mac deps-mac-arm deps-mac-x86 build-core-mac-arm build-core-mac-x86 build-frontend
+dist-mac-uni: require-mac build-frontend
 	cargo tauri build --target universal-apple-darwin --bundles dmg $(TAURI_BUILD_CFG)
 	@echo "" && ls target/universal-apple-darwin/release/bundle/dmg/*.dmg
 
-dist-linux: require-linux deps-linux build-core-linux build-frontend $(DIST)
+dist-linux: require-linux build-frontend $(DIST)
 	cargo tauri build --target $(TARGET_LINUX) --bundles appimage,deb $(TAURI_BUILD_CFG)
 	@img=$$(ls target/$(TARGET_LINUX)/release/bundle/appimage/*.AppImage 2>/dev/null | head -1) && \
 	 [ -n "$$img" ] && tar -czf $(DIST)/rootcx-studio-linux-x86_64.tar.gz \
@@ -166,7 +177,7 @@ dist-linux: require-linux deps-linux build-core-linux build-frontend $(DIST)
 	@echo "" && ls $(DIST)/rootcx-studio-linux-x86_64.tar.gz \
 	  target/$(TARGET_LINUX)/release/bundle/deb/*.deb 2>/dev/null
 
-dist-linux-arm: require-linux deps-linux-arm build-core-linux-arm build-frontend $(DIST)
+dist-linux-arm: require-linux build-frontend $(DIST)
 	cargo tauri build --target $(TARGET_LINUX_ARM) --bundles appimage,deb $(TAURI_BUILD_CFG)
 	@img=$$(ls target/$(TARGET_LINUX_ARM)/release/bundle/appimage/*.AppImage 2>/dev/null | head -1) && \
 	 [ -n "$$img" ] && tar -czf $(DIST)/rootcx-studio-linux-aarch64.tar.gz \
@@ -174,7 +185,7 @@ dist-linux-arm: require-linux deps-linux-arm build-core-linux-arm build-frontend
 	@echo "" && ls $(DIST)/rootcx-studio-linux-aarch64.tar.gz \
 	  target/$(TARGET_LINUX_ARM)/release/bundle/deb/*.deb 2>/dev/null
 
-dist-win: require-win deps-win build-core-win build-frontend
+dist-win: require-win build-frontend
 	cargo tauri build --target $(TARGET_WIN) --bundles nsis $(TAURI_BUILD_CFG)
 ifeq ($(OS),Windows_NT)
 	@dir target\$(TARGET_WIN)\release\bundle\nsis\*.exe

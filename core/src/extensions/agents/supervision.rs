@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use serde_json::Value as JsonValue;
-use rootcx_shared_types::{SupervisionConfig, SupervisionMode};
+use rootcx_types::{SupervisionConfig, SupervisionMode};
 
 pub enum PolicyDecision {
     Allow,
@@ -124,7 +124,7 @@ fn parse_window(window: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rootcx_shared_types::{SupervisionPolicy, RateLimit};
+    use rootcx_types::{SupervisionPolicy, RateLimit};
     use serde_json::json;
 
     fn config(mode: SupervisionMode, policies: Vec<SupervisionPolicy>) -> SupervisionConfig {

@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rootcx_forge::{ForgeConfig, ForgeEngine};
-use rootcx_runtime::RuntimeClient;
+use rootcx_client::RuntimeClient;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 use tracing::{info, warn};
@@ -25,7 +25,7 @@ pub async fn init(state: &ForgeState) {
     }
 }
 
-const RUNTIME_INSTRUCTIONS: &str = include_str!("../../../.agents/instructions/rootcx-runtime.md");
+const RUNTIME_INSTRUCTIONS: &str = include_str!("../../../.agents/instructions/rootcx-sdk.md");
 
 async fn ensure_instructions() {
     let dir = match crate::state::instructions_dir() {
@@ -33,7 +33,7 @@ async fn ensure_instructions() {
         Err(_) => return,
     };
     let _ = tokio::fs::create_dir_all(&dir).await;
-    let _ = tokio::fs::write(dir.join("rootcx-runtime.md"), RUNTIME_INSTRUCTIONS).await;
+    let _ = tokio::fs::write(dir.join("rootcx-sdk.md"), RUNTIME_INSTRUCTIONS).await;
 }
 
 async fn build_config(client: &RuntimeClient) -> Result<ForgeConfig, String> {

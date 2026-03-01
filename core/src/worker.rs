@@ -266,7 +266,7 @@ async fn supervisor_loop(
 
                         if let Some(supervision) = payload.config
                             .get("_supervision")
-                            .and_then(|v| serde_json::from_value::<rootcx_shared_types::SupervisionConfig>(v.clone()).ok())
+                            .and_then(|v| serde_json::from_value::<rootcx_types::SupervisionConfig>(v.clone()).ok())
                         {
                             policy_evaluators.insert(invoke_id.clone(),
                                 Arc::new(TokioMutex::new(PolicyEvaluator::new(supervision))));

@@ -13,7 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 rootcx-platform.workspace = true
 rootcx-postgres-mgmt.workspace = true
-rootcx-shared-types.workspace = true
+rootcx-types.workspace = true
 axum = { version = "0.8", features = ["multipart"] }
 tower-http = { version = "0.6", features = ["cors"] }
 async-trait = "0.1"

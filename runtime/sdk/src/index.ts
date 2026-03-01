@@ -1,4 +1,4 @@
-export { RuntimeClient, RuntimeApiError } from "./client";
+export { RuntimeClient, RuntimeApiError, DEFAULT_BASE_URL } from "./client";
 export type {
   RuntimeClientOptions,
   AuthUser,

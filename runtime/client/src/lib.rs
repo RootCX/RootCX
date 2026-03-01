@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rootcx_shared_types::{AiConfig, AppManifest, InstalledApp, OsStatus, SchemaVerification};
+use rootcx_types::{AiConfig, AppManifest, InstalledApp, OsStatus, SchemaVerification};
 use serde_json::Value as JsonValue;
 
 pub mod daemon;
-pub use daemon::ensure_runtime;
+pub use daemon::{RuntimeStatus, ensure_runtime, prompt_runtime_install, deploy_bundled_backend};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
