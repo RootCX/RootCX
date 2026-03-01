@@ -1,7 +1,7 @@
 use crate::scaffold::emitter::Emitter;
 use crate::scaffold::types::{Layer, LayerFuture, ScaffoldContext};
 
-/// Emits: src/App.tsx with login/register flow using @rootcx/runtime auth.
+/// Emits: src/App.tsx with login/register flow using @rootcx/sdk auth.
 /// When `include_auth` is false, emits a simple hello-world App instead.
 pub struct AuthLayer {
     pub include_auth: bool,
@@ -33,7 +33,7 @@ export default function App() {{
 
 fn auth_app(name: &str) -> String {
     format!(
-        r#"import {{ AuthGate }} from "@rootcx/runtime";
+        r#"import {{ AuthGate }} from "@rootcx/sdk";
 import {{ AppShell, AppShellSidebar, AppShellMain, Sidebar, SidebarItem, PageHeader, Button }} from "@rootcx/ui";
 import {{ IconLogout, IconHome }} from "@tabler/icons-react";
 

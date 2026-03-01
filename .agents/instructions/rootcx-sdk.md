@@ -1,6 +1,6 @@
-# RootCX Runtime
+# RootCX SDK
 
-Apps require: `manifest.json` (data contract) + React code using `@rootcx/runtime` hooks and `@rootcx/ui` components.
+Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` hooks and `@rootcx/ui` components.
 
 ## manifest.json
 
@@ -105,7 +105,7 @@ import { Button, Input, Label, Card, CardHeader, CardTitle, CardContent, CardDes
 } from "@rootcx/ui";
 import { IconPlus, IconTrash, IconEdit } from "@tabler/icons-react";
 import { cn } from "@/lib/utils";
-import { AuthGate } from "@rootcx/runtime";
+import { AuthGate } from "@rootcx/sdk";
 import type { ColumnDef } from "@tanstack/react-table";
 ```
 
@@ -221,21 +221,21 @@ my-agent/
 ├── manifest.json
 ├── .rootcx/launch.json
 └── backend/
-    ├── index.ts                       # import "@rootcx/agent-runtime";
+    ├── index.ts                       # import "@rootcx/agents";
     ├── package.json
     └── agents/{id}/
         ├── system.md                  # persona + rules (injected as SystemMessage)
         └── graph.ts                   # LangGraph StateGraph (the workflow)
 ```
 
-**Never include:** React, JSX/TSX, UI, `src/`, `vite.config.ts`, `index.html`, `@rootcx/runtime`, `@rootcx/ui`, frontend deps.
+**Never include:** React, JSX/TSX, UI, `src/`, `vite.config.ts`, `index.html`, `@rootcx/sdk`, `@rootcx/ui`, frontend deps.
 
 ### Fixed boilerplate
 
 **`backend/package.json`**:
 ```json
 { "name": "<agent>", "version": "0.1.0", "private": true, "type": "module",
-  "dependencies": { "@rootcx/agent-runtime": "file:../../runtime/agent" } }
+  "dependencies": { "@rootcx/agents": "file:../../runtime/agent" } }
 ```
 
 **`.rootcx/launch.json`**:

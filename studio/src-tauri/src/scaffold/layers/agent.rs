@@ -8,7 +8,7 @@ pub struct AgentLayer;
 impl Layer for AgentLayer {
     fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> LayerFuture<'a> {
         Box::pin(async move {
-            let agent_runtime_dep = format!("file:{}", ctx.runtime.agent_runtime.display());
+            let agent_runtime_dep = "~0.1.0";
 
             let ai = ctx.ai_config.clone().unwrap_or_default();
             let provider = serde_json::to_value(ai.agent_provider_config())
@@ -76,10 +76,10 @@ export default function buildGraph(model: BaseChatModel, tools: StructuredToolIn
 }
 "#).await?;
 
-            e.write("backend/index.ts", "import \"@rootcx/agent-runtime\";\n").await?;
+            e.write("backend/index.ts", "import \"@rootcx/agents\";\n").await?;
 
             e.write("backend/package.json", &format!(
-                r#"{{"name":"{}-backend","version":"0.1.0","private":true,"type":"module","dependencies":{{"@rootcx/agent-runtime":"{agent_runtime_dep}"}}}}"#,
+                r#"{{"name":"{}-backend","version":"0.1.0","private":true,"type":"module","dependencies":{{"@rootcx/agents":"{agent_runtime_dep}"}}}}"#,
                 ctx.app_id
             )).await?;
 

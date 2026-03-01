@@ -1,7 +1,7 @@
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
-use rootcx_shared_types::AiConfig;
+use rootcx_types::AiConfig;
 use serde_json::{Value as JsonValue, json};
 
 use super::{SharedRuntime, pool};

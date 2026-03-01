@@ -1,6 +1,6 @@
 mod harness;
 use harness::TestRuntime;
-use rootcx_shared_types::SchemaVerification;
+use rootcx_types::SchemaVerification;
 use serde_json::{Value, json};
 
 fn make_tar_gz(files: &[(&str, &[u8])]) -> Vec<u8> {

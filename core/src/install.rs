@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use rootcx_platform::service::{ServiceConfig, ServiceStatus};
 use super::{die, SVC_NAME, SVC_LABEL, SVC_DESC};
 
@@ -15,7 +15,7 @@ pub fn run(home: PathBuf, pg_root: PathBuf, bun_bin: PathBuf, with_service: bool
 
     let pg_dest = res_dir.join(pg_root.file_name().unwrap_or("postgresql".as_ref()));
     if pg_dest.exists() { let _ = std::fs::remove_dir_all(&pg_dest); }
-    copy_dir(&pg_root, &pg_dest).unwrap_or_else(|e| die(e));
+    rootcx_platform::fs::copy_dir(&pg_root, &pg_dest).unwrap_or_else(|e| die(e));
 
     let bun_dest = rootcx_platform::bin::binary_path(&res_dir, "bun");
     std::fs::copy(&bun_bin, &bun_dest).unwrap_or_else(|e| die(format!("copy bun: {e}")));
@@ -37,14 +37,4 @@ pub fn run(home: PathBuf, pg_root: PathBuf, bun_bin: PathBuf, with_service: bool
         rootcx_platform::service::install(&cfg).unwrap_or_else(|e| die(e));
         println!("Service registered — starts on login.");
     }
-}
-
-fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for e in std::fs::read_dir(src)?.flatten() {
-        let (s, d) = (e.path(), dst.join(e.file_name()));
-        if s.is_dir() { copy_dir(&s, &d)?; }
-        else { std::fs::copy(&s, &d)?; let _ = rootcx_platform::fs::copy_permissions(&s, &d); }
-    }
-    Ok(())
 }

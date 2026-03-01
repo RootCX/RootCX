@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::RuntimeError;
 use crate::manifest::{json_to_sql_default, map_field_type, quote_ident};
-use rootcx_shared_types::{EntityContract, FieldContract, SchemaChange, SchemaVerification};
+use rootcx_types::{EntityContract, FieldContract, SchemaChange, SchemaVerification};
 
 const PROTECTED_COLUMNS: &[&str] = &["id", "created_at", "updated_at"];
 
@@ -465,7 +465,7 @@ pub async fn drop_orphaned_tables(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rootcx_shared_types::{FieldContract, FieldReference};
+    use rootcx_types::{FieldContract, FieldReference};
     use serde_json::json;
 
     fn db_col(name: &str, pg_type: &str, not_null: bool) -> DbColumn {

@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::RuntimeError;
 use crate::auth::AuthConfig;
 use crate::routes::SharedRuntime;
-use rootcx_shared_types::AppManifest;
+use rootcx_types::AppManifest;
 
 #[async_trait]
 pub trait RuntimeExtension: Send + Sync {

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use serde_json::{json, Value as JsonValue};
-use rootcx_shared_types::ToolDescriptor;
+use rootcx_types::ToolDescriptor;
 
 use super::{Tool, ToolContext, str_arg, check_permission};
 use crate::manifest::field_type_map;

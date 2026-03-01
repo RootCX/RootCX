@@ -2,13 +2,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
-use rootcx_runtime::RuntimeClient;
-use rootcx_shared_types::OsStatus;
+use rootcx_client::RuntimeClient;
+use rootcx_types::OsStatus;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 pub(crate) const DAEMON_URL: &str = "http://localhost:9100";
+const _: () = assert!(rootcx_platform::DEFAULT_API_PORT == 9100, "DAEMON_URL must match DEFAULT_API_PORT");
 
 static LOG_HTTP: LazyLock<reqwest::Client> =
     LazyLock::new(|| reqwest::Client::new());
@@ -86,7 +87,7 @@ pub fn clear_recent_projects() {
     }
 }
 
-async fn read_manifest(project_path: &str) -> Result<rootcx_shared_types::AppManifest, String> {
+async fn read_manifest(project_path: &str) -> Result<rootcx_types::AppManifest, String> {
     let contents = tokio::fs::read_to_string(Path::new(project_path).join("manifest.json"))
         .await
         .map_err(|e| format!("failed to read manifest: {e}"))?;
@@ -213,7 +214,7 @@ impl AppState {
         *abort_store.lock().await = Some(task.abort_handle());
     }
 
-    pub async fn get_ai_config(&self) -> Result<Option<rootcx_shared_types::AiConfig>, String> {
+    pub async fn get_ai_config(&self) -> Result<Option<rootcx_types::AiConfig>, String> {
         self.client.get_ai_config().await.map_err(|e| format!("failed to get AI config: {e}"))
     }
 

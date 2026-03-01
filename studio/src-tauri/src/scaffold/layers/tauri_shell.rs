@@ -1,7 +1,7 @@
 use crate::scaffold::emitter::Emitter;
 use crate::scaffold::types::{Layer, LayerFuture, ScaffoldContext};
 
-const SCAFFOLD_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' http://127.0.0.1:9100; img-src 'self' data:";
+const SCAFFOLD_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:";
 
 const ICON: &[u8] = include_bytes!("../../../icons/32x32.png");
 
@@ -12,7 +12,6 @@ impl Layer for TauriLayer {
     fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> LayerFuture<'a> {
         Box::pin(async move {
             let ScaffoldContext { app_id, identifier, port, .. } = ctx;
-            let client_dep = ctx.runtime.client_crate.display();
 
             e.write_bytes("src-tauri/icons/icon.png", ICON).await?;
 
@@ -36,7 +35,7 @@ tauri = {{ version = "2", features = [] }}
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 reqwest = {{ version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }}
-rootcx-runtime = {{ path = "{client_dep}" }}
+rootcx-client = "0.1"
 "#
                 ),
             )
@@ -61,7 +60,10 @@ rootcx-runtime = {{ path = "{client_dep}" }}
     "windows": [{{ "title": "{app_id}", "width": 900, "height": 600 }}],
     "security": {{ "csp": "{SCAFFOLD_CSP}" }}
   }},
-  "bundle": {{ "active": true, "icon": ["icons/icon.png"] }}
+  "bundle": {{
+    "active": true,
+    "icon": ["icons/icon.png"]
+  }}
 }}
 "#
                 ),
@@ -82,20 +84,25 @@ rootcx-runtime = {{ path = "{client_dep}" }}
 
             e.write(
                 "src-tauri/src/lib.rs",
-                r#"pub fn run() {
-    rootcx_runtime::ensure_runtime().expect("failed to start RootCX Runtime");
+                &format!(
+                    r#"pub fn run() {{
+    match rootcx_client::ensure_runtime() {{
+        Ok(rootcx_client::RuntimeStatus::Ready) => {{}}
+        Ok(rootcx_client::RuntimeStatus::NotInstalled) => {{
+            rootcx_client::prompt_runtime_install()
+                .expect("RootCX Runtime installation required");
+        }}
+        Err(e) => panic!("Failed to start RootCX Runtime: {{e}}"),
+    }}
 
-    let _ = reqwest::blocking::Client::new()
-        .post("http://localhost:9100/api/v1/apps")
-        .header("Content-Type", "application/json")
-        .body(include_str!("../../manifest.json"))
-        .send();
+    rootcx_client::deploy_bundled_backend("{app_id}");
 
     tauri::Builder::default()
         .run(tauri::generate_context!())
         .expect("error while running application");
-}
-"#,
+}}
+"#
+                ),
             )
             .await?;
 

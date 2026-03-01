@@ -20,8 +20,8 @@ tracing.workspace = true
 rootcx-browser.workspace = true
 rootcx-forge.workspace = true
 rootcx-platform.workspace = true
-rootcx-runtime.workspace = true
-rootcx-shared-types.workspace = true
+rootcx-client.workspace = true
+rootcx-types.workspace = true
 thiserror.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 tauri-plugin-dialog = "2"

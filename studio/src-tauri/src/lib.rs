@@ -42,6 +42,7 @@ pub fn run() {
             commands::create_window,
             commands::get_recent_projects,
             commands::add_to_recent,
+            commands::bundle_app,
             commands::clear_recent,
             forge::forge_set_cwd,
             forge::forge_create_session,
@@ -68,28 +69,23 @@ pub fn run() {
             let bg = state.clone();
             app.manage(state);
 
-            // Manage ForgeState synchronously (empty), fill after PG is ready
             let forge_state = forge::new_state();
             app.manage(forge_state.clone());
 
             tauri::async_runtime::spawn(async move {
-                let t0 = std::time::Instant::now();
-
-                if let Err(e) = tokio::task::spawn_blocking(rootcx_runtime::ensure_runtime)
-                    .await
-                    .unwrap_or_else(|e| Err(rootcx_runtime::ClientError::RuntimeStart(e.to_string())))
-                {
-                    error!("failed to start core daemon: {e}");
+                match tokio::task::spawn_blocking(rootcx_client::ensure_runtime).await {
+                    Ok(Ok(rootcx_client::RuntimeStatus::Ready)) => {}
+                    Ok(Ok(rootcx_client::RuntimeStatus::NotInstalled)) => match
+                        tokio::task::spawn_blocking(rootcx_client::prompt_runtime_install).await {
+                            Ok(Err(e)) => error!("runtime: {e}"),
+                            Err(e) => error!("runtime: {e}"),
+                            _ => {}
+                        }
+                    Ok(Err(e)) => error!("runtime: {e}"),
+                    Err(e) => error!("runtime: {e}"),
                 }
-                tracing::info!("boot: ensure_runtime done in {:?}", t0.elapsed());
-
-                if let Err(e) = bg.boot().await {
-                    error!("runtime boot failed: {e}");
-                }
-                tracing::info!("boot: app boot done in {:?}", t0.elapsed());
-
+                if let Err(e) = bg.boot().await { error!("runtime boot failed: {e}"); }
                 forge::init(&forge_state).await;
-                tracing::info!("boot: forge init done in {:?}", t0.elapsed());
             });
 
             Ok(())

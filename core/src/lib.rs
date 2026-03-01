@@ -24,7 +24,7 @@ use std::sync::Arc;
 use auth::AuthConfig;
 use extensions::{RuntimeExtension, builtin_extensions};
 use rootcx_postgres_mgmt::PostgresManager;
-use rootcx_shared_types::{ForgeStatus, OsStatus, PostgresStatus, RuntimeStatus, ServiceState};
+use rootcx_types::{ForgeStatus, OsStatus, PostgresStatus, RuntimeStatus, ServiceState};
 use scheduler::SchedulerHandle;
 use secrets::SecretManager;
 use sqlx::PgPool;

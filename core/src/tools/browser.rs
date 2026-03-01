@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{json, Value as JsonValue};
-use rootcx_shared_types::ToolDescriptor;
+use rootcx_types::ToolDescriptor;
 
 use super::{Tool, ToolContext};
 use crate::extensions::browser::queue::BrowserQueue;

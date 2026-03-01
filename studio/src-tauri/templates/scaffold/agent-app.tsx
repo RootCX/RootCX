@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { AuthGate, useRuntimeClient } from "@rootcx/runtime";
+import { AuthGate, useRuntimeClient } from "@rootcx/sdk";
 import { Button, ChatScrollArea, Markdown } from "@rootcx/ui";
 import { IconLogout, IconArrowUp, IconSquareFilled, IconChevronDown } from "@tabler/icons-react";
 

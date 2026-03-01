@@ -110,7 +110,7 @@ impl RuntimeExtension for AuditExtension {
     async fn on_table_created(
         &self,
         pool: &PgPool,
-        _manifest: &rootcx_shared_types::AppManifest,
+        _manifest: &rootcx_types::AppManifest,
         schema: &str,
         table: &str,
     ) -> Result<(), RuntimeError> {

@@ -1,6 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { RuntimeProvider } from "@rootcx/runtime";
+import { RuntimeProvider } from "@rootcx/sdk";
 import "./globals.css";
 import App from "./App";
 

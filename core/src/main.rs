@@ -1,4 +1,5 @@
 mod install;
+mod pack_runtime;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
 const PG_PORT:  u16 = 5480;
-const API_PORT: u16 = 9100;
+const API_PORT: u16 = rootcx_platform::DEFAULT_API_PORT;
 
 pub(crate) const SVC_NAME:  &str = "rootcx-core";
 pub(crate) const SVC_LABEL: &str = "com.rootcx.core";
@@ -77,6 +78,22 @@ async fn main() {
         }
         Some("service") => {
             handle_service(args.get(2).map(String::as_str).unwrap_or("status"));
+            return;
+        }
+        Some("bundle") => {
+            let app_dir = args.get(2).map(PathBuf::from)
+                .unwrap_or_else(|| die("usage: rootcx-core bundle <app-dir>"));
+            match rootcx_platform::bundle::run(app_dir, &|msg| eprintln!("{msg}")) {
+                Ok(p) => eprintln!("[bundle] done → {}", p.display()),
+                Err(e) => die(e),
+            }
+            return;
+        }
+        Some("pack-runtime") => {
+            pack_runtime::run(
+                std::env::current_exe().unwrap_or_else(|e| die(e)),
+                resources(),
+            );
             return;
         }
         _ => {}

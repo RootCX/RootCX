@@ -4598,6 +4598,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rootcx-client"
+version = "0.1.0"
+dependencies = [
+ "open",
+ "reqwest 0.12.28",
+ "rootcx-platform",
+ "rootcx-types",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "rootcx-core"
 version = "0.1.0"
 dependencies = [
@@ -4615,7 +4628,7 @@ dependencies = [
  "reqwest 0.12.28",
  "rootcx-platform",
  "rootcx-postgres-mgmt",
- "rootcx-shared-types",
+ "rootcx-types",
  "serde",
  "serde_json",
  "sqlx",
@@ -4658,7 +4671,9 @@ dependencies = [
 name = "rootcx-platform"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "libc",
+ "tar",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -4676,26 +4691,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rootcx-runtime"
-version = "0.1.0"
-dependencies = [
- "reqwest 0.12.28",
- "rootcx-platform",
- "rootcx-shared-types",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "rootcx-shared-types"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "rootcx-studio"
 version = "0.1.0"
 dependencies = [
@@ -4705,10 +4700,10 @@ dependencies = [
  "portable-pty",
  "reqwest 0.12.28",
  "rootcx-browser",
+ "rootcx-client",
  "rootcx-forge",
  "rootcx-platform",
- "rootcx-runtime",
- "rootcx-shared-types",
+ "rootcx-types",
  "serde",
  "serde_json",
  "tar",
@@ -4722,6 +4717,14 @@ dependencies = [
  "tracing",
  "urlencoding",
  "uuid",
+]
+
+[[package]]
+name = "rootcx-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

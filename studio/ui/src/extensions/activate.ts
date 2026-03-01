@@ -11,6 +11,7 @@ import { activate as editor } from "./editor";
 import { activate as settings } from "./settings";
 import { activate as database } from "./database";
 import { activate as security } from "./security";
+import { activate as bundle } from "./bundle";
 
 export function activateBuiltins() {
   commandPalette();
@@ -22,6 +23,7 @@ export function activateBuiltins() {
   output();
   coreStatus();
   run();
+  bundle();
   editor();
   settings();
   database();

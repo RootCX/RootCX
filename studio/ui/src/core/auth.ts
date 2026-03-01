@@ -1,7 +1,7 @@
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-const BASE = "http://localhost:9100";
+const BASE = "http://localhost:9100"; // rootcx_platform::DEFAULT_API_PORT
 const REFRESH_KEY = "rootcx_refresh_token";
 
 export interface AuthUser {

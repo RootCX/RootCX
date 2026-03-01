@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use uuid::Uuid;
-use rootcx_shared_types::ToolDescriptor;
+use rootcx_types::ToolDescriptor;
 
 pub struct ToolContext {
     pub pool: PgPool,

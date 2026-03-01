@@ -28,7 +28,8 @@ impl TestRuntime {
     }
 
     async fn boot_inner(require_auth: bool) -> Self {
-        let resources = rootcx_platform::dirs::resources_dir(env!("CARGO_MANIFEST_DIR"));
+        let resources = rootcx_platform::dirs::resources_dir(env!("CARGO_MANIFEST_DIR"))
+            .expect("resources dir not found");
         let pg_root = find_pg_root(&resources).expect("bundled PostgreSQL not found");
         let bun_bin = rootcx_platform::bin::binary_path(&resources, "bun");
         let tmp = TempDir::new().unwrap();

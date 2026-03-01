@@ -20,7 +20,7 @@ use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::secrets::SecretManager;
 use crate::worker_manager::WorkerManager;
-use rootcx_shared_types::{AppManifest, InstalledApp, OsStatus, SchemaVerification};
+use rootcx_types::{AppManifest, InstalledApp, OsStatus, SchemaVerification};
 
 pub type SharedRuntime = Arc<Mutex<Runtime>>;
 

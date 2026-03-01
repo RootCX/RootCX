@@ -1,37 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
 use std::pin::Pin;
 
 /// Boxed async return type for Layer::emit — eliminates Future/Pin imports from every layer file.
 pub type LayerFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
-
-/// Paths to the shared runtime crates/packages consumed during scaffold.
-pub struct RuntimePaths {
-    pub sdk: PathBuf,
-    pub ui: PathBuf,
-    pub client_crate: PathBuf,
-    pub agent_runtime: PathBuf,
-}
-
-impl RuntimePaths {
-    pub fn resolve() -> Result<Self, String> {
-        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        Ok(Self {
-            sdk: base.join("../../runtime/sdk").canonicalize().map_err(|e| format!("SDK not found: {e}"))?,
-            ui: base.join("../../runtime/ui").canonicalize().map_err(|e| format!("UI library not found: {e}"))?,
-            client_crate: base
-                .join("../../runtime/client")
-                .canonicalize()
-                .map_err(|e| format!("runtime client crate not found: {e}"))?,
-            agent_runtime: base
-                .join("../../runtime/agent")
-                .canonicalize()
-                .map_err(|e| format!("agent runtime not found: {e}"))?,
-        })
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresetInfo {
@@ -100,9 +73,8 @@ pub struct ScaffoldContext {
     pub app_id: String,
     pub identifier: String,
     pub port: u16,
-    pub runtime: RuntimePaths,
     pub answers: HashMap<String, AnswerValue>,
-    pub ai_config: Option<rootcx_shared_types::AiConfig>,
+    pub ai_config: Option<rootcx_types::AiConfig>,
 }
 
 pub trait Preset: Send + Sync {
