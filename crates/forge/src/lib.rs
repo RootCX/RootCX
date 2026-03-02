@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use error::ForgeError;
-use provider::ProviderKind;
+use provider::ProviderType;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::sync::{Mutex, RwLock};
@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForgeConfig {
-    pub provider: ProviderKind,
+    pub provider: ProviderType,
     pub model: String,
     pub api_key: Option<String>,
     pub region: Option<String>,
@@ -33,7 +33,7 @@ pub struct ForgeConfig {
 impl Default for ForgeConfig {
     fn default() -> Self {
         Self {
-            provider: ProviderKind::Anthropic,
+            provider: ProviderType::Anthropic,
             model: "claude-sonnet-4-20250514".into(),
             api_key: None,
             region: None,

@@ -212,91 +212,61 @@ const columns: ColumnDef<T, unknown>[] = [
 
 ## AI Agents
 
-Backend-only apps. LangGraph workflow in TypeScript. Same manifest, deploy, RBAC as apps. No frontend.
+Agents are apps with a `backend/` containing a LangGraph agent. Same manifest, same deploy, same RBAC. Core passes LLM credentials via IPC.
 
 ### Project structure
 
 ```
 my-agent/
-├── manifest.json
+├── manifest.json                  # Data contract (no agent field)
 ├── .rootcx/launch.json
+├── src/App.tsx                    # Chat UI
 └── backend/
-    ├── index.ts                       # import "@rootcx/agents";
-    ├── package.json
-    └── agents/{id}/
-        ├── system.md                  # persona + rules (injected as SystemMessage)
-        └── graph.ts                   # LangGraph StateGraph (the workflow)
+    ├── agent.json                 # Agent config (limits, memory, supervision)
+    ├── agent/system.md            # System prompt
+    ├── index.ts                   # LangGraph agent + IPC bridge
+    └── package.json               # @langchain/langgraph, @langchain/openai, zod
 ```
 
-**Never include:** React, JSX/TSX, UI, `src/`, `vite.config.ts`, `index.html`, `@rootcx/sdk`, `@rootcx/ui`, frontend deps.
+### backend/agent.json
 
-### Fixed boilerplate
-
-**`backend/package.json`**:
-```json
-{ "name": "<agent>", "version": "0.1.0", "private": true, "type": "module",
-  "dependencies": { "@rootcx/agents": "file:../../runtime/agent" } }
-```
-
-**`.rootcx/launch.json`**:
-```json
-{ "preLaunch": ["verify_schema", "sync_manifest", "deploy_backend"] }
-```
-
-### Manifest `agent` field
-
-Added alongside `dataContract` in `manifest.json`:
+Agent config — read by Core at deploy time, separate from manifest:
 
 ```json
-"agent": {
+{
   "name": "<name>",
   "description": "<description>",
-  "provider": { "type": "anthropic", "model": "claude-sonnet-4-20250514" },
   "systemPrompt": "./agent/system.md",
-  "graph": "./agent/graph.ts",
   "memory": { "enabled": true },
-  "limits": { "maxTurns": 10 }
+  "limits": { "maxTurns": 50, "maxContextTokens": 100000, "keepRecentMessages": 10 },
+  "supervision": { "mode": "autonomous" }
 }
 ```
 
-**`provider` is required.** Tagged union: `{ "type": "anthropic"|"openai"|"bedrock", "model": "<model>" }`. Bedrock also accepts `"region"`.
+LLM provider selected at scaffold time. Platform secrets (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `AWS_BEARER_TOKEN_BEDROCK`) set via dashboard. Core passes credentials to agent at startup.
 
 ### Tools & permissions
 
-All registered tools are available to every agent. RBAC permissions are derived automatically from `dataContract` (full CRUD per entity).
+All registered tools available via IPC. RBAC permissions derived from `dataContract` (full CRUD per entity).
 
-### graph.ts contract
+### Backend code
 
-```typescript
-import { StateGraph, MessagesAnnotation, Annotation } from "@langchain/langgraph";
-import { ToolNode } from "@langchain/langgraph/prebuilt";
-import { SystemMessage } from "@langchain/core/messages";
-import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import type { StructuredToolInterface } from "@langchain/core/tools";
-
-// Must default-export this signature:
-export default function buildGraph(
-  model: BaseChatModel,       // LLM provided by runtime
-  tools: StructuredToolInterface[], // all registered platform tools
-): CompiledStateGraph
-```
-
-Build any `StateGraph` using LangGraph primitives: `Annotation.Root`, `MessagesAnnotation`, `ToolNode`, conditional edges, custom state fields. System prompt is injected by runtime — graph doesn't handle it.
-
-### Secrets
-
-`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `BRAVE_API_KEY`, `TAVILY_API_KEY`
+The scaffold generates a single `index.ts` — the developer owns the code:
+- LangGraph `createReactAgent` handles the ReAct loop and streaming
+- Provider-specific LangChain SDK (ChatAnthropic, ChatOpenAI, ChatBedrockConverse)
+- IPC bridge (JSON-lines stdin/stdout) connects to Core for tool calls and supervision
+- Dependencies: `@langchain/langgraph`, provider package, `@langchain/core`, `zod`
 
 ### Invocation
 
 ```
-POST /api/v1/apps/{appId}/agent/invoke
+POST /api/v1/apps/{app_id}/agent/invoke
 { "message": "...", "session_id": "optional-uuid" }
 ```
 
-Response: SSE stream (`chunk`, `done`, `error` events).
+Response: SSE stream (`chunk`, `tool_call_started`, `tool_call_completed`, `approval_required`, `done`, `error` events).
 
 Other endpoints:
-- `GET /api/v1/apps/{appId}/agent` — agent config
-- `GET /api/v1/apps/{appId}/agent/sessions` — list sessions
-- `GET /api/v1/apps/{appId}/agent/sessions/{sessionId}` — get session
+- `GET /api/v1/apps/{app_id}/agent` — agent config
+- `GET /api/v1/apps/{app_id}/agent/sessions` — list sessions
+- `GET /api/v1/apps/{app_id}/agent/sessions/{session_id}` — get session

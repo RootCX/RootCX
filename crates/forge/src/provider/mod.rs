@@ -5,17 +5,10 @@ pub mod openai;
 use std::pin::Pin;
 
 use futures::Stream;
-use serde::{Deserialize, Serialize};
 
 use crate::error::ForgeError;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderKind {
-    Anthropic,
-    OpenAi,
-    Bedrock,
-}
+pub use rootcx_types::{ChatMessage, ContentBlock, ProviderType, Role, ToolDef};
 
 #[derive(Debug, Clone)]
 pub enum StopReason {
@@ -33,34 +26,6 @@ pub enum StreamEvent {
     ToolCallEnd { id: String },
     Done(StopReason),
     Error(String),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Role {
-    User,
-    Assistant,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum ContentBlock {
-    Text { text: String },
-    ToolUse { id: String, name: String, input: serde_json::Value },
-    ToolResult { tool_use_id: String, content: String, is_error: bool },
-}
-
-#[derive(Debug, Clone)]
-pub struct ChatMessage {
-    pub role: Role,
-    pub content: Vec<ContentBlock>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ToolDef {
-    pub name: String,
-    pub description: String,
-    pub input_schema: serde_json::Value,
 }
 
 pub type EventStream =
@@ -81,7 +46,7 @@ pub trait LlmProvider: Send + Sync {
 pub fn estimate_tokens(system: &str, messages: &[ChatMessage]) -> usize {
     let mut chars = system.len();
     for msg in messages {
-        chars += 4; // per-message overhead
+        chars += 4;
         for block in &msg.content {
             chars += match block {
                 ContentBlock::Text { text } => text.len(),
@@ -94,21 +59,21 @@ pub fn estimate_tokens(system: &str, messages: &[ChatMessage]) -> usize {
 }
 
 pub fn build_provider(
-    kind: &ProviderKind,
+    kind: &ProviderType,
     model: &str,
     api_key: Option<&str>,
     region: Option<&str>,
 ) -> Box<dyn LlmProvider> {
     match kind {
-        ProviderKind::Anthropic => Box::new(anthropic::Anthropic::new(
+        ProviderType::Anthropic => Box::new(anthropic::Anthropic::new(
             model.to_string(),
             api_key.unwrap_or_default().to_string(),
         )),
-        ProviderKind::OpenAi => Box::new(openai::OpenAi::new(
+        ProviderType::OpenAI => Box::new(openai::OpenAi::new(
             model.to_string(),
             api_key.unwrap_or_default().to_string(),
         )),
-        ProviderKind::Bedrock => Box::new(bedrock::Bedrock::new(
+        ProviderType::Bedrock => Box::new(bedrock::Bedrock::new(
             model.to_string(),
             region.map(String::from),
             api_key.map(String::from),

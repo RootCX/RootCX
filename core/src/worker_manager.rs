@@ -11,8 +11,8 @@ use tracing::{error, info, warn};
 use crate::RuntimeError;
 use crate::extensions::logs::LogEntry;
 use crate::ipc::{AgentInvokePayload, RpcCaller};
-use crate::secrets::SecretManager;
 use crate::extensions::agents::approvals::PendingApprovals;
+use crate::secrets::SecretManager;
 use crate::tools::ToolRegistry;
 use crate::worker::{self, AgentEvent, SupervisorHandle, WorkerConfig, WorkerStatus};
 
@@ -47,13 +47,13 @@ impl WorkerManager {
 
         let app_dir = self.apps_dir.join(app_id);
         let entry_point = resolve_entry_point(&app_dir)?;
-        let env = secrets.get_env_for_app(pool, app_id).await?;
+        let credentials = secrets.get_env_for_app(pool, app_id).await?;
 
         let config = WorkerConfig {
             app_id: app_id.to_string(),
             entry_point,
             working_dir: app_dir,
-            env,
+            credentials,
             runtime_url: self.runtime_url.clone(),
             pool: pool.clone(),
             js_runtime: self.bun_bin.clone(),
@@ -82,11 +82,8 @@ impl WorkerManager {
 
     pub async fn stop_all(&self) {
         let ids: Vec<String> = self.workers.read().await.keys().cloned().collect();
-        for id in ids {
-            if let Err(e) = self.stop_app(&id).await {
-                error!(app_id = %id, "stop error: {e}");
-            }
-        }
+        let futs = ids.iter().map(|id| async move { if let Err(e) = self.stop_app(id).await { error!(app_id = %id, "stop error: {e}"); } });
+        join_all(futs).await;
     }
 
     pub async fn rpc(

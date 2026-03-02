@@ -214,10 +214,6 @@ impl AppState {
         *abort_store.lock().await = Some(task.abort_handle());
     }
 
-    pub async fn get_ai_config(&self) -> Result<Option<rootcx_types::AiConfig>, String> {
-        self.client.get_ai_config().await.map_err(|e| format!("failed to get AI config: {e}"))
-    }
-
     pub async fn deploy_backend(&self, project_path: &str) -> Result<String, String> {
         let project = Path::new(project_path);
         let manifest = read_manifest(project_path).await?;

@@ -60,8 +60,6 @@ pub struct AppManifest {
     pub permissions: Option<PermissionsContract>,
     #[serde(default)]
     pub data_contract: Vec<EntityContract>,
-    #[serde(default)]
-    pub agent: Option<AgentDefinition>,
 }
 
 fn default_version() -> String {
@@ -147,30 +145,6 @@ pub enum ProviderType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ProviderConfig {
-    #[serde(rename = "anthropic")]
-    Anthropic {
-        model: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        api_key: Option<String>,
-    },
-    #[serde(rename = "openai")]
-    OpenAI {
-        model: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        api_key: Option<String>,
-    },
-    /// Bedrock uses IAM role-based auth server-side; no api_key field needed.
-    #[serde(rename = "bedrock")]
-    Bedrock {
-        model: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        region: Option<String>,
-    },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiConfig {
     pub provider: ProviderType,
     pub model: String,
@@ -192,23 +166,6 @@ impl AiConfig {
             ProviderType::OpenAI => format!("openai/{}", self.model),
         }
     }
-
-    pub fn agent_provider_config(&self) -> ProviderConfig {
-        match self.provider {
-            ProviderType::Anthropic => ProviderConfig::Anthropic {
-                model: self.model.clone(),
-                api_key: Some("${ANTHROPIC_API_KEY}".into()),
-            },
-            ProviderType::OpenAI => ProviderConfig::OpenAI {
-                model: self.model.clone(),
-                api_key: Some("${OPENAI_API_KEY}".into()),
-            },
-            ProviderType::Bedrock => ProviderConfig::Bedrock {
-                model: format!("us.anthropic.{}", self.model),
-                region: self.region.clone(),
-            },
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,11 +175,7 @@ pub struct AgentDefinition {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
-    pub provider: Option<ProviderConfig>,
-    #[serde(default)]
     pub system_prompt: Option<String>,
-    #[serde(default)]
-    pub graph: Option<String>,
     #[serde(default)]
     pub memory: Option<AgentMemory>,
     #[serde(default)]
@@ -287,4 +240,42 @@ pub struct ToolDescriptor {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    Text { text: String },
+    ToolUse { id: String, name: String, input: serde_json::Value },
+    ToolResult { tool_use_id: String, content: String, #[serde(default)] is_error: bool },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub role: Role,
+    pub content: Vec<ContentBlock>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDef {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+impl ProviderType {
+    pub fn secret_key_name(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "ANTHROPIC_API_KEY",
+            Self::OpenAI => "OPENAI_API_KEY",
+            Self::Bedrock => "AWS_BEARER_TOKEN_BEDROCK",
+        }
+    }
 }

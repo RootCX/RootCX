@@ -5,7 +5,6 @@ pub(crate) mod routes;
 pub(crate) mod streaming;
 pub(crate) mod supervision;
 
-
 use async_trait::async_trait;
 use axum::Router;
 use axum::routing::{get, post};
@@ -16,17 +15,14 @@ use uuid::Uuid;
 use super::RuntimeExtension;
 use crate::RuntimeError;
 use crate::routes::SharedRuntime;
-use rootcx_types::AppManifest;
+use rootcx_types::{AgentDefinition, AppManifest};
 
-/// Fixed namespace for UUID v5 generation. Ensures `agent_user_id("my-app")`
-/// always returns the same UUID, so agents keep their identity across restarts.
 /// Do not change — existing agent user_ids in the DB depend on this value.
 const AGENT_UUID_NAMESPACE: Uuid = Uuid::from_bytes([
     0x9a, 0x3b, 0x4c, 0x5d, 0x6e, 0x7f, 0x40, 0x01,
     0x82, 0x93, 0xa4, 0xb5, 0xc6, 0xd7, 0xe8, 0xf9,
 ]);
 
-/// Deterministic user ID for an agent: same app_id always yields the same UUID.
 pub fn agent_user_id(app_id: &str) -> Uuid {
     Uuid::new_v5(&AGENT_UUID_NAMESPACE, format!("agent:{app_id}").as_bytes())
 }
@@ -99,87 +95,19 @@ impl RuntimeExtension for AgentExtension {
     }
 
     async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, _installed_by: uuid::Uuid, _tool_names: &[String]) -> Result<(), RuntimeError> {
-        let def = match &manifest.agent {
-            Some(d) => d,
-            None => return Ok(()),
-        };
         let app_id = &manifest.app_id;
-        let role_name = format!("agent:{app_id}");
-        let agent_uid = agent_user_id(app_id);
-
-        let config = serde_json::json!({
-            "provider": def.provider,
-            "systemPrompt": def.system_prompt,
-            "graph": def.graph,
-            "memory": def.memory,
-            "limits": def.limits,
-            "supervision": def.supervision,
-        });
-
-        // All catalogued permissions — RbacExtension already derived them from dataContract
-        let agent_permissions: Vec<String> = sqlx::query_scalar(
-            "SELECT key FROM rootcx_system.rbac_permissions WHERE app_id = $1",
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id = $1)",
         )
         .bind(app_id)
-        .fetch_all(pool)
+        .fetch_one(pool)
         .await
         .map_err(RuntimeError::Schema)?;
 
-        let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
+        if !exists { return Ok(()); }
 
-        sqlx::query(
-            "INSERT INTO rootcx_system.agents (app_id, name, description, config)
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (app_id) DO UPDATE SET
-                 name = EXCLUDED.name, description = EXCLUDED.description,
-                 config = EXCLUDED.config, updated_at = now()"
-        )
-        .bind(app_id)
-        .bind(&def.name)
-        .bind(def.description.as_deref())
-        .bind(&config)
-        .execute(&mut *tx)
-        .await
-        .map_err(RuntimeError::Schema)?;
-
-        sqlx::query(
-            "INSERT INTO rootcx_system.rbac_roles (app_id, name, description, inherits, permissions)
-             VALUES ($1, $2, $3, '{}', $4)
-             ON CONFLICT (app_id, name) DO UPDATE SET description = EXCLUDED.description, permissions = EXCLUDED.permissions"
-        )
-        .bind(app_id)
-        .bind(&role_name)
-        .bind(format!("Auto-created role for agent {}", def.name))
-        .bind(&agent_permissions)
-        .execute(&mut *tx)
-        .await
-        .map_err(RuntimeError::Schema)?;
-
-        sqlx::query(
-            "INSERT INTO rootcx_system.users (id, username, is_system)
-             VALUES ($1, $2, true)
-             ON CONFLICT (id) DO NOTHING"
-        )
-        .bind(agent_uid)
-        .bind(&role_name)
-        .execute(&mut *tx)
-        .await
-        .map_err(RuntimeError::Schema)?;
-
-        sqlx::query(
-            "INSERT INTO rootcx_system.rbac_assignments (user_id, app_id, role)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (user_id, app_id, role) DO NOTHING"
-        )
-        .bind(agent_uid)
-        .bind(app_id)
-        .bind(&role_name)
-        .execute(&mut *tx)
-        .await
-        .map_err(RuntimeError::Schema)?;
-
-        tx.commit().await.map_err(RuntimeError::Schema)?;
-        info!(app = %app_id, "agent registered");
+        sync_agent_rbac(pool, app_id).await?;
+        info!(app = %app_id, "agent RBAC synced");
         Ok(())
     }
 
@@ -195,4 +123,86 @@ impl RuntimeExtension for AgentExtension {
                 .route("/api/v1/apps/{app_id}/agent/approvals/{approval_id}", post(routes::reply_approval)),
         )
     }
+}
+
+pub(crate) async fn register_agent(pool: &PgPool, app_id: &str, def: &AgentDefinition) -> Result<(), RuntimeError> {
+    let config = serde_json::json!({
+        "systemPrompt": def.system_prompt,
+        "memory": def.memory,
+        "limits": def.limits,
+        "supervision": def.supervision,
+    });
+
+    sqlx::query(
+        "INSERT INTO rootcx_system.agents (app_id, name, description, config)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (app_id) DO UPDATE SET
+             name = EXCLUDED.name, description = EXCLUDED.description,
+             config = EXCLUDED.config, updated_at = now()"
+    )
+    .bind(app_id)
+    .bind(&def.name)
+    .bind(def.description.as_deref())
+    .bind(&config)
+    .execute(pool)
+    .await
+    .map_err(RuntimeError::Schema)?;
+
+    sync_agent_rbac(pool, app_id).await?;
+    info!(app = %app_id, "agent registered from agent.json");
+    Ok(())
+}
+
+async fn sync_agent_rbac(pool: &PgPool, app_id: &str) -> Result<(), RuntimeError> {
+    let role_name = format!("agent:{app_id}");
+    let agent_uid = agent_user_id(app_id);
+
+    let agent_permissions: Vec<String> = sqlx::query_scalar(
+        "SELECT key FROM rootcx_system.rbac_permissions WHERE app_id = $1",
+    )
+    .bind(app_id)
+    .fetch_all(pool)
+    .await
+    .map_err(RuntimeError::Schema)?;
+
+    let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
+
+    sqlx::query(
+        "INSERT INTO rootcx_system.rbac_roles (app_id, name, description, inherits, permissions)
+         VALUES ($1, $2, $3, '{}', $4)
+         ON CONFLICT (app_id, name) DO UPDATE SET description = EXCLUDED.description, permissions = EXCLUDED.permissions"
+    )
+    .bind(app_id)
+    .bind(&role_name)
+    .bind(format!("Agent role for {app_id}"))
+    .bind(&agent_permissions)
+    .execute(&mut *tx)
+    .await
+    .map_err(RuntimeError::Schema)?;
+
+    sqlx::query(
+        "INSERT INTO rootcx_system.users (id, username, is_system)
+         VALUES ($1, $2, true)
+         ON CONFLICT (id) DO NOTHING"
+    )
+    .bind(agent_uid)
+    .bind(&role_name)
+    .execute(&mut *tx)
+    .await
+    .map_err(RuntimeError::Schema)?;
+
+    sqlx::query(
+        "INSERT INTO rootcx_system.rbac_assignments (user_id, app_id, role)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_id, app_id, role) DO NOTHING"
+    )
+    .bind(agent_uid)
+    .bind(app_id)
+    .bind(&role_name)
+    .execute(&mut *tx)
+    .await
+    .map_err(RuntimeError::Schema)?;
+
+    tx.commit().await.map_err(RuntimeError::Schema)?;
+    Ok(())
 }

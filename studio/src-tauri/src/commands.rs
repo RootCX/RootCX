@@ -150,20 +150,18 @@ pub async fn stop_deployed_worker(state: State<'_, AppState>) -> Result<(), Stri
 
 #[tauri::command]
 pub async fn scaffold_project(
-    state: State<'_, AppState>,
+    _state: State<'_, AppState>,
     path: String,
     name: String,
     preset_id: Option<String>,
     answers: Option<std::collections::HashMap<String, crate::scaffold::Answer>>,
 ) -> Result<(), String> {
     validate_fs_path(&path)?;
-    let ai_config = state.get_ai_config().await.ok().flatten();
     crate::scaffold::create(
         std::path::Path::new(&path),
         &name,
         preset_id.as_deref().unwrap_or("blank"),
         answers.unwrap_or_default(),
-        ai_config,
     )
     .await
 }

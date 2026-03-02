@@ -56,6 +56,12 @@ pub async fn deploy_backend(
         install_deps(&bun_bin, &app_dir).await?;
     }
 
+    if let Some(def) = crate::extensions::agents::config::load_agent_json(&app_dir).await {
+        crate::extensions::agents::register_agent(&pool, &app_id, &def)
+            .await
+            .map_err(|e| ApiError::Internal(format!("agent registration: {e}")))?;
+    }
+
     let _ = wm.stop_app(&app_id).await;
     wm.start_app(&pool, &secrets, &app_id).await?;
 

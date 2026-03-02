@@ -78,7 +78,7 @@ pub struct WorkerConfig {
     pub app_id: String,
     pub entry_point: PathBuf,
     pub working_dir: PathBuf,
-    pub env: HashMap<String, String>,
+    pub credentials: HashMap<String, String>,
     pub runtime_url: String,
     pub pool: PgPool,
     pub js_runtime: PathBuf,
@@ -160,7 +160,7 @@ async fn supervisor_loop(
     let mut child: Option<AsyncGroupChild> = None;
     let mut ipc_writer: Option<IpcWriter> = None;
     let mut ipc_reader: Option<IpcReader> = None;
-    let mut pending_rpcs = PendingRpcs::new();
+    let mut pending_rpcs = PendingRpcs::default();
     let mut pending_agent_streams: HashMap<String, mpsc::Sender<AgentEvent>> = HashMap::new();
     let mut policy_evaluators: HashMap<String, Arc<TokioMutex<PolicyEvaluator>>> = HashMap::new();
     let pending_approvals = config.pending_approvals.clone();
@@ -303,6 +303,7 @@ async fn supervisor_loop(
                                 let _ = w.send(&OutboundMessage::Discover {
                                     app_id: config.app_id.clone(),
                                     runtime_url: config.runtime_url.clone(),
+                                    credentials: config.credentials.clone(),
                                 }).await;
                             }
                         }
@@ -564,10 +565,6 @@ async fn spawn_worker(
         .stderr(Stdio::piped())
         .env("ROOTCX_APP_ID", &config.app_id)
         .env("ROOTCX_RUNTIME_URL", &config.runtime_url);
-
-    for (k, v) in &config.env {
-        cmd.env(k, v);
-    }
 
     let mut child = cmd.group_spawn().map_err(|e| RuntimeError::Worker(format!("spawn failed: {e}")))?;
 

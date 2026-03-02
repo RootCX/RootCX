@@ -49,6 +49,19 @@ impl Preset for BlankPreset {
                 default: Some(AnswerValue::Bool(true)),
                 depends_on: Some(DependsOn { key: "project_type".into(), equals: AnswerValue::Text("app".into()) }),
             },
+            Question {
+                key: "llm_provider".into(),
+                label: "Which LLM provider?".into(),
+                question_type: QuestionType::Choice {
+                    options: vec![
+                        ChoiceOption { value: "anthropic".into(), label: "Anthropic".into() },
+                        ChoiceOption { value: "openai".into(), label: "OpenAI".into() },
+                        ChoiceOption { value: "bedrock".into(), label: "AWS Bedrock".into() },
+                    ],
+                },
+                default: Some(AnswerValue::Text("anthropic".into())),
+                depends_on: Some(DependsOn { key: "project_type".into(), equals: AnswerValue::Text("agent".into()) }),
+            },
         ]
     }
 

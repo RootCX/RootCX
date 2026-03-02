@@ -28,7 +28,6 @@ pub async fn create(
     name: &str,
     preset_id: &str,
     answers: HashMap<String, AnswerValue>,
-    ai_config: Option<rootcx_types::AiConfig>,
 ) -> Result<(), String> {
     let registry = PresetRegistry::new();
     let preset = registry.get(preset_id)?;
@@ -40,7 +39,7 @@ pub async fn create(
     app_id.hash(&mut h);
     let port = 3000 + (h.finish() % 6000) as u16;
 
-    let ctx = ScaffoldContext { app_id, identifier, port, answers, ai_config };
+    let ctx = ScaffoldContext { app_id, identifier, port, answers };
 
     let emitter = Emitter::new(root.to_path_buf());
     for layer in &layers {

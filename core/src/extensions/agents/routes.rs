@@ -99,14 +99,13 @@ pub async fn invoke_agent(
     Path(app_id): Path<String>,
     Json(body): Json<InvokeRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let (pool, wm, data_dir, auth_cfg, sm, tool_registry) = {
+    let (pool, wm, data_dir, auth_cfg, tool_registry) = {
         let g = rt.lock().await;
         (
             g.pool().cloned().ok_or(ApiError::NotReady)?,
             g.worker_manager().cloned().ok_or(ApiError::NotReady)?,
             g.data_dir().to_path_buf(),
             g.auth_config().clone(),
-            g.secret_manager().cloned().ok_or(ApiError::NotReady)?,
             g.tool_registry().clone(),
         )
     };
@@ -123,7 +122,7 @@ pub async fn invoke_agent(
 
     let history = config::load_history(&pool, memory_enabled, &session_id).await?;
     let system_prompt = config::load_system_prompt(&app_id, &agent_config_json, &data_dir).await?;
-    let agent_config = config::build_agent_config(&pool, &sm, &app_id, &agent_config_json, &tool_registry).await?;
+    let agent_config = config::build_agent_config(&pool, &app_id, &agent_config_json, &tool_registry).await?;
 
     let agent_token = jwt::encode_access(&auth_cfg, agent_user_id(&app_id), &format!("agent:{app_id}"))
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -196,13 +195,16 @@ pub async fn get_session(
          FROM rootcx_system.agent_tool_calls WHERE session_id = $1::uuid ORDER BY created_at ASC",
     ).bind(&session_id).fetch_all(&pool).await?;
 
-    let structured: Vec<JsonValue> = messages.iter().map(|m| {
+    let structured: Vec<JsonValue> = messages.iter().enumerate().map(|(i, m)| {
         let mut msg = json!({
             "id": m.id, "role": m.role, "content": m.content,
             "tokenCount": m.token_count, "isSummary": m.is_summary, "createdAt": m.created_at,
         });
         if m.role == "assistant" {
-            let tc: Vec<&ToolCallRow> = tool_calls.iter().filter(|tc| tc.created_at >= m.created_at).collect();
+            let upper = messages.get(i + 1).map(|next| next.created_at.as_str());
+            let tc: Vec<&ToolCallRow> = tool_calls.iter().filter(|tc| {
+                tc.created_at >= m.created_at && upper.is_none_or(|u| tc.created_at.as_str() < u)
+            }).collect();
             if !tc.is_empty() { msg["toolCalls"] = json!(tc); }
         }
         msg
@@ -217,9 +219,15 @@ pub async fn get_session(
 
 pub async fn get_session_events(
     State(rt): State<SharedRuntime>,
-    Path((_app_id, session_id)): Path<(String, String)>,
+    Path((app_id, session_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<SessionEventEntry>>, ApiError> {
     let pool = routes::pool(&rt).await?;
+
+    // Verify session belongs to app
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.agent_sessions WHERE id = $1::uuid AND app_id = $2)",
+    ).bind(&session_id).bind(&app_id).fetch_one(&pool).await?;
+    if !exists { return Err(ApiError::NotFound(format!("session '{session_id}' not found"))); }
 
     let messages = sqlx::query_as::<_, MessageRow>(
         "SELECT id::text, role, content, token_count, is_summary, created_at::text
@@ -262,10 +270,14 @@ pub async fn list_approvals(
 
 pub async fn reply_approval(
     State(rt): State<SharedRuntime>,
-    Path((_app_id, approval_id)): Path<(String, String)>,
+    Path((app_id, approval_id)): Path<(String, String)>,
     Json(body): Json<ApprovalReply>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let approvals = rt.lock().await.pending_approvals().clone();
+    // Verify approval belongs to app
+    if !approvals.list(&app_id).await.iter().any(|a| a.approval_id == approval_id) {
+        return Err(ApiError::NotFound(format!("approval '{approval_id}' not found for app '{app_id}'")));
+    }
     let response = match body.action {
         super::approvals::ApprovalAction::Approve => ApprovalResponse::Approved,
         super::approvals::ApprovalAction::Reject => ApprovalResponse::Rejected {
