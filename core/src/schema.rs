@@ -35,6 +35,14 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
     .await
     .map_err(RuntimeError::Schema)?;
 
+    sqlx::query(
+        "INSERT INTO rootcx_system.apps (id, name, version, status)
+         VALUES ('core', 'Core', '0.0.0', 'system') ON CONFLICT (id) DO NOTHING",
+    )
+    .execute(pool)
+    .await
+    .map_err(RuntimeError::Schema)?;
+
     crate::secrets::bootstrap_secrets_schema(pool).await?;
     crate::jobs::bootstrap_jobs_schema(pool).await?;
 
