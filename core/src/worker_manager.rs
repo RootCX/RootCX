@@ -80,6 +80,24 @@ impl WorkerManager {
         Ok(())
     }
 
+    pub async fn start_deployed_apps(&self, pool: &PgPool, secrets: &SecretManager) {
+        let Ok(entries) = std::fs::read_dir(&self.apps_dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() || resolve_entry_point(&path).is_err() { continue; }
+            let app_id = entry.file_name().to_string_lossy().to_string();
+
+            if let Some(def) = crate::extensions::agents::config::load_agent_json(&path).await {
+                if let Err(e) = crate::extensions::agents::register_agent(pool, &app_id, &def).await {
+                    error!(app_id = %app_id, "re-register agent: {e}");
+                }
+            }
+            if let Err(e) = self.start_app(pool, secrets, &app_id).await {
+                error!(app_id = %app_id, "auto-start failed: {e}");
+            }
+        }
+    }
+
     pub async fn stop_all(&self) {
         let ids: Vec<String> = self.workers.read().await.keys().cloned().collect();
         let futs = ids.iter().map(|id| async move { if let Err(e) = self.stop_app(id).await { error!(app_id = %id, "stop error: {e}"); } });

@@ -112,7 +112,10 @@ impl Runtime {
         let runtime_url = format!("http://127.0.0.1:{api_port}");
         let wm = Arc::new(WorkerManager::new(apps_dir, runtime_url, self.bun_bin.clone(), Arc::clone(&self.tool_registry), self.pending_approvals.clone()));
         self.scheduler = Some(scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm)));
-        self.worker_manager = Some(wm);
+        self.worker_manager = Some(wm.clone());
+
+        let secrets = self.secret_manager.as_ref().unwrap();
+        wm.start_deployed_apps(&pool, secrets).await;
 
         self.pool = Some(pool);
         info!("runtime boot complete");
