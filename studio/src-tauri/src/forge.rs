@@ -42,12 +42,7 @@ async fn build_config(client: &RuntimeClient) -> Result<ForgeConfig, String> {
 
     let provider_str = ai.get("model").and_then(|m| m.as_str()).unwrap_or("claude-sonnet-4-6");
     let (provider, model) = parse_provider_model(provider_str);
-
-    let api_key = match provider {
-        rootcx_forge::provider::ProviderKind::Anthropic => env.get("ANTHROPIC_API_KEY").cloned(),
-        rootcx_forge::provider::ProviderKind::OpenAi => env.get("OPENAI_API_KEY").cloned(),
-        rootcx_forge::provider::ProviderKind::Bedrock => env.get("AWS_BEARER_TOKEN_BEDROCK").cloned(),
-    };
+    let api_key = env.get(provider.secret_key_name()).cloned();
 
     info!("forge: provider={provider:?} model={model} key={}", if api_key.is_some() { "ok" } else { "missing" });
 
@@ -58,9 +53,9 @@ async fn build_config(client: &RuntimeClient) -> Result<ForgeConfig, String> {
     Ok(ForgeConfig { provider, model, api_key, region, system_prompt: None, instructions })
 }
 
-fn parse_provider_model(s: &str) -> (rootcx_forge::provider::ProviderKind, String) {
-    use rootcx_forge::provider::ProviderKind::*;
-    if let Some(m) = s.strip_prefix("openai/") { return (OpenAi, m.into()); }
+fn parse_provider_model(s: &str) -> (rootcx_types::ProviderType, String) {
+    use rootcx_types::ProviderType::*;
+    if let Some(m) = s.strip_prefix("openai/") { return (OpenAI, m.into()); }
     if s.starts_with("bedrock/") || s.starts_with("amazon-bedrock/") {
         let model = s.split_once('/').map(|(_, m)| m).unwrap_or(s);
         // Bedrock needs cross-region inference profile prefix

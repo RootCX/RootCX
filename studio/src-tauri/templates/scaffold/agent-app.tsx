@@ -66,6 +66,7 @@ const TOOL_LABELS: Record<string, string> = {
 };
 
 const FADE_MASK = "linear-gradient(to bottom, transparent 0%, black 12px, black calc(100% - 12px), transparent 100%)";
+const PERM_BTN = "h-8 rounded-lg text-xs";
 
 function toolTitle(tc: ToolActivity) {
   const label = TOOL_LABELS[tc.name] ?? tc.name;
@@ -493,7 +494,6 @@ function ApprovalCard({
   onRespond: (id: string, approved: boolean) => void;
 }) {
   const resolved = approval.resolved;
-  const PERM_BTN = "h-8 rounded-lg text-xs";
 
   if (resolved) {
     return (

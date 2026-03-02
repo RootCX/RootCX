@@ -7,6 +7,7 @@ edition.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+rootcx-types.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }

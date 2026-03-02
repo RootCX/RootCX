@@ -2,236 +2,139 @@
 
 ## Philosophy
 
-RootCX agents are **autonomous AI workers that live inside your application**. They aren't chatbots — they are first-class actors with their own identity, permissions, and persistent memory, operating on real business data through the same API your app uses.
-
-Three core principles guide the design:
-
-1. **Declarative over imperative** — Define *what* an agent can do in `manifest.json`. The platform handles *how*.
-2. **Convention over configuration** — Agents get all registered tools automatically. RBAC permissions are derived from the app's data contract.
-3. **Isolated execution** — Each agent runs in its own process, communicates via IPC, and can crash without taking down the runtime.
+An agent is an **app with a brain**. Same manifest, same deploy, same RBAC — with a backend that talks to an LLM.
 
 ---
 
-## How It Works
-
-### Architecture
+## Architecture
 
 ```
 ┌─────────────┐     SSE      ┌──────────────┐     IPC (stdin/stdout)     ┌──────────────────┐
-│   Client     │◄────────────►│  Rust Core   │◄──────────────────────────►│  TS Agent Runtime │
+│   Client     │◄────────────►│  Rust Core   │◄──────────────────────────►│  Agent Backend    │
 │  (Browser)   │   HTTP POST  │  (Axum)      │   JSON lines              │  (Bun/Node)       │
 └─────────────┘              └──────┬───────┘                            └────────┬─────────┘
                                     │                                             │
                               ┌─────▼──────┐                              ┌───────▼────────┐
-                              │  PostgreSQL │                              │  LangGraph +   │
-                              │  (sessions, │                              │  LLM Provider  │
-                              │   RBAC)     │                              │  (Claude, GPT, │
-                              └────────────┘                              │   Bedrock)     │
+                              │  PostgreSQL │                              │  Direct LLM    │
+                              │  (sessions, │                              │  (Anthropic,   │
+                              │   RBAC)     │                              │  OpenAI,       │
+                              └────────────┘                              │  Bedrock)      │
                                                                           └────────────────┘
 ```
+
+Core passes LLM credentials to the agent via IPC Discover. The scaffold generates provider-specific code (ChatAnthropic, ChatOpenAI, ChatBedrockConverse) based on the user's choice.
 
 **Invocation flow:**
 
 1. Client sends `POST /api/v1/apps/{app_id}/agent/invoke` with a message
-2. Core loads the agent config, system prompt, conversation history, and resolves which tools are available
-3. Core spawns (or reuses) the agent's TypeScript worker process
-4. The TS runtime builds the LLM provider, loads the LangGraph, and starts reasoning
-5. As the LLM generates tokens, `agent_chunk` messages stream back through IPC → SSE to the client
-6. When the agent needs data, it calls tools (query_data, mutate_data, browser...) that execute server-side
+2. Core loads agent config from DB (registered at deploy from `agent.json`)
+3. Core resolves system prompt, history, tool descriptors, and issues a short-lived JWT
+4. Core sends `agent_invoke` IPC message to the worker process
+5. LangGraph's `createReactAgent` calls the LLM directly, executes tools via IPC
+6. `agent_chunk` messages stream back through IPC → SSE to the client
 7. On completion, the session is persisted and a `done` event closes the stream
 
 ### Identity & Permissions
 
-Every agent gets a **deterministic UUID** derived from its app ID. This UUID is a system user in the RBAC layer — same identity across restarts, same audit trail.
-
-Permissions are derived automatically from the app's `dataContract`. Every entity in the contract grants full CRUD permissions to the agent's RBAC role. For example, if `dataContract` contains `tickets` and `customers`, the agent gets `tickets.create`, `tickets.read`, `tickets.update`, `tickets.delete`, `customers.create`, `customers.read`, `customers.update`, `customers.delete`.
-
-All registered tools (query_data, mutate_data, browser, list_apps, describe_app, etc.) are available to every agent — tools are platform capabilities, not agent properties.
+Every agent gets a **deterministic UUID** derived from its app ID — same identity across restarts, same audit trail. Permissions are derived from the app's `dataContract`: every entity grants full CRUD to the agent's role.
 
 ### Memory
 
-When `memory.enabled` is true, conversations persist across invocations. Each session accumulates messages in a JSONB column. On the next call with the same `session_id`, the full history is loaded and prepended to the LLM context.
+When `memory.enabled` is true, conversations persist across invocations. On the next call with the same `session_id`, the full history is loaded and prepended to the LLM context.
+
+### Supervision
+
+| Mode | Behavior |
+|------|----------|
+| `autonomous` | All tool calls execute immediately |
+| `supervised` | Policies define which tools need approval or have rate limits |
+| `strict` | Every tool call requires explicit approval |
+
+Policies support `requires: "approval"` and `rate_limit: { max, window }` per tool/entity.
 
 ### Crash Recovery
 
-The Rust supervisor monitors the agent process. If it crashes:
-- Exponential backoff: 0s → 2s → 4s → 8s...
-- After 5 crashes in 60 seconds, the agent is marked `Crashed` and stops restarting
-- Stop commands can interrupt backoff (no stuck processes)
+If a worker crashes, the supervisor restarts it with exponential backoff (0s → 2s → 4s → 8s). After 5 crashes within 60 seconds, the worker enters a `Crashed` state and stops restarting.
 
 ---
 
 ## Building an Agent
 
-### 1. Define in manifest.json
+### Project structure
+
+```
+my-agent/
+├── manifest.json              # Data contract (same as any app)
+├── .rootcx/launch.json        # Pre-launch hooks
+├── src/App.tsx                 # Chat UI (scaffolded)
+└── backend/
+    ├── agent.json             # Agent config (limits, memory, supervision)
+    ├── agent/system.md        # System prompt
+    ├── index.ts               # LangGraph agent + IPC bridge
+    └── package.json           # @langchain/langgraph, @langchain/openai, zod
+```
+
+### backend/agent.json
 
 ```json
 {
-  "appId": "support-bot",
-  "name": "Support Bot",
-  "dataContract": [
-    {
-      "entityName": "tickets",
-      "fields": [
-        { "name": "title", "type": "text", "required": true },
-        { "name": "status", "type": "text", "enumValues": ["open", "resolved", "escalated"] },
-        { "name": "customer_email", "type": "text", "required": true },
-        { "name": "resolution", "type": "text" }
-      ]
-    }
-  ],
-  "agent": {
-    "name": "Support Assistant",
-    "provider": { "type": "anthropic", "model": "claude-sonnet-4-6", "api_key": "${ANTHROPIC_API_KEY}" },
-    "systemPrompt": "./agent/system.md",
-    "memory": { "enabled": true },
-    "limits": { "maxTurns": 15 }
-  }
+  "name": "Support Assistant",
+  "systemPrompt": "./agent/system.md",
+  "memory": { "enabled": true },
+  "limits": { "maxTurns": 15, "maxContextTokens": 100000, "keepRecentMessages": 10 },
+  "supervision": { "mode": "autonomous" }
 }
 ```
 
-The `api_key` field uses `${SECRET_NAME}` syntax — resolved at runtime from the platform secret store, never stored in config.
+### Deploy
 
-### 2. Write the system prompt
-
-**backend/agent/system.md:**
-
-```markdown
-You are the Support Assistant for Acme Corp.
-
-## Data
-You have access to the tickets entity:
-- title (text): Short description of the issue
-- status (text): open | resolved | escalated
-- customer_email (text): The customer's email
-- resolution (text): How the issue was resolved
-
-## Workflow
-1. Query existing tickets to check for duplicates
-2. Create a new ticket if none exists
-3. Investigate and attempt resolution
-4. Update the ticket with your findings
-
-## Rules
-- Always check for existing tickets before creating new ones
-- Set status to "escalated" if you cannot resolve within 3 tool calls
-- Never promise timelines or refunds
-```
-
-### 3. (Optional) Custom graph
-
-By default, agents use a ReAct loop: think → call tools → think → ... → respond. For more complex workflows, provide `backend/agent/graph.ts`:
-
-```typescript
-import { StateGraph, MessagesAnnotation } from "@langchain/langgraph";
-import { ToolNode } from "@langchain/langgraph/prebuilt";
-import type { BaseChatModel } from "@langchain/core/language_models/chat_models";
-import type { StructuredToolInterface } from "@langchain/core/tools";
-
-export default function buildGraph(model: BaseChatModel, tools: StructuredToolInterface[]) {
-    const bound = model.bindTools(tools);
-    const toolNode = new ToolNode(tools);
-
-    async function agent(state: typeof MessagesAnnotation.State) {
-        return { messages: [await bound.invoke(state.messages)] };
-    }
-
-    function route(state: typeof MessagesAnnotation.State) {
-        const last = state.messages.at(-1) as { tool_calls?: unknown[] } | undefined;
-        return last?.tool_calls?.length ? "tools" : "__end__";
-    }
-
-    return new StateGraph(MessagesAnnotation)
-        .addNode("agent", agent)
-        .addNode("tools", toolNode)
-        .addEdge("__start__", "agent")
-        .addConditionalEdges("agent", route)
-        .addEdge("tools", "agent")
-        .compile();
-}
-```
-
-The function receives the LLM instance and all registered tools. You wire them however you want — multi-agent handoffs, conditional branches, human-in-the-loop checkpoints.
-
-### 4. Entry point
-
-**backend/index.ts:**
-
-```typescript
-import "@rootcx/agents";
-```
-
-That's it. The runtime handles IPC, tool bridging, and graph execution.
-
-### 5. Deploy
-
-The app is installed via the Studio or the REST API. On install, the platform:
-- Creates the agent's DB tables (from `dataContract`)
-- Registers the agent in `rootcx_system.agents`
-- Creates an RBAC role and system user
-- Starts the worker process
+On deploy, the platform:
+1. Reads `agent.json` and registers the agent in the DB
+2. Creates RBAC role and system user
+3. Starts the worker process
 
 ---
 
-## Using an Agent (End User / Production)
+## API
 
 ### Invoke
 
 ```
-POST /api/v1/apps/support-bot/agent/invoke
+POST /api/v1/apps/{app_id}/agent/invoke
 Authorization: Bearer <user_jwt>
-Content-Type: application/json
 
-{
-  "message": "Customer sarah@acme.com reports order #4521 hasn't arrived after 2 weeks",
-  "session_id": "optional-uuid-for-continuity"
-}
+{ "message": "...", "session_id": "optional-uuid" }
 ```
 
-Response is an **SSE stream**:
+Response is an **SSE stream**: `chunk`, `tool_call_started`, `tool_call_completed`, `approval_required`, `done`, `error` events.
+
+### Sessions
 
 ```
-event: chunk
-data: {"delta":"Let me check","session_id":"abc-123"}
-
-event: chunk
-data: {"delta":" for existing tickets...","session_id":"abc-123"}
-
-event: done
-data: {"response":"I found an existing ticket...","session_id":"abc-123","tokens":342}
+GET /api/v1/apps/{app_id}/agent/sessions
+GET /api/v1/apps/{app_id}/agent/sessions/{session_id}
+GET /api/v1/apps/{app_id}/agent/sessions/{session_id}/events
 ```
 
-If `session_id` is omitted, a new session is created. Pass the same ID to continue a conversation.
-
-### List Sessions
+### Approvals
 
 ```
-GET /api/v1/apps/support-bot/agent/sessions
+GET  /api/v1/apps/{app_id}/agent/approvals
+POST /api/v1/apps/{app_id}/agent/approvals/{approval_id}
+{ "action": "approve" | "reject", "reason": "optional" }
 ```
 
-Returns all sessions ordered by last activity.
-
-### Get Session Detail
+### Agent Info
 
 ```
-GET /api/v1/apps/support-bot/agent/sessions/{session_id}
+GET /api/v1/apps/{app_id}/agent
 ```
-
-Returns the full message history.
-
-### Get Agent Info
-
-```
-GET /api/v1/apps/support-bot/agent
-```
-
-Returns the agent's name, description, and config.
 
 ---
 
-## Available Tools
+## Tools
 
-Agents don't call APIs directly. They use **tools** — server-side functions that respect RBAC.
+Agents call tools via IPC — Core executes them server-side with RBAC enforcement.
 
 | Tool | Purpose |
 |------|---------|
@@ -241,48 +144,8 @@ Agents don't call APIs directly. They use **tools** — server-side functions th
 | `describe_app` | Get full data contract of any app |
 | `browser` | Navigate, click, type, screenshot web pages |
 
-### query_data example (what the LLM sends)
-
-```json
-{
-  "entity": "tickets",
-  "where": { "customer_email": "sarah@acme.com", "status": { "$ne": "resolved" } },
-  "orderBy": "created_at",
-  "order": "desc",
-  "limit": 10
-}
-```
-
-### mutate_data example
-
-```json
-{
-  "entity": "tickets",
-  "action": "create",
-  "data": { "title": "Missing order #4521", "status": "open", "customer_email": "sarah@acme.com" }
-}
-```
-
 ---
 
 ## LLM Providers
 
-Agents support three providers, configured in the manifest:
-
-| Provider | Config | Auth |
-|----------|--------|------|
-| Anthropic | `{ "type": "anthropic", "model": "claude-sonnet-4-6" }` | `api_key` or `${SECRET}` |
-| OpenAI | `{ "type": "openai", "model": "gpt-4o" }` | `api_key` or `${SECRET}` |
-| Bedrock | `{ "type": "bedrock", "model": "us.anthropic.claude-sonnet-4-6", "region": "us-east-1" }` | IAM role (no key) |
-
-Secret references (`${ANTHROPIC_API_KEY}`) are resolved at invocation time from the platform secret store — keys never reach the agent process in config.
-
----
-
-## Key Takeaways
-
-- **Agents are apps.** They live alongside your data, use the same schema, same auth, same audit log.
-- **Declare, don't code.** Manifest defines identity, permissions, provider, memory. The graph is optional.
-- **Tools are the API.** Agents interact with data through the same query/mutate interface as the rest of the platform.
-- **Memory is opt-in.** Stateless by default. Enable `memory.enabled` for persistent conversations.
-- **Isolation is real.** Separate process, separate identity, separate permissions. A broken agent can't affect others.
+Configured via platform secrets (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `AWS_BEARER_TOKEN_BEDROCK`). Core passes credentials to the agent at startup via IPC. The scaffold generates provider-specific LangChain code (ChatAnthropic, ChatOpenAI, ChatBedrockConverse).

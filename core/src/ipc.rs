@@ -32,7 +32,6 @@ pub struct AgentInvokePayload {
     pub system_prompt: String,
     pub config: JsonValue,
     pub auth_token: String,
-    #[serde(default)]
     pub history: Vec<JsonValue>,
     pub caller: Option<RpcCaller>,
 }
@@ -40,7 +39,12 @@ pub struct AgentInvokePayload {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutboundMessage {
-    Discover { app_id: String, runtime_url: String },
+    Discover {
+        app_id: String,
+        runtime_url: String,
+        #[serde(skip_serializing_if = "HashMap::is_empty")]
+        credentials: HashMap<String, String>,
+    },
     Rpc { id: String, method: String, params: JsonValue, caller: Option<RpcCaller> },
     Job { id: String, payload: JsonValue },
     AgentInvoke(AgentInvokePayload),
@@ -171,10 +175,6 @@ impl IpcReader {
 pub struct PendingRpcs(HashMap<String, oneshot::Sender<Result<JsonValue, String>>>);
 
 impl PendingRpcs {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn register(&mut self, id: String) -> oneshot::Receiver<Result<JsonValue, String>> {
         let (tx, rx) = oneshot::channel();
         self.0.insert(id, tx);
@@ -196,7 +196,7 @@ mod tests {
     #[test]
     fn outbound_messages_carry_type_tag() {
         let cases: Vec<(OutboundMessage, &str)> = vec![
-            (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into() }, "discover"),
+            (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), credentials: HashMap::new() }, "discover"),
             (OutboundMessage::Rpc { id: "r1".into(), method: "echo".into(), params: json!({}), caller: None }, "rpc"),
             (OutboundMessage::Job { id: "j1".into(), payload: json!({}) }, "job"),
             (OutboundMessage::Shutdown, "shutdown"),
@@ -304,7 +304,7 @@ mod tests {
 
     #[test]
     fn pending_rpcs_register_resolve_ok() {
-        let mut rpcs = PendingRpcs::new();
+        let mut rpcs = PendingRpcs::default();
         let mut rx = rpcs.register("r1".into());
         rpcs.resolve("r1", Ok(json!(42)));
         assert_eq!(rx.try_recv().unwrap(), Ok(json!(42)));
@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn pending_rpcs_register_resolve_err() {
-        let mut rpcs = PendingRpcs::new();
+        let mut rpcs = PendingRpcs::default();
         let mut rx = rpcs.register("r1".into());
         rpcs.resolve("r1", Err("fail".into()));
         assert_eq!(rx.try_recv().unwrap(), Err("fail".to_string()));
@@ -320,14 +320,14 @@ mod tests {
 
     #[test]
     fn pending_rpcs_resolve_unknown_noop() {
-        let mut rpcs = PendingRpcs::new();
+        let mut rpcs = PendingRpcs::default();
         rpcs.resolve("nonexistent", Ok(json!(null)));
         // no panic — passes if we reach here
     }
 
     #[test]
     fn pending_rpcs_register_replaces() {
-        let mut rpcs = PendingRpcs::new();
+        let mut rpcs = PendingRpcs::default();
         let mut rx1 = rpcs.register("r1".into());
         let _rx2 = rpcs.register("r1".into());
         // First sender was dropped when the key was replaced
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn pending_rpcs_multiple_independent() {
-        let mut rpcs = PendingRpcs::new();
+        let mut rpcs = PendingRpcs::default();
         let mut rx_a = rpcs.register("a".into());
         let mut rx_b = rpcs.register("b".into());
 

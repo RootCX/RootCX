@@ -1,11 +1,29 @@
+use std::path::Path;
+
 use serde_json::{json, Value as JsonValue};
 use sqlx::PgPool;
+use tracing::warn;
 
 use crate::api_error::ApiError;
-use crate::secrets::SecretManager;
+use rootcx_types::AgentDefinition;
+
+pub(crate) async fn load_agent_json(app_dir: &Path) -> Option<AgentDefinition> {
+    let path = app_dir.join("agent.json");
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(b) => b,
+        Err(_) => return None, // no agent.json — not an agent app
+    };
+    match serde_json::from_slice(&bytes) {
+        Ok(def) => Some(def),
+        Err(e) => {
+            warn!(path = %path.display(), "invalid agent.json: {e}");
+            None
+        }
+    }
+}
 
 pub(crate) async fn build_agent_config(
-    pool: &PgPool, sm: &SecretManager, app_id: &str,
+    pool: &PgPool, app_id: &str,
     config: &JsonValue, tool_registry: &crate::tools::ToolRegistry,
 ) -> Result<JsonValue, ApiError> {
     let data_contract: JsonValue = sqlx::query_scalar(
@@ -18,34 +36,12 @@ pub(crate) async fn build_agent_config(
     let (_, perms) = crate::extensions::rbac::policy::resolve_permissions(pool, app_id, agent_uid).await?;
     let tool_descriptors = tool_registry.descriptors_for_permissions(&perms, &data_contract);
 
-    let mut provider = config.get("provider").cloned().unwrap_or(json!(null));
-    resolve_secret_refs(pool, sm, &mut provider).await?;
-
     Ok(json!({
-        "provider": provider,
         "limits": config.get("limits"),
         "_appId": app_id,
         "_toolDescriptors": tool_descriptors,
-        "_graphPath": config.get("graph"),
         "_supervision": config.get("supervision"),
     }))
-}
-
-async fn resolve_secret_refs(pool: &PgPool, sm: &SecretManager, value: &mut JsonValue) -> Result<(), ApiError> {
-    let Some(obj) = value.as_object() else { return Ok(()) };
-    let mut resolved = Vec::new();
-    for (k, v) in obj {
-        let Some(raw) = v.as_str() else { continue };
-        if let Some(key) = raw.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
-            let secret = sm.get(pool, "_platform", key).await
-                .map_err(|e| ApiError::Internal(format!("secret resolution failed: {e}")))?
-                .ok_or_else(|| ApiError::BadRequest(format!("platform secret '{key}' not found")))?;
-            resolved.push((k.clone(), secret));
-        }
-    }
-    let obj = value.as_object_mut().unwrap();
-    for (k, secret) in resolved { obj.insert(k, JsonValue::String(secret)); }
-    Ok(())
 }
 
 pub(crate) async fn load_system_prompt(
@@ -69,18 +65,7 @@ pub(crate) async fn load_history(
          WHERE session_id = $1::uuid ORDER BY created_at ASC",
     ).bind(session_id).fetch_all(pool).await?;
 
-    if !messages.is_empty() {
-        return Ok(messages.into_iter().map(|(role, content)| {
-            json!({"role": role, "content": content.unwrap_or_default()})
-        }).collect());
-    }
-
-    // Fallback: legacy JSONB messages column
-    match sqlx::query_scalar::<_, JsonValue>(
-        "SELECT messages FROM rootcx_system.agent_sessions WHERE id = $1::uuid",
-    ).bind(session_id).fetch_optional(pool).await? {
-        None => Ok(vec![]),
-        Some(v) => v.as_array().cloned()
-            .ok_or_else(|| ApiError::Internal("agent session messages is not a JSON array".into())),
-    }
+    Ok(messages.into_iter().map(|(role, content)| {
+        json!({"role": role, "content": content.unwrap_or_default()})
+    }).collect())
 }

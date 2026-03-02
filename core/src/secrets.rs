@@ -115,8 +115,6 @@ impl SecretManager {
         Ok(r.rows_affected() > 0)
     }
 
-    /// Merge platform (`_platform`) secrets with app-specific secrets.
-    /// App-specific secrets win on conflict.
     pub async fn get_env_for_app(&self, pool: &PgPool, app_id: &str) -> Result<HashMap<String, String>, RuntimeError> {
         let mut env: HashMap<String, String> = self.get_all_for_app(pool, "_platform").await?.into_iter().collect();
         for (k, v) in self.get_all_for_app(pool, app_id).await? {

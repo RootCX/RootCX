@@ -2,6 +2,9 @@ import { open, ask } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { commands, workspace } from "@/core/studio";
 import { showScaffoldWizard } from "./scaffold-wizard";
+import { showAISetupDialog } from "@/components/ai-setup-dialog";
+import { listSecrets } from "@/core/api";
+import { AI_PROVIDERS } from "@/lib/ai-models";
 
 async function openFolder() {
   const selected = await open({ directory: true });
@@ -27,6 +30,15 @@ async function createProject() {
   if (!result) return;
 
   await invoke("scaffold_project", { ...result });
+
+  const provider = result.answers?.llm_provider;
+  if (provider) {
+    const keys = await listSecrets().catch(() => [] as string[]);
+    const needed = AI_PROVIDERS.find((p) => p.id === provider)?.env ?? [];
+    if (needed.length && needed.some((k) => !keys.includes(k))) {
+      await showAISetupDialog(provider);
+    }
+  }
 
   if (workspace.projectPath) {
     const newWindow = await ask("Open in a new window or this window?", {
