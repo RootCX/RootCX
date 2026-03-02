@@ -68,7 +68,7 @@ pub async fn list_apps(
 ) -> Result<Json<Vec<InstalledApp>>, ApiError> {
     let pool = pool(&rt).await?;
     let rows = sqlx::query_as::<_, (String, String, String, String, Option<sqlx::types::JsonValue>)>(
-        "SELECT id, name, version, status, manifest FROM rootcx_system.apps ORDER BY name",
+        "SELECT id, name, version, status, manifest FROM rootcx_system.apps WHERE status != 'system' ORDER BY name",
     )
     .fetch_all(&pool)
     .await?;

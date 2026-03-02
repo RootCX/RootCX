@@ -16,6 +16,10 @@ pub async fn deploy_backend(
     AxumPath(app_id): AxumPath<String>,
     mut multipart: Multipart,
 ) -> Result<Json<JsonValue>, ApiError> {
+    if app_id == "core" {
+        return Err(ApiError::BadRequest("reserved app_id".into()));
+    }
+
     let (app_dir, bun_bin, pool, secrets, wm) = {
         let g = rt.lock().await;
         let app_dir = g.data_dir().join("apps").join(&app_id);

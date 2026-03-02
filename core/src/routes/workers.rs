@@ -5,28 +5,32 @@ use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use serde_json::{Value as JsonValue, json};
 
-use super::{SharedRuntime, pool_and_secrets, wm};
+use super::{SharedRuntime, pool, pool_and_secrets, wm};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::auth::{AuthConfig, jwt};
+use crate::extensions::rbac::policy::require_admin;
 use crate::ipc::RpcCaller;
 
 pub async fn start_worker(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, secrets) = pool_and_secrets(&rt).await?;
+    let (p, secrets) = pool_and_secrets(&rt).await?;
+    require_admin(&p, "core", identity.user_id).await?;
     let w = wm(&rt).await?;
-    w.start_app(&pool, &secrets, &app_id).await?;
+    w.start_app(&p, &secrets, &app_id).await?;
     Ok(Json(json!({ "message": format!("worker '{}' started", app_id) })))
 }
 
 pub async fn stop_worker(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    let p = pool(&rt).await?;
+    require_admin(&p, "core", identity.user_id).await?;
     wm(&rt).await?.stop_app(&app_id).await?;
     Ok(Json(json!({ "message": format!("worker '{}' stopped", app_id) })))
 }
@@ -39,7 +43,12 @@ pub async fn worker_status(
     Ok(Json(json!({ "app_id": app_id, "status": s })))
 }
 
-pub async fn all_worker_statuses(State(rt): State<SharedRuntime>) -> Result<Json<JsonValue>, ApiError> {
+pub async fn all_worker_statuses(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let p = pool(&rt).await?;
+    require_admin(&p, "core", identity.user_id).await?;
     Ok(Json(json!({ "workers": wm(&rt).await?.all_statuses().await })))
 }
 

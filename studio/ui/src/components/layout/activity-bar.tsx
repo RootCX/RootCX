@@ -1,21 +1,23 @@
-import { useState } from "react";
-import { Database, FolderOpen, Hammer, Shield, LogOut, type LucideIcon } from "lucide-react";
+import { useEffect, useState, useMemo, useSyncExternalStore } from "react";
+import { Container, Database, FolderOpen, Hammer, Shield, LogOut, type LucideIcon } from "lucide-react";
 import { useAuth, logout } from "@/core/auth";
 import { cn } from "@/lib/utils";
 import { useLayout, type ZoneId, type LayoutState } from "./layout-store";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
+import { subscribe, getSnapshot, checkAdmin } from "@/extensions/workers/store";
 
 const INDICATOR = "absolute left-0 top-1/2 h-6 w-0.5 -translate-y-1/2 rounded-r bg-foreground";
 const BTN = "relative flex h-12 w-12 select-none items-center justify-center text-muted-foreground/50 transition-colors hover:text-muted-foreground";
 
 interface NavItem { id: string; icon: LucideIcon; label: string; desc: string; zone: ZoneId }
 
-const NAV_ITEMS: NavItem[] = [
+const BASE_NAV: NavItem[] = [
   { id: "explorer", icon: FolderOpen, label: "Explorer", desc: "Browse project files", zone: "sidebar" },
   { id: "forge", icon: Hammer, label: "AI Forge", desc: "Chat with AI assistant", zone: "editor" },
   { id: "database", icon: Database, label: "Database", desc: "Browse schemas and tables", zone: "sidebar" },
   { id: "security", icon: Shield, label: "Security", desc: "Manage roles and permissions", zone: "sidebar" },
 ];
+const WORKERS_NAV: NavItem = { id: "workers", icon: Container, label: "Workers", desc: "Manage app workers", zone: "sidebar" };
 
 const isVisible = (state: LayoutState, id: string) =>
   Object.values(state.zones).some((ids) => ids.includes(id)) && !state.hidden.has(id);
@@ -24,6 +26,9 @@ export function ActivityBar() {
   const [userMenu, setUserMenu] = useState<{ x: number; y: number } | null>(null);
   const { state, dispatch } = useLayout();
   const { user } = useAuth();
+  const { isCoreAdmin } = useSyncExternalStore(subscribe, getSnapshot);
+  useEffect(() => { checkAdmin(); }, [user?.id]);
+  const navItems = useMemo(() => isCoreAdmin ? [...BASE_NAV, WORKERS_NAV] : BASE_NAV, [isCoreAdmin]);
 
   const toggle = ({ id, zone }: NavItem) => {
     if (isVisible(state, id)) dispatch({ type: "TOGGLE_VIEW", viewId: id });
@@ -33,7 +38,7 @@ export function ActivityBar() {
   return (
     <TooltipProvider delayDuration={300}>
       <div className="flex w-12 shrink-0 flex-col items-center border-r border-border bg-sidebar">
-        {NAV_ITEMS.map((item) => {
+        {navItems.map((item) => {
           const visible = isVisible(state, item.id);
           const Icon = item.icon;
           return (

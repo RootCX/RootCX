@@ -54,6 +54,11 @@ impl RuntimeExtension for RbacExtension {
         ] {
             exec(pool, ddl).await?;
         }
+        exec(pool,
+            "INSERT INTO rootcx_system.rbac_roles (app_id, name, description, permissions)
+             VALUES ('core', 'admin', 'Core administrator', ARRAY['*'])
+             ON CONFLICT (app_id, name) DO NOTHING",
+        ).await?;
         info!("RBAC extension ready");
         Ok(())
     }
