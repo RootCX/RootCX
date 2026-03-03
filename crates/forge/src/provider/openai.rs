@@ -149,8 +149,15 @@ impl LlmProvider for OpenAi {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(ForgeError::Provider(format!("{status}: {text}")));
+            let body = resp.text().await.unwrap_or_default();
+            tracing::error!(status = %status, "openai API error: {body}");
+            let msg = match status.as_u16() {
+                401 => "authentication failed — check your API key",
+                429 => "rate limited — try again shortly",
+                500..=599 => "provider server error — try again later",
+                _ => "provider request failed",
+            };
+            return Err(ForgeError::Provider(format!("{status}: {msg}")));
         }
 
         let byte_stream = resp.bytes_stream();

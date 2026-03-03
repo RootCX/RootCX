@@ -75,8 +75,12 @@ pub async fn register(
     State(rt): State<SharedRuntime>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
-    if req.username.is_empty() || req.password.len() < 8 {
-        return Err(ApiError::BadRequest("username required, password min 8 chars".into()));
+    if req.username.is_empty() {
+        return Err(ApiError::BadRequest("username required".into()));
+    }
+    let pw = &req.password;
+    if pw.len() < 10 || !pw.chars().any(|c| c.is_uppercase()) || !pw.chars().any(|c| c.is_lowercase()) || !pw.chars().any(|c| c.is_ascii_digit()) {
+        return Err(ApiError::BadRequest("password must be ≥10 chars with uppercase, lowercase, and digit".into()));
     }
 
     let pool = super::pool(&rt).await?;
@@ -134,10 +138,14 @@ pub async fn login(
         .await?;
 
     let (user_id, username, email, display_name, pw_hash, created_at) =
-        row.ok_or_else(|| ApiError::Unauthorized("invalid credentials".into()))?;
+        row.ok_or_else(|| {
+            tracing::warn!(username = %req.username, "login failed: unknown user");
+            ApiError::Unauthorized("invalid credentials".into())
+        })?;
 
     let pw_hash = pw_hash.ok_or_else(|| ApiError::Unauthorized("password login not available".into()))?;
     if !password::verify(&req.password, &pw_hash) {
+        tracing::warn!(username = %req.username, "login failed: invalid password");
         return Err(ApiError::Unauthorized("invalid credentials".into()));
     }
 
@@ -170,8 +178,9 @@ pub async fn refresh(
     let pool = super::pool(&rt).await?;
 
     let valid: Option<(Uuid,)> =
-        sqlx::query_as("SELECT user_id FROM rootcx_system.sessions WHERE id = $1 AND expires_at > now()")
+        sqlx::query_as("SELECT user_id FROM rootcx_system.sessions WHERE id = $1 AND user_id = $2 AND expires_at > now()")
             .bind(session_id)
+            .bind(user_id)
             .fetch_optional(&pool)
             .await?;
 
@@ -213,6 +222,7 @@ pub async fn auth_mode(
 }
 
 pub async fn list_users(
+    _identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<AuthUserResponse>>, ApiError> {
     let pool = super::pool(&rt).await?;

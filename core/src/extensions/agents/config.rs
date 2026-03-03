@@ -49,16 +49,34 @@ pub(crate) async fn load_system_prompt(
 ) -> Result<String, ApiError> {
     let prompt_path = config.get("systemPrompt").and_then(|p| p.as_str()).unwrap_or("./agent/system.md");
     let rel = prompt_path.strip_prefix("./").unwrap_or(prompt_path);
-    let full_path = data_dir.join("apps").join(app_id).join(rel);
-    tokio::fs::read_to_string(&full_path).await.map_err(|e| {
-        ApiError::Internal(format!("failed to read system prompt at {}: {e}", full_path.display()))
+
+    let rel_path = std::path::Path::new(rel);
+    if rel_path.is_absolute() || rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(ApiError::BadRequest(format!("systemPrompt path '{rel}' contains forbidden traversal")));
+    }
+
+    let app_root = data_dir.join("apps").join(app_id);
+    let full_path = app_root.join(rel);
+    let canonical = std::fs::canonicalize(&full_path).map_err(|e| {
+        ApiError::Internal(format!("failed to resolve system prompt at {}: {e}", full_path.display()))
+    })?;
+    if !canonical.starts_with(&app_root) {
+        return Err(ApiError::BadRequest("systemPrompt path escapes app directory".into()));
+    }
+    tokio::fs::read_to_string(&canonical).await.map_err(|e| {
+        ApiError::Internal(format!("failed to read system prompt at {}: {e}", canonical.display()))
     })
 }
 
 pub(crate) async fn load_history(
-    pool: &PgPool, memory_enabled: bool, session_id: &str,
+    pool: &PgPool, memory_enabled: bool, app_id: &str, session_id: &str,
 ) -> Result<Vec<JsonValue>, ApiError> {
     if !memory_enabled { return Ok(vec![]); }
+
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.agent_sessions WHERE id = $1::uuid AND app_id = $2)",
+    ).bind(session_id).bind(app_id).fetch_one(pool).await?;
+    if !exists { return Ok(vec![]); }
 
     let messages: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT role, content FROM rootcx_system.agent_messages

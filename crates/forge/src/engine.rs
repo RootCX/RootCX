@@ -121,6 +121,7 @@ pub async fn agentic_loop(mut ctx: LoopContext, user_text: &str) -> Result<(), F
         }
     }
 
+    ctx.permissions.clear_session(ctx.session_id).await;
     (ctx.emit)("forge://session-idle", json!({"sessionID": ctx.session_id}));
     Ok(())
 }

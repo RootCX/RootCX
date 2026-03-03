@@ -125,6 +125,7 @@ impl RuntimeExtension for AuditExtension {
 }
 
 async fn list_audit_events(
+    _identity: crate::auth::identity::Identity,
     State(rt): State<SharedRuntime>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<JsonValue>>, crate::api_error::ApiError> {

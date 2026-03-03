@@ -164,8 +164,8 @@ mod imp {
     pub fn install(c: &ServiceConfig) -> Result<(), PlatformError> {
         let mut tr = format!("\"{}\"", c.binary.display());
         for a in c.args { tr.push(' '); tr.push_str(a); }
-        // ONLOGON + HIGHEST: starts at user login, no admin required
-        sch(&["/Create", "/TN", &task(c), "/TR", &tr, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F"])
+        // ONLOGON + LIMITED: starts at user login with standard privileges
+        sch(&["/Create", "/TN", &task(c), "/TR", &tr, "/SC", "ONLOGON", "/RL", "LIMITED", "/F"])
     }
 
     pub fn uninstall(c: &ServiceConfig) -> Result<(), PlatformError> {

@@ -9,3 +9,4 @@ thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 rootcx-platform.workspace = true
+rand = "0.8"

@@ -120,7 +120,7 @@ pub async fn invoke_agent(
     let memory_enabled = agent_config_json.get("memory")
         .and_then(|m| m.get("enabled")).and_then(|e| e.as_bool()) == Some(true);
 
-    let history = config::load_history(&pool, memory_enabled, &session_id).await?;
+    let history = config::load_history(&pool, memory_enabled, &app_id, &session_id).await?;
     let system_prompt = config::load_system_prompt(&app_id, &agent_config_json, &data_dir).await?;
     let agent_config = config::build_agent_config(&pool, &app_id, &agent_config_json, &tool_registry).await?;
 

@@ -5,10 +5,15 @@ use uuid::Uuid;
 
 use crate::api_error::ApiError;
 
+const MAX_ROLE_DEPTH: usize = 64;
+
 pub fn expand_roles(assigned: &[String], role_map: &HashMap<String, Vec<String>>) -> HashSet<String> {
     let mut expanded = HashSet::new();
     let mut stack: Vec<&str> = assigned.iter().map(|s| s.as_str()).collect();
+    let mut depth = 0usize;
     while let Some(role) = stack.pop() {
+        depth += 1;
+        if depth > MAX_ROLE_DEPTH { break; }
         if expanded.insert(role.to_string())
             && let Some(parents) = role_map.get(role) {
                 for parent in parents {

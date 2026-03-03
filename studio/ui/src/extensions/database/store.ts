@@ -109,7 +109,11 @@ export async function executeQuery(sql: string) {
   }
 }
 
+function quoteIdent(s: string): string {
+  return `"${s.replace(/"/g, '""')}"`;
+}
+
 export function queryTable(table: string) {
   if (!state.appId) return;
-  return executeQuery(`SELECT * FROM "${table}" LIMIT 200`);
+  return executeQuery(`SELECT * FROM ${quoteIdent(table)} LIMIT 200`);
 }

@@ -1,6 +1,6 @@
 #[derive(Debug, thiserror::Error)]
 pub enum ForgeError {
-    #[error("database: {0}")]
+    #[error("database error")]
     Db(#[from] sqlx::Error),
     #[error("provider: {0}")]
     Provider(String),

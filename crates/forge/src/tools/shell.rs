@@ -53,6 +53,8 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...\n[truncated, {} total bytes]", &s[..max], s.len())
+        let mut end = max;
+        while !s.is_char_boundary(end) { end -= 1; }
+        format!("{}...\n[truncated, {} total bytes]", &s[..end], s.len())
     }
 }

@@ -32,7 +32,7 @@ pub fn read(project: &Path) -> Result<LaunchConfig, String> {
 }
 
 pub fn validate_command(cmd: &str) -> Result<(), String> {
-    let forbidden = ['`', '$', '|', ';', '&', '>', '<', '(', ')', '{', '}', '\\', '\n', '\r'];
+    let forbidden = ['`', '$', '|', ';', '&', '>', '<', '(', ')', '{', '}', '\\', '\n', '\r', '\'', '!', '"'];
     if cmd.chars().any(|c| forbidden.contains(&c)) {
         return Err("launch command contains forbidden shell metacharacter".into());
     }

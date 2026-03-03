@@ -50,7 +50,9 @@ pub fn encode_refresh(config: &AuthConfig, user_id: Uuid, session_id: Uuid) -> R
 }
 
 pub fn decode(config: &AuthConfig, token: &str) -> Result<Claims, RuntimeError> {
-    jsonwebtoken::decode::<Claims>(token, &config.decoding_key, &Validation::default())
+    let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.validate_exp = true;
+    jsonwebtoken::decode::<Claims>(token, &config.decoding_key, &validation)
         .map(|d| d.claims)
         .map_err(|e| RuntimeError::Auth(e.to_string()))
 }

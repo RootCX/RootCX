@@ -36,6 +36,7 @@ pub async fn stop_worker(
 }
 
 pub async fn worker_status(
+    _identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {

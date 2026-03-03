@@ -82,7 +82,9 @@ fn search_file(
         }
         if re.is_match(line) {
             let display_line = if line.len() > MAX_LINE_LEN {
-                &line[..MAX_LINE_LEN]
+                let mut end = MAX_LINE_LEN;
+                while !line.is_char_boundary(end) { end -= 1; }
+                &line[..end]
             } else {
                 line
             };

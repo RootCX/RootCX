@@ -9,6 +9,7 @@ use sqlx::{Column, Row as _, TypeInfo, ValueRef};
 
 use super::{pool, SharedRuntime};
 use crate::api_error::ApiError;
+use crate::auth::identity::Identity;
 
 #[derive(Serialize)]
 pub struct SchemaInfo {
@@ -17,6 +18,7 @@ pub struct SchemaInfo {
 }
 
 pub async fn list_schemas(
+    _identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<SchemaInfo>>, ApiError> {
     let pool = pool(&rt).await?;
@@ -64,6 +66,7 @@ pub struct TableInfo {
 }
 
 pub async fn list_tables(
+    _identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(schema): Path<String>,
 ) -> Result<Json<Vec<TableInfo>>, ApiError> {
@@ -153,6 +156,7 @@ pub struct QueryResult {
 }
 
 pub async fn execute_query(
+    _identity: Identity,
     State(rt): State<SharedRuntime>,
     Json(body): Json<QueryRequest>,
 ) -> Result<Json<QueryResult>, ApiError> {
@@ -161,6 +165,12 @@ pub async fn execute_query(
     let sql = body.sql.trim();
     if sql.is_empty() {
         return Err(ApiError::BadRequest("empty query".into()));
+    }
+
+    // Only allow SELECT statements — reject DDL/DML
+    let first_word = sql.split_whitespace().next().unwrap_or("").to_uppercase();
+    if !matches!(first_word.as_str(), "SELECT" | "WITH" | "EXPLAIN") {
+        return Err(ApiError::BadRequest("only SELECT queries are allowed".into()));
     }
 
     // Dedicated connection so SET search_path doesn't leak to the pool

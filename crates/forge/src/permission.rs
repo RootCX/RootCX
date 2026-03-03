@@ -69,6 +69,10 @@ impl PendingPermissions {
         (perm, rx)
     }
 
+    pub async fn clear_session(&self, session_id: Uuid) {
+        self.always_allowed.lock().await.remove(&session_id);
+    }
+
     pub async fn reply(
         &self,
         id: Uuid,

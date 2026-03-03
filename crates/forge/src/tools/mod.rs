@@ -160,5 +160,5 @@ pub async fn execute(name: &str, args: Value, cwd: &Path) -> Result<String, Stri
 }
 
 pub fn needs_permission(name: &str) -> bool {
-    matches!(name, "write" | "edit" | "bash")
+    matches!(name, "write" | "edit" | "bash" | "web_fetch")
 }

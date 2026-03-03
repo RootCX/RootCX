@@ -4595,6 +4595,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -4624,6 +4625,7 @@ dependencies = [
  "futures",
  "hex",
  "jsonwebtoken",
+ "libc",
  "rand 0.8.5",
  "reqwest 0.12.28",
  "rootcx-platform",
@@ -4665,6 +4667,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -4684,6 +4687,7 @@ dependencies = [
 name = "rootcx-postgres-mgmt"
 version = "0.1.0"
 dependencies = [
+ "rand 0.8.5",
  "rootcx-platform",
  "serde",
  "thiserror 2.0.18",

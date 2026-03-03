@@ -86,6 +86,7 @@ fn emit_fn(app: AppHandle) -> rootcx_forge::engine::EmitFn {
 
 #[tauri::command]
 pub async fn forge_set_cwd(state: State<'_, ForgeState>, path: String) -> Result<(), String> {
+    crate::commands::validate_fs_path(&path)?;
     engine(&state)?.set_cwd(PathBuf::from(path)).await;
     Ok(())
 }

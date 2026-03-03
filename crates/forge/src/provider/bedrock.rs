@@ -120,17 +120,20 @@ impl LlmProvider for Bedrock {
         messages: &[ChatMessage],
         tools: &[ToolDef],
     ) -> Result<EventStream, ForgeError> {
-        let config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_config::Region::new(self.region.clone()));
-
-        // Bearer token: inject as env var for AWS SDK credential chain
-        if let Some(ref token) = self.bearer_token {
-            // SAFETY: called before AWS SDK reads env, single call site
-            unsafe { std::env::set_var("AWS_BEARER_TOKEN_BEDROCK", token); }
-        }
-
-        let config = config_loader.load().await;
-        let client = bedrock::Client::new(&config);
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new(self.region.clone()))
+            .load()
+            .await;
+        let client = match self.bearer_token {
+            Some(ref token) => {
+                let sdk_config = bedrock::Config::from(&aws_config)
+                    .to_builder()
+                    .bearer_token(bedrock::config::Token::new(token, None))
+                    .build();
+                bedrock::Client::from_conf(sdk_config)
+            }
+            None => bedrock::Client::new(&aws_config),
+        };
 
         let br_messages = Self::convert_messages(messages)?;
 
@@ -219,7 +222,11 @@ fn json_to_document(value: &serde_json::Value) -> Document {
         serde_json::Value::Bool(b) => Document::Bool(*b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Document::Number(aws_smithy_types::Number::PosInt(i as u64))
+                if i >= 0 {
+                    Document::Number(aws_smithy_types::Number::PosInt(i as u64))
+                } else {
+                    Document::Number(aws_smithy_types::Number::NegInt(i))
+                }
             } else if let Some(f) = n.as_f64() {
                 Document::Number(aws_smithy_types::Number::Float(f))
             } else {

@@ -217,6 +217,10 @@ async fn supervisor_loop(
                         ipc_reader = None;
                         for h in output_handles.drain(..) { h.abort(); }
                         kill_child(&mut child).await;
+                        for (_sid, tx) in pending_agent_streams.drain() {
+                            let _ = tx.send(AgentEvent::Error { error: "worker stopped".into() }).await;
+                        }
+                        policy_evaluators.clear();
                         status = WorkerStatus::Stopped;
                         crash_times.clear();
                         info!(app_id = %app_id, "worker stopped");
@@ -327,13 +331,14 @@ async fn supervisor_loop(
                             }
                         }
                         InboundMessage::Log { level, message } => {
+                            let message = if message.len() > 8192 { &message[..8192] } else { &message };
                             match level.as_str() {
                                 "error" => error!(app_id = %app_id, "[worker] {message}"),
                                 "warn" => warn!(app_id = %app_id, "[worker] {message}"),
                                 "debug" => tracing::debug!(app_id = %app_id, "[worker] {message}"),
                                 _ => info!(app_id = %app_id, "[worker] {message}"),
                             }
-                            emit_log(&log_tx, &level, &message);
+                            emit_log(&log_tx, &level, message);
                         }
                         InboundMessage::AgentChunk { invoke_id, delta } => {
                             if let Some(tx) = pending_agent_streams.get(&invoke_id) {
@@ -567,6 +572,18 @@ async fn spawn_worker(
         .env("ROOTCX_RUNTIME_URL", &config.runtime_url);
 
     let mut child = cmd.group_spawn().map_err(|e| RuntimeError::Worker(format!("spawn failed: {e}")))?;
+
+    #[cfg(target_os = "linux")]
+    if let Some(pid) = child.id() {
+        let set = |resource: libc::__rlimit_resource_t, limit: u64| unsafe {
+            let lim = libc::rlimit { rlim_cur: limit, rlim_max: limit };
+            libc::prlimit(pid as i32, resource, &lim, std::ptr::null_mut());
+        };
+        set(libc::RLIMIT_AS, 512 * 1024 * 1024);
+        set(libc::RLIMIT_CPU, 300);
+        set(libc::RLIMIT_NOFILE, 256);
+        set(libc::RLIMIT_NPROC, 64);
+    }
 
     let stdin = child.inner().stdin.take().ok_or_else(|| RuntimeError::Worker("no stdin".into()))?;
     let stdout = child.inner().stdout.take().ok_or_else(|| RuntimeError::Worker("no stdout".into()))?;
