@@ -1,7 +1,7 @@
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::routes::{self, SharedRuntime};
 
@@ -56,11 +56,25 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         rt.auth_config().clone()
     };
 
+    let cors = if auth_config.public {
+        CorsLayer::permissive()
+    } else {
+        CorsLayer::new()
+            .allow_origin(AllowOrigin::predicate(|origin, _| {
+                let o = origin.as_bytes();
+                o.starts_with(b"http://localhost:") || o.starts_with(b"http://127.0.0.1:")
+                    || o.starts_with(b"tauri://") || o.starts_with(b"https://tauri.")
+            }))
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any)
+    };
+
     let router = router
         .layer(axum::Extension(auth_config))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state(runtime);
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
-    tracing::info!(port = port, "runtime HTTP server listening");
+    let bind = if std::env::var("ROOTCX_BIND").is_ok() { "0.0.0.0" } else { "127.0.0.1" };
+    let listener = tokio::net::TcpListener::bind(format!("{bind}:{port}")).await?;
+    tracing::info!(port = port, bind = bind, "runtime HTTP server listening");
     axum::serve(listener, router).await
 }

@@ -24,16 +24,19 @@ impl AuthConfig {
     pub fn load(data_dir: &Path, auth_required: Option<bool>) -> Result<Arc<Self>, RuntimeError> {
         let public = match auth_required {
             Some(required) => !required,
-            None => std::env::var("ROOTCX_AUTH").map(|v| v != "required").unwrap_or(true),
+            None => std::env::var("ROOTCX_AUTH").map(|v| v == "public").unwrap_or(false),
         };
 
         if public {
-            info!("auth mode: public (set ROOTCX_AUTH=required to enforce)");
+            warn!("auth mode: public (set ROOTCX_AUTH=required or remove ROOTCX_AUTH=public to enforce)");
         } else {
             info!("auth mode: required");
         }
 
         let secret = if let Ok(s) = std::env::var("ROOTCX_JWT_SECRET") {
+            if s.len() < 32 {
+                return Err(RuntimeError::Auth("ROOTCX_JWT_SECRET must be at least 32 bytes".into()));
+            }
             info!("JWT secret loaded from env");
             s.into_bytes()
         } else {

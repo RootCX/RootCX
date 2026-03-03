@@ -22,6 +22,10 @@ Thumbs.db
 *.swp
 *.swo
 
-# Env
+# Secrets / Credentials
 .env
 .env.*
+*.pem
+*.key
+*.p12
+*.pfx

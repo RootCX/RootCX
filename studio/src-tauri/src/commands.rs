@@ -64,7 +64,7 @@ pub fn sync_view_menu(hidden: Vec<String>, state: State<'_, ViewMenuItems>) {
     }
 }
 
-fn validate_fs_path(path: &str) -> Result<(), String> {
+pub(crate) fn validate_fs_path(path: &str) -> Result<(), String> {
     let home = rootcx_platform::dirs::home_dir().map_err(|e| e.to_string())?;
     let raw = std::path::Path::new(path);
 
@@ -72,7 +72,6 @@ fn validate_fs_path(path: &str) -> Result<(), String> {
         return Err("path must be absolute".into());
     }
 
-    // Falls back to lexical normalization for paths that don't exist yet
     let resolved = std::fs::canonicalize(raw).unwrap_or_else(|_| normalize_lexical(raw));
 
     if !resolved.starts_with(&home) {
@@ -124,6 +123,7 @@ pub async fn ensure_dir(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn deploy_backend(state: State<'_, AppState>, project_path: String) -> Result<String, String> {
+    validate_fs_path(&project_path)?;
     state.deploy_and_watch(&project_path).await
 }
 
@@ -133,6 +133,7 @@ pub async fn run_app(
     app_handle: tauri::AppHandle,
     state: State<'_, Mutex<RunnerState>>,
 ) -> Result<(), String> {
+    validate_fs_path(&project_path)?;
     let config = crate::launch::read(std::path::Path::new(&project_path))?;
     if let Some(ref cmd) = config.command {
         state.lock().await.run(cmd, &project_path, app_handle);
@@ -255,6 +256,7 @@ pub async fn bundle_app(
     runner: State<'_, Mutex<RunnerState>>,
 ) -> Result<(), String> {
     use tauri::Emitter;
+    validate_fs_path(&project_path)?;
 
     runner.lock().await.stop();
     let _ = app_handle.emit("run-started", ());

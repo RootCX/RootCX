@@ -13,9 +13,31 @@ static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
         .expect("http client")
 });
 
+fn is_private_ip(host: &str) -> bool {
+    use std::net::IpAddr;
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local()
+                || v4.octets()[0] == 169 && v4.octets()[1] == 254,
+            IpAddr::V6(v6) => v6.is_loopback(),
+        };
+    }
+    matches!(host, "localhost" | "127.0.0.1" | "::1" | "0.0.0.0")
+}
+
 pub async fn fetch(args: Value, _cwd: &Path) -> Result<String, String> {
     let url = args["url"].as_str().ok_or("missing url")?;
     let max_len = args["max_length"].as_u64().unwrap_or(30_000) as usize;
+
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("URL scheme '{}' not allowed; use http or https", parsed.scheme()));
+    }
+    if let Some(host) = parsed.host_str() {
+        if is_private_ip(host) {
+            return Err("requests to private/loopback addresses are blocked".into());
+        }
+    }
 
     let resp = CLIENT.get(url).send().await.map_err(|e| format!("fetch: {e}"))?;
     if !resp.status().is_success() {

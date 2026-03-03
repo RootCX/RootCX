@@ -16,6 +16,11 @@ impl BrowserSession {
     }
 
     pub async fn navigate(&mut self, url: &str) -> Result<Snapshot, BrowserError> {
+        if let Ok(parsed) = url::Url::parse(url) {
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return Err(BrowserError::Navigation(format!("scheme '{}' not allowed; use http or https", parsed.scheme())));
+            }
+        }
         wait::navigate(&self.handle.page, url).await
             .map_err(BrowserError::Navigation)?;
         self.snapshot(SnapshotMode::Full).await

@@ -262,7 +262,7 @@ pub async fn field_type_map(
 }
 
 pub fn quote_ident(ident: &str) -> String {
-    format!("\"{}\"", ident)
+    format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
 /// Reject identifiers that aren't valid unquoted PostgreSQL names.

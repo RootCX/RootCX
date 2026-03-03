@@ -46,6 +46,12 @@ impl RuntimeExtension for AuthExtension {
         ] {
             sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
         }
+        let pruned = sqlx::query("DELETE FROM rootcx_system.sessions WHERE expires_at < now()")
+            .execute(pool).await.map_err(RuntimeError::Schema)?;
+        if pruned.rows_affected() > 0 {
+            info!(count = pruned.rows_affected(), "pruned expired sessions");
+        }
+
         info!("auth schema ready");
         Ok(())
     }

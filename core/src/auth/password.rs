@@ -1,12 +1,21 @@
 use argon2::password_hash::SaltString;
 use argon2::password_hash::rand_core::OsRng;
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
+use argon2::{Argon2, Params, PasswordHash, PasswordHasher, PasswordVerifier};
 
 use crate::RuntimeError;
 
+// Pinned Argon2id parameters (OWASP recommendation)
+fn argon2() -> Argon2<'static> {
+    Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        Params::new(19 * 1024, 2, 1, None).expect("valid argon2 params"),
+    )
+}
+
 pub fn hash(password: &str) -> Result<String, RuntimeError> {
     let salt = SaltString::generate(&mut OsRng);
-    Argon2::default()
+    argon2()
         .hash_password(password.as_bytes(), &salt)
         .map(|h| h.to_string())
         .map_err(|e| RuntimeError::Auth(format!("password hash: {e}")))
@@ -15,7 +24,7 @@ pub fn hash(password: &str) -> Result<String, RuntimeError> {
 pub fn verify(password: &str, hash: &str) -> bool {
     PasswordHash::new(hash)
         .ok()
-        .map(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
+        .map(|parsed| argon2().verify_password(password.as_bytes(), &parsed).is_ok())
         .unwrap_or(false)
 }
 

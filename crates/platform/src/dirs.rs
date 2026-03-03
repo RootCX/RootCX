@@ -38,7 +38,9 @@ pub fn rootcx_home() -> Result<PathBuf, PlatformError> {
 
 // Resolution order: $ROOTCX_RESOURCES env > dev Cargo.toml dir > macOS bundle > exe-adjacent
 pub fn resources_dir(manifest_dir: &str) -> Result<PathBuf, PlatformError> {
-    if let Ok(p) = std::env::var("ROOTCX_RESOURCES") { return Ok(p.into()); }
+    if let Ok(p) = std::env::var("ROOTCX_RESOURCES") {
+        return std::fs::canonicalize(&p).map_err(|_| PlatformError("ROOTCX_RESOURCES path"));
+    }
     let dev = PathBuf::from(manifest_dir).join("resources");
     if dev.is_dir() { return Ok(dev); }
     let exe = std::env::current_exe().map_err(|_| PlatformError("executable path"))?;

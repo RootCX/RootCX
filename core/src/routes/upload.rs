@@ -29,7 +29,10 @@ pub async fn upload_file(
         .map_err(|e| ApiError::BadRequest(e.to_string()))?
         .ok_or_else(|| ApiError::BadRequest("no file field".into()))?;
 
-    let name = field.file_name().unwrap_or("upload").to_string();
+    let raw_name = field.file_name().unwrap_or("upload").to_string();
+    let name = std::path::Path::new(&raw_name)
+        .file_name().and_then(|n| n.to_str())
+        .unwrap_or("upload").to_string();
     let ext = std::path::Path::new(&name).extension().and_then(|e| e.to_str()).unwrap_or("bin");
 
     if !ALLOWED_EXTENSIONS.contains(&ext.to_lowercase().as_str()) {

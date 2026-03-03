@@ -95,8 +95,8 @@ impl Runtime {
         self.pg.init_db().await.map_err(RuntimeError::Postgres)?;
         self.pg.start().await.map_err(RuntimeError::Postgres)?;
 
-        let db_url = format!("postgres://localhost:{}/postgres", self.pg.port());
-        info!(url = %db_url, "connecting to postgres");
+        let db_url = self.pg.connection_url("postgres");
+        info!("connecting to postgres on port {}", self.pg.port());
 
         let pool = PgPool::connect(&db_url).await.map_err(RuntimeError::Database)?;
         schema::bootstrap(&pool).await?;

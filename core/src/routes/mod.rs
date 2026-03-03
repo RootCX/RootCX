@@ -46,6 +46,7 @@ pub async fn health() -> Json<JsonValue> {
 }
 
 pub async fn get_status(
+    _identity: Identity,
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
 ) -> Result<Json<OsStatus>, ApiError> {
     Ok(Json(rt.lock().await.status().await))
@@ -64,6 +65,7 @@ pub async fn install_app(
 }
 
 pub async fn list_apps(
+    _identity: Identity,
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
 ) -> Result<Json<Vec<InstalledApp>>, ApiError> {
     let pool = pool(&rt).await?;

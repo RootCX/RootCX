@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::task::{AbortHandle, JoinHandle};
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ForgeConfig {
     pub provider: ProviderType,
     pub model: String,
@@ -28,6 +28,17 @@ pub struct ForgeConfig {
     pub region: Option<String>,
     pub system_prompt: Option<String>,
     pub instructions: Vec<String>,
+}
+
+impl std::fmt::Debug for ForgeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForgeConfig")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("region", &self.region)
+            .finish()
+    }
 }
 
 impl Default for ForgeConfig {

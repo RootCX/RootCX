@@ -16,6 +16,13 @@ use crate::manifest::{field_type_map, map_field_type, quote_ident};
 pub(crate) const MAX_BULK_SIZE: usize = 1000;
 const PG_PARAM_LIMIT: usize = 65535;
 
+pub(crate) fn validate_app_id(app_id: &str) -> Result<(), ApiError> {
+    if matches!(app_id, "rootcx_system" | "pg_catalog" | "information_schema") || app_id.starts_with("pg_") {
+        return Err(ApiError::Forbidden(format!("access to schema '{app_id}' is blocked")));
+    }
+    Ok(())
+}
+
 pub(crate) fn table(app_id: &str, entity: &str) -> String {
     format!("{}.{}", quote_ident(app_id), quote_ident(entity))
 }
@@ -258,6 +265,7 @@ pub async fn list_records(
     Path((app_id, entity)): Path<(String, String)>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<JsonValue>>, ApiError> {
+    validate_app_id(&app_id)?;
     let pool = pool(&rt).await?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
@@ -290,6 +298,7 @@ pub async fn query_records(
     Path((app_id, entity)): Path<(String, String)>,
     Json(body): Json<QueryRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    validate_app_id(&app_id)?;
     let pool = pool(&rt).await?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
@@ -325,6 +334,7 @@ pub async fn create_record(
     Path((app_id, entity)): Path<(String, String)>,
     Json(body): Json<JsonValue>,
 ) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
+    validate_app_id(&app_id)?;
     let pool = pool(&rt).await?;
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
@@ -415,6 +425,7 @@ pub async fn bulk_create_records(
     Path((app_id, entity)): Path<(String, String)>,
     Json(body): Json<JsonValue>,
 ) -> Result<(StatusCode, Json<Vec<JsonValue>>), ApiError> {
+    validate_app_id(&app_id)?;
     let records = body.as_array()
         .ok_or_else(|| ApiError::BadRequest("body must be a JSON array".into()))?;
     if records.is_empty() {
@@ -440,6 +451,7 @@ pub async fn get_record(
     State(rt): State<SharedRuntime>,
     Path((app_id, entity, id)): Path<(String, String, String)>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt).await?);
     let tbl = table(&app_id, &entity);
     let q = format!("SELECT to_jsonb(t.*) AS row FROM {tbl} t WHERE t.id = $1");
@@ -456,6 +468,7 @@ pub async fn update_record(
     Path((app_id, entity, id)): Path<(String, String, String)>,
     Json(body): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt).await?);
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
@@ -484,6 +497,7 @@ pub async fn delete_record(
     State(rt): State<SharedRuntime>,
     Path((app_id, entity, id)): Path<(String, String, String)>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt).await?);
     let tbl = table(&app_id, &entity);
     let q = format!("DELETE FROM {tbl} WHERE id = $1");

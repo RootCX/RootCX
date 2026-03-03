@@ -38,6 +38,10 @@ flate2 = "1"
 argon2 = "0.5"
 jsonwebtoken = "9"
 
+# Resource limits for agent workers
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Job Engine
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

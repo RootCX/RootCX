@@ -6,7 +6,7 @@ const MAX_LINES: usize = 2000;
 const MAX_LINE_LEN: usize = 2000;
 
 pub async fn read(args: Value, cwd: &Path) -> Result<String, String> {
-    let file_path = resolve(args["file_path"].as_str().ok_or("missing file_path")?, cwd);
+    let file_path = resolve(args["file_path"].as_str().ok_or("missing file_path")?, cwd)?;
     let offset = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
     let limit = args["limit"].as_u64().unwrap_or(MAX_LINES as u64) as usize;
 
@@ -22,7 +22,9 @@ pub async fn read(args: Value, cwd: &Path) -> Result<String, String> {
         .map(|(i, line)| {
             let num = i + 1;
             let truncated = if line.len() > MAX_LINE_LEN {
-                &line[..MAX_LINE_LEN]
+                let mut end = MAX_LINE_LEN;
+                while !line.is_char_boundary(end) { end -= 1; }
+                &line[..end]
             } else {
                 line
             };
@@ -34,7 +36,7 @@ pub async fn read(args: Value, cwd: &Path) -> Result<String, String> {
 }
 
 pub async fn write(args: Value, cwd: &Path) -> Result<String, String> {
-    let file_path = resolve(args["file_path"].as_str().ok_or("missing file_path")?, cwd);
+    let file_path = resolve(args["file_path"].as_str().ok_or("missing file_path")?, cwd)?;
     let content = args["content"].as_str().ok_or("missing content")?;
 
     if let Some(parent) = file_path.parent() {
@@ -51,7 +53,7 @@ pub async fn write(args: Value, cwd: &Path) -> Result<String, String> {
 }
 
 pub async fn edit(args: Value, cwd: &Path) -> Result<String, String> {
-    let file_path = resolve(args["file_path"].as_str().ok_or("missing file_path")?, cwd);
+    let file_path = resolve(args["file_path"].as_str().ok_or("missing file_path")?, cwd)?;
     let old = args["old_string"].as_str().ok_or("missing old_string")?;
     let new = args["new_string"].as_str().ok_or("missing new_string")?;
 
@@ -102,7 +104,7 @@ pub async fn glob_files(args: Value, cwd: &Path) -> Result<String, String> {
 }
 
 pub async fn ls(args: Value, cwd: &Path) -> Result<String, String> {
-    let path = resolve(args["path"].as_str().ok_or("missing path")?, cwd);
+    let path = resolve(args["path"].as_str().ok_or("missing path")?, cwd)?;
 
     let mut entries = tokio::fs::read_dir(&path)
         .await
@@ -124,11 +126,35 @@ pub async fn ls(args: Value, cwd: &Path) -> Result<String, String> {
     Ok(items.join("\n"))
 }
 
-fn resolve(path: &str, cwd: &Path) -> std::path::PathBuf {
+fn resolve(path: &str, cwd: &Path) -> Result<std::path::PathBuf, String> {
     let p = Path::new(path);
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        cwd.join(p)
+    let resolved = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+
+    let canonical = std::fs::canonicalize(&resolved).unwrap_or_else(|_| {
+        let mut out = std::path::PathBuf::new();
+        for comp in resolved.components() {
+            match comp {
+                std::path::Component::ParentDir => { out.pop(); }
+                std::path::Component::CurDir => {}
+                _ => out.push(comp),
+            }
+        }
+        out
+    });
+
+    if let Ok(home) = std::env::var("HOME") {
+        let home_path = Path::new(&home);
+        if canonical.starts_with(home_path) {
+            if let Ok(rel) = canonical.strip_prefix(home_path) {
+                let first = rel.components().next()
+                    .and_then(|c| c.as_os_str().to_str())
+                    .unwrap_or("");
+                if matches!(first, ".ssh" | ".gnupg" | ".aws" | ".kube") {
+                    return Err(format!("access to ~/{first} is blocked"));
+                }
+            }
+        }
     }
+
+    Ok(canonical)
 }

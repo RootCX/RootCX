@@ -26,6 +26,7 @@ pub fn copy_dir(src: &Path, dst: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for e in std::fs::read_dir(src)?.flatten() {
         let (s, d) = (e.path(), dst.join(e.file_name()));
+        if s.symlink_metadata()?.file_type().is_symlink() { continue; }
         if s.is_dir() { copy_dir(&s, &d)?; }
         else { std::fs::copy(&s, &d)?; let _ = copy_permissions(&s, &d); }
     }
