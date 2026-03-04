@@ -20,15 +20,7 @@ impl Layer for CoreLayer {
             });
             if permissions {
                 manifest["permissions"] = serde_json::json!({
-                    "roles": {
-                        "admin": { "description": "Full access" },
-                        "member": { "description": "Standard user", "inherits": [] }
-                    },
-                    "defaultRole": "member",
-                    "policies": [
-                        { "role": "admin", "entity": "*", "actions": ["*"] },
-                        { "role": "member", "entity": "*", "actions": ["read"] }
-                    ]
+                    "permissions": []
                 });
             }
             e.write_json("manifest.json", &manifest).await?;
