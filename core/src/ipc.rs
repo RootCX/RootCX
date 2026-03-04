@@ -22,6 +22,8 @@ fn ipc_err(e: impl std::fmt::Display) -> RuntimeError {
 pub struct RpcCaller {
     pub user_id: String,
     pub username: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,10 +65,7 @@ pub enum OutboundMessage {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InboundMessage {
-    Discover {
-        #[serde(default)]
-        capabilities: Vec<String>,
-    },
+    Discover {},
     RpcResponse {
         id: String,
         #[serde(default)]
@@ -214,16 +213,14 @@ mod tests {
 
     #[test]
     fn inbound_discover_deserialization() {
-        let msg: InboundMessage = serde_json::from_str(r#"{"type":"discover","capabilities":["a","b"]}"#).unwrap();
-        let InboundMessage::Discover { capabilities } = msg else { panic!("expected Discover") };
-        assert_eq!(capabilities, ["a", "b"]);
+        let msg: InboundMessage = serde_json::from_str(r#"{"type":"discover"}"#).unwrap();
+        assert!(matches!(msg, InboundMessage::Discover {}));
     }
 
     #[test]
-    fn inbound_discover_default_capabilities() {
-        let msg: InboundMessage = serde_json::from_str(r#"{"type":"discover"}"#).unwrap();
-        let InboundMessage::Discover { capabilities } = msg else { panic!("expected Discover") };
-        assert!(capabilities.is_empty());
+    fn inbound_discover_ignores_extra_fields() {
+        let msg: InboundMessage = serde_json::from_str(r#"{"type":"discover","methods":["ping"]}"#).unwrap();
+        assert!(matches!(msg, InboundMessage::Discover {}));
     }
 
     #[test]

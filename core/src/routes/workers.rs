@@ -73,13 +73,15 @@ pub async fn rpc_proxy(
         .map(String::from)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    let caller = headers
+    let raw_token = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .and_then(|token| jwt::decode(&auth_config, token).ok())
-        .filter(|c| !c.username.is_empty())
-        .map(|c| RpcCaller { user_id: c.sub, username: c.username });
+        .and_then(|h| h.strip_prefix("Bearer "));
+
+    let caller = raw_token
+        .and_then(|token| jwt::decode(&auth_config, token).ok()
+            .filter(|c| !c.username.is_empty())
+            .map(|c| RpcCaller { user_id: c.sub, username: c.username, auth_token: Some(token.to_string()) }));
 
     Ok(Json(wm(&rt).await?.rpc(&app_id, id, method, params, caller).await?))
 }
