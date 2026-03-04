@@ -19,7 +19,12 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
         { "name": "<field>", "type": "text", "enum_values": ["a", "b", "c"] }
       ]
     }
-  ]
+  ],
+  "permissions": {
+    "permissions": [
+      { "key": "<entity>:<action>", "description": "<description>" }
+    ]
+  }
 }
 ```
 
@@ -247,7 +252,7 @@ LLM provider selected at scaffold time. Platform secrets (`ANTHROPIC_API_KEY`, `
 
 ### Tools & permissions
 
-All registered tools available via IPC. RBAC permissions derived from `dataContract` (full CRUD per entity).
+All registered tools available via IPC. RBAC permissions declared in `manifest.json` `permissions.permissions[]` as `{ "key": "<entity>:<action>", "description": "..." }` strings.
 
 ### Backend code
 
