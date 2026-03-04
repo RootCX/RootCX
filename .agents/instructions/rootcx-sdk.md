@@ -221,22 +221,27 @@ Apps can have a `backend/` directory with a Bun worker for server-side logic. Co
 
 ### IPC protocol
 
-```typescript
-const write = (m: any) => process.stdout.write(JSON.stringify(m) + "\n");
-const rl = createInterface({ input: process.stdin });
+Core sends `discover` immediately after spawn. Worker listens on stdin, responds on stdout. JSON-lines (one JSON object per line).
 
-// 1. Core sends discover immediately after spawn — worker listens:
-// { type: "discover", app_id, runtime_url, database_url, credentials }
+**Messages Core → Worker:**
+- `{ type: "discover", app_id, runtime_url, database_url, credentials }` — init handshake
+- `{ type: "rpc", id, method, params, caller }` — caller includes `authToken` for Core API calls
+- `{ type: "job", id, payload }` — async job dispatch
+- `{ type: "shutdown" }` — graceful exit
 
-// 2. RPC: Core sends { type: "rpc", id, method, params, caller }
-//    Worker responds: { type: "rpc_response", id, result } or { type: "rpc_response", id, error }
+**Messages Worker → Core:**
+- `{ type: "discover", methods: [...] }` — handshake response (list exposed RPC methods)
+- `{ type: "rpc_response", id, result }` or `{ type: "rpc_response", id, error }`
+- `{ type: "job_result", id, result }` or `{ type: "job_result", id, error }`
+- `{ type: "log", level: "info"|"warn"|"error", message }` — structured logging
 
-// 3. Logs: { type: "log", level: "info", message: "..." }
-```
+**Caller shape:** `{ userId: string, username: string, authToken?: string }`
+- `authToken` is the caller's JWT — use it for `Authorization: Bearer` when calling Core REST API
+- Always check `caller` for authorization in RPC handlers
 
 ### Data access
 
-- **Simple CRUD**: use Core REST API via `runtime_url` (`/api/v1/apps/{app_id}/collections/{entity}`)
+- **Simple CRUD**: use Core REST API via `runtime_url` (`/api/v1/apps/{app_id}/collections/{entity}`) with `caller.authToken`
 - **Custom SQL** (transactions, sequences, JOINs): connect to PostgreSQL via `database_url` from discover
 - All apps share one PG instance — cross-app queries are possible
 - **NEVER use SQLite or file-based storage** — PostgreSQL is the only database
@@ -254,18 +259,32 @@ const result = await client.rpc(appId, "method_name", { ...params });
 import { createInterface } from "readline";
 import postgres from "postgres";
 
+interface Caller { userId: string; username: string; authToken?: string }
+
 const write = (m: any) => process.stdout.write(JSON.stringify(m) + "\n");
 const rl = createInterface({ input: process.stdin });
 let sql: ReturnType<typeof postgres>;
+let runtimeUrl: string;
+let appId: string;
 
 rl.on("line", (l) => {
   let m: any;
   try { m = JSON.parse(l); } catch { return; }
-  if (m.type === "discover") { sql = postgres(m.database_url); return; }
-  if (m.type === "rpc") handleRpc(m);
-});
 
-write({ type: "discover", capabilities: [] });
+  switch (m.type) {
+    case "discover":
+      appId = m.app_id;
+      runtimeUrl = m.runtime_url;
+      sql = postgres(m.database_url);
+      write({ type: "discover", methods: ["ping"] });
+      break;
+    case "rpc":
+      handleRpc(m);
+      break;
+    case "shutdown":
+      process.exit(0);
+  }
+});
 
 async function handleRpc(m: any) {
   try {
@@ -276,8 +295,9 @@ async function handleRpc(m: any) {
   }
 }
 
-async function dispatch(method: string, params: any, caller: any): Promise<any> {
+async function dispatch(method: string, params: any, caller: Caller | null): Promise<any> {
   switch (method) {
+    case "ping": return { pong: true };
     default: throw new Error(`unknown method: ${method}`);
   }
 }
@@ -287,7 +307,7 @@ async function dispatch(method: string, params: any, caller: any): Promise<any> 
 
 - Entry point: `index.ts` → `index.js` → `main.ts` → `main.js` → `src/index.ts`
 - RPC timeout: 30s. Always respond with matching `id`
-- Check `caller` for authorization in RPC handlers
+- Use `caller.authToken` for authenticated Core API calls from the worker
 - Crash recovery: max 5 crashes in 60s → failed state
 
 ---
