@@ -20,14 +20,15 @@ pub struct WorkerManager {
     workers: Arc<RwLock<HashMap<String, SupervisorHandle>>>,
     apps_dir: PathBuf,
     runtime_url: String,
+    database_url: String,
     bun_bin: PathBuf,
     tool_registry: Arc<ToolRegistry>,
     pending_approvals: PendingApprovals,
 }
 
 impl WorkerManager {
-    pub fn new(apps_dir: PathBuf, runtime_url: String, bun_bin: PathBuf, tool_registry: Arc<ToolRegistry>, pending_approvals: PendingApprovals) -> Self {
-        Self { workers: Arc::new(RwLock::new(HashMap::new())), apps_dir, runtime_url, bun_bin, tool_registry, pending_approvals }
+    pub fn new(apps_dir: PathBuf, runtime_url: String, database_url: String, bun_bin: PathBuf, tool_registry: Arc<ToolRegistry>, pending_approvals: PendingApprovals) -> Self {
+        Self { workers: Arc::new(RwLock::new(HashMap::new())), apps_dir, runtime_url, database_url, bun_bin, tool_registry, pending_approvals }
     }
 
     async fn get_handle(&self, app_id: &str) -> Result<SupervisorHandle, RuntimeError> {
@@ -55,6 +56,7 @@ impl WorkerManager {
             working_dir: app_dir,
             credentials,
             runtime_url: self.runtime_url.clone(),
+            database_url: self.database_url.clone(),
             pool: pool.clone(),
             js_runtime: self.bun_bin.clone(),
             tool_registry: Arc::clone(&self.tool_registry),
