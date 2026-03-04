@@ -26,8 +26,8 @@ import {
 function groupPermissions(perms: PermissionDeclaration[]) {
   const groups = new Map<string, PermissionDeclaration[]>();
   for (const p of perms) {
-    const dot = p.key.indexOf(".");
-    const ns = dot >= 0 ? p.key.slice(0, dot) : p.key;
+    const sep = p.key.search(/[.:]/);
+    const ns = sep >= 0 ? p.key.slice(0, sep) : p.key;
     if (!groups.has(ns)) groups.set(ns, []);
     groups.get(ns)!.push(p);
   }
