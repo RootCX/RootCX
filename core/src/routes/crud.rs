@@ -200,12 +200,13 @@ fn build_field_condition(
                 binds.push(json_value_to_string(operand));
                 conditions.push(format!("{col} {kw} ${}", *idx));
             }
-            "$in" => {
+            "$in" | "$nin" => {
                 let arr = operand
                     .as_array()
-                    .ok_or_else(|| ApiError::BadRequest("$in must be an array".into()))?;
+                    .ok_or_else(|| ApiError::BadRequest(format!("{op} must be an array")))?;
+                let (empty_val, kw) = if op == "$in" { ("FALSE", "IN") } else { ("TRUE", "NOT IN") };
                 if arr.is_empty() {
-                    conditions.push("FALSE".into());
+                    conditions.push(empty_val.into());
                 } else {
                     let phs: Vec<String> = arr
                         .iter()
@@ -215,7 +216,7 @@ fn build_field_condition(
                             format!("${}{cast}", *idx)
                         })
                         .collect();
-                    conditions.push(format!("{col} IN ({})", phs.join(", ")));
+                    conditions.push(format!("{col} {kw} ({})", phs.join(", ")));
                 }
             }
             "$contains" => {
@@ -714,6 +715,33 @@ mod tests {
             build_where_clause(&json!({"status": {"$in": []}}), &types, &mut binds, &mut idx)
                 .unwrap();
         assert_eq!(sql, "FALSE");
+    }
+
+    #[test]
+    fn where_nin_operator() {
+        let types = types_fixture();
+        let mut binds = Vec::new();
+        let mut idx = 0;
+        let sql = build_where_clause(
+            &json!({"status": {"$nin": ["deleted", "archived"]}}),
+            &types,
+            &mut binds,
+            &mut idx,
+        )
+        .unwrap();
+        assert_eq!(sql, "\"status\" NOT IN ($1, $2)");
+        assert_eq!(binds, vec!["deleted", "archived"]);
+    }
+
+    #[test]
+    fn where_nin_empty_is_true() {
+        let types = types_fixture();
+        let mut binds = Vec::new();
+        let mut idx = 0;
+        let sql =
+            build_where_clause(&json!({"status": {"$nin": []}}), &types, &mut binds, &mut idx)
+                .unwrap();
+        assert_eq!(sql, "TRUE");
     }
 
     #[test]
