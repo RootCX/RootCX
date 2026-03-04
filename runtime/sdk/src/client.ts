@@ -57,6 +57,7 @@ export type WhereOperator =
   | "$like"
   | "$ilike"
   | "$in"
+  | "$nin"
   | "$contains"
   | "$isNull";
 
