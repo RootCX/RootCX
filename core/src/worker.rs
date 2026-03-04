@@ -80,6 +80,7 @@ pub struct WorkerConfig {
     pub working_dir: PathBuf,
     pub credentials: HashMap<String, String>,
     pub runtime_url: String,
+    pub database_url: String,
     pub pool: PgPool,
     pub js_runtime: PathBuf,
     pub tool_registry: Arc<ToolRegistry>,
@@ -301,16 +302,6 @@ async fn supervisor_loop(
             } => {
                 match event {
                     Some(IpcEvent::Message(msg)) => match msg {
-                        InboundMessage::Discover { capabilities } => {
-                            info!(app_id = %app_id, ?capabilities, "worker discovered");
-                            if let Some(ref mut w) = ipc_writer {
-                                let _ = w.send(&OutboundMessage::Discover {
-                                    app_id: config.app_id.clone(),
-                                    runtime_url: config.runtime_url.clone(),
-                                    credentials: config.credentials.clone(),
-                                }).await;
-                            }
-                        }
                         InboundMessage::RpcResponse { id, result, error } => {
                             pending_rpcs.resolve(&id, match error {
                                 Some(e) => Err(e),
@@ -453,6 +444,7 @@ async fn supervisor_loop(
                             }
                             info!(app_id = %app_id, "agent session compacted");
                         }
+                        _ => {}
                     },
                     Some(IpcEvent::Output(line)) => {
                         emit_log(&log_tx, "stdout", &line);
@@ -589,7 +581,15 @@ async fn spawn_worker(
     let stdout = child.inner().stdout.take().ok_or_else(|| RuntimeError::Worker("no stdout".into()))?;
     let stderr = child.inner().stderr.take().ok_or_else(|| RuntimeError::Worker("no stderr".into()))?;
 
-    Ok((child, IpcWriter::new(stdin), IpcReader::new(stdout), stderr))
+    let mut writer = IpcWriter::new(stdin);
+    writer.send(&OutboundMessage::Discover {
+        app_id: config.app_id.clone(),
+        runtime_url: config.runtime_url.clone(),
+        database_url: config.database_url.clone(),
+        credentials: config.credentials.clone(),
+    }).await?;
+
+    Ok((child, writer, IpcReader::new(stdout), stderr))
 }
 
 fn backoff_delay(restart_count: u32) -> Duration {

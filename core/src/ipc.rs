@@ -42,6 +42,7 @@ pub enum OutboundMessage {
     Discover {
         app_id: String,
         runtime_url: String,
+        database_url: String,
         #[serde(skip_serializing_if = "HashMap::is_empty")]
         credentials: HashMap<String, String>,
     },
@@ -196,7 +197,7 @@ mod tests {
     #[test]
     fn outbound_messages_carry_type_tag() {
         let cases: Vec<(OutboundMessage, &str)> = vec![
-            (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), credentials: HashMap::new() }, "discover"),
+            (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), database_url: "postgres://localhost:5480/postgres".into(), credentials: HashMap::new() }, "discover"),
             (OutboundMessage::Rpc { id: "r1".into(), method: "echo".into(), params: json!({}), caller: None }, "rpc"),
             (OutboundMessage::Job { id: "j1".into(), payload: json!({}) }, "job"),
             (OutboundMessage::Shutdown, "shutdown"),

@@ -215,6 +215,83 @@ const columns: ColumnDef<T, unknown>[] = [
 
 ---
 
+## Backend Workers
+
+Apps can have a `backend/` directory with a Bun worker for server-side logic. Core manages lifecycle (spawn, crash recovery, shutdown). IPC via JSON-lines on stdin/stdout.
+
+### IPC protocol
+
+```typescript
+const write = (m: any) => process.stdout.write(JSON.stringify(m) + "\n");
+const rl = createInterface({ input: process.stdin });
+
+// 1. Core sends discover immediately after spawn — worker listens:
+// { type: "discover", app_id, runtime_url, database_url, credentials }
+
+// 2. RPC: Core sends { type: "rpc", id, method, params, caller }
+//    Worker responds: { type: "rpc_response", id, result } or { type: "rpc_response", id, error }
+
+// 3. Logs: { type: "log", level: "info", message: "..." }
+```
+
+### Data access
+
+- **Simple CRUD**: use Core REST API via `runtime_url` (`/api/v1/apps/{app_id}/collections/{entity}`)
+- **Custom SQL** (transactions, sequences, JOINs): connect to PostgreSQL via `database_url` from discover
+- All apps share one PG instance — cross-app queries are possible
+- **NEVER use SQLite or file-based storage** — PostgreSQL is the only database
+
+### Frontend → Worker
+
+```tsx
+const client = useRuntimeClient();
+const result = await client.rpc(appId, "method_name", { ...params });
+```
+
+### Minimal worker template
+
+```typescript
+import { createInterface } from "readline";
+import postgres from "postgres";
+
+const write = (m: any) => process.stdout.write(JSON.stringify(m) + "\n");
+const rl = createInterface({ input: process.stdin });
+let sql: ReturnType<typeof postgres>;
+
+rl.on("line", (l) => {
+  let m: any;
+  try { m = JSON.parse(l); } catch { return; }
+  if (m.type === "discover") { sql = postgres(m.database_url); return; }
+  if (m.type === "rpc") handleRpc(m);
+});
+
+write({ type: "discover", capabilities: [] });
+
+async function handleRpc(m: any) {
+  try {
+    const result = await dispatch(m.method, m.params ?? {}, m.caller);
+    write({ type: "rpc_response", id: m.id, result });
+  } catch (e: any) {
+    write({ type: "rpc_response", id: m.id, error: e.message });
+  }
+}
+
+async function dispatch(method: string, params: any, caller: any): Promise<any> {
+  switch (method) {
+    default: throw new Error(`unknown method: ${method}`);
+  }
+}
+```
+
+### Rules
+
+- Entry point: `index.ts` → `index.js` → `main.ts` → `main.js` → `src/index.ts`
+- RPC timeout: 30s. Always respond with matching `id`
+- Check `caller` for authorization in RPC handlers
+- Crash recovery: max 5 crashes in 60s → failed state
+
+---
+
 ## AI Agents
 
 Agents are apps with a `backend/` containing a LangGraph agent. Same manifest, same deploy, same RBAC. Core passes LLM credentials via IPC.
