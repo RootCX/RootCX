@@ -11,7 +11,16 @@ use uuid::Uuid;
 
 use super::{SharedRuntime, parse_uuid, pool};
 use crate::api_error::ApiError;
+use crate::auth::identity::Identity;
+use crate::extensions::rbac::policy::resolve_permissions;
 use crate::manifest::{field_type_map, map_field_type, quote_ident};
+
+async fn require_perm(pool: &PgPool, app_id: &str, user_id: Uuid, perm: &str) -> Result<(), ApiError> {
+    if user_id.is_nil() { return Ok(()); } // public mode — no RBAC
+    let (_, perms) = resolve_permissions(pool, app_id, user_id).await?;
+    if perms.iter().any(|p| p == "*" || p == perm) { Ok(()) }
+    else { Err(ApiError::Forbidden(format!("permission denied: {perm}"))) }
+}
 
 pub(crate) const MAX_BULK_SIZE: usize = 1000;
 const PG_PARAM_LIMIT: usize = 65535;
@@ -263,10 +272,12 @@ fn default_query_limit() -> i64 {
 pub async fn list_records(
     State(rt): State<SharedRuntime>,
     Path((app_id, entity)): Path<(String, String)>,
+    identity: Identity,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<JsonValue>>, ApiError> {
     validate_app_id(&app_id)?;
     let pool = pool(&rt).await?;
+    require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.read")).await?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
 
@@ -296,10 +307,12 @@ pub async fn list_records(
 pub async fn query_records(
     State(rt): State<SharedRuntime>,
     Path((app_id, entity)): Path<(String, String)>,
+    identity: Identity,
     Json(body): Json<QueryRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
     let pool = pool(&rt).await?;
+    require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.read")).await?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
 
@@ -332,10 +345,12 @@ pub async fn query_records(
 pub async fn create_record(
     State(rt): State<SharedRuntime>,
     Path((app_id, entity)): Path<(String, String)>,
+    identity: Identity,
     Json(body): Json<JsonValue>,
 ) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
     validate_app_id(&app_id)?;
     let pool = pool(&rt).await?;
+    require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.create")).await?;
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
@@ -423,9 +438,12 @@ pub(crate) async fn bulk_insert(
 pub async fn bulk_create_records(
     State(rt): State<SharedRuntime>,
     Path((app_id, entity)): Path<(String, String)>,
+    identity: Identity,
     Json(body): Json<JsonValue>,
 ) -> Result<(StatusCode, Json<Vec<JsonValue>>), ApiError> {
     validate_app_id(&app_id)?;
+    let db = pool(&rt).await?;
+    require_perm(&db, &app_id, identity.user_id, &format!("{entity}.create")).await?;
     let records = body.as_array()
         .ok_or_else(|| ApiError::BadRequest("body must be a JSON array".into()))?;
     if records.is_empty() {
@@ -440,7 +458,6 @@ pub async fn bulk_create_records(
         .map(|r| require_object(r))
         .collect::<Result<_, _>>()?;
 
-    let db = pool(&rt).await?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&db, &app_id, &entity).await?;
     let created = bulk_insert(&db, &tbl, &types, &objects).await?;
@@ -450,9 +467,11 @@ pub async fn bulk_create_records(
 pub async fn get_record(
     State(rt): State<SharedRuntime>,
     Path((app_id, entity, id)): Path<(String, String, String)>,
+    identity: Identity,
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt).await?);
+    require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.read")).await?;
     let tbl = table(&app_id, &entity);
     let q = format!("SELECT to_jsonb(t.*) AS row FROM {tbl} t WHERE t.id = $1");
     let query = sqlx::query_as::<_, (JsonValue,)>(&q).bind(uuid);
@@ -466,10 +485,12 @@ pub async fn get_record(
 pub async fn update_record(
     State(rt): State<SharedRuntime>,
     Path((app_id, entity, id)): Path<(String, String, String)>,
+    identity: Identity,
     Json(body): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt).await?);
+    require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.update")).await?;
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
@@ -496,9 +517,11 @@ pub async fn update_record(
 pub async fn delete_record(
     State(rt): State<SharedRuntime>,
     Path((app_id, entity, id)): Path<(String, String, String)>,
+    identity: Identity,
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt).await?);
+    require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.delete")).await?;
     let tbl = table(&app_id, &entity);
     let q = format!("DELETE FROM {tbl} WHERE id = $1");
     let r = sqlx::query(&q).bind(uuid).execute(&pool).await?;
