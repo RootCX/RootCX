@@ -14,6 +14,9 @@ export type {
   WhereClause,
   QueryOptions,
   QueryResult,
+  IntegrationSummary,
+  ActionDefinition,
+  IntegrationBinding,
 } from "./client";
 
 export { RuntimeProvider, useRuntimeClient } from "./components/RuntimeProvider";
