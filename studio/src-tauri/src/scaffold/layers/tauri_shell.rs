@@ -32,6 +32,7 @@ tauri-build = {{ version = "2", features = [] }}
 
 [dependencies]
 tauri = {{ version = "2", features = [] }}
+tauri-plugin-shell = "2"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 reqwest = {{ version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }}
@@ -76,7 +77,7 @@ rootcx-client = "0.1"
   "identifier": "default",
   "description": "Default capabilities",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "shell:allow-open"]
 }
 "#,
             )
@@ -98,6 +99,7 @@ rootcx-client = "0.1"
     rootcx_client::deploy_bundled_backend("{app_id}");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
         .run(tauri::generate_context!())
         .expect("error while running application");
 }}

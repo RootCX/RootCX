@@ -110,6 +110,11 @@ pub enum InboundMessage {
         invoke_id: String,
         summary: String,
     },
+    Event {
+        name: String,
+        #[serde(default)]
+        data: JsonValue,
+    },
 }
 
 fn default_level() -> String {

@@ -109,6 +109,14 @@ pub fn tool_schemas() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "list_integrations".into(),
+            description: "List installed integrations with their actions and parameter schemas. Use this to discover what external services (email, CRM, messaging, etc.) are available before generating code that uses the useIntegration hook.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
+        ToolDef {
             name: "question".into(),
             description: "Ask the user questions to gather preferences, clarify instructions, or get decisions on implementation choices.".into(),
             input_schema: json!({

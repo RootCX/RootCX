@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useSyncExternalStore } from "react";
-import { Container, Database, FolderOpen, Hammer, Shield, LogOut, type LucideIcon } from "lucide-react";
+import { Container, Database, FolderOpen, Hammer, Plug, Shield, LogOut, type LucideIcon } from "lucide-react";
 import { useAuth, logout } from "@/core/auth";
 import { cn } from "@/lib/utils";
 import { useLayout, type ZoneId, type LayoutState } from "./layout-store";
@@ -16,6 +16,7 @@ const BASE_NAV: NavItem[] = [
   { id: "forge", icon: Hammer, label: "AI Forge", desc: "Chat with AI assistant", zone: "editor" },
   { id: "database", icon: Database, label: "Database", desc: "Browse schemas and tables", zone: "sidebar" },
   { id: "security", icon: Shield, label: "Security", desc: "Manage roles and permissions", zone: "sidebar" },
+  { id: "integrations", icon: Plug, label: "Integrations", desc: "Connect external services", zone: "sidebar" },
 ];
 const WORKERS_NAV: NavItem = { id: "workers", icon: Container, label: "Workers", desc: "Manage app workers", zone: "sidebar" };
 

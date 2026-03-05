@@ -444,6 +444,10 @@ async fn supervisor_loop(
                             }
                             info!(app_id = %app_id, "agent session compacted");
                         }
+                        InboundMessage::Event { name, data } => {
+                            info!(app_id = %app_id, event = %name, "worker event");
+                            emit_log(&log_tx, "event", format!("{name}: {data}"));
+                        }
                         _ => {}
                     },
                     Some(IpcEvent::Output(line)) => {

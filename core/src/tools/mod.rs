@@ -1,6 +1,7 @@
 pub mod browser;
 pub mod describe_app;
 pub mod list_apps;
+pub mod list_integrations;
 pub mod mutate_data;
 pub mod query_data;
 pub mod routes;

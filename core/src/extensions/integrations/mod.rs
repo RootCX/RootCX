@@ -1,4 +1,6 @@
-mod routes;
+mod auth;
+mod catalog;
+pub(crate) mod routes;
 
 use async_trait::async_trait;
 use axum::Router;
@@ -39,12 +41,19 @@ impl RuntimeExtension for IntegrationsExtension {
     fn routes(&self) -> Option<Router<SharedRuntime>> {
         Some(Router::new()
             .route("/api/v1/integrations", get(routes::list_integrations))
+            .route("/api/v1/integrations/catalog", get(catalog::list_catalog))
+            .route("/api/v1/integrations/catalog/{id}/deploy", post(catalog::deploy_from_catalog))
+            .route("/api/v1/integrations/catalog/{id}", axum::routing::delete(catalog::undeploy))
             .route("/api/v1/apps/{app_id}/integrations", get(routes::list_bindings).post(routes::bind))
             .route(
                 "/api/v1/apps/{app_id}/integrations/{integration_id}",
                 axum::routing::delete(routes::unbind).patch(routes::update_config),
             )
             .route("/api/v1/apps/{app_id}/integrations/{integration_id}/actions/{action_id}", post(routes::execute_action))
+            .route("/api/v1/apps/{app_id}/integrations/{integration_id}/auth", get(auth::status).delete(auth::disconnect))
+            .route("/api/v1/apps/{app_id}/integrations/{integration_id}/auth/start", post(auth::start))
+            .route("/api/v1/apps/{app_id}/integrations/{integration_id}/auth/credentials", post(auth::submit_credentials))
+            .route("/api/v1/integrations/auth/callback", get(auth::callback))
             .route("/api/v1/hooks/{token}", post(routes::webhook_ingress)))
     }
 }

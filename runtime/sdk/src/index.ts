@@ -34,6 +34,9 @@ export type { UseAuthResult } from "./hooks/useAuth";
 export { usePermissions } from "./hooks/usePermissions";
 export type { UsePermissionsResult } from "./hooks/usePermissions";
 
+export { useIntegration } from "./hooks/useIntegration";
+export type { UseIntegrationResult } from "./hooks/useIntegration";
+
 export { PermissionsProvider, usePermissionsContext } from "./components/PermissionsProvider";
 export type { PermissionsProviderProps } from "./components/PermissionsProvider";
 
