@@ -45,18 +45,20 @@ pub struct Runtime {
     tool_registry: Arc<ToolRegistry>,
     pending_approvals: PendingApprovals,
     scheduler: Option<SchedulerHandle>,
+    resources_dir: PathBuf,
     data_dir: PathBuf,
     bun_bin: PathBuf,
 }
 
 impl Runtime {
-    pub fn new(pg: PostgresManager, data_dir: PathBuf, bun_bin: PathBuf) -> Self {
-        Self::with_auth_mode(pg, data_dir, bun_bin, None)
+    pub fn new(pg: PostgresManager, data_dir: PathBuf, resources_dir: PathBuf, bun_bin: PathBuf) -> Self {
+        Self::with_auth_mode(pg, data_dir, resources_dir, bun_bin, None)
     }
 
     pub fn with_auth_mode(
         pg: PostgresManager,
         data_dir: PathBuf,
+        resources_dir: PathBuf,
         bun_bin: PathBuf,
         auth_required: Option<bool>,
     ) -> Self {
@@ -73,6 +75,7 @@ impl Runtime {
         tool_registry.register(tools::browser::BrowserTool::new(browser_queue));
         tool_registry.register(tools::list_apps::ListAppsTool);
         tool_registry.register(tools::describe_app::DescribeAppTool);
+        tool_registry.register(tools::list_integrations::ListIntegrationsTool);
 
         Self {
             pg,
@@ -84,6 +87,7 @@ impl Runtime {
             tool_registry: Arc::new(tool_registry),
             pending_approvals: PendingApprovals::new(),
             scheduler: None,
+            resources_dir,
             data_dir,
             bun_bin,
         }
@@ -194,6 +198,10 @@ impl Runtime {
 
     pub fn bun_bin(&self) -> &std::path::Path {
         &self.bun_bin
+    }
+
+    pub fn resources_dir(&self) -> &std::path::Path {
+        &self.resources_dir
     }
 
     pub fn data_dir(&self) -> &std::path::Path {

@@ -47,6 +47,27 @@ pub enum ServiceState {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AppType {
+    #[default]
+    App,
+    Integration,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionDefinition {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub input_schema: Option<JsonValue>,
+    #[serde(default)]
+    pub output_schema: Option<JsonValue>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppManifest {
@@ -56,10 +77,23 @@ pub struct AppManifest {
     pub version: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default, rename = "type")]
+    pub app_type: AppType,
     #[serde(default)]
     pub permissions: Option<PermissionsContract>,
     #[serde(default)]
     pub data_contract: Vec<EntityContract>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ActionDefinition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_schema: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_auth: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub webhooks: Vec<String>,
+    /// Free-form usage instructions surfaced to AI via list_integrations tool
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 fn default_version() -> String {

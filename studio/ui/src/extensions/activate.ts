@@ -13,6 +13,7 @@ import { activate as database } from "./database";
 import { activate as security } from "./security";
 import { activate as bundle } from "./bundle";
 import { activate as workers } from "./workers";
+import { activate as integrations } from "./integrations";
 
 export function activateBuiltins() {
   commandPalette();
@@ -30,4 +31,5 @@ export function activateBuiltins() {
   database();
   security();
   workers();
+  integrations();
 }

@@ -245,6 +245,9 @@ async fn execute_with_permission(
     if tool_name == "question" {
         return execute_question(ctx, args).await;
     }
+    if tool_name == "list_integrations" {
+        return Ok(execute_list_integrations(&ctx.pool).await);
+    }
 
     if tools::needs_permission(tool_name)
         && !ctx.permissions.is_allowed(ctx.session_id, tool_name).await
@@ -299,6 +302,30 @@ async fn execute_question(
     };
     (ctx.emit)(event, json!({"requestID": req.id}));
     Ok(result)
+}
+
+async fn execute_list_integrations(pool: &PgPool) -> Result<String, String> {
+    let rows: Vec<(String, String, String, Option<Value>)> = sqlx::query_as(
+        "SELECT id, name, version, manifest FROM rootcx_system.apps \
+         WHERE manifest->>'type' = 'integration' AND status = 'installed' ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let integrations: Vec<Value> = rows.into_iter().map(|(id, name, version, m)| {
+        let m = m.unwrap_or(Value::Null);
+        json!({
+            "id": id, "name": name, "version": version,
+            "description": m.get("description").and_then(Value::as_str).unwrap_or(""),
+            "actions": m.get("actions").unwrap_or(&json!([])),
+            "userAuth": m.get("userAuth"),
+            "webhooks": m.get("webhooks").unwrap_or(&json!([])),
+            "instructions": m.get("instructions"),
+        })
+    }).collect();
+
+    serde_json::to_string_pretty(&integrations).map_err(|e| e.to_string())
 }
 
 async fn build_history(

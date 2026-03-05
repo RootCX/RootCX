@@ -4619,6 +4619,7 @@ dependencies = [
  "argon2",
  "async-trait",
  "axum",
+ "base64 0.22.1",
  "chrono",
  "command-group",
  "flate2",
