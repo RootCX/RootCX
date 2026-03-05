@@ -2,6 +2,7 @@ pub mod agents;
 mod audit;
 pub mod auth;
 pub mod browser;
+pub mod integrations;
 pub mod logs;
 pub mod rbac;
 
@@ -54,5 +55,6 @@ pub fn builtin_extensions(
         Box::new(rbac::RbacExtension),
         Box::new(agents::AgentExtension),
         Box::new(browser::BrowserExtension::with_queue(browser_queue)),
+        Box::new(integrations::IntegrationsExtension),
     ]
 }

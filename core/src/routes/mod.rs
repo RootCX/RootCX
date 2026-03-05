@@ -32,7 +32,7 @@ pub(crate) async fn wm(rt: &SharedRuntime) -> Result<Arc<WorkerManager>, ApiErro
     rt.lock().await.worker_manager().cloned().ok_or(ApiError::NotReady)
 }
 
-async fn pool_and_secrets(rt: &SharedRuntime) -> Result<(PgPool, Arc<SecretManager>), ApiError> {
+pub(crate) async fn pool_and_secrets(rt: &SharedRuntime) -> Result<(PgPool, Arc<SecretManager>), ApiError> {
     let g = rt.lock().await;
     Ok((g.pool().cloned().ok_or(ApiError::NotReady)?, g.secret_manager().cloned().ok_or(ApiError::NotReady)?))
 }

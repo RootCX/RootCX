@@ -47,6 +47,31 @@ export interface EffectivePermissions {
   permissions: string[];
 }
 
+export interface IntegrationSummary {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  actions: ActionDefinition[];
+  configSchema: Record<string, unknown> | null;
+  webhooks: string[];
+}
+
+export interface ActionDefinition {
+  id: string;
+  name: string;
+  description: string;
+  inputSchema?: Record<string, unknown>;
+  outputSchema?: Record<string, unknown>;
+}
+
+export interface IntegrationBinding {
+  integrationId: string;
+  enabled: boolean;
+  webhookToken: string | null;
+  createdAt: string;
+}
+
 export type WhereOperator =
   | "$eq"
   | "$ne"
@@ -363,6 +388,84 @@ export class RuntimeClient {
     const res = await this.authFetch(
       `${this.baseUrl}/api/v1/apps/${enc(appId)}/roles/${enc(roleName)}`,
       { method: "DELETE" },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async listIntegrations(): Promise<IntegrationSummary[]> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/integrations`);
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async listIntegrationBindings(appId: string): Promise<IntegrationBinding[]> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations`,
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async bindIntegration(
+    appId: string,
+    integrationId: string,
+    config?: Record<string, unknown>,
+  ): Promise<{ message: string; webhookToken: string }> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ integrationId, config }),
+      },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async updateIntegrationConfig(
+    appId: string,
+    integrationId: string,
+    config: Record<string, unknown>,
+  ): Promise<{ message: string }> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations/${enc(integrationId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config }),
+      },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async unbindIntegration(
+    appId: string,
+    integrationId: string,
+  ): Promise<{ message: string }> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations/${enc(integrationId)}`,
+      { method: "DELETE" },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async callIntegration(
+    appId: string,
+    integrationId: string,
+    action: string,
+    input?: Record<string, unknown>,
+  ): Promise<unknown> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations/${enc(integrationId)}/actions/${enc(action)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input ?? {}),
+      },
     );
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
