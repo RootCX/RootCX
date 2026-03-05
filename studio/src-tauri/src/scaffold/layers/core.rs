@@ -38,6 +38,7 @@ impl Layer for CoreLayer {
     "@rootcx/sdk": "~0.1.0",
     "@rootcx/ui": "~0.1.0",
     "@tabler/icons-react": "^3.30.0",
+    "@tauri-apps/plugin-shell": "^2.0.0",
     "@tailwindcss/vite": "^4.0.0",
     "clsx": "^2.1.0",
     "react": "^19.0.0",

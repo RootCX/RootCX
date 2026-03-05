@@ -87,8 +87,13 @@ pub struct AppManifest {
     pub actions: Vec<ActionDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_schema: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_auth: Option<JsonValue>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub webhooks: Vec<String>,
+    /// Free-form usage instructions surfaced to AI via list_integrations tool
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 fn default_version() -> String {

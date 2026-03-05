@@ -453,6 +453,58 @@ export class RuntimeClient {
     return res.json();
   }
 
+  async integrationAuthStatus(
+    appId: string,
+    integrationId: string,
+  ): Promise<{ connected: boolean }> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations/${enc(integrationId)}/auth`,
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async integrationAuthStart(
+    appId: string,
+    integrationId: string,
+  ): Promise<{ type: string; url?: string; [key: string]: unknown }> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations/${enc(integrationId)}/auth/start`,
+      { method: "POST" },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async integrationAuthSubmit(
+    appId: string,
+    integrationId: string,
+    credentials: Record<string, string>,
+  ): Promise<{ message: string }> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations/${enc(integrationId)}/auth/credentials`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ credentials }),
+      },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async integrationAuthDisconnect(
+    appId: string,
+    integrationId: string,
+  ): Promise<{ message: string }> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations/${enc(integrationId)}/auth`,
+      { method: "DELETE" },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
   async callIntegration(
     appId: string,
     integrationId: string,

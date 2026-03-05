@@ -68,6 +68,18 @@ const { data, loading, error, update, remove } = useAppRecord<T>(appId, entityNa
 const { connected, loading } = useRuntimeStatus();
 ```
 
+### useIntegration
+
+```tsx
+const { connected, loading, connect, submitCredentials, disconnect, call } = useIntegration(appId, integrationId);
+// connect() => triggers OAuth redirect or returns { type: "credentials", schema } for manual form
+// submitCredentials(values) => submit credential form values
+// disconnect() => revoke auth
+// call(actionId, params?) => execute integration action, returns parsed result
+```
+
+**Always call `list_integrations` tool first** to discover available integrations, their actions, schemas, and usage instructions.
+
 ---
 
 ## Record shape

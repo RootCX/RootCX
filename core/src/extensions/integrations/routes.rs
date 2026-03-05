@@ -11,28 +11,34 @@ use crate::auth::identity::Identity;
 use crate::extensions::rbac::policy::resolve_permissions;
 use crate::routes::{self, SharedRuntime};
 
-pub async fn list_integrations(
-    _identity: Identity,
-    State(rt): State<SharedRuntime>,
-) -> Result<Json<Vec<JsonValue>>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+pub(crate) async fn query_installed_integrations(pool: &sqlx::PgPool) -> Result<Vec<JsonValue>, sqlx::Error> {
     let rows: Vec<(String, String, String, Option<JsonValue>)> = sqlx::query_as(
         "SELECT id, name, version, manifest FROM rootcx_system.apps
          WHERE manifest->>'type' = 'integration' AND status = 'installed' ORDER BY name",
     )
-    .fetch_all(&pool)
+    .fetch_all(pool)
     .await?;
 
-    Ok(Json(rows.into_iter().map(|(id, name, version, m)| {
+    Ok(rows.into_iter().map(|(id, name, version, m)| {
         let m = m.unwrap_or(JsonValue::Null);
         json!({
             "id": id, "name": name, "version": version,
             "description": m.get("description").and_then(|v| v.as_str()).unwrap_or(""),
             "actions": m.get("actions").unwrap_or(&json!([])),
             "configSchema": m.get("configSchema"),
+            "userAuth": m.get("userAuth"),
             "webhooks": m.get("webhooks").unwrap_or(&json!([])),
+            "instructions": m.get("instructions"),
         })
-    }).collect()))
+    }).collect())
+}
+
+pub async fn list_integrations(
+    _identity: Identity,
+    State(rt): State<SharedRuntime>,
+) -> Result<Json<Vec<JsonValue>>, ApiError> {
+    let pool = routes::pool(&rt).await?;
+    Ok(Json(query_installed_integrations(&pool).await?))
 }
 
 pub async fn list_bindings(
@@ -56,7 +62,7 @@ pub async fn list_bindings(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct BindRequest {
+pub(crate) struct BindRequest {
     integration_id: String,
     #[serde(default)]
     config: Option<JsonValue>,
@@ -69,6 +75,17 @@ pub async fn bind(
     Json(body): Json<BindRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, secrets) = routes::pool_and_secrets(&rt).await?;
+
+    let consumer_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.apps WHERE id = $1)",
+    )
+    .bind(&app_id)
+    .fetch_one(&pool)
+    .await?;
+
+    if !consumer_exists {
+        return Err(ApiError::BadRequest(format!("app '{app_id}' not installed — sync your manifest first")));
+    }
 
     let manifest: Option<(JsonValue,)> = sqlx::query_as(
         "SELECT manifest FROM rootcx_system.apps
@@ -108,7 +125,7 @@ pub async fn bind(
 }
 
 #[derive(Deserialize)]
-pub(super) struct UpdateConfigRequest {
+pub(crate) struct UpdateConfigRequest {
     config: JsonValue,
 }
 
@@ -208,12 +225,22 @@ pub async fn execute_action(
 
     let config = fetch_config(&pool, &secrets, &app_id, &integration_id).await?;
 
+    let user_credentials = if !identity.user_id.is_nil() {
+        let key = format!("_iuc.{integration_id}.{}", identity.user_id);
+        match secrets.get(&pool, &app_id, &key).await {
+            Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or(JsonValue::Null),
+            _ => JsonValue::Null,
+        }
+    } else {
+        JsonValue::Null
+    };
+
     let result = wm
         .rpc(
             &integration_id,
             Uuid::new_v4().to_string(),
             "__integration".into(),
-            json!({ "action": action_id, "input": input, "config": config, "consumerAppId": app_id }),
+            json!({ "action": action_id, "input": input, "config": config, "userCredentials": user_credentials, "consumerAppId": app_id }),
             None,
         )
         .await
@@ -222,7 +249,6 @@ pub async fn execute_action(
     Ok(Json(result))
 }
 
-/// No JWT auth — the opaque webhook token is the credential
 pub async fn webhook_ingress(
     State(rt): State<SharedRuntime>,
     Path(token): Path<String>,
@@ -252,12 +278,15 @@ pub async fn webhook_ingress(
     let payload = serde_json::from_slice(&body)
         .unwrap_or_else(|_| json!(String::from_utf8_lossy(&body).into_owned()));
 
+    use base64::Engine;
+    let raw_body = base64::engine::general_purpose::STANDARD.encode(&body);
+
     let result = wm
         .rpc(
             &integration_id,
             Uuid::new_v4().to_string(),
             "__webhook".into(),
-            json!({ "headers": hdr_map, "body": payload, "config": config, "consumerAppId": consumer_app_id }),
+            json!({ "headers": hdr_map, "body": payload, "rawBody": raw_body, "config": config, "consumerAppId": consumer_app_id }),
             None,
         )
         .await
@@ -266,7 +295,7 @@ pub async fn webhook_ingress(
     Ok(Json(result))
 }
 
-async fn fetch_config(
+pub(super) async fn fetch_config(
     pool: &sqlx::PgPool,
     secrets: &crate::secrets::SecretManager,
     consumer_app_id: &str,
