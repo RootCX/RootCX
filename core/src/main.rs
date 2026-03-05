@@ -110,7 +110,7 @@ async fn main() {
     let data_dir = data_base_dir().unwrap_or_else(|e| die(e));
     let pg = PostgresManager::new(pg_root.join("bin"), data_dir.join("data/pg"), PG_PORT)
         .with_lib_dir(pg_root.join("lib"));
-    let rt = Arc::new(Mutex::new(Runtime::new(pg, data_dir, resolve_bun())));
+    let rt = Arc::new(Mutex::new(Runtime::new(pg, data_dir, resources(), resolve_bun())));
 
     rt.lock().await.boot(API_PORT).await.unwrap_or_else(|e| {
         tracing::error!("boot: {e}"); std::process::exit(1);

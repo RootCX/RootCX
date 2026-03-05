@@ -1,0 +1,123 @@
+{
+  "appId": "gmail",
+  "name": "Gmail",
+  "version": "0.1.0",
+  "type": "integration",
+  "description": "Send, read and receive emails via Gmail API",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "clientId": { "type": "string", "description": "Google OAuth 2.0 Client ID" },
+      "clientSecret": { "type": "string", "description": "Google OAuth 2.0 Client Secret" }
+    },
+    "required": ["clientId", "clientSecret"]
+  },
+  "userAuth": { "type": "redirect" },
+  "actions": [
+    {
+      "id": "send_email",
+      "name": "Send Email",
+      "description": "Send an email via Gmail",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "to": { "type": "string" },
+          "subject": { "type": "string" },
+          "body": { "type": "string" },
+          "cc": { "type": "string" },
+          "bcc": { "type": "string" },
+          "html": { "type": "boolean", "default": false }
+        },
+        "required": ["to", "subject", "body"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": { "type": "string" },
+          "threadId": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "list_emails",
+      "name": "List Emails",
+      "description": "List recent emails from inbox",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "description": "Gmail search query" },
+          "maxResults": { "type": "integer", "default": 10 },
+          "labelIds": { "type": "array", "items": { "type": "string" }, "default": ["INBOX"] }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string" },
+                "threadId": { "type": "string" },
+                "from": { "type": "string" },
+                "to": { "type": "string" },
+                "subject": { "type": "string" },
+                "date": { "type": "string" },
+                "snippet": { "type": "string" },
+                "labelIds": { "type": "array", "items": { "type": "string" } },
+                "body": { "type": "string" }
+              }
+            }
+          },
+          "resultSizeEstimate": { "type": "integer" }
+        }
+      }
+    },
+    {
+      "id": "get_email",
+      "name": "Get Email",
+      "description": "Get full email by message ID",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "messageId": { "type": "string" } },
+        "required": ["messageId"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "threadId": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "subject": { "type": "string" },
+          "date": { "type": "string" },
+          "snippet": { "type": "string" },
+          "labelIds": { "type": "array", "items": { "type": "string" } },
+          "body": { "type": "string", "description": "HTML or plain text body, already decoded" }
+        }
+      }
+    },
+    {
+      "id": "modify_email",
+      "name": "Modify Email",
+      "description": "Add or remove labels (star, read, archive)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": { "type": "string" },
+          "addLabels": { "type": "array", "items": { "type": "string" } },
+          "removeLabels": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["messageId"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": { "ok": { "type": "boolean" } }
+      }
+    }
+  ],
+  "webhooks": ["push_notification"],
+  "instructions": "Gmail integration with OAuth 2.0 per-user auth.\n\nAll actions return parsed objects (not raw Gmail API responses). Fields like `from`, `to`, `subject`, `body` are already extracted strings.\n\n`list_emails` supports Gmail search syntax in the `query` param (e.g. `from:user@example.com OR to:user@example.com`).\n\n`get_email` returns `body` as decoded HTML or plain text — no base64 decoding needed client-side.\n\nCommon label IDs: INBOX, SENT, DRAFT, SPAM, TRASH, UNREAD, STARRED, IMPORTANT.",
+  "entities": []
+}

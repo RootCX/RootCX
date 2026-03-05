@@ -40,7 +40,9 @@ impl TestRuntime {
         let pg = PostgresManager::new(pg_root.join("bin"), data_dir.join("data/pg"), pg_port)
             .with_lib_dir(pg_root.join("lib"));
         let auth_required = if require_auth { Some(true) } else { None };
-        let runtime = Arc::new(Mutex::new(Runtime::with_auth_mode(pg, data_dir, bun_bin, auth_required)));
+        let resources_dir = data_dir.join("resources");
+        std::fs::create_dir_all(&resources_dir).unwrap();
+        let runtime = Arc::new(Mutex::new(Runtime::with_auth_mode(pg, data_dir, resources_dir, bun_bin, auth_required)));
         runtime.lock().await.boot(api_port).await.expect("boot failed");
 
         let rt = Arc::clone(&runtime);
