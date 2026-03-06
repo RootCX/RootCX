@@ -13,7 +13,6 @@ pub async fn install_app(
     manifest: &AppManifest,
     extensions: &[Box<dyn RuntimeExtension>],
     installed_by: Uuid,
-    tools: &[(String, String)],
 ) -> Result<(), RuntimeError> {
     validate_manifest(manifest)?;
     let app_id = &manifest.app_id;
@@ -54,7 +53,7 @@ pub async fn install_app(
     }
 
     for ext in extensions {
-        ext.on_app_installed(pool, manifest, installed_by, tools).await?;
+        ext.on_app_installed(pool, manifest, installed_by).await?;
     }
 
     info!(

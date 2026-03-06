@@ -63,21 +63,15 @@ impl RuntimeExtension for RbacExtension {
         Ok(())
     }
 
-    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, installed_by: Uuid, tools: &[(String, String)]) -> Result<(), RuntimeError> {
+    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, installed_by: Uuid) -> Result<(), RuntimeError> {
         let app_id = &manifest.app_id;
-        let tool_perms = tools.iter().map(|(n, desc)| {
-            let d = if desc.is_empty() { n.clone() } else { desc.clone() };
-            (format!("tool.{n}"), d)
-        });
 
-        // Manifest permissions = source of truth; auto-CRUD only when absent
         let (keys, descs): (Vec<String>, Vec<String>) = if let Some(c) = &manifest.permissions {
-            c.permissions.iter().map(|p| (p.key.clone(), p.description.clone())).chain(tool_perms).unzip()
+            c.permissions.iter().map(|p| (p.key.clone(), p.description.clone())).unzip()
         } else {
             manifest.data_contract.iter()
                 .flat_map(|e| ["create", "read", "update", "delete"]
                     .map(|a| (format!("{}.{a}", e.entity_name), format!("{a} {}", e.entity_name))))
-                .chain(tool_perms)
                 .unzip()
         };
 

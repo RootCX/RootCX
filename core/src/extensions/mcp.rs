@@ -62,6 +62,11 @@ fn server_json(name: &str, status: &str) -> JsonValue {
     json!({ "name": name, "status": status })
 }
 
+/// Sync tool registry to rbac_permissions after bulk MCP changes
+async fn sync_tools(pool: &PgPool, mcp: &McpManager) {
+    mcp.tool_registry().sync_to_db(pool).await;
+}
+
 pub async fn start_registered_servers(pool: &PgPool, secrets: &SecretManager, mcp: &McpManager) {
     let rows: Vec<(String, JsonValue)> = match sqlx::query_as(
         "SELECT name, config FROM rootcx_system.mcp_servers WHERE status = 'running'"
@@ -76,11 +81,15 @@ pub async fn start_registered_servers(pool: &PgPool, secrets: &SecretManager, mc
             continue;
         };
         let env = mcp_env(pool, secrets, &name).await;
-        if let Err(e) = mcp.start_server(&config, &env).await {
-            error!(server = %name, "auto-start failed: {e}");
-            set_status(pool, &name, "error").await;
+        match mcp.start_server(&config, &env).await {
+            Ok(_) => {},
+            Err(e) => {
+                error!(server = %name, "auto-start failed: {e}");
+                set_status(pool, &name, "error").await;
+            }
         }
     }
+    sync_tools(pool, mcp).await;
 }
 
 async fn list_servers(
@@ -139,6 +148,7 @@ async fn register_server(
         match mcp.start_server(&body.config, &env).await {
             Ok(tools) => {
                 set_status(&pool, name, "running").await;
+                sync_tools(&pool, &mcp).await;
                 return Ok(Json(json!({ "name": name, "status": "running", "tools": tools })));
             }
             Err(e) => {
@@ -159,6 +169,7 @@ async fn remove_server(
     let pool = crate::routes::pool(&rt).await?;
     let mcp = rt.lock().await.mcp_manager().clone();
     mcp.stop_server(&name).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    sync_tools(&pool, &mcp).await;
     sqlx::query("DELETE FROM rootcx_system.mcp_servers WHERE name = $1")
         .bind(&name).execute(&pool).await?;
     Ok(Json(json!({ "message": format!("MCP server '{name}' removed") })))
@@ -186,6 +197,7 @@ async fn start_server(
     let env = mcp_env(&pool, &secrets, &name).await;
     let tools = mcp.start_server(&config, &env).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     set_status(&pool, &name, "running").await;
+    sync_tools(&pool, &mcp).await;
 
     Ok(Json(json!({ "name": name, "status": "running", "tools": tools })))
 }
@@ -199,5 +211,6 @@ async fn stop_server(
     let mcp = rt.lock().await.mcp_manager().clone();
     mcp.stop_server(&name).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     set_status(&pool, &name, "stopped").await;
+    sync_tools(&pool, &mcp).await;
     Ok(Json(server_json(&name, "stopped")))
 }

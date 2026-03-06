@@ -85,12 +85,14 @@ impl McpManager {
 
     pub async fn stop_all(&self) {
         let names: Vec<String> = self.clients.read().await.keys().cloned().collect();
-        for name in names {
-            if let Err(e) = self.stop_server(&name).await {
+        for name in &names {
+            if let Err(e) = self.stop_server(name).await {
                 error!(server = %name, "stop error: {e}");
             }
         }
     }
+
+    pub fn tool_registry(&self) -> &Arc<ToolRegistry> { &self.tool_registry }
 
     pub async fn is_running(&self, name: &str) -> bool {
         self.clients.read().await.contains_key(name)

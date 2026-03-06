@@ -94,7 +94,7 @@ impl RuntimeExtension for AgentExtension {
         Ok(())
     }
 
-    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, _installed_by: uuid::Uuid, _tools: &[(String, String)]) -> Result<(), RuntimeError> {
+    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, _installed_by: uuid::Uuid) -> Result<(), RuntimeError> {
         let app_id = &manifest.app_id;
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id = $1)",
@@ -157,25 +157,17 @@ async fn sync_agent_rbac(pool: &PgPool, app_id: &str) -> Result<(), RuntimeError
     let role_name = format!("agent:{app_id}");
     let agent_uid = agent_user_id(app_id);
 
-    let agent_permissions: Vec<String> = sqlx::query_scalar(
-        "SELECT key FROM rootcx_system.rbac_permissions WHERE app_id = $1",
-    )
-    .bind(app_id)
-    .fetch_all(pool)
-    .await
-    .map_err(RuntimeError::Schema)?;
-
     let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
 
+    // Agent role gets full access; admin restricts via role update if needed
     sqlx::query(
         "INSERT INTO rootcx_system.rbac_roles (app_id, name, description, inherits, permissions)
-         VALUES ($1, $2, $3, '{}', $4)
-         ON CONFLICT (app_id, name) DO UPDATE SET description = EXCLUDED.description, permissions = EXCLUDED.permissions"
+         VALUES ($1, $2, $3, '{}', ARRAY['*'])
+         ON CONFLICT (app_id, name) DO NOTHING"
     )
     .bind(app_id)
     .bind(&role_name)
     .bind(format!("Agent role for {app_id}"))
-    .bind(&agent_permissions)
     .execute(&mut *tx)
     .await
     .map_err(RuntimeError::Schema)?;

@@ -59,8 +59,7 @@ pub async fn install_app(
 ) -> Result<Json<JsonValue>, ApiError> {
     let g = rt.lock().await;
     let pool = g.pool().cloned().ok_or(ApiError::NotReady)?;
-    let tools = g.tool_registry().all_summaries();
-    crate::manifest::install_app(&pool, &manifest, g.extensions(), identity.user_id, &tools).await?;
+    crate::manifest::install_app(&pool, &manifest, g.extensions(), identity.user_id).await?;
     Ok(Json(json!({ "message": format!("app '{}' installed", manifest.app_id) })))
 }
 
