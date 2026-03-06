@@ -15,6 +15,7 @@ import { activate as bundle } from "./bundle";
 import { activate as workers } from "./workers";
 import { activate as integrations } from "./integrations";
 import { activate as mcpServers } from "./mcp-servers";
+import { activate as secrets } from "./secrets";
 
 export function activateBuiltins() {
   commandPalette();
@@ -34,4 +35,5 @@ export function activateBuiltins() {
   workers();
   integrations();
   mcpServers();
+  secrets();
 }
