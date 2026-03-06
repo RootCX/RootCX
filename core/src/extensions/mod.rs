@@ -34,7 +34,7 @@ pub trait RuntimeExtension: Send + Sync {
         Ok(())
     }
 
-    async fn on_app_installed(&self, _pool: &PgPool, _manifest: &AppManifest, _installed_by: Uuid, _tools: &[(String, String)]) -> Result<(), RuntimeError> {
+    async fn on_app_installed(&self, _pool: &PgPool, _manifest: &AppManifest, _installed_by: Uuid) -> Result<(), RuntimeError> {
         Ok(())
     }
 

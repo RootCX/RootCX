@@ -127,6 +127,7 @@ impl Runtime {
         let secrets = self.secret_manager.as_ref().unwrap();
         wm.start_deployed_apps(&pool, secrets).await;
 
+        self.tool_registry.sync_to_db(&pool).await;
         extensions::mcp::start_registered_servers(&pool, secrets, &self.mcp_manager).await;
 
         self.pool = Some(pool);
