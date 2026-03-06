@@ -41,7 +41,7 @@ pub async fn execute_tool(
 ) -> Result<Json<JsonValue>, ApiError> {
     let (tool, pool) = {
         let g = rt.lock().await;
-        let tool = g.tool_registry().get(&tool_name).cloned()
+        let tool = g.tool_registry().get(&tool_name)
             .ok_or_else(|| ApiError::NotFound(format!("unknown tool: '{tool_name}'")))?;
         let pool = g.pool().cloned().ok_or(ApiError::NotReady)?;
         (tool, pool)

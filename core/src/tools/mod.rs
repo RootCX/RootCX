@@ -7,7 +7,7 @@ pub mod query_data;
 pub mod routes;
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
@@ -35,20 +35,29 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, ctx: &ToolContext) -> Result<JsonValue, String>;
 }
 
-#[derive(Default)]
 pub struct ToolRegistry {
-    tools: HashMap<String, (Arc<dyn Tool>, ToolDescriptor)>,
+    tools: RwLock<HashMap<String, (Arc<dyn Tool>, ToolDescriptor)>>,
+}
+
+impl Default for ToolRegistry {
+    fn default() -> Self {
+        Self { tools: RwLock::new(HashMap::new()) }
+    }
 }
 
 impl ToolRegistry {
-    pub fn register(&mut self, tool: impl Tool + 'static) {
+    pub fn register(&self, tool: impl Tool + 'static) {
         let desc = tool.descriptor();
         let name = desc.name.clone();
-        self.tools.insert(name, (Arc::new(tool), desc));
+        self.tools.write().unwrap().insert(name, (Arc::new(tool), desc));
+    }
+
+    pub fn unregister_prefix(&self, prefix: &str) {
+        self.tools.write().unwrap().retain(|name, _| !name.starts_with(prefix));
     }
 
     pub fn descriptors_for_permissions(&self, permissions: &[String], data_contract: &JsonValue) -> Vec<ToolDescriptor> {
-        self.tools.values().filter_map(|(tool, base)| {
+        self.tools.read().unwrap().values().filter_map(|(tool, base)| {
             let perm = format!("tool.{}", base.name);
             if !permissions.iter().any(|p| p == "*" || p == &perm) { return None; }
             let mut desc = base.clone();
@@ -59,12 +68,12 @@ impl ToolRegistry {
         }).collect()
     }
 
-    pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
-        self.tools.get(name).map(|(t, _)| t)
+    pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.read().unwrap().get(name).map(|(t, _)| t.clone())
     }
 
     pub fn all_summaries(&self) -> Vec<(String, String)> {
-        let mut out: Vec<_> = self.tools.values()
+        let mut out: Vec<_> = self.tools.read().unwrap().values()
             .map(|(_, d)| (d.name.clone(), d.description.clone()))
             .collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));

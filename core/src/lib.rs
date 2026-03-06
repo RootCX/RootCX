@@ -5,6 +5,7 @@ pub mod extensions;
 mod ipc;
 mod jobs;
 mod manifest;
+pub mod mcp;
 mod routes;
 mod scheduler;
 mod schema;
@@ -25,6 +26,7 @@ use auth::AuthConfig;
 use extensions::{RuntimeExtension, builtin_extensions};
 use rootcx_postgres_mgmt::PostgresManager;
 use rootcx_types::{ForgeStatus, OsStatus, PostgresStatus, RuntimeStatus, ServiceState};
+use mcp::McpManager;
 use scheduler::SchedulerHandle;
 use secrets::SecretManager;
 use sqlx::PgPool;
@@ -43,6 +45,7 @@ pub struct Runtime {
     secret_manager: Option<Arc<SecretManager>>,
     worker_manager: Option<Arc<WorkerManager>>,
     tool_registry: Arc<ToolRegistry>,
+    mcp_manager: Arc<McpManager>,
     pending_approvals: PendingApprovals,
     scheduler: Option<SchedulerHandle>,
     resources_dir: PathBuf,
@@ -69,13 +72,15 @@ impl Runtime {
             Arc::clone(&auth_config), Arc::clone(&browser_queue),
         );
 
-        let mut tool_registry = ToolRegistry::default();
+        let tool_registry = Arc::new(ToolRegistry::default());
         tool_registry.register(tools::query_data::QueryDataTool);
         tool_registry.register(tools::mutate_data::MutateDataTool);
         tool_registry.register(tools::browser::BrowserTool::new(browser_queue));
         tool_registry.register(tools::list_apps::ListAppsTool);
         tool_registry.register(tools::describe_app::DescribeAppTool);
         tool_registry.register(tools::list_integrations::ListIntegrationsTool);
+
+        let mcp_manager = Arc::new(McpManager::new(Arc::clone(&tool_registry)));
 
         Self {
             pg,
@@ -84,7 +89,8 @@ impl Runtime {
             auth_config,
             secret_manager: None,
             worker_manager: None,
-            tool_registry: Arc::new(tool_registry),
+            tool_registry,
+            mcp_manager,
             pending_approvals: PendingApprovals::new(),
             scheduler: None,
             resources_dir,
@@ -121,6 +127,8 @@ impl Runtime {
         let secrets = self.secret_manager.as_ref().unwrap();
         wm.start_deployed_apps(&pool, secrets).await;
 
+        extensions::mcp::start_registered_servers(&pool, secrets, &self.mcp_manager).await;
+
         self.pool = Some(pool);
         info!("runtime boot complete");
         Ok(())
@@ -128,6 +136,7 @@ impl Runtime {
 
     pub async fn shutdown(&mut self) -> Result<(), RuntimeError> {
         info!("runtime shutting down");
+        self.mcp_manager.stop_all().await;
         if let Some(ref wm) = self.worker_manager {
             wm.stop_all().await;
         }
@@ -186,6 +195,10 @@ impl Runtime {
 
     pub fn tool_registry(&self) -> &Arc<ToolRegistry> {
         &self.tool_registry
+    }
+
+    pub fn mcp_manager(&self) -> &Arc<McpManager> {
+        &self.mcp_manager
     }
 
     pub fn pending_approvals(&self) -> &PendingApprovals {

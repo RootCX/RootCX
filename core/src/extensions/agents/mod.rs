@@ -94,7 +94,7 @@ impl RuntimeExtension for AgentExtension {
         Ok(())
     }
 
-    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, _installed_by: uuid::Uuid, _tool_names: &[String]) -> Result<(), RuntimeError> {
+    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, _installed_by: uuid::Uuid, _tools: &[(String, String)]) -> Result<(), RuntimeError> {
         let app_id = &manifest.app_id;
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id = $1)",

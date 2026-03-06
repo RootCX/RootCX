@@ -359,7 +359,7 @@ async fn supervisor_loop(
                                 }).await;
                             }
 
-                            let tool = config.tool_registry.get(&tool_name).cloned();
+                            let tool = config.tool_registry.get(&tool_name);
                             let pool = config.pool.clone();
                             let aid = config.app_id.clone();
                             let out_tx = outbound_tx.clone();
