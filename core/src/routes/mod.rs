@@ -117,7 +117,7 @@ pub use config::{get_ai_config, get_forge_config, set_ai_config};
 pub use crud::{bulk_create_records, create_record, delete_record, get_record, list_records, query_records, update_record};
 pub use deploy::deploy_backend;
 pub use jobs::{enqueue_job, get_job, list_jobs};
-pub use secrets::{delete_secret, list_scopes, list_secrets, set_secret};
+pub use secrets::{delete_secret, list_secrets, set_secret};
 pub use secrets::{delete_platform_secret, get_platform_env, list_platform_secrets, set_platform_secret};
 pub use upload::upload_file;
 pub use introspection::{execute_query, list_schemas, list_tables};

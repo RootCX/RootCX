@@ -21,14 +21,9 @@ const put = (body: unknown): RequestInit => ({
   method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
 });
 
-function scopePath(scope: string) {
-  return scope === "_platform" ? "/api/v1/platform/secrets" : `/api/v1/apps/${encodeURIComponent(scope)}/secrets`;
-}
-
-export const listSecretScopes = () => json<string[]>("/api/v1/secrets/scopes");
-export const listSecrets = (scope = "_platform") => json<string[]>(scopePath(scope));
-export const setSecret = (key: string, value: string, scope = "_platform") => send(scopePath(scope), post({ key, value }));
-export const deleteSecret = (key: string, scope = "_platform") => send(`${scopePath(scope)}/${encodeURIComponent(key)}`, { method: "DELETE" });
+export const listSecrets = () => json<string[]>("/api/v1/platform/secrets");
+export const setSecret = (key: string, value: string) => send("/api/v1/platform/secrets", post({ key, value }));
+export const deleteSecret = (key: string) => send(`/api/v1/platform/secrets/${encodeURIComponent(key)}`, { method: "DELETE" });
 
 export const getAiConfig = () => json<AiConfig | null>("/api/v1/config/ai");
 export const saveAiConfig = (config: AiConfig) => send("/api/v1/config/ai", put(config));

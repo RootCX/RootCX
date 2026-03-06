@@ -272,11 +272,7 @@ pub struct RateLimit {
 #[serde(rename_all = "camelCase")]
 pub struct McpServerConfig {
     pub name: String,
-    #[serde(default)]
-    pub description: Option<String>,
     pub transport: McpTransport,
-    #[serde(default)]
-    pub env: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
