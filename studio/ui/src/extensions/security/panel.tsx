@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { Shield, Users, Plus, Trash2, RefreshCw, ChevronRight, Search, ArrowLeft } from "lucide-react";
+import { Shield, Users, Plus, Trash2, RefreshCw, ChevronRight, Search, ArrowLeft, Info } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -7,7 +7,7 @@ import { Label } from "@/components/ui/label";
 import { ListRow } from "@/components/ui/list-row";
 import { Popover, PopoverTrigger, PopoverContent } from "@/components/ui/popover";
 import { ToggleDot } from "@/components/ui/toggle-dot";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import {
   Dialog, DialogTrigger, DialogContent,
   DialogHeader, DialogBody, DialogFooter,
@@ -356,8 +356,17 @@ function RoleDetailView({ role, availablePermissions, isAdmin, onBack }: {
                       active={isWildcard || role.permissions.includes(p.key)}
                       disabled={!canToggle}
                     />
-                    <code className="text-xs">{p.key}</code>
-                    <span className="text-xs text-muted-foreground">{p.description}</span>
+                    <code className="flex-1 min-w-0 truncate text-xs">{p.key}</code>
+                    {p.description && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Info className="h-3 w-3 shrink-0 text-muted-foreground/50 hover:text-muted-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent side="top" className="max-w-xs text-xs">
+                          {p.description}
+                        </TooltipContent>
+                      </Tooltip>
+                    )}
                   </ListRow>
                 );
               })}

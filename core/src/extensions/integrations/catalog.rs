@@ -62,7 +62,7 @@ pub async fn deploy_from_catalog(
     State(rt): State<SharedRuntime>,
     Path(id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (catalog_path, app_dir, bun_bin, pool, secrets, wm, tool_names) = {
+    let (catalog_path, app_dir, bun_bin, pool, secrets, wm, tools) = {
         let g = rt.lock().await;
         (
             g.resources_dir().join("integrations").join(&id),
@@ -71,7 +71,7 @@ pub async fn deploy_from_catalog(
             g.pool().cloned().ok_or(ApiError::NotReady)?,
             g.secret_manager().cloned().ok_or(ApiError::NotReady)?,
             g.worker_manager().cloned().ok_or(ApiError::NotReady)?,
-            g.tool_registry().all_summaries().into_iter().map(|(n, _)| n).collect::<Vec<_>>(),
+            g.tool_registry().all_summaries(),
         )
     };
 
@@ -88,7 +88,7 @@ pub async fn deploy_from_catalog(
     // Brief re-lock: install_app needs &[Box<dyn RuntimeExtension>] which borrows Runtime
     {
         let g = rt.lock().await;
-        crate::manifest::install_app(&pool, &manifest, g.extensions(), uuid::Uuid::nil(), &tool_names).await?;
+        crate::manifest::install_app(&pool, &manifest, g.extensions(), uuid::Uuid::nil(), &tools).await?;
     }
 
     if app_dir.exists() {

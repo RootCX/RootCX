@@ -63,9 +63,12 @@ impl RuntimeExtension for RbacExtension {
         Ok(())
     }
 
-    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, installed_by: Uuid, tool_names: &[String]) -> Result<(), RuntimeError> {
+    async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, installed_by: Uuid, tools: &[(String, String)]) -> Result<(), RuntimeError> {
         let app_id = &manifest.app_id;
-        let tool_perms = tool_names.iter().map(|n| (format!("tool.{n}"), format!("use {n} tool")));
+        let tool_perms = tools.iter().map(|(n, desc)| {
+            let d = if desc.is_empty() { n.clone() } else { desc.clone() };
+            (format!("tool.{n}"), d)
+        });
 
         // Manifest permissions = source of truth; auto-CRUD only when absent
         let (keys, descs): (Vec<String>, Vec<String>) = if let Some(c) = &manifest.permissions {

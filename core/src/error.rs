@@ -25,4 +25,7 @@ pub enum RuntimeError {
 
     #[error("auth error: {0}")]
     Auth(String),
+
+    #[error("MCP error: {0}")]
+    Mcp(String),
 }

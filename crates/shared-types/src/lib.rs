@@ -270,6 +270,24 @@ pub struct RateLimit {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct McpServerConfig {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub transport: McpTransport,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum McpTransport {
+    Stdio { command: String, #[serde(default)] args: Vec<String> },
+    Sse { url: String, #[serde(default)] headers: std::collections::HashMap<String, String> },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolDescriptor {
     pub name: String,
     pub description: String,

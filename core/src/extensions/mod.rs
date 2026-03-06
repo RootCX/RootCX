@@ -4,6 +4,7 @@ pub mod auth;
 pub mod browser;
 pub mod integrations;
 pub mod logs;
+pub mod mcp;
 pub mod rbac;
 
 use std::sync::Arc;
@@ -33,7 +34,7 @@ pub trait RuntimeExtension: Send + Sync {
         Ok(())
     }
 
-    async fn on_app_installed(&self, _pool: &PgPool, _manifest: &AppManifest, _installed_by: Uuid, _tool_names: &[String]) -> Result<(), RuntimeError> {
+    async fn on_app_installed(&self, _pool: &PgPool, _manifest: &AppManifest, _installed_by: Uuid, _tools: &[(String, String)]) -> Result<(), RuntimeError> {
         Ok(())
     }
 
@@ -56,5 +57,6 @@ pub fn builtin_extensions(
         Box::new(agents::AgentExtension),
         Box::new(browser::BrowserExtension::with_queue(browser_queue)),
         Box::new(integrations::IntegrationsExtension),
+        Box::new(mcp::McpExtension),
     ]
 }
