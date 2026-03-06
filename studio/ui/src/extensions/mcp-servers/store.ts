@@ -8,7 +8,6 @@ export interface McpServer {
 
 export interface McpServerConfig {
   name: string;
-  description?: string;
   transport: { type: "stdio"; command: string; args?: string[] } | { type: "sse"; url: string; headers?: Record<string, string> };
 }
 

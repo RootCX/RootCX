@@ -48,8 +48,8 @@ impl RuntimeExtension for McpExtension {
     }
 }
 
-async fn mcp_env(pool: &PgPool, secrets: &SecretManager, name: &str) -> HashMap<String, String> {
-    secrets.get_all_for_app(pool, &format!("_mcp.{name}")).await
+async fn mcp_env(pool: &PgPool, secrets: &SecretManager) -> HashMap<String, String> {
+    secrets.get_all_for_app(pool, "_platform").await
         .unwrap_or_default().into_iter().collect()
 }
 
@@ -75,12 +75,12 @@ pub async fn start_registered_servers(pool: &PgPool, secrets: &SecretManager, mc
         Err(e) => { error!("load mcp_servers: {e}"); return; }
     };
 
+    let env = mcp_env(pool, secrets).await;
     for (name, config_val) in rows {
         let Ok(config) = serde_json::from_value::<McpServerConfig>(config_val) else {
             error!(server = %name, "invalid mcp config in DB");
             continue;
         };
-        let env = mcp_env(pool, secrets, &name).await;
         match mcp.start_server(&config, &env).await {
             Ok(_) => {},
             Err(e) => {
@@ -144,7 +144,7 @@ async fn register_server(
 
     if body.auto_start {
         let mcp = rt.lock().await.mcp_manager().clone();
-        let env = mcp_env(&pool, &secrets, name).await;
+        let env = mcp_env(&pool, &secrets).await;
         match mcp.start_server(&body.config, &env).await {
             Ok(tools) => {
                 set_status(&pool, name, "running").await;
@@ -194,7 +194,7 @@ async fn start_server(
 
     let config: McpServerConfig = serde_json::from_value(config_val)
         .map_err(|e| ApiError::Internal(format!("bad config: {e}")))?;
-    let env = mcp_env(&pool, &secrets, &name).await;
+    let env = mcp_env(&pool, &secrets).await;
     let tools = mcp.start_server(&config, &env).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     set_status(&pool, &name, "running").await;
     sync_tools(&pool, &mcp).await;

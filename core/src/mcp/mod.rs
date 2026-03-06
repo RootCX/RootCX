@@ -39,14 +39,12 @@ impl McpManager {
         Self { clients: RwLock::new(HashMap::new()), tool_registry }
     }
 
-    pub async fn start_server(&self, config: &McpServerConfig, env_overrides: &HashMap<String, String>) -> Result<Vec<String>, RuntimeError> {
+    pub async fn start_server(&self, config: &McpServerConfig, env: &HashMap<String, String>) -> Result<Vec<String>, RuntimeError> {
         let name = &config.name;
-        let mut env = config.env.clone();
-        env.extend(env_overrides.clone());
 
         let client = match &config.transport {
             McpTransport::Stdio { command, args } => {
-                Arc::new(McpClient::connect_stdio(name, command, args, &env, None).await?)
+                Arc::new(McpClient::connect_stdio(name, command, args, env, None).await?)
             }
             McpTransport::Sse { .. } => {
                 return Err(RuntimeError::Mcp("SSE transport not yet implemented".into()));

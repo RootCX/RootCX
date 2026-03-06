@@ -99,16 +99,14 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
     if (!valid) return;
     setSaving(true); setError(null);
     try {
-      const serverName = name.trim();
       const secrets = envRows.filter(r => r.key.trim() && r.value);
+      for (const s of secrets) await setSecret(s.key.trim(), s.value);
       await register({
-        name: serverName,
+        name: name.trim(),
         transport: transport === "stdio"
           ? { type: "stdio", command: command.trim(), args: args.trim() ? args.trim().split(/\s+/) : [] }
           : { type: "sse", url: url.trim() },
-      }, secrets.length === 0);
-      for (const s of secrets) await setSecret(s.key.trim(), s.value, `_mcp.${serverName}`);
-      if (secrets.length > 0) await start(serverName);
+      }, true);
       onDone();
     } catch (e) { setError(errMsg(e)); }
     finally { setSaving(false); }
