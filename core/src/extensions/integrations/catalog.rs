@@ -122,15 +122,22 @@ pub async fn undeploy(
     State(rt): State<SharedRuntime>,
     Path(id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (app_dir, pool, wm) = {
+    let (app_dir, pool, secrets, wm) = {
         let g = rt.lock().await;
         let app_dir = g.data_dir().join("apps").join(&id);
         let pool = g.pool().cloned().ok_or(ApiError::NotReady)?;
+        let secrets = g.secret_manager().cloned().ok_or(ApiError::NotReady)?;
         let wm = g.worker_manager().cloned().ok_or(ApiError::NotReady)?;
-        (app_dir, pool, wm)
+        (app_dir, pool, secrets, wm)
     };
 
     let _ = wm.stop_app(&id).await;
+
+    let manifest = super::routes::get_integration_manifest(&pool, &id).await?;
+    let secret_map = super::routes::platform_secret_map(&manifest);
+    for (_, secret_key) in &secret_map {
+        let _ = secrets.delete(&pool, "_platform", secret_key).await;
+    }
 
     crate::manifest::uninstall_app(&pool, &id).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
