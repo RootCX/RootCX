@@ -1,0 +1,339 @@
+{
+  "appId": "peppol",
+  "name": "Peppol E-Invoicing",
+  "version": "0.1.0",
+  "type": "integration",
+  "description": "Send and receive electronic invoices via the Peppol network (UBL 2.1, BIS Billing 3.0)",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "clientId": { "type": "string", "description": "Dokapi OAuth 2.0 Client ID" },
+      "clientSecret": { "type": "string", "description": "Dokapi OAuth 2.0 Client Secret" },
+      "baseUrl": { "type": "string", "description": "Dokapi API base URL", "default": "https://peppol-api.dokapi.io/v1" },
+      "identityUrl": { "type": "string", "description": "Dokapi OAuth token URL", "default": "https://portal.dokapi.io/api/oauth2/token" },
+      "webhookSecret": { "type": "string", "description": "HMAC secret key for verifying Dokapi webhook signatures" }
+    },
+    "required": ["clientId", "clientSecret"]
+  },
+  "actions": [
+    {
+      "id": "register_participant",
+      "name": "Register Peppol Participant",
+      "description": "Register an organization on the Peppol network via Dokapi SMP",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "vatNumber": { "type": "string", "description": "VAT or business identifier (e.g. BE0501598777)" },
+          "companyName": { "type": "string", "description": "Company name for Peppol business card" },
+          "countryCode": { "type": "string", "description": "ISO 3166-1 alpha-2 country code", "default": "BE" }
+        },
+        "required": ["vatNumber", "companyName"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "peppolId": { "type": "string" },
+          "dokapiUlid": { "type": "string" },
+          "status": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "deregister_participant",
+      "name": "Deregister Peppol Participant",
+      "description": "Remove an organization from the Peppol network",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "peppolId": { "type": "string", "description": "Peppol participant ID (e.g. 0208:0501598777)" }
+        },
+        "required": ["peppolId"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": { "success": { "type": "boolean" } }
+      }
+    },
+    {
+      "id": "register_document_types",
+      "name": "Register Document Types",
+      "description": "Register document types for a participant to receive invoices on Peppol",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "peppolId": { "type": "string", "description": "Peppol participant ID" },
+          "countryCode": { "type": "string", "default": "BE" }
+        },
+        "required": ["peppolId"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "documentTypes": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    {
+      "id": "refresh_participant_status",
+      "name": "Refresh Participant Status",
+      "description": "Check current registration status from Dokapi",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "dokapiUlid": { "type": "string", "description": "Dokapi participant registration ULID" }
+        },
+        "required": ["dokapiUlid"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string" },
+          "peppolId": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "send_invoice",
+      "name": "Send Invoice",
+      "description": "Send a UBL invoice via the Peppol network",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "senderPeppolId": { "type": "string", "description": "Sender Peppol ID" },
+          "receiverPeppolId": { "type": "string", "description": "Receiver Peppol ID" },
+          "countryCode": { "type": "string", "default": "BE" },
+          "xml": { "type": "string", "description": "Pre-generated UBL XML (provide this OR invoiceParams)" },
+          "invoiceParams": {
+            "type": "object",
+            "description": "Structured invoice data for UBL generation",
+            "properties": {
+              "invoiceNumber": { "type": "string" },
+              "issueDate": { "type": "string", "description": "YYYY-MM-DD" },
+              "dueDate": { "type": "string", "description": "YYYY-MM-DD" },
+              "currency": { "type": "string", "default": "EUR" },
+              "buyerReference": { "type": "string" },
+              "orderReference": { "type": "string" },
+              "contractReference": { "type": "string" },
+              "projectReference": { "type": "string" },
+              "note": { "type": "string" },
+              "supplier": { "type": "object", "description": "InvoiceParty: peppolId, name, vatNumber, street, city, postalCode, countryCode" },
+              "customer": { "type": "object", "description": "InvoiceParty: peppolId, name, vatNumber, street, city, postalCode, countryCode" },
+              "lines": { "type": "array", "description": "Array of {id, description, quantity, unitPrice, taxPercent, lineAmount}" },
+              "taxTotal": { "type": "number" },
+              "taxableAmount": { "type": "number" },
+              "payableAmount": { "type": "number" },
+              "paymentInfo": { "type": "object", "description": "{iban, bic?, bankName?, accountName?}" },
+              "documentReferences": { "type": "array", "description": "Additional document references with optional attachments" }
+            },
+            "required": ["invoiceNumber", "issueDate", "dueDate", "supplier", "customer", "lines", "taxTotal", "taxableAmount", "payableAmount"]
+          }
+        },
+        "required": ["senderPeppolId", "receiverPeppolId"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "dokapiUlid": { "type": "string" },
+          "status": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "send_test_invoice",
+      "name": "Send Test Invoice",
+      "description": "Send a test invoice to self for verifying the integration",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "peppolId": { "type": "string" },
+          "vatNumber": { "type": "string" }
+        },
+        "required": ["peppolId", "vatNumber"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "dokapiUlid": { "type": "string" },
+          "invoiceNumber": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "validate_document",
+      "name": "Validate UBL Document",
+      "description": "Validate a UBL XML document against Peppol rules before sending",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "xml": { "type": "string", "description": "UBL XML content to validate" }
+        },
+        "required": ["xml"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "valid": { "type": "boolean" },
+          "errors": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    {
+      "id": "generate_ubl",
+      "name": "Generate UBL Invoice XML",
+      "description": "Generate Peppol BIS Billing 3.0 compliant UBL 2.1 XML from structured invoice data",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "invoiceParams": { "type": "object", "description": "Full InvoiceParams object (see send_invoice schema)" }
+        },
+        "required": ["invoiceParams"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "xml": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "parse_ubl",
+      "name": "Parse UBL Document",
+      "description": "Parse a UBL XML document (Invoice or CreditNote) and extract metadata",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "xml": { "type": "string", "description": "UBL XML content (may include SBD wrapper)" }
+        },
+        "required": ["xml"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "documentNumber": { "type": "string" },
+          "documentType": { "type": "string" },
+          "issueDate": { "type": "string" },
+          "currency": { "type": "string" },
+          "amount": { "type": "number" },
+          "sender": { "type": "object" },
+          "receiver": { "type": "object" },
+          "attachments": { "type": "array" }
+        }
+      }
+    },
+    {
+      "id": "list_webhooks",
+      "name": "List Webhooks",
+      "description": "List all registered Dokapi webhooks",
+      "inputSchema": { "type": "object", "properties": {} },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "webhooks": { "type": "array" }
+        }
+      }
+    },
+    {
+      "id": "register_webhook",
+      "name": "Register Webhook",
+      "description": "Register a Dokapi webhook for document/participant status events",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "url": { "type": "string", "description": "Webhook callback URL" },
+          "events": { "type": "array", "items": { "type": "string" }, "description": "Event types (e.g. outgoing-peppol-documents.sent, incoming-peppol-documents.received)" }
+        },
+        "required": ["url", "events"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ulid": { "type": "string" },
+          "url": { "type": "string" },
+          "events": { "type": "array" }
+        }
+      }
+    },
+    {
+      "id": "delete_webhook",
+      "name": "Delete Webhook",
+      "description": "Delete a registered Dokapi webhook",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "ulid": { "type": "string", "description": "Webhook ULID to delete" }
+        },
+        "required": ["ulid"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": { "success": { "type": "boolean" } }
+      }
+    },
+    {
+      "id": "generate_webhook_secret",
+      "name": "Generate Webhook Secret",
+      "description": "Generate or regenerate HMAC secret key for webhook signature verification",
+      "inputSchema": { "type": "object", "properties": {} },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "secretKey": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "download_document",
+      "name": "Download Incoming Document",
+      "description": "Download and parse an incoming Peppol document from a pre-signed URL",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "presignedUrl": { "type": "string", "description": "Pre-signed S3 URL from incoming document webhook" }
+        },
+        "required": ["presignedUrl"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "xml": { "type": "string" },
+          "parsed": { "type": "object" }
+        }
+      }
+    },
+    {
+      "id": "confirm_document_download",
+      "name": "Confirm Document Download",
+      "description": "Confirm to Dokapi that an incoming document was successfully downloaded and stored. CRITICAL: document is deleted from Dokapi after confirmation.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "documentUlid": { "type": "string", "description": "Incoming document ULID" }
+        },
+        "required": ["documentUlid"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": { "success": { "type": "boolean" } }
+      }
+    },
+    {
+      "id": "push_business_card",
+      "name": "Push Business Card to Directory",
+      "description": "Publish participant to the public Peppol Directory for discoverability",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "peppolId": { "type": "string", "description": "Peppol participant ID" }
+        },
+        "required": ["peppolId"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": { "success": { "type": "boolean" } }
+      }
+    }
+  ],
+  "webhooks": ["document_status", "participant_status", "incoming_document"],
+  "instructions": "Peppol e-invoicing integration via Dokapi access point.\n\nTypical registration flow:\n1. `register_participant` with VAT number and company name\n2. `register_document_types` to enable receiving documents\n3. `push_business_card` to appear in Peppol Directory\n4. `register_webhook` for async status updates\n\nSending an invoice:\n- Provide `invoiceParams` for automatic UBL 2.1 generation, or `xml` for pre-built UBL\n- InvoiceParams supplier/customer require: peppolId, name, vatNumber, street, city, postalCode, countryCode\n- Each invoice line: id, description, quantity, unitPrice, taxPercent, lineAmount\n- Optional: paymentInfo (IBAN/BIC), documentReferences (embedded PDF attachments)\n\nWebhook events from Dokapi:\n- `outgoing-peppol-documents.sent/delivered/failed` - document delivery status\n- `participant-registrations.active/failed` - registration completion\n- `incoming-peppol-documents.received` - new incoming document (must download and confirm)\n\nCountry support: BE, NL, FR, DE, IT, ES, AT, LU, PT, IE, FI, SE, NO, DK, PL, CZ, RO, BG, HR, SI, SK, EE, LV, LT, HU, CY, MT, GR, SG, AU, NZ, US, JP.\n\nPeppol ID format: `{ICD}:{identifier}` (e.g. `0208:0501598777` for Belgian KBO).",
+  "entities": []
+}
