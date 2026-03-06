@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from "crypto";
 import { XMLParser } from "fast-xml-parser";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -653,10 +654,6 @@ async function deleteWebhook(config: Config, input: any) {
   return { success: true };
 }
 
-async function generateWebhookSecret(config: Config) {
-  return dokapiRequest(config, "POST", "/webhooks/secretKey");
-}
-
 async function downloadDocument(_config: Config, input: any) {
   const { presignedUrl } = input;
   if (!presignedUrl) throw new Error("presignedUrl is required");
@@ -697,7 +694,6 @@ const actions: Record<string, (config: Config, input: any) => Promise<any> | any
   list_webhooks: listWebhooks,
   register_webhook: registerWebhook,
   delete_webhook: deleteWebhook,
-  generate_webhook_secret: generateWebhookSecret,
   download_document: downloadDocument,
   confirm_document_download: confirmDocumentDownload,
   push_business_card: pushBusinessCard,
@@ -709,8 +705,22 @@ const STATUS_MAP: Record<string, string> = {
   NEW: "sending", SENDING: "sending", SENT: "sent", DELIVERED: "delivered", FAILED: "failed",
 };
 
+function verifySignature(secret: string, rawBody: string, signature: string): boolean {
+  const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
+  if (expected.length !== signature.length) return false;
+  return timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+}
+
 async function handleWebhook(params: any) {
-  const { body, config } = params;
+  const { body, config, rawBody, headers } = params;
+
+  if (config?.webhookSecret) {
+    const signature = headers?.["x-signature"];
+    if (!signature || !rawBody) throw new Error("missing webhook signature");
+    const raw = Buffer.from(rawBody, "base64").toString("utf-8");
+    if (!verifySignature(config.webhookSecret, raw, signature)) throw new Error("invalid webhook signature");
+  }
+
   if (!body?.event || !body?.body) return { skipped: true, reason: "invalid payload" };
 
   const { event: eventType, body: data } = body;
@@ -740,7 +750,6 @@ async function handleWebhook(params: any) {
       const { ulid: documentUlid, presignedUrl, sender, receiver, instanceIdentifier, as4MessageId } = data;
       if (!documentUlid || !presignedUrl) return { event: "incoming_document", error: "missing ulid or presignedUrl" };
 
-      // Download and parse in one shot
       let xml: string | undefined;
       let parsed: ParsedUBLDocument | undefined;
       try {
@@ -757,12 +766,7 @@ async function handleWebhook(params: any) {
         };
       }
 
-      // Confirm download to Dokapi so it can be deleted from their side
-      try {
-        await dokapiRequest(config, "POST", `/incoming-peppol-documents/${documentUlid}/confirm`, {});
-      } catch (err: any) {
-        // Non-fatal: document was downloaded, confirmation can be retried
-      }
+      try { await dokapiRequest(config, "POST", `/incoming-peppol-documents/${documentUlid}/confirm`, {}); } catch {}
 
       return {
         event: "incoming_document",
@@ -781,6 +785,13 @@ async function handleWebhook(params: any) {
 // ─── IPC Protocol ────────────────────────────────────────────────────────────
 
 const rpcHandlers: Record<string, (params: any) => Promise<any>> = {
+  async __bind(params) {
+    const { config } = params;
+    if (!config?.clientId || !config?.clientSecret) return {};
+    const secret = await dokapiRequest<string>(config, "POST", "/webhooks/secretKey");
+    return { mergeConfig: { webhookSecret: secret } };
+  },
+
   async __integration(params) {
     const { action, input, config } = params;
     if (!config?.clientId || !config?.clientSecret) throw new Error("Dokapi credentials not configured");
