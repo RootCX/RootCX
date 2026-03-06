@@ -49,6 +49,17 @@ pub async fn list_secrets(
     Ok(Json(SecretManager::list_keys(&pool, &app_id).await?))
 }
 
+pub async fn list_scopes(
+    _identity: Identity,
+    State(rt): State<SharedRuntime>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let (pool, _) = pool_and_secrets(&rt).await?;
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT app_id FROM rootcx_system.secrets ORDER BY app_id"
+    ).fetch_all(&pool).await?;
+    Ok(Json(rows.into_iter().map(|(s,)| s).collect()))
+}
+
 const PLATFORM_SCOPE: &str = "_platform";
 
 fn validate_key_name(key: &str) -> Result<(), ApiError> {
