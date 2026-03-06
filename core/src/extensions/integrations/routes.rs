@@ -6,6 +6,8 @@ use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
+use base64::Engine;
+
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::extensions::rbac::policy::resolve_permissions;
@@ -48,8 +50,14 @@ pub async fn list_integrations(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<JsonValue>>, ApiError> {
-    let pool = routes::pool(&rt).await?;
-    Ok(Json(query_installed_integrations(&pool).await?))
+    let (pool, secrets) = routes::pool_and_secrets(&rt).await?;
+    let mut items = query_installed_integrations(&pool).await?;
+    for item in &mut items {
+        let map = platform_secret_map(item);
+        let configured = is_configured(&pool, &secrets, item, &map).await?;
+        item.as_object_mut().unwrap().insert("configured".into(), json!(configured));
+    }
+    Ok(Json(items))
 }
 
 pub async fn list_bindings(
@@ -75,8 +83,6 @@ pub async fn list_bindings(
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BindRequest {
     integration_id: String,
-    #[serde(default)]
-    config: Option<JsonValue>,
 }
 
 pub async fn bind(
@@ -122,14 +128,10 @@ pub async fn bind(
     .fetch_one(&pool)
     .await?;
 
-    let secret_map = platform_secret_map(&manifest);
-    if let Some(config) = &body.config {
-        save_config_secrets(&pool, &secrets, &secret_map, config).await?;
-    }
-
     sync_integration_permissions(&pool, &app_id, &body.integration_id, &manifest).await?;
 
     let wm = routes::wm(&rt).await?;
+    let secret_map = platform_secret_map(&manifest);
     let config = fetch_config(&pool, &secrets, &secret_map).await?;
     if let Ok(result) = wm
         .rpc(
@@ -150,37 +152,16 @@ pub async fn bind(
     Ok(Json(json!({ "message": "integration bound", "webhookToken": token })))
 }
 
-#[derive(Deserialize)]
-pub(crate) struct UpdateConfigRequest {
-    config: JsonValue,
-}
-
-pub async fn update_config(
+pub async fn save_platform_config(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
-    Path((app_id, integration_id)): Path<(String, String)>,
-    Json(body): Json<UpdateConfigRequest>,
+    Path(integration_id): Path<String>,
+    Json(config): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, secrets) = routes::pool_and_secrets(&rt).await?;
-
-    let bound: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM rootcx_system.integration_bindings
-         WHERE consumer_app_id = $1 AND integration_id = $2)",
-    )
-    .bind(&app_id)
-    .bind(&integration_id)
-    .fetch_one(&pool)
-    .await?;
-
-    if !bound {
-        return Err(ApiError::NotFound("binding not found".into()));
-    }
-
     let manifest = get_integration_manifest(&pool, &integration_id).await?;
-    let secret_map = platform_secret_map(&manifest);
-    save_config_secrets(&pool, &secrets, &secret_map, &body.config).await?;
-
-    Ok(Json(json!({ "message": "config updated" })))
+    save_config_secrets(&pool, &secrets, &platform_secret_map(&manifest), &config).await?;
+    Ok(Json(json!({ "message": "config saved" })))
 }
 
 pub async fn unbind(
@@ -299,7 +280,6 @@ pub async fn webhook_ingress(
     let payload = serde_json::from_slice(&body)
         .unwrap_or_else(|_| json!(String::from_utf8_lossy(&body).into_owned()));
 
-    use base64::Engine;
     let raw_body = base64::engine::general_purpose::STANDARD.encode(&body);
 
     let result = wm
@@ -340,6 +320,28 @@ async fn save_config_secrets(
         }
     }
     Ok(())
+}
+
+async fn is_configured(
+    pool: &sqlx::PgPool,
+    secrets: &crate::secrets::SecretManager,
+    manifest: &JsonValue,
+    secret_map: &[(String, String)],
+) -> Result<bool, ApiError> {
+    if secret_map.is_empty() { return Ok(true); }
+    let required: Vec<&str> = manifest.pointer("/configSchema/required")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    for (field, key) in secret_map {
+        if required.contains(&field.as_str()) {
+            if secrets.get(pool, PLATFORM_SCOPE, key).await
+                .map_err(|e| ApiError::Internal(e.to_string()))?.is_none() {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 pub(super) async fn resolve_config(

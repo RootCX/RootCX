@@ -4,7 +4,7 @@ pub(crate) mod routes;
 
 use async_trait::async_trait;
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use sqlx::PgPool;
 use tracing::info;
 
@@ -44,11 +44,9 @@ impl RuntimeExtension for IntegrationsExtension {
             .route("/api/v1/integrations/catalog", get(catalog::list_catalog))
             .route("/api/v1/integrations/catalog/{id}/deploy", post(catalog::deploy_from_catalog))
             .route("/api/v1/integrations/catalog/{id}", axum::routing::delete(catalog::undeploy))
+            .route("/api/v1/integrations/{integration_id}/config", put(routes::save_platform_config))
             .route("/api/v1/apps/{app_id}/integrations", get(routes::list_bindings).post(routes::bind))
-            .route(
-                "/api/v1/apps/{app_id}/integrations/{integration_id}",
-                axum::routing::delete(routes::unbind).patch(routes::update_config),
-            )
+            .route("/api/v1/apps/{app_id}/integrations/{integration_id}", axum::routing::delete(routes::unbind))
             .route("/api/v1/apps/{app_id}/integrations/{integration_id}/actions/{action_id}", post(routes::execute_action))
             .route("/api/v1/apps/{app_id}/integrations/{integration_id}/auth", get(auth::status).delete(auth::disconnect))
             .route("/api/v1/apps/{app_id}/integrations/{integration_id}/auth/start", post(auth::start))
