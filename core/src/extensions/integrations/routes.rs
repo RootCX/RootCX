@@ -121,6 +121,29 @@ pub async fn bind(
 
     sync_integration_permissions(&pool, &app_id, &body.integration_id, &manifest).await?;
 
+    let wm = routes::wm(&rt).await?;
+    let config = fetch_config(&pool, &secrets, &app_id, &body.integration_id).await?;
+    if let Ok(result) = wm
+        .rpc(
+            &body.integration_id,
+            Uuid::new_v4().to_string(),
+            "__bind".into(),
+            json!({ "config": config, "consumerAppId": app_id, "webhookToken": token }),
+            None,
+        )
+        .await
+    {
+        if let Some(merge) = result.get("mergeConfig").and_then(|v| v.as_object()) {
+            let mut current = match config {
+                JsonValue::Object(_) => config,
+                _ => json!({}),
+            };
+            current.as_object_mut().unwrap().extend(merge.iter().map(|(k, v)| (k.clone(), v.clone())));
+            let key = format!("_integration.{}", body.integration_id);
+            let _ = secrets.set(&pool, &app_id, &key, &current.to_string()).await;
+        }
+    }
+
     Ok(Json(json!({ "message": "integration bound", "webhookToken": token })))
 }
 

@@ -10,8 +10,7 @@
       "clientId": { "type": "string", "description": "Dokapi OAuth 2.0 Client ID" },
       "clientSecret": { "type": "string", "description": "Dokapi OAuth 2.0 Client Secret" },
       "baseUrl": { "type": "string", "description": "Dokapi API base URL", "default": "https://peppol-api.dokapi.io/v1" },
-      "identityUrl": { "type": "string", "description": "Dokapi OAuth token URL", "default": "https://portal.dokapi.io/api/oauth2/token" },
-      "webhookSecret": { "type": "string", "description": "HMAC secret key for verifying Dokapi webhook signatures" }
+      "identityUrl": { "type": "string", "description": "Dokapi OAuth token URL", "default": "https://portal.dokapi.io/api/oauth2/token" }
     },
     "required": ["clientId", "clientSecret"]
   },
@@ -267,18 +266,6 @@
       "outputSchema": {
         "type": "object",
         "properties": { "success": { "type": "boolean" } }
-      }
-    },
-    {
-      "id": "generate_webhook_secret",
-      "name": "Generate Webhook Secret",
-      "description": "Generate or regenerate HMAC secret key for webhook signature verification",
-      "inputSchema": { "type": "object", "properties": {} },
-      "outputSchema": {
-        "type": "object",
-        "properties": {
-          "secretKey": { "type": "string" }
-        }
       }
     },
     {

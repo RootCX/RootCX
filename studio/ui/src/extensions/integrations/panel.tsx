@@ -129,20 +129,6 @@ function IntegrationCard({ integration, status, hasApp }: {
         </div>
       )}
 
-      {/* Active — user auth hint */}
-      {active && integration.userAuth && (
-        <p className="mt-1.5 text-[10px] text-muted-foreground">
-          Users connect their own account from the app via the SDK.
-        </p>
-      )}
-
-      {active && integration.actions.length > 0 && (
-        <div className="mt-1.5 flex flex-wrap gap-1">
-          {integration.actions.map(a => (
-            <span key={a.id} className="rounded bg-accent px-1.5 py-0.5 text-[10px] text-foreground" title={a.description}>{a.name}</span>
-          ))}
-        </div>
-      )}
 
       {error && <div className={`mt-1.5 ${errBox}`}>{error}</div>}
     </div>
