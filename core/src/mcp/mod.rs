@@ -56,7 +56,7 @@ impl McpManager {
         let tools = client.list_tools().await?;
         let registered: Vec<String> = tools.into_iter().map(|tool| {
             let remote_name = tool.name.clone();
-            let namespaced = format!("{name}.{remote_name}");
+            let namespaced = format!("{name}_{remote_name}");
             self.tool_registry.register(McpTool {
                 remote_name,
                 descriptor: ToolDescriptor {
@@ -77,7 +77,7 @@ impl McpManager {
     pub async fn stop_server(&self, name: &str) -> Result<(), RuntimeError> {
         if let Some(c) = self.clients.write().await.remove(name) {
             c.shutdown().await;
-            self.tool_registry.unregister_prefix(&format!("{name}."));
+            self.tool_registry.unregister_prefix(&format!("{name}_"));
             info!(server = %name, "MCP server stopped");
         }
         Ok(())
