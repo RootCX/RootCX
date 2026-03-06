@@ -22,8 +22,8 @@ const BASE_NAV: NavItem[] = [
 ];
 const WORKERS_NAV: NavItem = { id: "workers", icon: Container, label: "Workers", desc: "Manage app workers", zone: "sidebar" };
 
-const isVisible = (state: LayoutState, id: string) =>
-  Object.values(state.zones).some((ids) => ids.includes(id)) && !state.hidden.has(id);
+const isActive = (state: LayoutState, id: string) =>
+  Object.values(state.active).includes(id) && !state.hidden.has(id);
 
 export function ActivityBar() {
   const [userMenu, setUserMenu] = useState<{ x: number; y: number } | null>(null);
@@ -33,28 +33,22 @@ export function ActivityBar() {
   useEffect(() => { checkAdmin(); }, [user?.id]);
   const navItems = useMemo(() => isCoreAdmin ? [...BASE_NAV, WORKERS_NAV] : BASE_NAV, [isCoreAdmin]);
 
-  const toggle = ({ id, zone }: NavItem) => {
-    if (isVisible(state, id)) dispatch({ type: "TOGGLE_VIEW", viewId: id });
-    else dispatch({ type: "SHOW_VIEW", viewId: id, zone });
-  };
-
   return (
     <TooltipProvider delayDuration={300}>
       <div className="flex w-12 shrink-0 flex-col items-center border-r border-border bg-sidebar">
-        {navItems.map((item) => {
-          const visible = isVisible(state, item.id);
-          const Icon = item.icon;
+        {navItems.map(({ id, icon: Icon, label, desc, zone }) => {
+          const active = isActive(state, id);
           return (
-            <Tooltip key={item.id}>
+            <Tooltip key={id}>
               <TooltipTrigger asChild>
-                <button className={cn(BTN, visible && "text-foreground")} onClick={() => toggle(item)}>
-                  {visible && <span className={INDICATOR} />}
+                <button className={cn(BTN, active && "text-foreground")} onClick={() => dispatch({ type: "SHOW_VIEW", viewId: id, zone })}>
+                  {active && <span className={INDICATOR} />}
                   <Icon className="h-5 w-5" />
                 </button>
               </TooltipTrigger>
               <TooltipContent side="right" sideOffset={4}>
-                <div className="text-xs font-semibold">{item.label}</div>
-                <div className="text-[10px] text-muted-foreground">{item.desc}</div>
+                <div className="text-xs font-semibold">{label}</div>
+                <div className="text-[10px] text-muted-foreground">{desc}</div>
               </TooltipContent>
             </Tooltip>
           );
