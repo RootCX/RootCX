@@ -331,7 +331,12 @@ impl AppState {
 
     pub async fn shutdown(&self) {
         crate::browser::shutdown().await;
-        self.stop_deployed_worker().await;
+        // Only clean up local Studio resources (watchers, log stream).
+        // Workers live on Core daemon and must keep running after Studio exits.
+        if let Some(handle) = self.log_stream_abort.lock().await.take() {
+            handle.abort();
+        }
+        self.watchers.lock().await.clear();
     }
 
     pub async fn status(&self) -> OsStatus {

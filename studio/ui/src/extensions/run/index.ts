@@ -10,7 +10,7 @@ interface LaunchConfig {
 
 export function activate() {
   listen("run-exited", () => {
-    invoke("stop_deployed_worker").catch(() => {});
+    emit("run-output", "\r\n\x1b[36m[process exited]\x1b[0m\r\n");
   });
 
   commands.register("rootcx.run", {
