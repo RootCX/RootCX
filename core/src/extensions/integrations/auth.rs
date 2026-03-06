@@ -42,7 +42,7 @@ pub async fn start(
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt).await?;
     let wm = crate::routes::wm(&rt).await?;
 
-    let config = super::routes::fetch_config(&pool, &secrets, &app_id, &integration_id).await?;
+    let config = super::routes::resolve_config(&pool, &secrets, &integration_id).await?;
 
     let nonce = Uuid::new_v4().to_string();
     let callback_url = format!("{}/api/v1/integrations/auth/callback", base_url(&headers));
@@ -83,7 +83,7 @@ pub async fn callback(
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt).await?;
     let wm = crate::routes::wm(&rt).await?;
 
-    let config = super::routes::fetch_config(&pool, &secrets, &pending.app_id, &pending.integration_id).await?;
+    let config = super::routes::resolve_config(&pool, &secrets, &pending.integration_id).await?;
     let callback_url = format!("{}/api/v1/integrations/auth/callback", base_url(&headers));
 
     let result = wm.rpc(

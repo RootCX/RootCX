@@ -2,6 +2,7 @@ import { useState, useEffect, useSyncExternalStore } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { useProjectContext } from "@/components/layout/app-context";
 import {
   subscribe, getSnapshot, loadProject, deploy, undeploy, bind, updateConfig, unbind, refresh,
@@ -54,6 +55,12 @@ function ConfigForm({ schema, onSubmit, submitLabel }: {
 
 type Status = "available" | "deployed" | "bound";
 
+function platformSecretKeys(schema: Record<string, unknown> | null): string[] {
+  if (!schema) return [];
+  const props = (schema as any).properties ?? {};
+  return Object.values(props).map((def: any) => def.platformSecret).filter(Boolean);
+}
+
 function IntegrationCard({ integration, status, hasApp }: {
   integration: Integration;
   status: Status;
@@ -63,22 +70,39 @@ function IntegrationCard({ integration, status, hasApp }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showConfig, setShowConfig] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
 
-  const toggle = async () => {
+  const secretKeys = platformSecretKeys(integration.configSchema);
+
+  const doRemove = async () => {
+    setConfirmRemove(false);
     setBusy(true);
     setError(null);
     try {
-      if (active) {
-        if (status === "bound") await unbind(integration.id);
-        await undeploy(integration.id);
-      } else {
-        await deploy(integration.id);
-        if (!integration.configSchema && hasApp) await bind(integration.id);
-      }
+      if (status === "bound") await unbind(integration.id);
+      await undeploy(integration.id);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const toggle = async () => {
+    if (active) {
+      if (secretKeys.length > 0) { setConfirmRemove(true); return; }
+      await doRemove();
+    } else {
+      setBusy(true);
+      setError(null);
+      try {
+        await deploy(integration.id);
+        if (!integration.configSchema && hasApp) await bind(integration.id);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(false);
+      }
     }
   };
 
@@ -107,7 +131,6 @@ function IntegrationCard({ integration, status, hasApp }: {
         </div>
       </div>
 
-      {/* Deployed but needs config to bind */}
       {status === "deployed" && hasApp && integration.configSchema && (
         <div className="mt-2 border-t border-border pt-2">
           <ConfigForm
@@ -118,7 +141,6 @@ function IntegrationCard({ integration, status, hasApp }: {
         </div>
       )}
 
-      {/* Active — show config editor */}
       {showConfig && status === "bound" && integration.configSchema && (
         <div className="mt-2 border-t border-border pt-2">
           <ConfigForm
@@ -129,6 +151,25 @@ function IntegrationCard({ integration, status, hasApp }: {
         </div>
       )}
 
+      <Dialog open={confirmRemove} onOpenChange={setConfirmRemove}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove {integration.name}?</DialogTitle>
+            <DialogDescription>
+              This integration will be uninstalled. The following platform secrets will also be deleted:
+            </DialogDescription>
+          </DialogHeader>
+          <DialogBody>
+            <ul className="list-inside list-disc font-mono text-xs text-muted-foreground">
+              {secretKeys.map(k => <li key={k}>{k}</li>)}
+            </ul>
+          </DialogBody>
+          <DialogFooter>
+            <Button size="xs" variant="ghost" onClick={() => setConfirmRemove(false)}>Cancel</Button>
+            <Button size="xs" variant="destructive" onClick={doRemove}>Remove</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {error && <div className={`mt-1.5 ${errBox}`}>{error}</div>}
     </div>

@@ -7,10 +7,10 @@
   "configSchema": {
     "type": "object",
     "properties": {
-      "clientId": { "type": "string", "description": "Dokapi OAuth 2.0 Client ID" },
-      "clientSecret": { "type": "string", "description": "Dokapi OAuth 2.0 Client Secret" },
-      "baseUrl": { "type": "string", "description": "Dokapi API base URL", "default": "https://peppol-api.dokapi.io/v1" },
-      "identityUrl": { "type": "string", "description": "Dokapi OAuth token URL", "default": "https://portal.dokapi.io/api/oauth2/token" }
+      "clientId": { "type": "string", "description": "Dokapi OAuth 2.0 Client ID", "platformSecret": "PEPPOL_CLIENT_ID" },
+      "clientSecret": { "type": "string", "description": "Dokapi OAuth 2.0 Client Secret", "platformSecret": "PEPPOL_CLIENT_SECRET" },
+      "baseUrl": { "type": "string", "description": "Dokapi API base URL", "default": "https://peppol-api.dokapi.io/v1", "platformSecret": "PEPPOL_BASE_URL" },
+      "identityUrl": { "type": "string", "description": "Dokapi OAuth token URL", "default": "https://portal.dokapi.io/api/oauth2/token", "platformSecret": "PEPPOL_IDENTITY_URL" }
     },
     "required": ["clientId", "clientSecret"]
   },

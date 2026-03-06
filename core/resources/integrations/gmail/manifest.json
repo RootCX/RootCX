@@ -7,8 +7,8 @@
   "configSchema": {
     "type": "object",
     "properties": {
-      "clientId": { "type": "string", "description": "Google OAuth 2.0 Client ID" },
-      "clientSecret": { "type": "string", "description": "Google OAuth 2.0 Client Secret" }
+      "clientId": { "type": "string", "description": "Google OAuth 2.0 Client ID", "platformSecret": "GMAIL_CLIENT_ID" },
+      "clientSecret": { "type": "string", "description": "Google OAuth 2.0 Client Secret", "platformSecret": "GMAIL_CLIENT_SECRET" }
     },
     "required": ["clientId", "clientSecret"]
   },

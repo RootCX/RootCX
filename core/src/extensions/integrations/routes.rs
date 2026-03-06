@@ -11,6 +11,17 @@ use crate::auth::identity::Identity;
 use crate::extensions::rbac::policy::resolve_permissions;
 use crate::routes::{self, SharedRuntime};
 
+const PLATFORM_SCOPE: &str = "_platform";
+
+pub(super) fn platform_secret_map(manifest: &JsonValue) -> Vec<(String, String)> {
+    let Some(props) = manifest.pointer("/configSchema/properties").and_then(|v| v.as_object()) else {
+        return vec![];
+    };
+    props.iter().filter_map(|(field, def)| {
+        def.get("platformSecret").and_then(|v| v.as_str()).map(|key| (field.clone(), key.to_string()))
+    }).collect()
+}
+
 pub(crate) async fn query_installed_integrations(pool: &sqlx::PgPool) -> Result<Vec<JsonValue>, sqlx::Error> {
     let rows: Vec<(String, String, String, Option<JsonValue>)> = sqlx::query_as(
         "SELECT id, name, version, manifest FROM rootcx_system.apps
@@ -111,18 +122,15 @@ pub async fn bind(
     .fetch_one(&pool)
     .await?;
 
+    let secret_map = platform_secret_map(&manifest);
     if let Some(config) = &body.config {
-        let key = format!("_integration.{}", body.integration_id);
-        secrets
-            .set(&pool, &app_id, &key, &config.to_string())
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
+        save_config_secrets(&pool, &secrets, &secret_map, config).await?;
     }
 
     sync_integration_permissions(&pool, &app_id, &body.integration_id, &manifest).await?;
 
     let wm = routes::wm(&rt).await?;
-    let config = fetch_config(&pool, &secrets, &app_id, &body.integration_id).await?;
+    let config = fetch_config(&pool, &secrets, &secret_map).await?;
     if let Ok(result) = wm
         .rpc(
             &body.integration_id,
@@ -134,13 +142,8 @@ pub async fn bind(
         .await
     {
         if let Some(merge) = result.get("mergeConfig").and_then(|v| v.as_object()) {
-            let mut current = match config {
-                JsonValue::Object(_) => config,
-                _ => json!({}),
-            };
-            current.as_object_mut().unwrap().extend(merge.iter().map(|(k, v)| (k.clone(), v.clone())));
-            let key = format!("_integration.{}", body.integration_id);
-            let _ = secrets.set(&pool, &app_id, &key, &current.to_string()).await;
+            let merged = json!(merge);
+            save_config_secrets(&pool, &secrets, &secret_map, &merged).await?;
         }
     }
 
@@ -173,11 +176,9 @@ pub async fn update_config(
         return Err(ApiError::NotFound("binding not found".into()));
     }
 
-    let key = format!("_integration.{integration_id}");
-    secrets
-        .set(&pool, &app_id, &key, &body.config.to_string())
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let manifest = get_integration_manifest(&pool, &integration_id).await?;
+    let secret_map = platform_secret_map(&manifest);
+    save_config_secrets(&pool, &secrets, &secret_map, &body.config).await?;
 
     Ok(Json(json!({ "message": "config updated" })))
 }
@@ -187,7 +188,7 @@ pub async fn unbind(
     State(rt): State<SharedRuntime>,
     Path((app_id, integration_id)): Path<(String, String)>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, secrets) = routes::pool_and_secrets(&rt).await?;
+    let pool = routes::pool(&rt).await?;
 
     sqlx::query(
         "DELETE FROM rootcx_system.integration_bindings
@@ -197,9 +198,6 @@ pub async fn unbind(
     .bind(&integration_id)
     .execute(&pool)
     .await?;
-
-    let key = format!("_integration.{integration_id}");
-    let _ = secrets.delete(&pool, &app_id, &key).await;
 
     // starts_with avoids LIKE wildcard injection from snake_case underscores
     sqlx::query(
@@ -246,7 +244,7 @@ pub async fn execute_action(
         )));
     }
 
-    let config = fetch_config(&pool, &secrets, &app_id, &integration_id).await?;
+    let config = resolve_config(&pool, &secrets, &integration_id).await?;
 
     let user_credentials = if !identity.user_id.is_nil() {
         let key = format!("_iuc.{integration_id}.{}", identity.user_id);
@@ -290,7 +288,7 @@ pub async fn webhook_ingress(
     .await?
     .ok_or_else(|| ApiError::NotFound("invalid webhook token".into()))?;
 
-    let config = fetch_config(&pool, &secrets, &consumer_app_id, &integration_id).await?;
+    let config = resolve_config(&pool, &secrets, &integration_id).await?;
 
     let hdr_map: JsonValue = headers
         .iter()
@@ -318,22 +316,56 @@ pub async fn webhook_ingress(
     Ok(Json(result))
 }
 
-pub(super) async fn fetch_config(
+pub(super) async fn get_integration_manifest(pool: &sqlx::PgPool, integration_id: &str) -> Result<JsonValue, ApiError> {
+    let row: Option<(JsonValue,)> = sqlx::query_as(
+        "SELECT manifest FROM rootcx_system.apps WHERE id = $1 AND manifest->>'type' = 'integration'",
+    )
+    .bind(integration_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(m,)| m).unwrap_or(JsonValue::Null))
+}
+
+async fn save_config_secrets(
     pool: &sqlx::PgPool,
     secrets: &crate::secrets::SecretManager,
-    consumer_app_id: &str,
+    secret_map: &[(String, String)],
+    config: &JsonValue,
+) -> Result<(), ApiError> {
+    for (field, secret_key) in secret_map {
+        if let Some(val) = config.get(field).and_then(|v| v.as_str()) {
+            secrets.set(pool, PLATFORM_SCOPE, secret_key, val)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn resolve_config(
+    pool: &sqlx::PgPool,
+    secrets: &crate::secrets::SecretManager,
     integration_id: &str,
 ) -> Result<JsonValue, ApiError> {
-    let key = format!("_integration.{integration_id}");
-    match secrets
-        .get(pool, consumer_app_id, &key)
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-    {
-        Some(json_str) => serde_json::from_str(&json_str)
-            .map_err(|e| ApiError::Internal(format!("bad config: {e}"))),
-        None => Ok(JsonValue::Null),
+    let manifest = get_integration_manifest(pool, integration_id).await?;
+    fetch_config(pool, secrets, &platform_secret_map(&manifest)).await
+}
+
+async fn fetch_config(
+    pool: &sqlx::PgPool,
+    secrets: &crate::secrets::SecretManager,
+    secret_map: &[(String, String)],
+) -> Result<JsonValue, ApiError> {
+    let mut config = serde_json::Map::new();
+    for (field, secret_key) in secret_map {
+        if let Some(val) = secrets.get(pool, PLATFORM_SCOPE, secret_key)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+        {
+            config.insert(field.clone(), JsonValue::String(val));
+        }
     }
+    if config.is_empty() { Ok(JsonValue::Null) } else { Ok(JsonValue::Object(config)) }
 }
 
 async fn sync_integration_permissions(
