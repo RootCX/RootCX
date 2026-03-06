@@ -23,12 +23,13 @@ interface State {
   appId: string | null;
   catalog: Integration[];
   installed: Set<string>;
+  configured: Set<string>;
   bindings: Binding[];
   loading: boolean;
   error: string | null;
 }
 
-let state: State = { appId: null, catalog: [], installed: new Set(), bindings: [], loading: false, error: null };
+let state: State = { appId: null, catalog: [], installed: new Set(), configured: new Set(), bindings: [], loading: false, error: null };
 const listeners = new Set<() => void>();
 let snapshot = state;
 
@@ -70,7 +71,12 @@ export async function refresh() {
         ? api<Binding[]>(`/api/v1/apps/${encodeURIComponent(state.appId!)}/integrations`)
         : Promise.resolve([]),
     ]);
-    state = { ...state, catalog, installed: new Set(installedList.map(i => i.id)), bindings, loading: false };
+    state = {
+      ...state, catalog,
+      installed: new Set(installedList.map(i => i.id)),
+      configured: new Set(installedList.filter((i: any) => i.configured).map(i => i.id)),
+      bindings, loading: false,
+    };
     emit();
   } catch (e) {
     state = { ...state, loading: false, error: err(e) };
@@ -88,22 +94,21 @@ export async function undeploy(integrationId: string) {
   await refresh();
 }
 
-export async function bind(integrationId: string, config?: Record<string, string>) {
-  if (!state.appId) return;
-  await api(`/api/v1/apps/${encodeURIComponent(state.appId)}/integrations`, {
-    method: "POST",
+export async function saveConfig(integrationId: string, config: Record<string, string>) {
+  await api(`/api/v1/integrations/${encodeURIComponent(integrationId)}/config`, {
+    method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ integrationId, config }),
+    body: JSON.stringify(config),
   });
   await refresh();
 }
 
-export async function updateConfig(integrationId: string, config: Record<string, string>) {
+export async function bind(integrationId: string) {
   if (!state.appId) return;
-  await api(`/api/v1/apps/${encodeURIComponent(state.appId)}/integrations/${encodeURIComponent(integrationId)}`, {
-    method: "PATCH",
+  await api(`/api/v1/apps/${encodeURIComponent(state.appId)}/integrations`, {
+    method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ config }),
+    body: JSON.stringify({ integrationId }),
   });
   await refresh();
 }
