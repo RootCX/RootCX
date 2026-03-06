@@ -30,6 +30,7 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .route("/api/v1/apps/{app_id}/secrets/{key_name}", delete(routes::delete_secret))
         .route("/api/v1/config/ai", get(routes::get_ai_config).put(routes::set_ai_config))
         .route("/api/v1/config/ai/forge", get(routes::get_forge_config))
+        .route("/api/v1/secrets/scopes", get(routes::list_scopes))
         .route("/api/v1/platform/secrets", get(routes::list_platform_secrets).post(routes::set_platform_secret))
         .route("/api/v1/platform/secrets/env", get(routes::get_platform_env))
         .route("/api/v1/platform/secrets/{key_name}", delete(routes::delete_platform_secret))

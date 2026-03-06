@@ -9,25 +9,16 @@ export interface McpServer {
 export interface McpServerConfig {
   name: string;
   description?: string;
-  transport: StdioTransport | SseTransport;
-  env?: Record<string, string>;
+  transport: { type: "stdio"; command: string; args?: string[] } | { type: "sse"; url: string; headers?: Record<string, string> };
 }
 
-interface StdioTransport { type: "stdio"; command: string; args?: string[] }
-interface SseTransport { type: "sse"; url: string; headers?: Record<string, string> }
-
-interface State {
-  servers: McpServer[];
-  loading: boolean;
-  error: string | null;
-}
+interface State { servers: McpServer[]; loading: boolean; error: string | null }
 
 let state: State = { servers: [], loading: false, error: null };
 const listeners = new Set<() => void>();
 let snapshot = state;
 
 function emit() { snapshot = { ...state }; listeners.forEach(fn => fn()); }
-const err = (e: unknown) => e instanceof Error ? e.message : String(e);
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetchCore(path, init);
@@ -36,24 +27,18 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 const jsonPost = (body: unknown): RequestInit => ({
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify(body),
+  method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
 });
 
 export const subscribe = (fn: () => void) => (listeners.add(fn), () => listeners.delete(fn));
 export const getSnapshot = () => snapshot;
 
 export async function refresh() {
-  state = { ...state, loading: true, error: null };
-  emit();
+  state = { ...state, loading: true, error: null }; emit();
   try {
-    const servers = await api<McpServer[]>("/api/v1/mcp-servers");
-    state = { ...state, servers, loading: false };
-    emit();
+    state = { servers: await api<McpServer[]>("/api/v1/mcp-servers"), loading: false, error: null }; emit();
   } catch (e) {
-    state = { ...state, loading: false, error: err(e) };
-    emit();
+    state = { ...state, loading: false, error: e instanceof Error ? e.message : String(e) }; emit();
   }
 }
 
