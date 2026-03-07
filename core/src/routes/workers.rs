@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
@@ -8,7 +6,6 @@ use serde_json::{Value as JsonValue, json};
 use super::{SharedRuntime, pool, pool_and_secrets, wm};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::auth::{AuthConfig, jwt};
 use crate::extensions::rbac::policy::require_admin;
 use crate::ipc::RpcCaller;
 
@@ -54,10 +51,10 @@ pub async fn all_worker_statuses(
 }
 
 pub async fn rpc_proxy(
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
     headers: HeaderMap,
-    axum::Extension(auth_config): axum::Extension<Arc<AuthConfig>>,
     Json(body): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let method = body
@@ -73,15 +70,14 @@ pub async fn rpc_proxy(
         .map(String::from)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    let raw_token = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "));
-
-    let caller = raw_token
-        .and_then(|token| jwt::decode(&auth_config, token).ok()
-            .filter(|c| !c.username.is_empty())
-            .map(|c| RpcCaller { user_id: c.sub, username: c.username, auth_token: Some(token.to_string()) }));
+    let caller = if !identity.user_id.is_nil() {
+        let raw_token = headers.get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|h| h.strip_prefix("Bearer ").map(String::from));
+        Some(RpcCaller { user_id: identity.user_id.to_string(), username: identity.username, auth_token: raw_token })
+    } else {
+        None
+    };
 
     Ok(Json(wm(&rt).await?.rpc(&app_id, id, method, params, caller).await?))
 }

@@ -165,12 +165,15 @@ impl AppState {
         let _ = app_handle.emit("run-started", ());
 
         let url = format!("{DAEMON_URL}/api/v1/apps/{app_id}/logs");
+        let token = self.client.token();
         let abort_store = self.log_stream_abort.clone();
 
         let task = tokio::spawn(async move {
             let client = LOG_HTTP.clone();
             loop {
-                match client.get(&url).send().await {
+                let mut req = client.get(&url);
+                if let Some(ref t) = token { req = req.bearer_auth(t); }
+                match req.send().await {
                     Ok(mut resp) if resp.status().is_success() => {
                         let mut buf = String::new();
                         loop {

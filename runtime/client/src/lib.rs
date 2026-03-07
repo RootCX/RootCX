@@ -47,6 +47,10 @@ impl RuntimeClient {
         *self.token.write().unwrap() = token;
     }
 
+    pub fn token(&self) -> Option<String> {
+        self.token.read().unwrap().clone()
+    }
+
     pub async fn authenticate(&self, username: &str, password: &str) -> Result<(), ClientError> {
         let creds = serde_json::json!({ "username": username, "password": password });
         let _ = self.client.post(self.api("/auth/register")).json(&creds).send().await;

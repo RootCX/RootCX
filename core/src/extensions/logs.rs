@@ -58,6 +58,7 @@ impl RuntimeExtension for LogsExtension {
 }
 
 async fn subscribe_worker_logs(
+    _identity: crate::auth::identity::Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
