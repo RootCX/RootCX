@@ -81,6 +81,7 @@ pub(crate) struct SessionEventEntry {
 }
 
 pub async fn get_agent(
+    _identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<AgentRow>, ApiError> {
@@ -153,6 +154,7 @@ pub async fn invoke_agent(
 }
 
 pub async fn list_sessions(
+    _identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<SessionRow>>, ApiError> {
@@ -166,6 +168,7 @@ pub async fn list_sessions(
 }
 
 pub async fn get_session(
+    _identity: Identity,
     State(rt): State<SharedRuntime>,
     Path((app_id, session_id)): Path<(String, String)>,
 ) -> Result<Json<JsonValue>, ApiError> {
@@ -218,6 +221,7 @@ pub async fn get_session(
 }
 
 pub async fn get_session_events(
+    _identity: Identity,
     State(rt): State<SharedRuntime>,
     Path((app_id, session_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<SessionEventEntry>>, ApiError> {
@@ -261,6 +265,7 @@ pub async fn get_session_events(
 }
 
 pub async fn list_approvals(
+    _identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<super::approvals::ApprovalRequest>>, ApiError> {
@@ -269,6 +274,7 @@ pub async fn list_approvals(
 }
 
 pub async fn reply_approval(
+    _identity: Identity,
     State(rt): State<SharedRuntime>,
     Path((app_id, approval_id)): Path<(String, String)>,
     Json(body): Json<ApprovalReply>,

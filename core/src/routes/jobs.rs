@@ -25,6 +25,7 @@ pub async fn enqueue_job(
 }
 
 pub async fn get_job(
+    _identity: Identity,
     State(rt): State<SharedRuntime>,
     Path((_app_id, job_id)): Path<(String, String)>,
 ) -> Result<Json<JsonValue>, ApiError> {
@@ -36,6 +37,7 @@ pub async fn get_job(
 }
 
 pub async fn list_jobs(
+    _identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
     Query(p): Query<HashMap<String, String>>,

@@ -15,6 +15,7 @@ pub struct ToolSummary {
 }
 
 pub async fn list_tools(
+    _identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<ToolSummary>>, ApiError> {
     let g = rt.lock().await;
