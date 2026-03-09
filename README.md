@@ -48,7 +48,7 @@ RootCX is built on two core pillars:
 
 ## License
 
-RootCX is licensed under [Apache-2.0](LICENSE).
+RootCX is licensed under [FSL-1.1-ALv2](LICENSE.md) — converts to Apache 2.0 after two years.
 
 ---
 

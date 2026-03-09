@@ -2,7 +2,7 @@
 name = "rootcx-platform"
 version = "0.1.0"
 edition = "2024"
-license = "Apache-2.0"
+license-file = "../../LICENSE.md"
 description = "RootCX platform utilities"
 repository = "https://github.com/rootcx/rootcx"
 

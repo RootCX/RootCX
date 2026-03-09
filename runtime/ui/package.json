@@ -2,7 +2,7 @@
   "name": "@rootcx/ui",
   "version": "0.1.0",
   "description": "RootCX shared UI component library",
-  "license": "Apache-2.0",
+  "license": "FSL-1.1-ALv2",
   "publishConfig": { "access": "public" },
   "type": "module",
   "main": "dist/index.js",
