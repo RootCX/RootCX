@@ -39,6 +39,7 @@ const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct Runtime {
     pg: PostgresManager,
+    external_db: bool,
     pool: Option<PgPool>,
     extensions: Vec<Box<dyn RuntimeExtension>>,
     auth_config: Arc<auth::AuthConfig>,
@@ -84,6 +85,7 @@ impl Runtime {
 
         Self {
             pg,
+            external_db: std::env::var("DATABASE_URL").is_ok(),
             pool: None,
             extensions,
             auth_config,
@@ -102,11 +104,16 @@ impl Runtime {
     pub async fn boot(&mut self, api_port: u16) -> Result<(), RuntimeError> {
         info!("runtime boot sequence starting");
 
-        self.pg.init_db().await.map_err(RuntimeError::Postgres)?;
-        self.pg.start().await.map_err(RuntimeError::Postgres)?;
-
-        let db_url = self.pg.connection_url("postgres");
-        info!("connecting to postgres on port {}", self.pg.port());
+        let db_url = if self.external_db {
+            let url = std::env::var("DATABASE_URL").unwrap();
+            info!("using external database");
+            url
+        } else {
+            self.pg.init_db().await.map_err(RuntimeError::Postgres)?;
+            self.pg.start().await.map_err(RuntimeError::Postgres)?;
+            info!("connecting to embedded postgres on port {}", self.pg.port());
+            self.pg.connection_url("postgres")
+        };
 
         let pool = PgPool::connect(&db_url).await.map_err(RuntimeError::Database)?;
         schema::bootstrap(&pool).await?;
@@ -150,13 +157,15 @@ impl Runtime {
         if let Some(pool) = self.pool.take() {
             pool.close().await;
         }
-        self.pg.stop().await.map_err(RuntimeError::Postgres)?;
+        if !self.external_db {
+            self.pg.stop().await.map_err(RuntimeError::Postgres)?;
+        }
         info!("runtime shutdown complete");
         Ok(())
     }
 
     pub async fn status(&self) -> OsStatus {
-        let pg_running = self.pg.is_running().await;
+        let pg_up = if self.external_db { self.pool.is_some() } else { self.pg.is_running().await };
         let online = ServiceState::Online;
         let offline = ServiceState::Offline;
 
@@ -166,9 +175,9 @@ impl Runtime {
                 state: if self.pool.is_some() { online } else { offline },
             },
             postgres: PostgresStatus {
-                state: if pg_running { online } else { offline },
-                port: pg_running.then(|| self.pg.port()),
-                data_dir: Some(self.pg.data_dir().display().to_string()),
+                state: if pg_up { online } else { offline },
+                port: (!self.external_db && pg_up).then(|| self.pg.port()),
+                data_dir: (!self.external_db).then(|| self.pg.data_dir().display().to_string()),
             },
             forge: ForgeStatus { state: offline, port: None },
         }
