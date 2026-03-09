@@ -106,11 +106,22 @@ async fn main() {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    let pg_root  = resolve_pg();
     let data_dir = data_base_dir().unwrap_or_else(|e| die(e));
-    let pg = PostgresManager::new(pg_root.join("bin"), data_dir.join("data/pg"), PG_PORT)
-        .with_lib_dir(pg_root.join("lib"));
-    let rt = Arc::new(Mutex::new(Runtime::new(pg, data_dir, resources(), resolve_bun())));
+    let external = std::env::var("DATABASE_URL").is_ok();
+    let (pg, res_dir, bun_bin) = if external {
+        let pg = PostgresManager::new(PathBuf::new(), data_dir.join("data/pg"), PG_PORT);
+        let res = std::env::var("ROOTCX_RESOURCES").map(PathBuf::from)
+            .unwrap_or_else(|_| data_dir.clone());
+        let bun = std::env::var("BUN_PATH").map(PathBuf::from)
+            .unwrap_or_else(|_| rootcx_platform::bin::binary_path(&res, "bun"));
+        (pg, res, bun)
+    } else {
+        let pg_root = resolve_pg();
+        let pg = PostgresManager::new(pg_root.join("bin"), data_dir.join("data/pg"), PG_PORT)
+            .with_lib_dir(pg_root.join("lib"));
+        (pg, resources(), resolve_bun())
+    };
+    let rt = Arc::new(Mutex::new(Runtime::new(pg, data_dir, res_dir, bun_bin)));
 
     rt.lock().await.boot(API_PORT).await.unwrap_or_else(|e| {
         tracing::error!("boot: {e}"); std::process::exit(1);
