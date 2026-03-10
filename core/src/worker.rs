@@ -83,6 +83,7 @@ pub struct WorkerConfig {
     pub database_url: String,
     pub pool: PgPool,
     pub js_runtime: PathBuf,
+    pub prelude_path: PathBuf,
     pub tool_registry: Arc<ToolRegistry>,
     pub pending_approvals: PendingApprovals,
 }
@@ -559,7 +560,8 @@ async fn spawn_worker(
     info!(app_id = %config.app_id, bin = %bin.display(), entry = %config.entry_point.display(), "spawning worker");
 
     let mut cmd = Command::new(bin);
-    cmd.arg(&config.entry_point)
+    cmd.arg("--preload").arg(&config.prelude_path)
+        .arg(&config.entry_point)
         .current_dir(&config.working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
