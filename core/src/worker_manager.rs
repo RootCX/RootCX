@@ -16,9 +16,12 @@ use crate::secrets::SecretManager;
 use crate::tools::ToolRegistry;
 use crate::worker::{self, AgentEvent, SupervisorHandle, WorkerConfig, WorkerStatus};
 
+const BACKEND_PRELUDE: &str = include_str!("backend_prelude.js");
+
 pub struct WorkerManager {
     workers: Arc<RwLock<HashMap<String, SupervisorHandle>>>,
     apps_dir: PathBuf,
+    prelude_path: PathBuf,
     runtime_url: String,
     database_url: String,
     bun_bin: PathBuf,
@@ -28,7 +31,9 @@ pub struct WorkerManager {
 
 impl WorkerManager {
     pub fn new(apps_dir: PathBuf, runtime_url: String, database_url: String, bun_bin: PathBuf, tool_registry: Arc<ToolRegistry>, pending_approvals: PendingApprovals) -> Self {
-        Self { workers: Arc::new(RwLock::new(HashMap::new())), apps_dir, runtime_url, database_url, bun_bin, tool_registry, pending_approvals }
+        let prelude_path = apps_dir.join(".prelude.js");
+        std::fs::write(&prelude_path, BACKEND_PRELUDE).expect("write backend prelude");
+        Self { workers: Arc::new(RwLock::new(HashMap::new())), apps_dir, prelude_path, runtime_url, database_url, bun_bin, tool_registry, pending_approvals }
     }
 
     async fn get_handle(&self, app_id: &str) -> Result<SupervisorHandle, RuntimeError> {
@@ -59,6 +64,7 @@ impl WorkerManager {
             database_url: self.database_url.clone(),
             pool: pool.clone(),
             js_runtime: self.bun_bin.clone(),
+            prelude_path: self.prelude_path.clone(),
             tool_registry: Arc::clone(&self.tool_registry),
             pending_approvals: self.pending_approvals.clone(),
         };
