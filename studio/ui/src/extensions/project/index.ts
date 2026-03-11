@@ -36,7 +36,7 @@ async function createProject() {
     const keys = await listSecrets().catch(() => [] as string[]);
     const needed = AI_PROVIDERS.find((p) => p.id === provider)?.env ?? [];
     if (needed.length && needed.some((k) => !keys.includes(k))) {
-      await showAISetupDialog(provider);
+      await showAISetupDialog(provider as string);
     }
   }
 

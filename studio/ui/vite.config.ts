@@ -12,6 +12,7 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
       "@rootcx/ui": path.resolve(__dirname, "../../runtime/ui/src"),
     },
+    dedupe: ["react", "react-dom"],
   },
 
   // Tauri expects a fixed port during development.

@@ -14,7 +14,6 @@ import {
   type AwsAuthMode,
 } from "@/lib/ai-models";
 import { setSecret, saveAiConfig } from "@/core/api";
-import { workspace } from "@/core/studio";
 
 type Step = "provider" | "key" | "saving";
 
@@ -29,7 +28,7 @@ export function showAISetupDialog(preselectedProvider?: string): Promise<boolean
 }
 
 export function AISetupDialogPortal() {
-  const [state, setState] = useState({ open: false, preselect: undefined as string | undefined });
+  const [state, setState] = useState<{ open: boolean; preselect?: string }>({ open: false });
   useEffect(() => { setDialogState = setState; return () => { setDialogState = null; }; }, []);
   if (!state.open) return null;
   return createPortal(

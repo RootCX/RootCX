@@ -62,7 +62,7 @@ export async function loadProject(projectPath: string) {
 export async function refresh() {
   if (!state.appId) return;
   state = { ...state, loading: true, error: null }; emit();
-  try { state = { ...state, ...(await fetchAll(state.appId)), loading: false }; emit(); }
+  try { state = { ...state, ...(await fetchAll(state.appId!)), loading: false }; emit(); }
   catch (e) { state = { ...state, loading: false, error: errMsg(e) }; emit(); }
 }
 
