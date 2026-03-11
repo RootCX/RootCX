@@ -459,7 +459,6 @@ async fn supervisor_loop(
                     }
                     None => {
                         if let Some(ref mut c) = child {
-                            // Fully-qualified call needed because `c` is `&mut` and `.wait()` would be ambiguous with the `Child::wait` method
                             let exit = AsyncGroupChild::wait(c).await;
                             warn!(app_id = %app_id, ?exit, "worker exited unexpectedly");
                             emit_log(&log_tx, "system", "worker crashed");
@@ -570,18 +569,6 @@ async fn spawn_worker(
         .env("ROOTCX_RUNTIME_URL", &config.runtime_url);
 
     let mut child = cmd.group_spawn().map_err(|e| RuntimeError::Worker(format!("spawn failed: {e}")))?;
-
-    #[cfg(target_os = "linux")]
-    if let Some(pid) = child.id() {
-        let set = |resource: libc::__rlimit_resource_t, limit: u64| unsafe {
-            let lim = libc::rlimit { rlim_cur: limit, rlim_max: limit };
-            libc::prlimit(pid as i32, resource, &lim, std::ptr::null_mut());
-        };
-        set(libc::RLIMIT_AS, 512 * 1024 * 1024);
-        set(libc::RLIMIT_CPU, 300);
-        set(libc::RLIMIT_NOFILE, 256);
-        set(libc::RLIMIT_NPROC, 64);
-    }
 
     let stdin = child.inner().stdin.take().ok_or_else(|| RuntimeError::Worker("no stdin".into()))?;
     let stdout = child.inner().stdout.take().ok_or_else(|| RuntimeError::Worker("no stdout".into()))?;
