@@ -113,7 +113,11 @@ export interface QueryResult<T> {
   total: number;
 }
 
-export const DEFAULT_BASE_URL = "http://localhost:9100";
+function resolveBaseUrl(): string {
+  return (import.meta as any).env?.VITE_ROOTCX_URL || "http://localhost:9100";
+}
+
+export const DEFAULT_BASE_URL = resolveBaseUrl();
 
 export class RuntimeClient {
   private baseUrl: string;

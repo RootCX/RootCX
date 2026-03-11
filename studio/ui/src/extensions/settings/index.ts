@@ -1,6 +1,6 @@
 import { lazy } from "react";
 import { Settings } from "lucide-react";
-import { views, commands } from "@/core/studio";
+import { views, commands, layout } from "@/core/studio";
 import { showAISetupDialog } from "@/components/ai-setup-dialog";
 
 export const activate = () => {
@@ -9,6 +9,13 @@ export const activate = () => {
     icon: Settings,
     defaultZone: "sidebar",
     component: lazy(() => import("./panel")),
+  });
+
+  commands.register("settings.open", {
+    title: "Open Settings",
+    category: "Settings",
+    keybinding: "Mod+,",
+    handler: () => { layout.showView("settings"); },
   });
 
   commands.register("ai.setup", {

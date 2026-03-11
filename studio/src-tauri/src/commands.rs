@@ -6,8 +6,18 @@ use tokio::sync::Mutex;
 
 use crate::menu::ViewMenuItems;
 use crate::runner::RunnerState;
-use crate::state::{AppState, RecentProject};
+use crate::state::AppState;
 use crate::terminal::TerminalState;
+
+#[tauri::command]
+pub fn get_core_url(state: State<'_, AppState>) -> String {
+    state.core_url()
+}
+
+#[tauri::command]
+pub fn set_core_url(state: State<'_, AppState>, url: String) {
+    state.set_core_url(&url);
+}
 
 #[tauri::command]
 pub fn set_auth_token(state: State<'_, AppState>, token: String) {
@@ -132,14 +142,13 @@ pub async fn run_app(
     project_path: String,
     app_handle: tauri::AppHandle,
     state: State<'_, Mutex<RunnerState>>,
+    app_state: State<'_, AppState>,
 ) -> Result<(), String> {
     validate_fs_path(&project_path)?;
     let config = crate::launch::read(std::path::Path::new(&project_path))?;
     if let Some(ref cmd) = config.command {
-        state.lock().await.run(cmd, &project_path, app_handle);
+        state.lock().await.run(cmd, &project_path, &app_state.core_url(), app_handle);
     }
-    // Agent projects have no local command — the worker runs in Core
-    // and logs are streamed via subscribe_to_worker_logs in deploy_and_watch.
     Ok(())
 }
 
@@ -282,19 +291,19 @@ pub async fn bundle_app(
 }
 
 #[tauri::command]
-pub fn get_recent_projects() -> Vec<RecentProject> {
-    crate::state::load_recent_projects()
+pub fn get_recent_projects(state: State<'_, AppState>) -> Vec<crate::state::RecentProject> {
+    state.recent_projects()
 }
 
 #[tauri::command]
-pub fn add_to_recent(app_handle: tauri::AppHandle, project_path: String) {
-    crate::state::add_recent_project(&project_path);
-    crate::menu::rebuild_recent_menu(&app_handle, &crate::state::load_recent_projects());
+pub fn add_to_recent(app_handle: tauri::AppHandle, project_path: String, state: State<'_, AppState>) {
+    state.add_recent_project(&project_path);
+    crate::menu::rebuild_recent_menu(&app_handle, &state.recent_projects());
 }
 
 #[tauri::command]
-pub fn clear_recent(app_handle: tauri::AppHandle) {
-    crate::state::clear_recent_projects();
+pub fn clear_recent(app_handle: tauri::AppHandle, state: State<'_, AppState>) {
+    state.clear_recent_projects();
     crate::menu::rebuild_recent_menu(&app_handle, &[]);
 }
 

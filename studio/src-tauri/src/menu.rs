@@ -2,8 +2,17 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::menu::{CheckMenuItem, MenuBuilder, MenuItem, Submenu, SubmenuBuilder};
 use tauri::{App, AppHandle, Emitter, Manager, WebviewWindow, Wry};
+use tauri_plugin_store::StoreExt;
 
-use crate::state::RecentProject;
+use crate::state::{RecentProject, STORE_FILE};
+
+fn load_recents(handle: &impl Manager<Wry>) -> Vec<RecentProject> {
+    handle.store(STORE_FILE)
+        .ok()
+        .and_then(|s| s.get("recent_projects"))
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
 
 const VIEWS: &[(&str, &str)] = &[
     ("explorer", "Explorer"),
@@ -53,11 +62,13 @@ pub fn handle_menu_event(app: &AppHandle, event: &tauri::menu::MenuEvent) {
             let _ = win.close();
         }
     } else if id == "clear-recent" {
-        crate::state::clear_recent_projects();
+        if let Ok(store) = app.store(STORE_FILE) {
+            store.delete("recent_projects");
+        }
         rebuild_recent_menu(app, &[]);
     } else if let Some(idx_str) = id.strip_prefix("recent:") {
         if let Ok(idx) = idx_str.parse::<usize>() {
-            if let Some(project) = crate::state::load_recent_projects().get(idx) {
+            if let Some(project) = load_recents(app).get(idx) {
                 let _ = app.emit_to(&target, "file:open-recent", &project.path);
             }
         }
@@ -77,7 +88,7 @@ pub fn setup(app: &mut App) -> tauri::Result<ViewMenuItems> {
         .quit()
         .build()?;
 
-    let recents = crate::state::load_recent_projects();
+    let recents = load_recents(app);
     let recent_submenu = build_recent_submenu(app, &recents)?;
 
     let file_menu = SubmenuBuilder::with_id(app, "file", "File")

@@ -5,13 +5,13 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
-use crate::state::DAEMON_URL;
-
 static HTTP: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 static SESSION: LazyLock<Mutex<Option<BrowserSession>>> = LazyLock::new(|| Mutex::new(None));
+static CORE_URL: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
 
-pub fn spawn_listener() {
-    tokio::spawn(async {
+pub fn spawn_listener(core_url: String) {
+    tokio::spawn(async move {
+        *CORE_URL.lock().await = core_url;
         loop {
             if let Err(e) = listen_commands().await {
                 warn!("browser command listener error: {e}");
@@ -22,7 +22,7 @@ pub fn spawn_listener() {
 }
 
 async fn listen_commands() -> Result<(), String> {
-    let url = format!("{DAEMON_URL}/api/v1/browser/commands");
+    let url = format!("{}/api/v1/browser/commands", CORE_URL.lock().await);
     let resp = HTTP.get(&url).send().await.map_err(|e| format!("connect: {e}"))?;
     if !resp.status().is_success() { return Err(format!("status {}", resp.status())); }
     info!("browser command listener connected");
@@ -70,7 +70,7 @@ async fn execute_command(cmd: Value) {
         }
     };
 
-    let url = format!("{DAEMON_URL}/api/v1/browser/result/{id}");
+    let url = format!("{}/api/v1/browser/result/{id}", CORE_URL.lock().await);
     if let Err(e) = HTTP.post(&url).json(&result).send().await {
         error!(id, "browser result post failed: {e}");
     }

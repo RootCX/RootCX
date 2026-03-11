@@ -1,7 +1,18 @@
 import { useSyncExternalStore } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-const BASE = "http://localhost:9100"; // rootcx_platform::DEFAULT_API_PORT
+let BASE = "";
+
+export async function setCoreUrl(url: string) {
+  BASE = url.replace(/\/+$/, "");
+  await invoke("set_core_url", { url: BASE });
+}
+
+export async function getCoreUrl(): Promise<string> {
+  BASE = await invoke<string>("get_core_url");
+  return BASE;
+}
+
 const REFRESH_KEY = "rootcx_refresh_token";
 
 export interface AuthUser {
@@ -35,6 +46,7 @@ const ANON: AuthUser = { id: "anonymous", username: "anonymous", email: null, di
 
 export async function initAuth() {
   try {
+    await getCoreUrl();
     const res = await fetch(`${BASE}/api/v1/auth/mode`);
     if (!res.ok) { state = { ...state, loading: false }; emit(); return; }
 
