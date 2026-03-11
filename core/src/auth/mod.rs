@@ -24,11 +24,11 @@ impl AuthConfig {
     pub fn load(data_dir: &Path, auth_required: Option<bool>) -> Result<Arc<Self>, RuntimeError> {
         let public = match auth_required {
             Some(required) => !required,
-            None => std::env::var("ROOTCX_AUTH").map(|v| v == "public").unwrap_or(false),
+            None => !std::env::var("ROOTCX_AUTH").is_ok_and(|v| v == "required"),
         };
 
         if public {
-            warn!("auth mode: public (set ROOTCX_AUTH=required or remove ROOTCX_AUTH=public to enforce)");
+            warn!("auth mode: public (set ROOTCX_AUTH=required to enforce)");
         } else {
             info!("auth mode: required");
         }

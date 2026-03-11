@@ -2,7 +2,7 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use reqwest::{Client, Response, StatusCode, multipart};
+use reqwest::{Client, Method, StatusCode, multipart};
 use rootcx_core::{Runtime, server};
 use rootcx_postgres_mgmt::PostgresManager;
 use serde_json::{Value, json};
@@ -12,20 +12,15 @@ use tokio::sync::Mutex;
 pub struct TestRuntime {
     base_url: String,
     pub pg_port: u16,
-    client: Client,
+    pub client: Client,
     runtime: Arc<Mutex<Runtime>>,
     token: String,
     _tmp: TempDir,
 }
 
 impl TestRuntime {
-    pub async fn boot() -> Self {
-        Self::boot_inner(false).await
-    }
-
-    pub async fn boot_with_auth() -> Self {
-        Self::boot_inner(true).await
-    }
+    pub async fn boot() -> Self { Self::boot_inner(false).await }
+    pub async fn boot_with_auth() -> Self { Self::boot_inner(true).await }
 
     async fn boot_inner(require_auth: bool) -> Self {
         let resources = rootcx_platform::dirs::resources_dir(env!("CARGO_MANIFEST_DIR"))
@@ -46,17 +41,13 @@ impl TestRuntime {
         runtime.lock().await.boot(api_port).await.expect("boot failed");
 
         let rt = Arc::clone(&runtime);
-        tokio::spawn(async move {
-            server::serve(rt, api_port).await.ok();
-        });
+        tokio::spawn(async move { server::serve(rt, api_port).await.ok(); });
 
         let base_url = format!("http://127.0.0.1:{api_port}");
         let client = Client::new();
         let health = format!("{base_url}/health");
         for _ in 0..100 {
-            if client.get(&health).send().await.is_ok() {
-                break;
-            }
+            if client.get(&health).send().await.is_ok() { break; }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
@@ -81,26 +72,29 @@ impl TestRuntime {
         if self.token.is_empty() { req } else { req.bearer_auth(&self.token) }
     }
 
-    pub async fn get(&self, path: &str) -> Response {
-        self.maybe_auth(self.client.get(self.url(path))).send().await.unwrap()
+    async fn send_json(&self, method: Method, path: &str, body: &Value) -> (StatusCode, Value) {
+        let r = self.maybe_auth(self.client.request(method, self.url(path)))
+            .json(body).send().await.unwrap();
+        let s = r.status();
+        (s, r.json().await.unwrap_or(Value::Null))
     }
 
     pub async fn get_json(&self, path: &str) -> (StatusCode, Value) {
-        let r = self.get(path).await;
+        let r = self.maybe_auth(self.client.get(self.url(path))).send().await.unwrap();
         let s = r.status();
         (s, r.json().await.unwrap_or(Value::Null))
     }
 
     pub async fn post_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
-        let r = self.maybe_auth(self.client.post(self.url(path))).json(body).send().await.unwrap();
-        let s = r.status();
-        (s, r.json().await.unwrap_or(Value::Null))
+        self.send_json(Method::POST, path, body).await
     }
 
     pub async fn patch_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
-        let r = self.maybe_auth(self.client.patch(self.url(path))).json(body).send().await.unwrap();
-        let s = r.status();
-        (s, r.json().await.unwrap_or(Value::Null))
+        self.send_json(Method::PATCH, path, body).await
+    }
+
+    pub async fn put_json(&self, path: &str, body: &Value) -> (StatusCode, Value) {
+        self.send_json(Method::PUT, path, body).await
     }
 
     pub async fn delete(&self, path: &str) -> StatusCode {
@@ -115,12 +109,15 @@ impl TestRuntime {
         (s, r.json().await.unwrap_or(Value::Null))
     }
 
+    // Unauthed variants for auth boundary tests
     pub async fn get_unauthed(&self, path: &str) -> StatusCode {
         self.client.get(self.url(path)).send().await.unwrap().status()
     }
 
-    pub async fn post_json_unauthed(&self, path: &str, body: &Value) -> StatusCode {
-        self.client.post(self.url(path)).json(body).send().await.unwrap().status()
+    pub async fn post_unauthed(&self, path: &str, body: &Value) -> (StatusCode, Value) {
+        let r = self.client.post(self.url(path)).json(body).send().await.unwrap();
+        let s = r.status();
+        (s, r.json().await.unwrap_or(Value::Null))
     }
 
     pub async fn delete_unauthed(&self, path: &str) -> StatusCode {
