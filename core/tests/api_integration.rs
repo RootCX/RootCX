@@ -57,14 +57,14 @@ async fn mgmt_endpoints_reject_unauthenticated() {
         ]}]
     });
 
-    assert_eq!(rt.post_json_unauthed("/api/v1/apps", &manifest).await, 401);
+    assert_eq!(rt.post_unauthed("/api/v1/apps", &manifest).await.0, 401);
     assert_eq!(rt.delete_unauthed("/api/v1/apps/authtest").await, 401);
-    assert_eq!(rt.post_json_unauthed("/api/v1/apps/authtest/secrets", &json!({"key":"K","value":"V"})).await, 401);
+    assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/secrets", &json!({"key":"K","value":"V"})).await.0, 401);
     assert_eq!(rt.get_unauthed("/api/v1/apps/authtest/secrets").await, 401);
     assert_eq!(rt.delete_unauthed("/api/v1/apps/authtest/secrets/K").await, 401);
-    assert_eq!(rt.post_json_unauthed("/api/v1/apps/authtest/jobs", &json!({"payload":{}})).await, 401);
-    assert_eq!(rt.post_json_unauthed("/api/v1/apps/authtest/worker/start", &json!({})).await, 401);
-    assert_eq!(rt.post_json_unauthed("/api/v1/apps/authtest/worker/stop", &json!({})).await, 401);
+    assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/jobs", &json!({"payload":{}})).await.0, 401);
+    assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/worker/start", &json!({})).await.0, 401);
+    assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/worker/stop", &json!({})).await.0, 401);
     rt.shutdown().await;
 }
 
@@ -629,6 +629,458 @@ async fn install_multiple_entities() {
     assert_eq!(orders.as_array().unwrap().len(), 1);
     let (_, items) = rt.get_json("/api/v1/apps/multi/collections/items").await;
     assert_eq!(items.as_array().unwrap().len(), 1);
+    rt.shutdown().await;
+}
+
+// ── Platform Secrets ──
+
+#[tokio::test]
+async fn platform_secrets_crud() {
+    let rt = TestRuntime::boot().await;
+    let (s, _) = rt.post_json("/api/v1/platform/secrets", &json!({"key":"MY_KEY","value":"secret"})).await;
+    assert_eq!(s, 200);
+
+    let (_, keys) = rt.get_json("/api/v1/platform/secrets").await;
+    assert!(keys.as_array().unwrap().contains(&json!("MY_KEY")));
+
+    assert_eq!(rt.delete("/api/v1/platform/secrets/MY_KEY").await, 200);
+
+    let (_, keys) = rt.get_json("/api/v1/platform/secrets").await;
+    assert!(!keys.as_array().unwrap().contains(&json!("MY_KEY")));
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn platform_secrets_env() {
+    let rt = TestRuntime::boot().await;
+    rt.post_json("/api/v1/platform/secrets", &json!({"key":"ENV_KEY","value":"env_val"})).await;
+
+    let (s, body) = rt.get_json("/api/v1/platform/secrets/env").await;
+    assert_eq!(s, 200);
+    assert_eq!(body["ENV_KEY"], "env_val");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn platform_secrets_delete_nonexistent() {
+    let rt = TestRuntime::boot().await;
+    assert_eq!(rt.delete("/api/v1/platform/secrets/NOPE").await, 404);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn platform_secrets_invalid_key() {
+    let rt = TestRuntime::boot().await;
+    for key in ["", "bad key!", "no-dashes", "no.dots"] {
+        let (s, _) = rt.post_json("/api/v1/platform/secrets", &json!({"key": key, "value":"v"})).await;
+        assert_eq!(s, 400, "key {key:?} should be rejected");
+    }
+    rt.shutdown().await;
+}
+
+// ── AI Config ──
+
+#[tokio::test]
+async fn ai_config_get_set() {
+    let rt = TestRuntime::boot().await;
+
+    let (s, _) = rt.get_json("/api/v1/config/ai").await;
+    assert_eq!(s, 404, "should be 404 before any config is set");
+
+    let config = json!({"provider":"Anthropic","model":"claude-sonnet-4-20250514"});
+    let (s, _) = rt.put_json("/api/v1/config/ai", &config).await;
+    assert!(s == 200 || s == 204);
+
+    let (s, body) = rt.get_json("/api/v1/config/ai").await;
+    assert_eq!(s, 200);
+    assert_eq!(body["provider"], "Anthropic");
+    assert_eq!(body["model"], "claude-sonnet-4-20250514");
+    rt.shutdown().await;
+}
+
+// ── DB Introspection ──
+
+#[tokio::test]
+async fn db_list_schemas() {
+    let rt = TestRuntime::boot().await;
+    rt.install("dbschema", "items").await;
+
+    let (s, body) = rt.get_json("/api/v1/db/schemas").await;
+    assert_eq!(s, 200);
+    let names: Vec<&str> = body.as_array().unwrap().iter().filter_map(|s| s["schema_name"].as_str()).collect();
+    assert!(names.contains(&"rootcx_system"), "should contain rootcx_system");
+    assert!(names.contains(&"dbschema"), "should contain app schema");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn db_list_tables() {
+    let rt = TestRuntime::boot().await;
+    rt.install("dbtables", "contacts").await;
+
+    let (s, body) = rt.get_json("/api/v1/db/schemas/dbtables/tables").await;
+    assert_eq!(s, 200);
+    let tables: Vec<&str> = body.as_array().unwrap().iter().filter_map(|t| t["table_name"].as_str()).collect();
+    assert!(tables.contains(&"contacts"));
+    assert!(!body[0]["columns"].as_array().unwrap().is_empty());
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn db_execute_query() {
+    let rt = TestRuntime::boot().await;
+    rt.install("dbq", "items").await;
+    rt.create("dbq", "items", &json!({"first_name":"A","last_name":"B"})).await;
+
+    let (s, body) = rt.post_json("/api/v1/db/query", &json!({"sql":"SELECT * FROM items","schema":"dbq"})).await;
+    assert_eq!(s, 200);
+    assert!(body["columns"].is_array());
+    assert_eq!(body["row_count"], 1);
+    assert_eq!(body["rows"].as_array().unwrap().len(), 1);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn db_query_rejects_dml() {
+    let rt = TestRuntime::boot().await;
+    let (s, body) = rt.post_json("/api/v1/db/query", &json!({"sql":"DROP TABLE foo"})).await;
+    assert_eq!(s, 400);
+    assert!(body["error"].as_str().unwrap().to_lowercase().contains("select"));
+    rt.shutdown().await;
+}
+
+// ── Query Records ──
+
+#[tokio::test]
+async fn query_records_basic() {
+    let rt = TestRuntime::boot().await;
+    rt.install("qr", "contacts").await;
+    rt.create("qr", "contacts", &json!({"first_name":"Alice","last_name":"A"})).await;
+    rt.create("qr", "contacts", &json!({"first_name":"Bob","last_name":"B"})).await;
+    rt.create("qr", "contacts", &json!({"first_name":"Charlie","last_name":"C"})).await;
+
+    let (s, body) = rt.post_json("/api/v1/apps/qr/collections/contacts/query", &json!({
+        "where": {"first_name": "Alice"},
+        "limit": 10
+    })).await;
+    assert_eq!(s, 200);
+    assert_eq!(body["data"].as_array().unwrap().len(), 1);
+    assert_eq!(body["data"][0]["first_name"], "Alice");
+    assert_eq!(body["total"], 1);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn query_records_operators() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&json!({
+        "appId": "qrop", "name": "qrop", "version": "1.0.0",
+        "dataContract": [{ "entityName": "scores", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "value", "type": "number", "required": true },
+        ]}]
+    })).await;
+    for (n, v) in [("low", 10), ("mid", 50), ("high", 90)] {
+        rt.create("qrop", "scores", &json!({"name": n, "value": v})).await;
+    }
+
+    let (s, body) = rt.post_json("/api/v1/apps/qrop/collections/scores/query", &json!({
+        "where": {"value": {"$gte": 50}},
+        "orderBy": "value", "order": "asc"
+    })).await;
+    assert_eq!(s, 200);
+    let data = body["data"].as_array().unwrap();
+    assert_eq!(data.len(), 2);
+    assert_eq!(data[0]["name"], "mid");
+    assert_eq!(data[1]["name"], "high");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn query_records_or_combinator() {
+    let rt = TestRuntime::boot().await;
+    rt.install("qror", "contacts").await;
+    rt.create("qror", "contacts", &json!({"first_name":"Alice","last_name":"A"})).await;
+    rt.create("qror", "contacts", &json!({"first_name":"Bob","last_name":"B"})).await;
+    rt.create("qror", "contacts", &json!({"first_name":"Charlie","last_name":"C"})).await;
+
+    let (s, body) = rt.post_json("/api/v1/apps/qror/collections/contacts/query", &json!({
+        "where": {"$or": [{"first_name":"Alice"}, {"first_name":"Charlie"}]}
+    })).await;
+    assert_eq!(s, 200);
+    assert_eq!(body["total"], 2);
+    rt.shutdown().await;
+}
+
+// ── Bulk Create ──
+
+#[tokio::test]
+async fn bulk_create_records() {
+    let rt = TestRuntime::boot().await;
+    rt.install("bulk", "contacts").await;
+
+    let records: Vec<Value> = (0..5).map(|i| json!({"first_name": format!("U{i}"), "last_name": "L"})).collect();
+    let (s, body) = rt.post_json("/api/v1/apps/bulk/collections/contacts/bulk", &json!(records)).await;
+    assert_eq!(s, 201);
+    assert_eq!(body.as_array().unwrap().len(), 5);
+
+    let (_, all) = rt.get_json("/api/v1/apps/bulk/collections/contacts").await;
+    assert_eq!(all.as_array().unwrap().len(), 5);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn bulk_create_empty_array() {
+    let rt = TestRuntime::boot().await;
+    rt.install("bulke", "contacts").await;
+    let (s, _) = rt.post_json("/api/v1/apps/bulke/collections/contacts/bulk", &json!([])).await;
+    assert_eq!(s, 400);
+    rt.shutdown().await;
+}
+
+// ── Auth Flow ──
+
+#[tokio::test]
+async fn auth_mode_public() {
+    let rt = TestRuntime::boot().await;
+    let (s, body) = rt.get_json("/api/v1/auth/mode").await;
+    assert_eq!(s, 200);
+    assert_eq!(body["authRequired"], false);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn auth_mode_protected() {
+    let rt = TestRuntime::boot_with_auth().await;
+    let (s, body) = rt.get_json("/api/v1/auth/mode").await;
+    assert_eq!(s, 200);
+    assert_eq!(body["authRequired"], true);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn auth_register_login_me_logout() {
+    let rt = TestRuntime::boot_with_auth().await;
+
+    // register new user
+    let (s, body) = rt.post_unauthed(
+        "/api/v1/auth/register",
+        &json!({"username":"newuser","password":"Str0ngPass!"}),
+    ).await;
+    assert_eq!(s, 201);
+    assert!(body["user"]["id"].is_string());
+
+    // login
+    let (s, body) = rt.post_unauthed(
+        "/api/v1/auth/login",
+        &json!({"username":"newuser","password":"Str0ngPass!"}),
+    ).await;
+    assert_eq!(s, 200);
+    let access = body["accessToken"].as_str().unwrap();
+    let refresh = body["refreshToken"].as_str().unwrap().to_string();
+    assert!(body["expiresIn"].as_i64().unwrap() > 0);
+
+    // me
+    let r = rt.client.get(rt.url("/api/v1/auth/me")).bearer_auth(access).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let me: Value = r.json().await.unwrap();
+    assert_eq!(me["username"], "newuser");
+
+    // refresh
+    let r = rt.client.post(rt.url("/api/v1/auth/refresh")).json(&json!({"refreshToken": refresh})).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let rb: Value = r.json().await.unwrap();
+    assert!(rb["accessToken"].is_string());
+
+    // logout
+    let r = rt.client.post(rt.url("/api/v1/auth/logout")).json(&json!({"refreshToken": refresh})).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn auth_login_wrong_password() {
+    let rt = TestRuntime::boot_with_auth().await;
+    let (s, _) = rt.post_unauthed(
+        "/api/v1/auth/login",
+        &json!({"username":"testadmin","password":"wrongpassword"}),
+    ).await;
+    assert_eq!(s, 401);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn auth_register_weak_password() {
+    let rt = TestRuntime::boot_with_auth().await;
+    let (s, _) = rt.post_unauthed(
+        "/api/v1/auth/register",
+        &json!({"username":"weakuser","password":"short"}),
+    ).await;
+    assert_eq!(s, 400);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn auth_list_users() {
+    let rt = TestRuntime::boot_with_auth().await;
+    let (s, body) = rt.get_json("/api/v1/users").await;
+    assert_eq!(s, 200);
+    let users = body.as_array().unwrap();
+    assert!(users.iter().any(|u| u["username"] == "testadmin"));
+    rt.shutdown().await;
+}
+
+// ── RBAC ──
+
+#[tokio::test]
+async fn rbac_list_roles() {
+    let rt = TestRuntime::boot_with_auth().await;
+    rt.install("rbacapp", "items").await;
+
+    let (s, body) = rt.get_json("/api/v1/apps/rbacapp/roles").await;
+    assert_eq!(s, 200);
+    let roles = body.as_array().unwrap();
+    assert!(roles.iter().any(|r| r["name"] == "admin"), "should have built-in admin role");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn rbac_create_and_delete_role() {
+    let rt = TestRuntime::boot_with_auth().await;
+    rt.install("rbacc", "items").await;
+
+    let (s, _) = rt.post_json("/api/v1/apps/rbacc/roles", &json!({
+        "name": "editor",
+        "description": "Can edit items",
+        "permissions": ["items.read", "items.update"]
+    })).await;
+    assert_eq!(s, 200);
+
+    let (_, roles) = rt.get_json("/api/v1/apps/rbacc/roles").await;
+    assert!(roles.as_array().unwrap().iter().any(|r| r["name"] == "editor"));
+
+    assert_eq!(rt.delete("/api/v1/apps/rbacc/roles/editor").await, 200);
+
+    let (_, roles) = rt.get_json("/api/v1/apps/rbacc/roles").await;
+    assert!(!roles.as_array().unwrap().iter().any(|r| r["name"] == "editor"));
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn rbac_cannot_create_admin_role() {
+    let rt = TestRuntime::boot_with_auth().await;
+    rt.install("rbacadm", "items").await;
+
+    let (s, _) = rt.post_json("/api/v1/apps/rbacadm/roles", &json!({"name":"admin"})).await;
+    assert!(s == 400 || s == 409, "creating admin role should fail, got {s}");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn rbac_assign_and_revoke_role() {
+    let rt = TestRuntime::boot_with_auth().await;
+    rt.install("rbacas", "items").await;
+
+    // register a second user
+    rt.post_unauthed(
+        "/api/v1/auth/register",
+        &json!({"username":"rbacuser","password":"Str0ngPass1"}),
+    ).await;
+
+    // get user id
+    let (_, users) = rt.get_json("/api/v1/users").await;
+    let user_id = users.as_array().unwrap().iter()
+        .find(|u| u["username"] == "rbacuser").unwrap()["id"].as_str().unwrap().to_string();
+
+    // create role
+    rt.post_json("/api/v1/apps/rbacas/roles", &json!({"name":"viewer","permissions":["items.read"]})).await;
+
+    // assign
+    let (s, _) = rt.post_json("/api/v1/apps/rbacas/roles/assign", &json!({"userId": user_id, "role": "viewer"})).await;
+    assert_eq!(s, 200);
+
+    // list assignments
+    let (s, body) = rt.get_json("/api/v1/apps/rbacas/roles/assignments").await;
+    assert_eq!(s, 200);
+    assert!(body.as_array().unwrap().iter().any(|a| a["role"] == "viewer"));
+
+    // revoke
+    let (s, _) = rt.post_json("/api/v1/apps/rbacas/roles/revoke", &json!({"userId": user_id, "role": "viewer"})).await;
+    assert_eq!(s, 200);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn rbac_my_permissions() {
+    let rt = TestRuntime::boot_with_auth().await;
+    rt.install("rbacperm", "items").await;
+
+    let (s, body) = rt.get_json("/api/v1/apps/rbacperm/permissions").await;
+    assert_eq!(s, 200);
+    let roles: Vec<&str> = body["roles"].as_array().unwrap().iter().filter_map(|r| r.as_str()).collect();
+    assert!(roles.contains(&"admin"), "first user should be admin");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn rbac_available_permissions() {
+    let rt = TestRuntime::boot_with_auth().await;
+    rt.install("rbacavail", "items").await;
+
+    let (s, body) = rt.get_json("/api/v1/apps/rbacavail/permissions/available").await;
+    assert_eq!(s, 200);
+    let perms = body.as_array().unwrap();
+    let keys: Vec<&str> = perms.iter().filter_map(|p| p["key"].as_str()).collect();
+    assert!(keys.contains(&"items.read"));
+    assert!(keys.contains(&"items.create"));
+    rt.shutdown().await;
+}
+
+// ── MCP Servers ──
+
+#[tokio::test]
+async fn mcp_servers_register_and_remove() {
+    let rt = TestRuntime::boot().await;
+
+    let (s, body) = rt.post_json("/api/v1/mcp-servers", &json!({
+        "name": "test-mcp",
+        "transport": {"type": "stdio", "command": "echo", "args": ["hello"]}
+    })).await;
+    assert_eq!(s, 200);
+    assert_eq!(body["name"], "test-mcp");
+
+    let (s, body) = rt.get_json("/api/v1/mcp-servers/test-mcp").await;
+    assert_eq!(s, 200);
+    assert_eq!(body["name"], "test-mcp");
+
+    let (_, list) = rt.get_json("/api/v1/mcp-servers").await;
+    assert_eq!(list.as_array().unwrap().len(), 1);
+
+    assert_eq!(rt.delete("/api/v1/mcp-servers/test-mcp").await, 200);
+
+    let (_, list) = rt.get_json("/api/v1/mcp-servers").await;
+    assert!(list.as_array().unwrap().is_empty());
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_servers_get_nonexistent() {
+    let rt = TestRuntime::boot().await;
+    let (s, _) = rt.get_json("/api/v1/mcp-servers/nope").await;
+    assert_eq!(s, 404);
+    rt.shutdown().await;
+}
+
+// ── Tools Registry ──
+
+#[tokio::test]
+async fn tools_execute_unknown() {
+    let rt = TestRuntime::boot().await;
+    let (s, body) = rt.post_json("/api/v1/tools/nonexistent/execute", &json!({"appId":"x","args":{}})).await;
+    assert_eq!(s, 404);
+    assert!(body["error"].as_str().unwrap().contains("unknown"));
     rt.shutdown().await;
 }
 
