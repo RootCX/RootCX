@@ -1,4 +1,3 @@
-import * as React from "react";
 import { cn } from "../lib/utils";
 import { Label } from "../primitives/label";
 import { Input } from "../primitives/input";

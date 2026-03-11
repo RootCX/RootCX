@@ -78,7 +78,7 @@ export async function refresh() {
   state = { ...state, loading: true, error: null };
   emit();
   try {
-    state = { ...state, tables: await fetchTables(state.appId), loading: false };
+    state = { ...state, tables: await fetchTables(state.appId!), loading: false };
     emit();
   } catch (e) {
     state = { ...state, loading: false, error: errMsg(e) };

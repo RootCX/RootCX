@@ -9,7 +9,7 @@ import { NotificationBar } from "./notification-bar";
 import { PanelContainer } from "./panel-container";
 import { ActivityBar } from "./activity-bar";
 import { ProjectProvider, useProjectContext } from "./app-context";
-import { LayoutProvider, useLayout, buildDefaultState, type ZoneId } from "./layout-store";
+import { LayoutProvider, useLayout, buildDefaultState, type ZoneId, type Action } from "./layout-store";
 import { useViews } from "@/core/hooks";
 import { views as viewRegistry, executeCommand, workspace, layout } from "@/core/studio";
 import { CommandPaletteOverlay } from "@/extensions/command-palette/palette";
@@ -20,7 +20,7 @@ import { LoginScreen } from "@/components/login-screen";
 
 const WelcomePanel = lazy(() => import("@/extensions/welcome/panel"));
 
-function useEventListeners(dispatch: React.Dispatch<Parameters<typeof dispatch>[0]>) {
+function useEventListeners(dispatch: React.Dispatch<Action>) {
   useEffect(() => {
     const win = getCurrentWebviewWindow();
     const subs = [

@@ -1,4 +1,3 @@
-import * as React from "react";
 import { IconAlertTriangle } from "@tabler/icons-react";
 import { cn } from "../lib/utils";
 import { Button } from "../primitives/button";

@@ -1,5 +1,5 @@
 import {
-  type ReactNode, type RefObject,
+  type ReactNode,
   useState, useRef, useEffect, useCallback, useImperativeHandle, forwardRef,
 } from "react";
 import { cn } from "../lib/utils";

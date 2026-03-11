@@ -33,7 +33,7 @@ export default function SettingsPanel() {
           <div className="flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-green-500" />
             <span className="flex-1 text-[10px] text-foreground">{aiConfigStore.providerName()}</span>
-            <Button size="xs" variant="link" onClick={showAISetupDialog}>Change</Button>
+            <Button size="xs" variant="link" onClick={() => showAISetupDialog()}>Change</Button>
           </div>
           <label className="flex flex-col gap-1">
             <span className="text-[10px] font-medium text-muted-foreground">Model</span>
@@ -46,7 +46,7 @@ export default function SettingsPanel() {
           </label>
         </>
       ) : (
-        <Button size="xs" onClick={showAISetupDialog}>Configure AI Provider</Button>
+        <Button size="xs" onClick={() => showAISetupDialog()}>Configure AI Provider</Button>
       )}
     </div>
   );

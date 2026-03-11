@@ -6,6 +6,8 @@ import { ListRow } from "@/components/ui/list-row";
 import { Logo } from "@/components/logo";
 import { FolderOpen, Plus, Clock } from "lucide-react";
 
+interface RecentProject { path: string; name: string; last_opened: number }
+
 function RecentProjects() {
   const [recents, setRecents] = useState<RecentProject[]>([]);
 

@@ -14,6 +14,6 @@ export const activate = () => {
   commands.register("ai.setup", {
     title: "Configure AI Provider",
     category: "Settings",
-    handler: () => showAISetupDialog(),
+    handler: () => { showAISetupDialog(); },
   });
 };
