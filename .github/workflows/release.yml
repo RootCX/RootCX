@@ -23,9 +23,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14,       target: aarch64-apple-darwin,      bundles: dmg,          name: macos-arm64 }
-          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu,  bundles: "appimage,deb", name: linux-x86_64 }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,    bundles: nsis,         name: windows-x86_64 }
+          - { os: macos-14,       target: aarch64-apple-darwin,     bundles: "app,dmg",    name: macos-arm64 }
+          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu, bundles: "appimage,deb", name: linux-x86_64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,   bundles: nsis,         name: windows-x86_64 }
 
     runs-on: ${{ matrix.os }}
     name: Build (${{ matrix.name }})
@@ -68,8 +68,11 @@ jobs:
           pnpm --dir studio/ui install --frozen-lockfile
           pnpm --dir studio/ui build
 
-      - name: Build Tauri app
+      - name: Build and sign Tauri app
         shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           cargo tauri build \
             --target ${{ matrix.target }} \
@@ -80,10 +83,14 @@ jobs:
         with:
           name: ${{ matrix.name }}
           path: |
+            target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
+            target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
             target/${{ matrix.target }}/release/bundle/dmg/*.dmg
             target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
+            target/${{ matrix.target }}/release/bundle/appimage/*.AppImage.sig
             target/${{ matrix.target }}/release/bundle/deb/*.deb
             target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            target/${{ matrix.target }}/release/bundle/nsis/*.exe.sig
           if-no-files-found: error
           retention-days: 7
 
@@ -94,13 +101,56 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: studio/src-tauri/tauri.conf.json
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
+      - name: Generate latest.json
+        shell: bash
+        run: |
+          VERSION=$(jq -r '.version' studio/src-tauri/tauri.conf.json)
+          TAG="${GITHUB_REF_NAME}"
+          BASE="https://github.com/RootCX/RootCX/releases/download/${TAG}"
+
+          sig() { cat "$1" 2>/dev/null || echo ""; }
+          url() { echo "${BASE}/$(basename "$1" 2>/dev/null)"; }
+
+          MAC=$(echo artifacts/**/*.app.tar.gz)
+          LINUX=$(echo artifacts/**/*.AppImage)
+          WIN=$(echo artifacts/**/*-setup.exe)
+
+          jq -n \
+            --arg v "$VERSION" \
+            --arg notes "Release ${TAG}" \
+            --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg mac_sig "$(sig "${MAC}.sig")" \
+            --arg mac_url "$(url "$MAC")" \
+            --arg linux_sig "$(sig "${LINUX}.sig")" \
+            --arg linux_url "$(url "$LINUX")" \
+            --arg win_sig "$(sig "${WIN}.sig")" \
+            --arg win_url "$(url "$WIN")" \
+            '{
+              version: $v,
+              notes: $notes,
+              pub_date: $date,
+              platforms: {
+                "darwin-aarch64": { signature: $mac_sig, url: $mac_url },
+                "linux-x86_64": { signature: $linux_sig, url: $linux_url },
+                "windows-x86_64": { signature: $win_sig, url: $win_url }
+              }
+            }' > latest.json
+
+          cat latest.json
+
       - uses: softprops/action-gh-release@v2
         with:
           draft: true
           generate_release_notes: true
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*
+            latest.json
