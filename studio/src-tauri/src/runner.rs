@@ -9,7 +9,7 @@ pub struct RunnerState {
 }
 
 impl RunnerState {
-    pub fn run(&mut self, command: &str, cwd: &str, app_handle: AppHandle) {
+    pub fn run(&mut self, command: &str, cwd: &str, core_url: &str, app_handle: AppHandle) {
         self.stop();
         let _ = app_handle.emit("run-started", ());
 
@@ -18,9 +18,10 @@ impl RunnerState {
 
         let command = command.to_string();
         let cwd = cwd.to_string();
+        let core_url = core_url.to_string();
 
         tokio::spawn(async move {
-            let mut child = match spawn_child(&command, &cwd) {
+            let mut child = match spawn_child(&command, &cwd, &core_url) {
                 Ok(c) => c,
                 Err(e) => {
                     warn!("failed to spawn process: {e}");
@@ -73,11 +74,12 @@ async fn pipe_stream<R: AsyncReadExt + Unpin>(mut reader: R, handle: AppHandle) 
     }
 }
 
-fn spawn_child(command: &str, cwd: &str) -> Result<tokio::process::Child, std::io::Error> {
+fn spawn_child(command: &str, cwd: &str, core_url: &str) -> Result<tokio::process::Child, std::io::Error> {
     let (shell, flag) = rootcx_platform::shell::shell_command();
     tokio::process::Command::new(shell)
         .args([flag, command])
         .current_dir(cwd)
+        .env("VITE_ROOTCX_URL", core_url)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

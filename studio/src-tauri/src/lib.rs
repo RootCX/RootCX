@@ -19,7 +19,10 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_store::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
+            commands::get_core_url,
+            commands::set_core_url,
             commands::set_auth_token,
             commands::get_os_status,
             commands::boot_runtime,
@@ -75,16 +78,19 @@ pub fn run() {
             app.manage(forge_state.clone());
 
             tauri::async_runtime::spawn(async move {
-                match tokio::task::spawn_blocking(rootcx_client::ensure_runtime).await {
-                    Ok(Ok(rootcx_client::RuntimeStatus::Ready)) => {}
-                    Ok(Ok(rootcx_client::RuntimeStatus::NotInstalled)) => match
-                        tokio::task::spawn_blocking(rootcx_client::prompt_runtime_install).await {
-                            Ok(Err(e)) => error!("runtime: {e}"),
-                            Err(e) => error!("runtime: {e}"),
-                            _ => {}
-                        }
-                    Ok(Err(e)) => error!("runtime: {e}"),
-                    Err(e) => error!("runtime: {e}"),
+                // Skip local daemon install when connecting to a remote core
+                if !bg.is_remote() {
+                    match tokio::task::spawn_blocking(rootcx_client::ensure_runtime).await {
+                        Ok(Ok(rootcx_client::RuntimeStatus::Ready)) => {}
+                        Ok(Ok(rootcx_client::RuntimeStatus::NotInstalled)) => match
+                            tokio::task::spawn_blocking(rootcx_client::prompt_runtime_install).await {
+                                Ok(Err(e)) => error!("runtime: {e}"),
+                                Err(e) => error!("runtime: {e}"),
+                                _ => {}
+                            }
+                        Ok(Err(e)) => error!("runtime: {e}"),
+                        Err(e) => error!("runtime: {e}"),
+                    }
                 }
                 if let Err(e) = bg.boot().await { error!("runtime boot failed: {e}"); }
                 forge::init(&forge_state).await;

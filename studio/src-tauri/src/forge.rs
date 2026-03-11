@@ -102,7 +102,7 @@ async fn ensure_config(engine: &ForgeEngine, client: &RuntimeClient) {
 #[tauri::command]
 pub async fn forge_reload_config(state: State<'_, ForgeState>, app_state: State<'_, crate::state::AppState>) -> Result<(), String> {
     let e = engine(&state)?;
-    let c = build_config(app_state.runtime_client()).await?;
+    let c = build_config(&app_state.client()).await?;
     e.set_config(c).await;
     Ok(())
 }
@@ -125,7 +125,7 @@ pub async fn forge_get_messages(state: State<'_, ForgeState>, session_id: Uuid) 
 #[tauri::command]
 pub async fn forge_send_message(app: AppHandle, state: State<'_, ForgeState>, app_state: State<'_, crate::state::AppState>, session_id: Uuid, text: String) -> Result<(), String> {
     let e = engine(&state)?;
-    ensure_config(e, app_state.runtime_client()).await;
+    ensure_config(e, &app_state.client()).await;
     e.send_message(session_id, text, emit_fn(app)).await;
     Ok(())
 }

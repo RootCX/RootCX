@@ -5,39 +5,22 @@ use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
 use rootcx_client::RuntimeClient;
 use rootcx_types::OsStatus;
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_store::StoreExt;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-pub(crate) const DAEMON_URL: &str = "http://localhost:9100";
-const _: () = assert!(rootcx_platform::DEFAULT_API_PORT == 9100, "DAEMON_URL must match DEFAULT_API_PORT");
+pub const STORE_FILE: &str = "studio.json";
+const DEFAULT_CORE_URL: &str = "http://localhost:9100";
+const MAX_RECENT: usize = 10;
+const DEPLOY_EXCLUDE: &[&str] = &["node_modules", ".git", ".rootcx", "bun.lock", "src-tauri"];
 
-static LOG_HTTP: LazyLock<reqwest::Client> =
-    LazyLock::new(|| reqwest::Client::new());
-
-#[derive(Clone)]
-pub struct AppState {
-    client: RuntimeClient,
-    watchers: Arc<Mutex<Vec<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>>>>,
-    active_app_id: Arc<Mutex<Option<String>>>,
-    app_handle: AppHandle,
-    log_stream_abort: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
-}
+static LOG_HTTP: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 pub fn config_dir() -> Result<PathBuf, String> { rootcx_platform::dirs::config_dir().map_err(|e| e.to_string()) }
 
 pub fn instructions_dir() -> Result<PathBuf, String> {
     Ok(config_dir()?.join("instructions"))
 }
-
-fn session_file() -> Result<PathBuf, String> {
-    Ok(config_dir()?.join("studio-session.json"))
-}
-
-fn recent_projects_file() -> Result<PathBuf, String> {
-    Ok(config_dir()?.join("studio-recent.json"))
-}
-
-const MAX_RECENT: usize = 10;
 
 fn unix_now() -> i64 {
     std::time::SystemTime::now()
@@ -53,40 +36,6 @@ pub struct RecentProject {
     pub last_opened: i64,
 }
 
-pub fn load_recent_projects() -> Vec<RecentProject> {
-    recent_projects_file()
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|d| serde_json::from_str(&d).ok())
-        .unwrap_or_default()
-}
-
-pub fn add_recent_project(project_path: &str) {
-    let mut recents = load_recent_projects();
-    recents.retain(|r| r.path != project_path);
-
-    let name = Path::new(project_path)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| project_path.to_string());
-
-    recents.insert(0, RecentProject { path: project_path.to_string(), name, last_opened: unix_now() });
-    recents.truncate(MAX_RECENT);
-
-    if let Ok(file) = recent_projects_file() {
-        if let Some(dir) = file.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let _ = std::fs::write(&file, serde_json::to_string_pretty(&recents).unwrap_or_default());
-    }
-}
-
-pub fn clear_recent_projects() {
-    if let Ok(file) = recent_projects_file() {
-        let _ = std::fs::remove_file(&file);
-    }
-}
-
 async fn read_manifest(project_path: &str) -> Result<rootcx_types::AppManifest, String> {
     let contents = tokio::fs::read_to_string(Path::new(project_path).join("manifest.json"))
         .await
@@ -94,66 +43,122 @@ async fn read_manifest(project_path: &str) -> Result<rootcx_types::AppManifest, 
     serde_json::from_str(&contents).map_err(|e| format!("invalid manifest: {e}"))
 }
 
-const DEPLOY_EXCLUDE: &[&str] = &["node_modules", ".git", ".rootcx", "bun.lock", "src-tauri"];
+#[derive(Clone)]
+pub struct AppState {
+    client: Arc<std::sync::RwLock<RuntimeClient>>,
+    watchers: Arc<Mutex<Vec<notify_debouncer_mini::Debouncer<notify::RecommendedWatcher>>>>,
+    app_handle: AppHandle,
+    log_stream_abort: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
+}
 
 impl AppState {
     pub fn from_tauri(app: &tauri::App) -> Self {
+        let url = app.store(STORE_FILE)
+            .ok()
+            .and_then(|s| s.get("core_url"))
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| DEFAULT_CORE_URL.to_string());
         Self {
-            client: RuntimeClient::new(DAEMON_URL),
+            client: Arc::new(std::sync::RwLock::new(RuntimeClient::new(&url))),
             watchers: Arc::new(Mutex::new(Vec::new())),
-            active_app_id: Arc::new(Mutex::new(None)),
             app_handle: app.handle().clone(),
             log_stream_abort: Arc::new(Mutex::new(None)),
         }
     }
 
-    pub fn runtime_client(&self) -> &RuntimeClient {
-        &self.client
+    fn store(&self) -> Arc<tauri_plugin_store::Store<tauri::Wry>> {
+        self.app_handle.store(STORE_FILE).expect("store")
+    }
+
+    pub fn core_url(&self) -> String {
+        self.store().get("core_url")
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| DEFAULT_CORE_URL.to_string())
+    }
+
+    pub fn set_core_url(&self, url: &str) {
+        let url = url.trim_end_matches('/');
+        self.store().set("core_url", url);
+        *self.client.write().unwrap() = RuntimeClient::new(url);
+    }
+
+    pub fn is_remote(&self) -> bool {
+        let url = self.core_url();
+        !url.contains("localhost") && !url.contains("127.0.0.1")
+    }
+
+    pub fn client(&self) -> RuntimeClient {
+        self.client.read().unwrap().clone()
     }
 
     pub fn set_auth_token(&self, token: Option<String>) {
-        self.client.set_token(token);
+        self.client().set_token(token);
+    }
+
+    pub fn recent_projects(&self) -> Vec<RecentProject> {
+        self.store().get("recent_projects")
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn add_recent_project(&self, path: &str) {
+        let mut recents = self.recent_projects();
+        recents.retain(|r| r.path != path);
+        let name = Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.to_string());
+        recents.insert(0, RecentProject { path: path.to_string(), name, last_opened: unix_now() });
+        recents.truncate(MAX_RECENT);
+        self.store().set("recent_projects", serde_json::to_value(&recents).unwrap());
+    }
+
+    pub fn clear_recent_projects(&self) {
+        self.store().delete("recent_projects");
+    }
+
+    fn active_app_id(&self) -> Option<String> {
+        self.store().get("active_app_id").and_then(|v| v.as_str().map(String::from))
+    }
+
+    fn set_active_app_id(&self, id: &str) {
+        self.store().set("active_app_id", id);
+    }
+
+    fn clear_active_app_id(&self) {
+        self.store().delete("active_app_id");
     }
 
     pub async fn boot(&self) -> Result<(), String> {
-        if !self.client.is_available().await {
-            return Err(format!("core daemon not reachable at {DAEMON_URL}"));
+        let url = self.core_url();
+        if !self.client().is_available().await {
+            return Err(format!("core daemon not reachable at {url}"));
         }
-        info!("connected to core daemon at {DAEMON_URL}");
-
+        info!("connected to core daemon at {url}");
         self.reconnect_or_cleanup().await;
-        crate::browser::spawn_listener();
+        crate::browser::spawn_listener(url.clone());
         let _ = self.app_handle.emit("runtime-booted", ());
         Ok(())
     }
 
     async fn reconnect_or_cleanup(&self) {
-        let path = match session_file() {
-            Ok(p) => p,
-            Err(_) => return,
+        let app_id = match self.active_app_id() {
+            Some(id) => id,
+            None => return,
         };
-        let data = match tokio::fs::read_to_string(&path).await {
-            Ok(d) => d,
-            Err(_) => return,
-        };
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&data)
-            && let Some(app_id) = parsed["active_app_id"].as_str() {
-                match self.client.worker_status(app_id).await {
-                    Ok(status) if status == "running" => {
-                        info!(app_id, "reconnecting to running worker from previous session");
-                        *self.active_app_id.lock().await = Some(app_id.to_string());
-                        self.subscribe_to_worker_logs(app_id).await;
-                        return;
-                    }
-                    _ => {
-                        info!(app_id, "cleaning up orphaned worker from previous session");
-                        if let Err(e) = self.client.stop_worker(app_id).await {
-                            warn!(app_id, "orphan cleanup failed (may already be stopped): {e}");
-                        }
-                    }
-                }
+        match self.client().worker_status(&app_id).await {
+            Ok(status) if status == "running" => {
+                info!(app_id, "reconnecting to running worker");
+                self.subscribe_to_worker_logs(&app_id).await;
             }
-        let _ = tokio::fs::remove_file(&path).await;
+            _ => {
+                info!(app_id, "cleaning up orphaned worker");
+                if let Err(e) = self.client().stop_worker(&app_id).await {
+                    warn!(app_id, "orphan cleanup: {e}");
+                }
+                self.clear_active_app_id();
+            }
+        }
     }
 
     async fn subscribe_to_worker_logs(&self, app_id: &str) {
@@ -164,8 +169,8 @@ impl AppState {
         let app_handle = self.app_handle.clone();
         let _ = app_handle.emit("run-started", ());
 
-        let url = format!("{DAEMON_URL}/api/v1/apps/{app_id}/logs");
-        let token = self.client.token();
+        let url = format!("{}/api/v1/apps/{app_id}/logs", self.core_url());
+        let token = self.client().token();
         let abort_store = self.log_stream_abort.clone();
 
         let task = tokio::spawn(async move {
@@ -253,13 +258,9 @@ impl AppState {
         .map_err(|e| format!("archive task failed: {e}"))??;
 
         info!(app_id = %app_id, size = archive.len(), "deploying backend");
-        let result = self.client.deploy_app(&app_id, archive).await.map_err(|e| format!("deploy failed: {e}"))?;
+        let result = self.client().deploy_app(&app_id, archive).await.map_err(|e| format!("deploy failed: {e}"))?;
 
-        *self.active_app_id.lock().await = Some(app_id.clone());
-        if let Ok(path) = session_file() {
-            let data = serde_json::json!({ "active_app_id": app_id });
-            let _ = tokio::fs::write(&path, data.to_string()).await;
-        }
+        self.set_active_app_id(&app_id);
 
         Ok(result)
     }
@@ -267,7 +268,7 @@ impl AppState {
     pub async fn deploy_and_watch(&self, project_path: &str) -> Result<String, String> {
         self.watchers.lock().await.clear();
         let msg = self.deploy_backend(project_path).await?;
-        if let Some(app_id) = self.active_app_id.lock().await.clone() {
+        if let Some(app_id) = self.active_app_id() {
             self.subscribe_to_worker_logs(&app_id).await;
         }
         self.start_watcher(project_path)?;
@@ -300,7 +301,7 @@ impl AppState {
                     match handle.block_on(state.deploy_backend(&project_path)) {
                         Ok(_) => {
                             info!("hot reload success");
-                            if let Some(app_id) = handle.block_on(state.active_app_id.lock()).clone() {
+                            if let Some(app_id) = state.active_app_id() {
                                 handle.block_on(state.subscribe_to_worker_logs(&app_id));
                             }
                         }
@@ -319,23 +320,19 @@ impl AppState {
         if let Some(handle) = self.log_stream_abort.lock().await.take() {
             handle.abort();
         }
-        if let Some(app_id) = self.active_app_id.lock().await.take() {
+        if let Some(app_id) = self.active_app_id() {
             info!(app_id, "stopping deployed worker");
-            if let Err(e) = self.client.stop_worker(&app_id).await {
+            if let Err(e) = self.client().stop_worker(&app_id).await {
                 warn!(app_id, "failed to stop worker: {e}");
             }
         }
+        self.clear_active_app_id();
         let _ = self.app_handle.emit("run-output", "\r\n[worker stopped]\r\n");
-        if let Ok(path) = session_file() {
-            let _ = tokio::fs::remove_file(&path).await;
-        }
         self.watchers.lock().await.clear();
     }
 
     pub async fn shutdown(&self) {
         crate::browser::shutdown().await;
-        // Only clean up local Studio resources (watchers, log stream).
-        // Workers live on Core daemon and must keep running after Studio exits.
         if let Some(handle) = self.log_stream_abort.lock().await.take() {
             handle.abort();
         }
@@ -343,7 +340,7 @@ impl AppState {
     }
 
     pub async fn status(&self) -> OsStatus {
-        self.client.status().await.unwrap_or_else(|_| OsStatus::offline())
+        self.client().status().await.unwrap_or_else(|_| OsStatus::offline())
     }
 }
 
