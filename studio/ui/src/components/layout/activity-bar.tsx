@@ -54,7 +54,7 @@ export function ActivityBar() {
           );
         })}
 
-        {user && user.id !== "anonymous" && (
+        {user && (
           <div className="mt-auto mb-2">
             <Tooltip>
               <TooltipTrigger asChild>

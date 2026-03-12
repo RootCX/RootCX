@@ -40,6 +40,12 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
             "/api/v1/apps/{app_id}/deploy",
             post(routes::deploy_backend).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
+        .route(
+            "/api/v1/apps/{app_id}/frontend",
+            post(routes::deploy_frontend).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        .route("/apps/{app_id}/", get(routes::serve_frontend_root))
+        .route("/apps/{app_id}/{*path}", get(routes::serve_frontend_path))
         .route("/api/v1/db/schemas", get(routes::list_schemas))
         .route("/api/v1/db/schemas/{schema}/tables", get(routes::list_tables))
         .route("/api/v1/db/query", post(routes::execute_query))
@@ -56,18 +62,14 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         rt.auth_config().clone()
     };
 
-    let cors = if auth_config.public {
-        CorsLayer::permissive()
-    } else {
-        CorsLayer::new()
-            .allow_origin(AllowOrigin::predicate(|origin, _| {
-                let o = origin.as_bytes();
-                o.starts_with(b"http://localhost:") || o.starts_with(b"http://127.0.0.1:")
-                    || o.starts_with(b"tauri://") || o.starts_with(b"https://tauri.")
-            }))
-            .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any)
-    };
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _| {
+            let o = origin.as_bytes();
+            o.starts_with(b"http://localhost:") || o.starts_with(b"http://127.0.0.1:")
+                || o.starts_with(b"tauri://") || o.starts_with(b"https://tauri.")
+        }))
+        .allow_methods(tower_http::cors::Any)
+        .allow_headers(tower_http::cors::Any);
 
     let router = router
         .layer(axum::Extension(auth_config))

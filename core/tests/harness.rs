@@ -19,10 +19,7 @@ pub struct TestRuntime {
 }
 
 impl TestRuntime {
-    pub async fn boot() -> Self { Self::boot_inner(false).await }
-    pub async fn boot_with_auth() -> Self { Self::boot_inner(true).await }
-
-    async fn boot_inner(require_auth: bool) -> Self {
+    pub async fn boot() -> Self {
         let resources = rootcx_platform::dirs::resources_dir(env!("CARGO_MANIFEST_DIR"))
             .expect("resources dir not found");
         let pg_root = find_pg_root(&resources).expect("bundled PostgreSQL not found");
@@ -34,10 +31,9 @@ impl TestRuntime {
 
         let pg = PostgresManager::new(pg_root.join("bin"), data_dir.join("data/pg"), pg_port)
             .with_lib_dir(pg_root.join("lib"));
-        let auth_required = if require_auth { Some(true) } else { None };
         let resources_dir = data_dir.join("resources");
         std::fs::create_dir_all(&resources_dir).unwrap();
-        let runtime = Arc::new(Mutex::new(Runtime::with_auth_mode(pg, data_dir, resources_dir, bun_bin, auth_required)));
+        let runtime = Arc::new(Mutex::new(Runtime::new(pg, data_dir, resources_dir, bun_bin)));
         runtime.lock().await.boot(api_port).await.expect("boot failed");
 
         let rt = Arc::clone(&runtime);
@@ -51,15 +47,11 @@ impl TestRuntime {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        let token = if require_auth {
-            let creds = json!({"username":"testadmin","password":"testpass123"});
-            client.post(format!("{base_url}/api/v1/auth/register")).json(&creds).send().await.ok();
-            let res = client.post(format!("{base_url}/api/v1/auth/login")).json(&creds).send().await.unwrap();
-            let body: Value = res.json().await.unwrap();
-            body["accessToken"].as_str().unwrap().to_string()
-        } else {
-            String::new()
-        };
+        let creds = json!({"username":"testadmin","password":"Str0ngPass1"});
+        client.post(format!("{base_url}/api/v1/auth/register")).json(&creds).send().await.ok();
+        let res = client.post(format!("{base_url}/api/v1/auth/login")).json(&creds).send().await.unwrap();
+        let body: Value = res.json().await.unwrap();
+        let token = body["accessToken"].as_str().unwrap().to_string();
 
         Self { base_url, pg_port, client, runtime, token, _tmp: tmp }
     }
@@ -68,19 +60,19 @@ impl TestRuntime {
         format!("{}{path}", self.base_url)
     }
 
-    fn maybe_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        if self.token.is_empty() { req } else { req.bearer_auth(&self.token) }
+    fn authed(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        req.bearer_auth(&self.token)
     }
 
     async fn send_json(&self, method: Method, path: &str, body: &Value) -> (StatusCode, Value) {
-        let r = self.maybe_auth(self.client.request(method, self.url(path)))
+        let r = self.authed(self.client.request(method, self.url(path)))
             .json(body).send().await.unwrap();
         let s = r.status();
         (s, r.json().await.unwrap_or(Value::Null))
     }
 
     pub async fn get_json(&self, path: &str) -> (StatusCode, Value) {
-        let r = self.maybe_auth(self.client.get(self.url(path))).send().await.unwrap();
+        let r = self.authed(self.client.get(self.url(path))).send().await.unwrap();
         let s = r.status();
         (s, r.json().await.unwrap_or(Value::Null))
     }
@@ -98,13 +90,13 @@ impl TestRuntime {
     }
 
     pub async fn delete(&self, path: &str) -> StatusCode {
-        self.maybe_auth(self.client.delete(self.url(path))).send().await.unwrap().status()
+        self.authed(self.client.delete(self.url(path))).send().await.unwrap().status()
     }
 
     pub async fn upload(&self, path: &str, name: &str, mime: &str, data: &[u8]) -> (StatusCode, Value) {
         let part = multipart::Part::bytes(data.to_vec()).file_name(name.to_string()).mime_str(mime).unwrap();
         let form = multipart::Form::new().part("file", part);
-        let r = self.maybe_auth(self.client.post(self.url(path))).multipart(form).send().await.unwrap();
+        let r = self.authed(self.client.post(self.url(path))).multipart(form).send().await.unwrap();
         let s = r.status();
         (s, r.json().await.unwrap_or(Value::Null))
     }

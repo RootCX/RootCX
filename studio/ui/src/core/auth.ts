@@ -25,10 +25,9 @@ export interface AuthUser {
 interface AuthState {
   user: AuthUser | null;
   loading: boolean;
-  authRequired: boolean;
 }
 
-let state: AuthState = { user: null, loading: true, authRequired: false };
+let state: AuthState = { user: null, loading: true };
 let accessToken: string | null = null;
 let refreshToken: string | null = null;
 const listeners = new Set<() => void>();
@@ -42,18 +41,9 @@ export const subscribe = (fn: () => void) => (listeners.add(fn), () => listeners
 export const getSnapshot = () => snapshot;
 export function useAuth() { return useSyncExternalStore(subscribe, getSnapshot); }
 
-const ANON: AuthUser = { id: "anonymous", username: "anonymous", email: null, displayName: null };
-
 export async function initAuth() {
   try {
     await getCoreUrl();
-    const res = await fetch(`${BASE}/api/v1/auth/mode`);
-    if (!res.ok) { state = { ...state, loading: false }; emit(); return; }
-
-    const { authRequired } = await res.json();
-    state = { ...state, authRequired };
-
-    if (!authRequired) { state = { ...state, user: ANON, loading: false }; emit(); return; }
 
     const stored = localStorage.getItem(REFRESH_KEY);
     if (stored) {

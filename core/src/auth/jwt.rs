@@ -70,7 +70,6 @@ mod tests {
             decoding_key: DecodingKey::from_secret(secret),
             access_ttl: Duration::from_secs(900),
             refresh_ttl: Duration::from_secs(86400),
-            public: false,
         }
     }
 

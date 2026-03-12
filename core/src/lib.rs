@@ -56,17 +56,7 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(pg: PostgresManager, data_dir: PathBuf, resources_dir: PathBuf, bun_bin: PathBuf) -> Self {
-        Self::with_auth_mode(pg, data_dir, resources_dir, bun_bin, None)
-    }
-
-    pub fn with_auth_mode(
-        pg: PostgresManager,
-        data_dir: PathBuf,
-        resources_dir: PathBuf,
-        bun_bin: PathBuf,
-        auth_required: Option<bool>,
-    ) -> Self {
-        let auth_config = AuthConfig::load(&data_dir, auth_required).expect("failed to load auth config");
+        let auth_config = AuthConfig::load(&data_dir).expect("failed to load auth config");
 
         let browser_queue = Arc::new(extensions::browser::queue::BrowserQueue::new());
         let extensions = builtin_extensions(

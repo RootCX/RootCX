@@ -125,13 +125,13 @@ export function DockLayout() {
   const views = useViews();
   const defaultState = useMemo(() => buildDefaultState(views), [views]);
   const validIds = useMemo(() => new Set(views.map((v) => v.id)), [views]);
-  const { user, loading, authRequired } = useAuth();
+  const { user, loading } = useAuth();
 
   if (loading) {
     return <div className="flex h-screen w-screen items-center justify-center bg-background text-xs text-muted-foreground">Loading...</div>;
   }
 
-  if (authRequired && !user) {
+  if (!user) {
     return <LoginScreen />;
   }
 

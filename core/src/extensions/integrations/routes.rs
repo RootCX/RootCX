@@ -202,12 +202,10 @@ pub async fn execute_action(
     let (pool, secrets) = routes::pool_and_secrets(&rt).await?;
     let wm = routes::wm(&rt).await?;
 
-    if !identity.user_id.is_nil() {
-        let perm = format!("integration.{integration_id}.{action_id}");
-        let (_, perms) = resolve_permissions(&pool, &app_id, identity.user_id).await?;
-        if !perms.iter().any(|p| p == "*" || p == &perm) {
-            return Err(ApiError::Forbidden(format!("permission denied: {perm}")));
-        }
+    let perm = format!("integration.{integration_id}.{action_id}");
+    let (_, perms) = resolve_permissions(&pool, &app_id, identity.user_id).await?;
+    if !perms.iter().any(|p| p == "*" || p == &perm) {
+        return Err(ApiError::Forbidden(format!("permission denied: {perm}")));
     }
 
     let bound: bool = sqlx::query_scalar(
@@ -227,14 +225,10 @@ pub async fn execute_action(
 
     let config = resolve_config(&pool, &secrets, &integration_id).await?;
 
-    let user_credentials = if !identity.user_id.is_nil() {
-        let key = format!("_iuc.{integration_id}.{}", identity.user_id);
-        match secrets.get(&pool, &app_id, &key).await {
-            Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or(JsonValue::Null),
-            _ => JsonValue::Null,
-        }
-    } else {
-        JsonValue::Null
+    let key = format!("_iuc.{integration_id}.{}", identity.user_id);
+    let user_credentials = match secrets.get(&pool, &app_id, &key).await {
+        Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or(JsonValue::Null),
+        _ => JsonValue::Null,
     };
 
     let result = wm

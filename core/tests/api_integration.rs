@@ -49,7 +49,7 @@ async fn sdk_does_not_persist_access_token_to_localstorage() {
 
 #[tokio::test]
 async fn mgmt_endpoints_reject_unauthenticated() {
-    let rt = TestRuntime::boot_with_auth().await;
+    let rt = TestRuntime::boot().await;
     let manifest = json!({
         "appId": "authtest", "name": "authtest", "version": "1.0.0",
         "dataContract": [{ "entityName": "items", "fields": [
@@ -841,17 +841,8 @@ async fn bulk_create_empty_array() {
 // ── Auth Flow ──
 
 #[tokio::test]
-async fn auth_mode_public() {
+async fn auth_mode_always_required() {
     let rt = TestRuntime::boot().await;
-    let (s, body) = rt.get_json("/api/v1/auth/mode").await;
-    assert_eq!(s, 200);
-    assert_eq!(body["authRequired"], false);
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn auth_mode_protected() {
-    let rt = TestRuntime::boot_with_auth().await;
     let (s, body) = rt.get_json("/api/v1/auth/mode").await;
     assert_eq!(s, 200);
     assert_eq!(body["authRequired"], true);
@@ -860,7 +851,7 @@ async fn auth_mode_protected() {
 
 #[tokio::test]
 async fn auth_register_login_me_logout() {
-    let rt = TestRuntime::boot_with_auth().await;
+    let rt = TestRuntime::boot().await;
 
     // register new user
     let (s, body) = rt.post_unauthed(
@@ -901,7 +892,7 @@ async fn auth_register_login_me_logout() {
 
 #[tokio::test]
 async fn auth_login_wrong_password() {
-    let rt = TestRuntime::boot_with_auth().await;
+    let rt = TestRuntime::boot().await;
     let (s, _) = rt.post_unauthed(
         "/api/v1/auth/login",
         &json!({"username":"testadmin","password":"wrongpassword"}),
@@ -912,7 +903,7 @@ async fn auth_login_wrong_password() {
 
 #[tokio::test]
 async fn auth_register_weak_password() {
-    let rt = TestRuntime::boot_with_auth().await;
+    let rt = TestRuntime::boot().await;
     let (s, _) = rt.post_unauthed(
         "/api/v1/auth/register",
         &json!({"username":"weakuser","password":"short"}),
@@ -923,7 +914,7 @@ async fn auth_register_weak_password() {
 
 #[tokio::test]
 async fn auth_list_users() {
-    let rt = TestRuntime::boot_with_auth().await;
+    let rt = TestRuntime::boot().await;
     let (s, body) = rt.get_json("/api/v1/users").await;
     assert_eq!(s, 200);
     let users = body.as_array().unwrap();
@@ -935,7 +926,7 @@ async fn auth_list_users() {
 
 #[tokio::test]
 async fn rbac_list_roles() {
-    let rt = TestRuntime::boot_with_auth().await;
+    let rt = TestRuntime::boot().await;
     rt.install("rbacapp", "items").await;
 
     let (s, body) = rt.get_json("/api/v1/apps/rbacapp/roles").await;
@@ -947,7 +938,7 @@ async fn rbac_list_roles() {
 
 #[tokio::test]
 async fn rbac_create_and_delete_role() {
-    let rt = TestRuntime::boot_with_auth().await;
+    let rt = TestRuntime::boot().await;
     rt.install("rbacc", "items").await;
 
     let (s, _) = rt.post_json("/api/v1/apps/rbacc/roles", &json!({
@@ -969,7 +960,7 @@ async fn rbac_create_and_delete_role() {
 
 #[tokio::test]
 async fn rbac_cannot_create_admin_role() {
-    let rt = TestRuntime::boot_with_auth().await;
+    let rt = TestRuntime::boot().await;
     rt.install("rbacadm", "items").await;
 
     let (s, _) = rt.post_json("/api/v1/apps/rbacadm/roles", &json!({"name":"admin"})).await;
@@ -979,7 +970,7 @@ async fn rbac_cannot_create_admin_role() {
 
 #[tokio::test]
 async fn rbac_assign_and_revoke_role() {
-    let rt = TestRuntime::boot_with_auth().await;
+    let rt = TestRuntime::boot().await;
     rt.install("rbacas", "items").await;
 
     // register a second user
@@ -1014,7 +1005,7 @@ async fn rbac_assign_and_revoke_role() {
 
 #[tokio::test]
 async fn rbac_my_permissions() {
-    let rt = TestRuntime::boot_with_auth().await;
+    let rt = TestRuntime::boot().await;
     rt.install("rbacperm", "items").await;
 
     let (s, body) = rt.get_json("/api/v1/apps/rbacperm/permissions").await;
@@ -1026,7 +1017,7 @@ async fn rbac_my_permissions() {
 
 #[tokio::test]
 async fn rbac_available_permissions() {
-    let rt = TestRuntime::boot_with_auth().await;
+    let rt = TestRuntime::boot().await;
     rt.install("rbacavail", "items").await;
 
     let (s, body) = rt.get_json("/api/v1/apps/rbacavail/permissions/available").await;
