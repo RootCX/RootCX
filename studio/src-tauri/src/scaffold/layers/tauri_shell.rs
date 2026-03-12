@@ -52,7 +52,7 @@ rootcx-client = "0.2"
   "version": "0.0.1",
   "identifier": "{identifier}",
   "build": {{
-    "beforeDevCommand": "npm install && npm run dev",
+    "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:{port}",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"

@@ -139,6 +139,12 @@ pub async fn ensure_dir(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn install_deps(state: State<'_, AppState>, project_path: String) -> Result<(), String> {
+    validate_fs_path(&project_path)?;
+    state.install_deps(&project_path).await
+}
+
+#[tauri::command]
 pub async fn deploy_backend(state: State<'_, AppState>, project_path: String) -> Result<String, String> {
     validate_fs_path(&project_path)?;
     state.deploy_and_watch(&project_path).await
