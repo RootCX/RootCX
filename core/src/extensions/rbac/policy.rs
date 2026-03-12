@@ -61,7 +61,6 @@ fn dfs_cycle<'a>(
     None
 }
 
-/// Resolve effective (roles, permissions) for a user. Queries DB directly.
 /// core:admin is the instance super-admin — gets wildcard on every app.
 pub async fn resolve_permissions(
     pool: &PgPool,
