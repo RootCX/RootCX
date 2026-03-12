@@ -113,8 +113,13 @@ export interface QueryResult<T> {
   total: number;
 }
 
+declare global {
+  interface ImportMetaEnv { VITE_ROOTCX_URL?: string }
+  interface ImportMeta { readonly env: ImportMetaEnv }
+}
+
 function resolveBaseUrl(): string {
-  return (import.meta as any).env?.VITE_ROOTCX_URL || "http://localhost:9100";
+  return import.meta.env.VITE_ROOTCX_URL || "http://localhost:9100";
 }
 
 export const DEFAULT_BASE_URL = resolveBaseUrl();

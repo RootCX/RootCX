@@ -90,9 +90,11 @@ export async function connectTo(url: string): Promise<boolean> {
   return true;
 }
 
-export function disconnect() {
+export async function disconnect() {
   clearTokens();
   syncToken();
+  BASE = "";
+  await setCoreUrl("");
   state = { user: null, loading: false, connected: false };
   emit();
 }

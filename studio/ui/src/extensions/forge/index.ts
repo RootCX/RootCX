@@ -1,8 +1,7 @@
 import { lazy } from "react";
 import { Bot } from "lucide-react";
-import { views, commands, statusBar } from "@/core/studio";
+import { views, commands } from "@/core/studio";
 import { sendMessage, abortSession } from "./store";
-import { ForgeStatus } from "./status";
 
 export const activate = () => {
   views.register("forge", {
@@ -25,11 +24,5 @@ export const activate = () => {
     title: "Abort Session",
     category: "AI Forge",
     handler: abortSession,
-  });
-
-  statusBar.register("forge.status", {
-    alignment: "left",
-    priority: 10,
-    component: ForgeStatus,
   });
 };
