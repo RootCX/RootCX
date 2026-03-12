@@ -223,7 +223,7 @@ impl AppState {
     }
 
     pub async fn publish_frontend(&self, project_path: &str) -> Result<String, String> {
-        let project = std::path::Path::new(project_path);
+        let project = Path::new(project_path);
         let manifest = read_manifest(project_path).await?;
         let app_id = manifest.app_id;
         let core_url = self.core_url();
