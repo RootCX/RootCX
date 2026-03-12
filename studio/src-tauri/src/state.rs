@@ -222,23 +222,34 @@ impl AppState {
         *abort_store.lock().await = Some(task.abort_handle());
     }
 
+    pub async fn install_deps(&self, project_path: &str) -> Result<(), String> {
+        let project = Path::new(project_path);
+        let pm = detect_pm(project);
+        let (shell, flag) = rootcx_platform::shell::shell_command();
+        let out = tokio::process::Command::new(shell)
+            .args([flag, &format!("{pm} install")])
+            .current_dir(project)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| format!("{pm} install: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("{pm} install failed:\n{}", String::from_utf8_lossy(&out.stderr)));
+        }
+        Ok(())
+    }
+
     pub async fn publish_frontend(&self, project_path: &str) -> Result<String, String> {
         let project = Path::new(project_path);
         let manifest = read_manifest(project_path).await?;
         let app_id = manifest.app_id;
         let core_url = self.core_url();
-
-        let pkg_manager = if project.join("bun.lock").exists() || project.join("bun.lockb").exists() {
-            "bun"
-        } else if project.join("pnpm-lock.yaml").exists() {
-            "pnpm"
-        } else {
-            "npm"
-        };
+        let pm = detect_pm(project);
 
         let (shell, flag) = rootcx_platform::shell::shell_command();
         let output = tokio::process::Command::new(shell)
-            .args([flag, &format!("{pkg_manager} run build -- --base=/apps/{app_id}/")])
+            .args([flag, &format!("{pm} run build -- --base=/apps/{app_id}/")])
             .current_dir(project)
             .env("VITE_ROOTCX_URL", &core_url)
             .stdout(std::process::Stdio::piped())
@@ -357,6 +368,12 @@ impl AppState {
     pub async fn status(&self) -> OsStatus {
         self.client().status().await.unwrap_or_else(|_| OsStatus::offline())
     }
+}
+
+fn detect_pm(dir: &Path) -> &'static str {
+    if dir.join("bun.lock").exists() || dir.join("bun.lockb").exists() { "bun" }
+    else if dir.join("pnpm-lock.yaml").exists() { "pnpm" }
+    else { "npm" }
 }
 
 async fn archive_dir(dir: PathBuf, exclude: &'static [&str]) -> Result<Vec<u8>, String> {

@@ -68,12 +68,26 @@ async function executeStep(step: string, projectPath: string): Promise<boolean> 
       } catch (e) { return logError("sync_manifest", e); }
       return true;
     }
+    case "install_deps": {
+      try {
+        await invoke("install_deps", { projectPath });
+      } catch (e) { return logError("install_deps", e); }
+      return true;
+    }
     case "deploy_backend": {
       try {
         const entries = await invoke<{ name: string; is_dir: boolean }[]>("read_dir", { path: projectPath });
         if (entries.some((e) => e.is_dir && e.name === "backend"))
           await invoke("deploy_backend", { projectPath });
       } catch (e) { return logError("deploy_backend", e); }
+      return true;
+    }
+    case "publish_frontend": {
+      try {
+        emit("run-output", "\x1b[36m[publish] Building frontend...\x1b[0m\r\n");
+        const url = await invoke<string>("deploy_frontend", { projectPath });
+        emit("run-output", `\x1b[32m[publish] ${url}\x1b[0m\r\n`);
+      } catch (e) { return logError("publish_frontend", e); }
       return true;
     }
     default:

@@ -24,7 +24,7 @@ impl Layer for CoreLayer {
                 });
             }
             e.write_json("manifest.json", &manifest).await?;
-            e.write(".rootcx/launch.json", "{\n  \"preLaunch\": [\"verify_schema\", \"sync_manifest\", \"deploy_backend\"],\n  \"command\": \"cargo tauri dev\"\n}\n").await?;
+            e.write(".rootcx/launch.json", "{\n  \"preLaunch\": [\"verify_schema\", \"sync_manifest\", \"install_deps\", \"deploy_backend\", \"publish_frontend\"],\n  \"command\": \"cargo tauri dev\"\n}\n").await?;
 
             e.write(
                 "package.json",

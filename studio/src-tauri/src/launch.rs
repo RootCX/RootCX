@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 const DIR: &str = ".rootcx";
 const FILE: &str = "launch.json";
 const TEMPLATE: &str = r#"{
-  "preLaunch": ["verify_schema", "sync_manifest", "deploy_backend"],
+  "preLaunch": ["verify_schema", "sync_manifest", "install_deps", "deploy_backend", "publish_frontend"],
   "command": "echo hello world"
 }
 "#;
