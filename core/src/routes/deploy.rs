@@ -146,6 +146,13 @@ pub fn list_frontends(data_dir: &Path) -> std::collections::HashSet<String> {
         .collect()
 }
 
+pub async fn serve_frontend_root(
+    state: State<SharedRuntime>,
+    AxumPath(app_id): AxumPath<String>,
+) -> impl IntoResponse {
+    serve_frontend(state, AxumPath((app_id, String::new()))).await
+}
+
 pub async fn serve_frontend(
     State(rt): State<SharedRuntime>,
     AxumPath((app_id, path)): AxumPath<(String, String)>,
