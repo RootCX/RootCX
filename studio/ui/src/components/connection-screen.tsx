@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/logo";
-import { connectTo, getSavedConnections } from "@/core/auth";
+import { connectTo, getCoreUrl, getSavedConnections } from "@/core/auth";
 
 const INPUT = "flex-1 rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground outline-none focus:border-primary font-mono";
 
@@ -10,6 +11,9 @@ export function ConnectionScreen() {
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [recent] = useState(getSavedConnections);
+  const [lastUrl, setLastUrl] = useState("");
+
+  useEffect(() => { getCoreUrl().then((u) => { if (/^https?:\/\//i.test(u)) setLastUrl(u); }); }, []);
 
   async function handleConnect(target: string) {
     setError(null);
@@ -26,6 +30,12 @@ export function ConnectionScreen() {
       <Logo className="pointer-events-none absolute h-[65%] max-h-[440px] text-white/[0.025]" />
 
       <div className="z-10 flex w-96 flex-col gap-4 rounded-lg border border-border bg-sidebar p-6">
+        {lastUrl && (
+          <button onClick={() => handleConnect(lastUrl)} disabled={connecting}
+            className="flex items-center gap-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50">
+            <ArrowLeft className="h-3 w-3" /> Back to {new URL(lastUrl).host}
+          </button>
+        )}
         <h1 className="text-center text-lg font-semibold text-foreground">Connect to RootCX</h1>
 
         <div className="flex flex-col gap-1.5">
