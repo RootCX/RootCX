@@ -35,6 +35,13 @@ pub async fn boot_runtime(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn await_boot(rx: State<'_, tokio::sync::watch::Receiver<bool>>) -> Result<(), String> {
+    let mut rx = rx.inner().clone();
+    rx.wait_for(|&ready| ready).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn shutdown_runtime(state: State<'_, AppState>) -> Result<(), String> {
     state.shutdown().await;
     Ok(())

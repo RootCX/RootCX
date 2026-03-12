@@ -16,7 +16,19 @@ import { CommandPaletteOverlay } from "@/extensions/command-palette/palette";
 import { showAISetupDialog } from "@/components/ai-setup-dialog";
 import { aiConfigStore } from "@/lib/ai-models";
 import { useAuth } from "@/core/auth";
+import { useBoot } from "@/core/boot";
+import { Logo } from "@/components/logo";
 import { LoginScreen } from "@/components/login-screen";
+import { ConnectionScreen } from "@/components/connection-screen";
+
+function BootScreen({ status }: { status: string }) {
+  return (
+    <div className="relative flex h-screen w-screen flex-col items-center justify-center gap-5 overflow-hidden bg-background">
+      <Logo className="h-10 animate-pulse text-primary/80" />
+      <p className="text-xs text-muted-foreground animate-in fade-in duration-500">{status}</p>
+    </div>
+  );
+}
 
 const WelcomePanel = lazy(() => import("@/extensions/welcome/panel"));
 
@@ -125,15 +137,13 @@ export function DockLayout() {
   const views = useViews();
   const defaultState = useMemo(() => buildDefaultState(views), [views]);
   const validIds = useMemo(() => new Set(views.map((v) => v.id)), [views]);
-  const { user, loading } = useAuth();
+  const { ready, status } = useBoot();
+  const { user, loading, connected } = useAuth();
 
-  if (loading) {
-    return <div className="flex h-screen w-screen items-center justify-center bg-background text-xs text-muted-foreground">Loading...</div>;
-  }
-
-  if (!user) {
-    return <LoginScreen />;
-  }
+  if (!ready) return <BootScreen status={status} />;
+  if (loading) return <BootScreen status="Restoring session…" />;
+  if (!connected) return <ConnectionScreen />;
+  if (!user) return <LoginScreen />;
 
   return (
     <ProjectProvider>
