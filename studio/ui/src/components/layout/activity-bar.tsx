@@ -1,6 +1,6 @@
 import { useEffect, useState, useMemo, useSyncExternalStore } from "react";
-import { Cable, Container, Database, FolderOpen, Hammer, KeyRound, Plug, Shield, LogOut, type LucideIcon } from "lucide-react";
-import { useAuth, logout } from "@/core/auth";
+import { Cable, Container, Database, FolderOpen, Hammer, KeyRound, Plug, Shield, LogOut, ServerOff, type LucideIcon } from "lucide-react";
+import { useAuth, logout, disconnect } from "@/core/auth";
 import { cn } from "@/lib/utils";
 import { useLayout, type ZoneId, type LayoutState } from "./layout-store";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
@@ -85,6 +85,12 @@ export function ActivityBar() {
               onClick={() => { setUserMenu(null); logout(); }}
             >
               <LogOut className="h-3 w-3" /> Sign out
+            </button>
+            <button
+              className="flex w-full items-center gap-2 rounded-[3px] px-2 py-[3px] text-[13px] text-foreground hover:bg-[#2a2d2e]"
+              onClick={() => { setUserMenu(null); disconnect(); }}
+            >
+              <ServerOff className="h-3 w-3" /> Switch server
             </button>
           </div>
         </>

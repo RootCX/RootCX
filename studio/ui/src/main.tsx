@@ -3,11 +3,11 @@ import { createRoot } from "react-dom/client";
 import { activateBuiltins } from "./extensions/activate";
 import { installGlobalListener } from "./core/keybindings";
 import { executeCommand } from "./core/studio";
-import { initAuth } from "./core/auth";
+import { startBoot } from "./core/boot";
 import App from "./App.tsx";
 import "./globals.css";
 
-initAuth();
+startBoot();
 activateBuiltins();
 installGlobalListener((id) => executeCommand(id));
 

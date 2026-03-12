@@ -9,7 +9,7 @@ mod state;
 mod terminal;
 
 use state::AppState;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tracing::error;
 
 pub fn run() {
@@ -26,6 +26,7 @@ pub fn run() {
             commands::set_auth_token,
             commands::get_os_status,
             commands::boot_runtime,
+            commands::await_boot,
             commands::shutdown_runtime,
             commands::read_dir,
             commands::read_file,
@@ -78,22 +79,34 @@ pub fn run() {
             let forge_state = forge::new_state();
             app.manage(forge_state.clone());
 
+            let (boot_tx, boot_rx) = tokio::sync::watch::channel(false);
+            app.manage(boot_rx);
+
+            let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                // Skip local daemon install when connecting to a remote core
-                if !bg.is_remote() {
+                if bg.is_remote() {
+                    let _ = handle.emit("boot-progress", "Connecting to remote server…");
+                } else {
+                    let _ = handle.emit("boot-progress", "Preparing environment…");
                     match tokio::task::spawn_blocking(rootcx_client::ensure_runtime).await {
                         Ok(Ok(rootcx_client::RuntimeStatus::Ready)) => {}
-                        Ok(Ok(rootcx_client::RuntimeStatus::NotInstalled)) => match
-                            tokio::task::spawn_blocking(rootcx_client::prompt_runtime_install).await {
+                        Ok(Ok(rootcx_client::RuntimeStatus::NotInstalled)) => {
+                            let _ = handle.emit("boot-progress", "Installing core…");
+                            match tokio::task::spawn_blocking(rootcx_client::prompt_runtime_install).await {
                                 Ok(Err(e)) => error!("runtime: {e}"),
                                 Err(e) => error!("runtime: {e}"),
                                 _ => {}
                             }
+                        }
                         Ok(Err(e)) => error!("runtime: {e}"),
                         Err(e) => error!("runtime: {e}"),
                     }
+                    let _ = handle.emit("boot-progress", "Starting core…");
                 }
-                if let Err(e) = bg.boot().await { error!("runtime boot failed: {e}"); }
+                if let Err(e) = bg.boot().await {
+                    error!("runtime boot failed: {e}");
+                }
+                let _ = boot_tx.send(true);
                 forge::init(&forge_state).await;
             });
 
