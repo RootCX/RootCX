@@ -4744,7 +4744,6 @@ dependencies = [
 name = "rootcx-postgres-mgmt"
 version = "0.2.0"
 dependencies = [
- "rand 0.8.5",
  "rootcx-platform",
  "serde",
  "thiserror 2.0.18",

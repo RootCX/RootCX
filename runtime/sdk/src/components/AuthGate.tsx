@@ -22,15 +22,18 @@ export interface AuthGateProps {
 function friendlyAuthError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
   const l = raw.toLowerCase();
-  if (l.includes("username") && l.includes("already taken")) return "This username is already taken.";
+  if (l.includes("already taken")) return "This username is already taken.";
   if (l.includes("invalid credentials")) return "Wrong username or password.";
-  if (l.includes("username required") || l.includes("password min"))
-    return "Username is required and password must be at least 8 characters.";
   if (l.includes("session revoked") || l.includes("expired"))
     return "Your session has expired. Please sign in again.";
   if (l.includes("fetch") || l.includes("network") || l.includes("failed to fetch"))
     return "Unable to reach the server. Please check your connection.";
-  return "Something went wrong. Please try again.";
+  // Surface server validation messages (e.g. password policy)
+  try {
+    const json = raw.match(/\{[\s\S]*\}$/)?.[0];
+    if (json) { const parsed = JSON.parse(json); if (typeof parsed.error === "string") return parsed.error; }
+  } catch {}
+  return raw || "Something went wrong. Please try again.";
 }
 
 const inputCls =

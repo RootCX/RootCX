@@ -222,46 +222,61 @@ impl AppState {
         *abort_store.lock().await = Some(task.abort_handle());
     }
 
+    pub async fn publish_frontend(&self, project_path: &str) -> Result<String, String> {
+        let project = std::path::Path::new(project_path);
+        let manifest = read_manifest(project_path).await?;
+        let app_id = manifest.app_id;
+        let core_url = self.core_url();
+
+        let pkg_manager = if project.join("bun.lock").exists() || project.join("bun.lockb").exists() {
+            "bun"
+        } else if project.join("pnpm-lock.yaml").exists() {
+            "pnpm"
+        } else {
+            "npm"
+        };
+
+        let (shell, flag) = rootcx_platform::shell::shell_command();
+        let output = tokio::process::Command::new(shell)
+            .args([flag, &format!("{pkg_manager} run build -- --base=/apps/{app_id}/")])
+            .current_dir(project)
+            .env("VITE_ROOTCX_URL", &core_url)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| format!("build failed: {e}"))?;
+
+        if !output.status.success() {
+            return Err(format!("frontend build failed:\n{}", String::from_utf8_lossy(&output.stderr)));
+        }
+
+        let dist_dir = project.join("dist");
+        if !dist_dir.exists() {
+            return Err("build did not produce a dist/ directory".into());
+        }
+
+        let archive = archive_dir(dist_dir, &[]).await?;
+        info!(app_id = %app_id, size = archive.len(), "publishing frontend");
+        self.client().deploy_frontend(&app_id, archive).await.map_err(|e| format!("publish failed: {e}"))?;
+
+        Ok(format!("{core_url}/apps/{app_id}/"))
+    }
+
     pub async fn deploy_backend(&self, project_path: &str) -> Result<String, String> {
         let project = Path::new(project_path);
         let manifest = read_manifest(project_path).await?;
         let app_id = manifest.app_id;
 
-        let deploy_dir = project.join("backend");
-        if !deploy_dir.exists() {
+        let backend_dir = project.join("backend");
+        if !backend_dir.exists() {
             return Err("no backend/ directory found in project".into());
         }
 
-        let archive = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
-            let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-            let mut tar = tar::Builder::new(enc);
-            for entry in std::fs::read_dir(&deploy_dir).map_err(|e| format!("read dir: {e}"))? {
-                let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
-                let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if DEPLOY_EXCLUDE.contains(&name_str.as_ref()) {
-                    continue;
-                }
-                let path = entry.path();
-                if path.is_file() {
-                    tar.append_path_with_name(&path, &*name_str).map_err(|e| format!("tar: {e}"))?;
-                } else if path.is_dir() {
-                    tar.append_dir_all(&*name_str, &path).map_err(|e| format!("tar: {e}"))?;
-                }
-            }
-            tar.into_inner()
-                .map_err(|e| format!("tar finalize: {e}"))?
-                .finish()
-                .map_err(|e| format!("gzip: {e}"))
-        })
-        .await
-        .map_err(|e| format!("archive task failed: {e}"))??;
-
+        let archive = archive_dir(backend_dir, DEPLOY_EXCLUDE).await?;
         info!(app_id = %app_id, size = archive.len(), "deploying backend");
         let result = self.client().deploy_app(&app_id, archive).await.map_err(|e| format!("deploy failed: {e}"))?;
-
         self.set_active_app_id(&app_id);
-
         Ok(result)
     }
 
@@ -342,6 +357,28 @@ impl AppState {
     pub async fn status(&self) -> OsStatus {
         self.client().status().await.unwrap_or_else(|_| OsStatus::offline())
     }
+}
+
+async fn archive_dir(dir: PathBuf, exclude: &'static [&str]) -> Result<Vec<u8>, String> {
+    tokio::task::spawn_blocking(move || {
+        let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        let mut tar = tar::Builder::new(enc);
+        for entry in std::fs::read_dir(&dir).map_err(|e| format!("read dir: {e}"))? {
+            let entry = entry.map_err(|e| format!("dir entry: {e}"))?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if exclude.contains(&name_str.as_ref()) { continue; }
+            let path = entry.path();
+            if path.is_file() {
+                tar.append_path_with_name(&path, &*name_str).map_err(|e| format!("tar: {e}"))?;
+            } else if path.is_dir() {
+                tar.append_dir_all(&*name_str, &path).map_err(|e| format!("tar: {e}"))?;
+            }
+        }
+        tar.into_inner().map_err(|e| format!("tar: {e}"))?.finish().map_err(|e| format!("gzip: {e}"))
+    })
+    .await
+    .map_err(|e| format!("archive task: {e}"))?
 }
 
 fn format_log_line(level: &str, message: &str) -> String {

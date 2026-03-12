@@ -132,12 +132,15 @@ pub struct FieldReference {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InstalledApp {
     pub id: String,
     pub name: String,
     pub version: String,
     pub status: String,
     pub entities: Vec<String>,
+    #[serde(default)]
+    pub has_frontend: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

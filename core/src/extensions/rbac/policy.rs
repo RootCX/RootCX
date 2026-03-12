@@ -62,11 +62,21 @@ fn dfs_cycle<'a>(
 }
 
 /// Resolve effective (roles, permissions) for a user. Queries DB directly.
+/// core:admin is the instance super-admin — gets wildcard on every app.
 pub async fn resolve_permissions(
     pool: &PgPool,
     app_id: &str,
     user_id: Uuid,
 ) -> Result<(Vec<String>, Vec<String>), ApiError> {
+    if app_id != "core" {
+        let is_core_admin: Option<(i32,)> = sqlx::query_as(
+            "SELECT 1 FROM rootcx_system.rbac_assignments WHERE user_id = $1 AND app_id = 'core' AND role = 'admin'",
+        ).bind(user_id).fetch_optional(pool).await?;
+        if is_core_admin.is_some() {
+            return Ok((vec!["admin".into()], vec!["*".into()]));
+        }
+    }
+
     let assigned: Vec<(String,)> =
         sqlx::query_as("SELECT role FROM rootcx_system.rbac_assignments WHERE user_id = $1 AND app_id = $2")
             .bind(user_id).bind(app_id).fetch_all(pool).await?;

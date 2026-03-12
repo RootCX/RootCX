@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 pub type ForgeState = Arc<tokio::sync::OnceCell<ForgeEngine>>;
 
-const PG_URL: &str = "postgres://localhost:5480/postgres";
+const PG_URL: &str = "postgres://postgres@localhost:5480/postgres";
 
 pub fn new_state() -> ForgeState {
     Arc::new(tokio::sync::OnceCell::new())
@@ -18,7 +18,6 @@ pub fn new_state() -> ForgeState {
 
 pub async fn init(state: &ForgeState) {
     ensure_instructions().await;
-    info!("forge: connecting to PG at {PG_URL}");
     match ForgeEngine::new(PG_URL).await {
         Ok(e) => { let _ = state.set(e); info!("forge: ready"); }
         Err(e) => warn!("forge: PG connection failed: {e}"),

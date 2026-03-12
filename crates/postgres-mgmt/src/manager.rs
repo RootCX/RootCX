@@ -27,17 +27,8 @@ impl PostgresManager {
     pub fn port(&self) -> u16 { self.port }
     pub fn data_dir(&self) -> &Path { &self.data_dir }
 
-    pub fn password(&self) -> String {
-        std::fs::read_to_string(self.data_dir.join(".pg_password")).unwrap_or_default().trim().to_string()
-    }
-
     pub fn connection_url(&self, db: &str) -> String {
-        let pw = self.password();
-        if pw.is_empty() {
-            format!("postgres://localhost:{}/{db}", self.port)
-        } else {
-            format!("postgres://postgres:{pw}@localhost:{}/{db}", self.port)
-        }
+        format!("postgres://postgres@localhost:{}/{db}", self.port)
     }
 
     pub async fn init_db(&self) -> Result<(), PgError> {
@@ -46,7 +37,6 @@ impl PostgresManager {
             return Ok(());
         }
 
-        // Create only the parent — initdb requires data_dir to not exist (or be empty).
         if let Some(parent) = self.data_dir.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -55,39 +45,19 @@ impl PostgresManager {
 
         info!(data_dir = %self.data_dir.display(), "running initdb");
 
-        let password: String = (0..32).map(|_| {
-            let idx = rand::random::<u8>() % 62;
-            (match idx {
-                0..=9 => b'0' + idx,
-                10..=35 => b'a' + idx - 10,
-                _ => b'A' + idx - 36,
-            }) as char
-        }).collect();
-
-        // Write password file to a temp location so the data_dir stays clean for initdb.
-        let pwfile = self.data_dir.with_file_name(".pg_password_tmp");
-        tokio::fs::write(&pwfile, &password).await
-            .map_err(|e| PgError::InitDb { data_dir: self.data_dir.clone(), source: e })?;
-
         let output = self
             .pg_command("initdb")
             .args(["-D"]).arg(&self.data_dir)
-            .args(["-E", "UTF8", "--locale=C", "--auth=scram-sha-256", "--username=postgres"])
-            .arg("--pwfile").arg(&pwfile)
+            .args(["-E", "UTF8", "--locale=C", "--auth=trust", "--username=postgres"])
             .output().await
             .map_err(|e| PgError::InitDb { data_dir: self.data_dir.clone(), source: e })?;
 
         if !output.status.success() {
-            let _ = tokio::fs::remove_file(&pwfile).await;
             return Err(PgError::InitDbFailed {
                 status: output.status.code().unwrap_or(-1),
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             });
         }
-
-        tokio::fs::rename(&pwfile, self.data_dir.join(".pg_password"))
-            .await
-            .map_err(|e| PgError::InitDb { data_dir: self.data_dir.clone(), source: e })?;
 
         let conf_path = self.data_dir.join("postgresql.conf");
         if let Ok(mut conf) = tokio::fs::read_to_string(&conf_path).await {

@@ -67,12 +67,17 @@ pub async fn list_apps(
     _identity: Identity,
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
 ) -> Result<Json<Vec<InstalledApp>>, ApiError> {
-    let pool = pool(&rt).await?;
+    let (pool, data_dir) = {
+        let g = rt.lock().await;
+        (g.pool().cloned().ok_or(ApiError::NotReady)?, g.data_dir().to_path_buf())
+    };
     let rows = sqlx::query_as::<_, (String, String, String, String, Option<sqlx::types::JsonValue>)>(
         "SELECT id, name, version, status, manifest FROM rootcx_system.apps WHERE status != 'system' ORDER BY name",
     )
     .fetch_all(&pool)
     .await?;
+
+    let frontends = deploy::list_frontends(&data_dir);
 
     Ok(Json(
         rows.into_iter()
@@ -84,7 +89,8 @@ pub async fn list_apps(
                             .map(|a| a.iter().filter_map(|e| e.get("entityName")?.as_str().map(String::from)).collect())
                     })
                     .unwrap_or_default();
-                InstalledApp { id, name, version, status, entities }
+                let has_frontend = frontends.contains(&id);
+                InstalledApp { id, name, version, status, entities, has_frontend }
             })
             .collect(),
     ))
@@ -115,7 +121,7 @@ pub async fn verify_schema(
 
 pub use config::{get_ai_config, get_forge_config, set_ai_config};
 pub use crud::{bulk_create_records, create_record, delete_record, get_record, list_records, query_records, update_record};
-pub use deploy::deploy_backend;
+pub use deploy::{deploy_backend, deploy_frontend, serve_frontend};
 pub use jobs::{enqueue_job, get_job, list_jobs};
 pub use secrets::{delete_secret, list_secrets, set_secret};
 pub use secrets::{delete_platform_secret, get_platform_env, list_platform_secrets, set_platform_secret};
