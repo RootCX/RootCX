@@ -1,7 +1,7 @@
 use crate::scaffold::emitter::Emitter;
 use crate::scaffold::types::{Layer, LayerFuture, ScaffoldContext};
 
-const SCAFFOLD_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' http://127.0.0.1:* http://localhost:*; img-src 'self' data:";
+const SCAFFOLD_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' http://127.0.0.1:* http://localhost:* https://*.rootcx.com; img-src 'self' data:";
 
 const ICON: &[u8] = include_bytes!("../../../icons/32x32.png");
 
