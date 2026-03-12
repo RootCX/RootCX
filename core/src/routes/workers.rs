@@ -70,14 +70,10 @@ pub async fn rpc_proxy(
         .map(String::from)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    let caller = if !identity.user_id.is_nil() {
-        let raw_token = headers.get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|h| h.strip_prefix("Bearer ").map(String::from));
-        Some(RpcCaller { user_id: identity.user_id.to_string(), username: identity.username, auth_token: raw_token })
-    } else {
-        None
-    };
+    let raw_token = headers.get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer ").map(String::from));
+    let caller = Some(RpcCaller { user_id: identity.user_id.to_string(), username: identity.username, auth_token: raw_token });
 
     Ok(Json(wm(&rt).await?.rpc(&app_id, id, method, params, caller).await?))
 }

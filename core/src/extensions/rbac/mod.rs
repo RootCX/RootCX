@@ -90,13 +90,11 @@ impl RuntimeExtension for RbacExtension {
              ON CONFLICT (app_id, name) DO UPDATE SET permissions = ARRAY['*']",
         ).bind(app_id).execute(pool).await.map_err(RuntimeError::Schema)?;
 
-        if !installed_by.is_nil() {
-            sqlx::query(
-                "INSERT INTO rootcx_system.rbac_assignments (user_id, app_id, role)
-                 VALUES ($1, $2, 'admin') ON CONFLICT DO NOTHING",
-            ).bind(installed_by).bind(app_id).execute(pool).await.map_err(RuntimeError::Schema)?;
-            info!(app = %app_id, user = %installed_by, "installer promoted to admin");
-        }
+        sqlx::query(
+            "INSERT INTO rootcx_system.rbac_assignments (user_id, app_id, role)
+             VALUES ($1, $2, 'admin') ON CONFLICT DO NOTHING",
+        ).bind(installed_by).bind(app_id).execute(pool).await.map_err(RuntimeError::Schema)?;
+        info!(app = %app_id, user = %installed_by, "installer promoted to admin");
         Ok(())
     }
 

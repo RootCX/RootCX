@@ -24,25 +24,21 @@ impl FromRequestParts<SharedRuntime> for Identity {
             .cloned()
             .ok_or_else(|| ApiError::Internal("auth not configured".into()))?;
 
-        let token =
-            parts.headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|h| h.strip_prefix("Bearer "));
+        let token = parts.headers.get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|h| h.strip_prefix("Bearer "))
+            .ok_or_else(|| ApiError::Unauthorized("missing or invalid authorization header".into()))?;
 
-        match token {
-            Some(t) => {
-                let claims =
-                    jwt::decode(&auth_config, t).map_err(|_| ApiError::Unauthorized("invalid token".into()))?;
+        let claims = jwt::decode(&auth_config, token)
+            .map_err(|_| ApiError::Unauthorized("invalid token".into()))?;
 
-                if claims.username.is_empty() {
-                    return Err(ApiError::Unauthorized("invalid token type".into()));
-                }
-
-                let user_id: Uuid =
-                    claims.sub.parse().map_err(|_| ApiError::Unauthorized("invalid token subject".into()))?;
-
-                Ok(Identity { user_id, username: claims.username })
-            }
-            None if auth_config.public => Ok(Identity { user_id: Uuid::nil(), username: "anonymous".to_string() }),
-            None => Err(ApiError::Unauthorized("missing or invalid authorization header".into())),
+        if claims.username.is_empty() {
+            return Err(ApiError::Unauthorized("invalid token type".into()));
         }
+
+        let user_id: Uuid = claims.sub.parse()
+            .map_err(|_| ApiError::Unauthorized("invalid token subject".into()))?;
+
+        Ok(Identity { user_id, username: claims.username })
     }
 }

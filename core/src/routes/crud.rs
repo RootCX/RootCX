@@ -16,7 +16,6 @@ use crate::extensions::rbac::policy::resolve_permissions;
 use crate::manifest::{field_type_map, map_field_type, quote_ident};
 
 async fn require_perm(pool: &PgPool, app_id: &str, user_id: Uuid, perm: &str) -> Result<(), ApiError> {
-    if user_id.is_nil() { return Ok(()); } // public mode — no RBAC
     let (_, perms) = resolve_permissions(pool, app_id, user_id).await?;
     if perms.iter().any(|p| p == "*" || p == perm) { Ok(()) }
     else { Err(ApiError::Forbidden(format!("permission denied: {perm}"))) }
