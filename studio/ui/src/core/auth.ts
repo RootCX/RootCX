@@ -78,6 +78,7 @@ export async function initAuth() {
 
 export async function connectTo(url: string): Promise<boolean> {
   const clean = url.replace(/\/+$/, "");
+  if (!/^https?:\/\//i.test(clean)) return false;
   const prev = BASE;
   BASE = clean;
   if (!(await checkHealth())) { BASE = prev; return false; }
