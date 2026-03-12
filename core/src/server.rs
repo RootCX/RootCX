@@ -44,8 +44,7 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
             "/api/v1/apps/{app_id}/frontend",
             post(routes::deploy_frontend).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
-        .route("/apps/{app_id}/", get(routes::serve_frontend_root))
-        .route("/apps/{app_id}/{*path}", get(routes::serve_frontend_path))
+        .route("/apps/{app_id}/{*path}", get(routes::serve_frontend))
         .route("/api/v1/db/schemas", get(routes::list_schemas))
         .route("/api/v1/db/schemas/{schema}/tables", get(routes::list_tables))
         .route("/api/v1/db/query", post(routes::execute_query))

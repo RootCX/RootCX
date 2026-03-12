@@ -24,7 +24,7 @@ Thumbs.db
 *.swo
 
 # Deploy (lives in separate private repo)
-deploy/
+/deploy/
 
 # Secrets / Credentials
 .env

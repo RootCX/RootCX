@@ -138,6 +138,12 @@ pub async fn deploy_backend(state: State<'_, AppState>, project_path: String) ->
 }
 
 #[tauri::command]
+pub async fn deploy_frontend(state: State<'_, AppState>, project_path: String) -> Result<String, String> {
+    validate_fs_path(&project_path)?;
+    state.publish_frontend(&project_path).await
+}
+
+#[tauri::command]
 pub async fn run_app(
     project_path: String,
     app_handle: tauri::AppHandle,

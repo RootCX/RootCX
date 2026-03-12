@@ -12,6 +12,7 @@ import { activate as settings } from "./settings";
 import { activate as database } from "./database";
 import { activate as security } from "./security";
 import { activate as bundle } from "./bundle";
+import { activate as publish } from "./publish";
 import { activate as workers } from "./workers";
 import { activate as integrations } from "./integrations";
 import { activate as mcpServers } from "./mcp-servers";
@@ -29,6 +30,7 @@ export function activateBuiltins() {
   coreStatus();
   run();
   bundle();
+  publish();
   editor();
   settings();
   database();

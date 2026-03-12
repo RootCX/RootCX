@@ -149,12 +149,19 @@ impl RuntimeClient {
     }
 
     pub async fn deploy_app(&self, app_id: &str, archive: Vec<u8>) -> Result<String, ClientError> {
+        self.upload_archive(&format!("/apps/{app_id}/deploy"), archive).await
+    }
+
+    pub async fn deploy_frontend(&self, app_id: &str, archive: Vec<u8>) -> Result<String, ClientError> {
+        self.upload_archive(&format!("/apps/{app_id}/frontend"), archive).await
+    }
+
+    async fn upload_archive(&self, path: &str, archive: Vec<u8>) -> Result<String, ClientError> {
         let part = reqwest::multipart::Part::bytes(archive)
-            .file_name("backend.tar.gz")
             .mime_str("application/gzip")
             .map_err(ClientError::Http)?;
         let form = reqwest::multipart::Form::new().part("archive", part);
-        let resp = self.authed(self.client.post(self.api(&format!("/apps/{app_id}/deploy")))).multipart(form).send().await?;
+        let resp = self.authed(self.client.post(self.api(path))).multipart(form).send().await?;
         extract_message(resp).await
     }
 

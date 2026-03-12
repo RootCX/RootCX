@@ -35,6 +35,7 @@ pub fn run() {
             commands::list_presets,
             commands::get_preset_questions,
             commands::deploy_backend,
+            commands::deploy_frontend,
             commands::run_app,
             commands::stop_deployed_worker,
             commands::resolve_instructions,
