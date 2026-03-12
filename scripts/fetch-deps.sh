@@ -6,13 +6,13 @@
 #
 # Override versions via env:
 #   ROOTCX_PG_VERSION   (default: 18.2.0)
-#   ROOTCX_BUN_VERSION  (default: 1.2.0)
+#   ROOTCX_BUN_VERSION  (default: 1.3.10)
 
 set -euo pipefail
 
 TARGET="${1:-$(rustc -vV 2>/dev/null | awk '/^host:/{print $2}')}"
 PG_VERSION="${ROOTCX_PG_VERSION:-18.2.0}"
-BUN_VERSION="${ROOTCX_BUN_VERSION:-1.2.0}"
+BUN_VERSION="${ROOTCX_BUN_VERSION:-1.3.10}"
 
 RESOURCES="$(dirname "$0")/../core/resources"
 mkdir -p "$RESOURCES"

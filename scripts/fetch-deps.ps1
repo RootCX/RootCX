@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $PgVersion = "18.2.0"
 if ($env:ROOTCX_PG_VERSION) { $PgVersion = $env:ROOTCX_PG_VERSION }
 
-$BunVersion = "1.2.0"
+$BunVersion = "1.3.10"
 if ($env:ROOTCX_BUN_VERSION) { $BunVersion = $env:ROOTCX_BUN_VERSION }
 
 $Resources = Join-Path $PSScriptRoot "..\core\resources"
