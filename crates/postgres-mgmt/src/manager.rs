@@ -46,9 +46,12 @@ impl PostgresManager {
             return Ok(());
         }
 
-        tokio::fs::create_dir_all(&self.data_dir)
-            .await
-            .map_err(|e| PgError::InitDb { data_dir: self.data_dir.clone(), source: e })?;
+        // Create only the parent — initdb requires data_dir to not exist (or be empty).
+        if let Some(parent) = self.data_dir.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| PgError::InitDb { data_dir: self.data_dir.clone(), source: e })?;
+        }
 
         info!(data_dir = %self.data_dir.display(), "running initdb");
 
@@ -61,24 +64,30 @@ impl PostgresManager {
             }) as char
         }).collect();
 
-        let pwfile = self.data_dir.join(".pg_password");
+        // Write password file to a temp location so the data_dir stays clean for initdb.
+        let pwfile = self.data_dir.with_file_name(".pg_password_tmp");
         tokio::fs::write(&pwfile, &password).await
             .map_err(|e| PgError::InitDb { data_dir: self.data_dir.clone(), source: e })?;
 
         let output = self
             .pg_command("initdb")
             .args(["-D"]).arg(&self.data_dir)
-            .args(["-E", "UTF8", "--locale=C", "--auth=scram-sha-256"])
+            .args(["-E", "UTF8", "--locale=C", "--auth=scram-sha-256", "--username=postgres"])
             .arg("--pwfile").arg(&pwfile)
             .output().await
             .map_err(|e| PgError::InitDb { data_dir: self.data_dir.clone(), source: e })?;
 
         if !output.status.success() {
+            let _ = tokio::fs::remove_file(&pwfile).await;
             return Err(PgError::InitDbFailed {
                 status: output.status.code().unwrap_or(-1),
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
             });
         }
+
+        tokio::fs::rename(&pwfile, self.data_dir.join(".pg_password"))
+            .await
+            .map_err(|e| PgError::InitDb { data_dir: self.data_dir.clone(), source: e })?;
 
         let conf_path = self.data_dir.join("postgresql.conf");
         if let Ok(mut conf) = tokio::fs::read_to_string(&conf_path).await {
