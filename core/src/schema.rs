@@ -46,6 +46,9 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
     crate::secrets::bootstrap_secrets_schema(pool).await?;
     crate::jobs::bootstrap_jobs_schema(pool).await?;
 
+    sqlx::query("ANALYZE rootcx_system.apps").execute(pool).await.ok();
+    sqlx::query("ANALYZE rootcx_system.config").execute(pool).await.ok();
+
     info!("rootcx_system schema ready");
     Ok(())
 }
