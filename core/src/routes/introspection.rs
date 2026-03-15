@@ -53,7 +53,6 @@ pub struct ColumnInfo {
 pub struct TableInfo {
     pub table_name: String,
     pub columns: Vec<ColumnInfo>,
-    pub row_estimate: i64,
 }
 
 pub async fn list_tables(
@@ -81,17 +80,6 @@ pub async fn list_tables(
     .fetch_all(&pool)
     .await?;
 
-    let estimates: HashMap<String, i64> = sqlx::query_as::<_, (String, i64)>(
-        "SELECT relname::text, GREATEST(reltuples, 0)::bigint
-         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-         WHERE n.nspname = $1 AND c.relkind = 'r'",
-    )
-    .bind(&schema)
-    .fetch_all(&pool)
-    .await?
-    .into_iter()
-    .collect();
-
     let mut col_map: HashMap<String, Vec<ColumnInfo>> = HashMap::new();
     for (table_name, column_name, data_type, is_nullable, column_default, ordinal_position) in columns {
         col_map.entry(table_name).or_default().push(ColumnInfo {
@@ -108,8 +96,7 @@ pub async fn list_tables(
             .into_iter()
             .map(|(table_name,)| {
                 let columns = col_map.remove(&table_name).unwrap_or_default();
-                let row_estimate = estimates.get(&table_name).copied().unwrap_or(0);
-                TableInfo { table_name, columns, row_estimate }
+                TableInfo { table_name, columns }
             })
             .collect(),
     ))

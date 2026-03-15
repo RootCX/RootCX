@@ -379,12 +379,6 @@ pub async fn sync_schema(
         apply_ddl(pool, &stmts).await?;
     }
 
-    // Refresh reltuples so the database browser shows accurate row estimates
-    for entity in entities {
-        let fq = format!("{}.{}", quote_ident(app_id), quote_ident(&entity.entity_name));
-        sqlx::query(&format!("ANALYZE {fq}")).execute(pool).await.ok();
-    }
-
     // Invalidate sqlx prepared-statement caches after column type changes
     // to prevent stale parameter-type bindings (e.g. f64 sent as TEXT).
     if has_type_changes {
