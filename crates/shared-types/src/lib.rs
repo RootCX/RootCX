@@ -282,6 +282,8 @@ pub struct McpServerConfig {
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum McpTransport {
     Stdio { command: String, #[serde(default)] args: Vec<String> },
+    Http { url: String, #[serde(default)] headers: std::collections::HashMap<String, String> },
+    #[deprecated = "use Http"]
     Sse { url: String, #[serde(default)] headers: std::collections::HashMap<String, String> },
 }
 
