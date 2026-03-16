@@ -46,8 +46,14 @@ impl McpManager {
             McpTransport::Stdio { command, args } => {
                 Arc::new(McpClient::connect_stdio(name, command, args, env, None).await?)
             }
-            McpTransport::Sse { .. } => {
-                return Err(RuntimeError::Mcp("SSE transport not yet implemented".into()));
+            #[allow(deprecated)]
+            McpTransport::Http { url, headers } | McpTransport::Sse { url, headers } => {
+                let mut args = vec!["@rootcx/mcp-bridge".into(), url.clone()];
+                for (k, v) in headers {
+                    args.push("--header".into());
+                    args.push(format!("{k}:{v}"));
+                }
+                Arc::new(McpClient::connect_stdio(name, "npx", &args, env, None).await?)
             }
         };
 

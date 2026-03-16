@@ -1,0 +1,19 @@
+{
+  "name": "@rootcx/mcp-bridge",
+  "version": "0.1.0",
+  "description": "stdio ↔ HTTP bridge for MCP servers (Streamable HTTP + legacy SSE)",
+  "license": "FSL-1.1-ALv2",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "bin": {
+    "mcp-bridge": "./bin/mcp-bridge.mjs"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}
