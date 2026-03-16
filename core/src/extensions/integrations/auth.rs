@@ -23,31 +23,27 @@ struct Pending { app_id: String, integration_id: String, user_id: String, create
 
 static PENDING: LazyLock<Mutex<HashMap<String, Pending>>> = LazyLock::new(Default::default);
 const TTL_SECS: u64 = 600;
-const CENTRALIZED_CALLBACK: &str = "https://rootcx.com/api/integrations/auth/callback";
-
-fn local_callback_url(headers: &HeaderMap) -> String {
-    let host = headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("localhost:9100");
-    let host = if host.starts_with("127.0.0.1") { host.replacen("127.0.0.1", "localhost", 1) } else { host.to_string() };
-    let scheme = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()).unwrap_or("http");
-    format!("{scheme}://{host}/api/v1/integrations/auth/callback")
+fn resolve_callback_url(headers: &HeaderMap) -> String {
+    std::env::var("OAUTH_CALLBACK_URL").unwrap_or_else(|_| {
+        let host = headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("localhost:9100");
+        let host = if host.starts_with("127.0.0.1") { host.replacen("127.0.0.1", "localhost", 1) } else { host.to_string() };
+        let scheme = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()).unwrap_or("http");
+        format!("{scheme}://{host}/api/v1/integrations/auth/callback")
+    })
 }
 
-/// Centralized: HMAC-signed state with tenant ref. Local dev: plain nonce.
 fn build_callback_and_state(headers: &HeaderMap, nonce: &str) -> (String, String) {
+    let cb = resolve_callback_url(headers);
     match (std::env::var("OAUTH_CALLBACK_HMAC_KEY"), std::env::var("ROOTCX_TENANT_REF")) {
         (Ok(key), Ok(tref)) => {
             let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
             let payload = format!("{tref}:{nonce}:{ts}");
             let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC key");
             mac.update(payload.as_bytes());
-            (CENTRALIZED_CALLBACK.into(), format!("{payload}:{}", hex::encode(mac.finalize().into_bytes())))
+            (cb, format!("{payload}:{}", hex::encode(mac.finalize().into_bytes())))
         }
-        _ => (local_callback_url(headers), nonce.to_string()),
+        _ => (cb, nonce.to_string()),
     }
-}
-
-fn callback_url(headers: &HeaderMap) -> String {
-    std::env::var("OAUTH_CALLBACK_HMAC_KEY").map(|_| CENTRALIZED_CALLBACK.into()).unwrap_or_else(|_| local_callback_url(headers))
 }
 
 fn extract_nonce(state: &str) -> &str {
@@ -106,7 +102,7 @@ pub async fn callback(
 
     let result = wm.rpc(
         &pending.integration_id, Uuid::new_v4().to_string(), "__auth_callback".into(),
-        json!({ "config": config, "query": params, "userId": pending.user_id, "callbackUrl": callback_url(&headers) }),
+        json!({ "config": config, "query": params, "userId": pending.user_id, "callbackUrl": resolve_callback_url(&headers) }),
         None,
     ).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
