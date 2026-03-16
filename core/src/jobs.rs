@@ -5,9 +5,9 @@ use uuid::Uuid;
 
 use crate::RuntimeError;
 
-type JobRow = (Uuid, String, String, Option<JsonValue>, Option<JsonValue>, Option<String>, i32);
+type JobRow = (Uuid, String, String, Option<JsonValue>, Option<JsonValue>, Option<String>, i32, Option<Uuid>);
 
-const COLS: &str = "id, app_id, status, payload, result, error, attempts";
+const COLS: &str = "id, app_id, status, payload, result, error, attempts, user_id";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Job {
@@ -18,11 +18,12 @@ pub struct Job {
     pub result: Option<JsonValue>,
     pub error: Option<String>,
     pub attempts: i32,
+    pub user_id: Option<Uuid>,
 }
 
 impl From<JobRow> for Job {
-    fn from((id, app_id, status, payload, result, error, attempts): JobRow) -> Self {
-        Self { id, app_id, status, payload, result, error, attempts }
+    fn from((id, app_id, status, payload, result, error, attempts, user_id): JobRow) -> Self {
+        Self { id, app_id, status, payload, result, error, attempts, user_id }
     }
 }
 
@@ -36,8 +37,10 @@ pub async fn bootstrap_jobs_schema(pool: &PgPool) -> Result<(), RuntimeError> {
             id UUID PRIMARY KEY, app_id TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'pending', payload JSONB, result JSONB, error TEXT,
             attempts INT NOT NULL DEFAULT 0, run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            user_id UUID,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
         )",
+        "ALTER TABLE rootcx_system.jobs ADD COLUMN IF NOT EXISTS user_id UUID",
         "CREATE INDEX IF NOT EXISTS idx_jobs_pending ON rootcx_system.jobs (run_at) WHERE status = 'pending'",
         "CREATE INDEX IF NOT EXISTS idx_jobs_app ON rootcx_system.jobs (app_id, status)",
     ] {
@@ -52,13 +55,15 @@ pub async fn enqueue(
     app_id: &str,
     payload: JsonValue,
     run_at: Option<chrono::DateTime<chrono::Utc>>,
+    user_id: Option<Uuid>,
 ) -> Result<Uuid, RuntimeError> {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO rootcx_system.jobs (id, app_id, payload, run_at) VALUES ($1, $2, $3, $4)")
+    sqlx::query("INSERT INTO rootcx_system.jobs (id, app_id, payload, run_at, user_id) VALUES ($1, $2, $3, $4, $5)")
         .bind(id)
         .bind(app_id)
         .bind(&payload)
         .bind(run_at.unwrap_or_else(chrono::Utc::now))
+        .bind(user_id)
         .execute(pool)
         .await
         .map_err(err)?;
