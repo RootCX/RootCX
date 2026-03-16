@@ -38,6 +38,8 @@ flate2 = "1"
 # Auth (JWT + password hashing)
 argon2 = "0.5"
 jsonwebtoken = "9"
+hmac = "0.12"
+sha2 = "0.10"
 
 # Job Engine
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
