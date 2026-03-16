@@ -71,7 +71,7 @@ impl Runtime {
         tool_registry.register(tools::describe_app::DescribeAppTool);
         tool_registry.register(tools::list_integrations::ListIntegrationsTool);
 
-        let mcp_manager = Arc::new(McpManager::new(Arc::clone(&tool_registry)));
+        let mcp_manager = Arc::new(McpManager::new(Arc::clone(&tool_registry), bun_bin.clone()));
 
         Self {
             pg,
