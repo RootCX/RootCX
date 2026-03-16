@@ -238,7 +238,7 @@ Core sends `discover` immediately after spawn. Worker listens on stdin, responds
 **Messages Core → Worker:**
 - `{ type: "discover", app_id, runtime_url, database_url, credentials }` — init handshake
 - `{ type: "rpc", id, method, params, caller }` — caller includes `authToken` for Core API calls
-- `{ type: "job", id, payload }` — async job dispatch
+- `{ type: "job", id, payload, caller }` — async job dispatch (caller has authToken if enqueued by a user)
 - `{ type: "shutdown" }` — graceful exit
 
 **Messages Worker → Core:**
@@ -253,10 +253,82 @@ Core sends `discover` immediately after spawn. Worker listens on stdin, responds
 
 ### Data access
 
-- **Simple CRUD**: use Core REST API via `runtime_url` (`/api/v1/apps/{app_id}/collections/{entity}`) with `caller.authToken`
+- **Simple CRUD**: use Core REST API via `runtime_url` with `caller.authToken`
 - **Custom SQL** (transactions, sequences, JOINs): connect to PostgreSQL via `database_url` from discover
 - All apps share one PG instance — cross-app queries are possible
 - **NEVER use SQLite or file-based storage** — PostgreSQL is the only database
+
+### Core REST API — Collections
+
+Base: `/api/v1/apps/{app_id}/collections/{entity}`
+
+| Method | Path | Body | Response |
+|--------|------|------|----------|
+| GET | `/` | — | `T[]` |
+| POST | `/` | `{field:value,...}` | `T` (201) |
+| POST | `/bulk` | `[{...},...]` | `T[]` (201) |
+| POST | `/query` | `QueryOptions` | `{data:T[],total:number}` |
+| GET | `/{id}` | — | `T` |
+| PATCH | `/{id}` | `{field:value,...}` | `T` |
+| DELETE | `/{id}` | — | `{message:string}` |
+
+**GET list — query params (flat, no bracket syntax):**
+- Filter: field name directly as param → `?contact_id=uuid&status=active`
+- `sort` — field name (must exist in entity or `created_at`/`updated_at`/`id`), default `created_at`
+- `order` — `asc` or `desc`, default `desc`
+- `limit` — 1–1000, no default (returns all if omitted)
+- `offset` — integer ≥ 0
+
+**POST /query — body (JSON):**
+- `where` — nested filter object (see operators below)
+- `orderBy` — field name, default `created_at`
+- `order` — `asc`/`desc`, default `desc`
+- `limit` — 1–1000, default 100
+- `offset` — integer ≥ 0
+
+**Where operators:** `$eq` `$ne` `$gt` `$gte` `$lt` `$lte` `$like` `$ilike` `$in` `$nin` `$contains` `$isNull`
+**Logical:** `$and` `$or` (arrays) `$not` (object)
+**Shorthand:** `{"field":"value"}` = `{"field":{"$eq":"value"}}`, `{"field":null}` = IS NULL
+
+### Core REST API — Integrations
+
+Base: `/api/v1/apps/{app_id}/integrations`
+
+| Method | Path | Body | Response |
+|--------|------|------|----------|
+| GET | `/` | — | bindings list |
+| POST | `/` | `{integrationId}` | bind integration to app |
+| DELETE | `/{integration_id}` | — | unbind |
+| POST | `/{integration_id}/actions/{action_id}` | action input `{...}` | action result |
+| GET | `/{integration_id}/auth` | — | `{connected,type}` |
+| POST | `/{integration_id}/auth/start` | — | starts OAuth or returns credential schema |
+| POST | `/{integration_id}/auth/credentials` | `{field:value,...}` | submit credential form |
+| DELETE | `/{integration_id}/auth` | — | disconnect user auth |
+
+**Executing an action from a worker:**
+`POST {runtime_url}/api/v1/apps/{app_id}/integrations/{integration_id}/actions/{action_id}` with `Authorization: Bearer {authToken}` — body is the action input object directly.
+
+### Core REST API — Jobs
+
+Async job queue managed by Core. Workers enqueue jobs via REST, Core dispatches them back to the worker via IPC.
+
+Base: `/api/v1/apps/{app_id}/jobs`
+
+| Method | Path | Body | Response |
+|--------|------|------|----------|
+| POST | `/` | `{payload:{...}}` | `{job_id}` (201) |
+| GET | `/` | — | `Job[]` (query: `status`, `limit`) |
+| GET | `/{job_id}` | — | `Job` |
+
+**Job statuses:** `pending` → `running` → `completed` | `failed`
+
+**Flow:**
+1. Worker (or frontend) enqueues: `POST /api/v1/apps/{app_id}/jobs` with `{payload:{...}}` + `Authorization: Bearer {authToken}`
+2. Core scheduler claims pending jobs and dispatches to worker via IPC: `{ type: "job", id, payload, caller }` — `caller` has `userId`, `username`, `authToken` (short-lived JWT minted by Core from the enqueuing user)
+3. Worker processes and responds: `{ type: "job_result", id, result }` or `{ type: "job_result", id, error }`
+4. Use `caller.authToken` in job handlers for authenticated Core API calls (collections, integrations, etc.)
+
+Use jobs for long-running work (bulk fetches, batch imports, async syncs) that would exceed the 30s RPC timeout.
 
 ### Frontend → Worker
 

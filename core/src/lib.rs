@@ -118,7 +118,7 @@ impl Runtime {
         std::fs::create_dir_all(&apps_dir).map_err(|e| RuntimeError::Worker(format!("create apps dir: {e}")))?;
         let runtime_url = format!("http://127.0.0.1:{api_port}");
         let wm = Arc::new(WorkerManager::new(apps_dir, runtime_url, db_url, self.bun_bin.clone(), Arc::clone(&self.tool_registry), self.pending_approvals.clone()));
-        self.scheduler = Some(scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm)));
+        self.scheduler = Some(scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm), Arc::clone(&self.auth_config)));
         self.worker_manager = Some(wm.clone());
 
         let secrets = self.secret_manager.as_ref().unwrap();

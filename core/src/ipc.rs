@@ -49,7 +49,7 @@ pub enum OutboundMessage {
         credentials: HashMap<String, String>,
     },
     Rpc { id: String, method: String, params: JsonValue, caller: Option<RpcCaller> },
-    Job { id: String, payload: JsonValue },
+    Job { id: String, payload: JsonValue, #[serde(skip_serializing_if = "Option::is_none")] caller: Option<RpcCaller> },
     AgentInvoke(AgentInvokePayload),
     AgentToolResult {
         invoke_id: String,
@@ -203,7 +203,7 @@ mod tests {
         let cases: Vec<(OutboundMessage, &str)> = vec![
             (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), database_url: "postgres://localhost:5480/postgres".into(), credentials: HashMap::new() }, "discover"),
             (OutboundMessage::Rpc { id: "r1".into(), method: "echo".into(), params: json!({}), caller: None }, "rpc"),
-            (OutboundMessage::Job { id: "j1".into(), payload: json!({}) }, "job"),
+            (OutboundMessage::Job { id: "j1".into(), payload: json!({}), caller: None }, "job"),
             (OutboundMessage::Shutdown, "shutdown"),
             (OutboundMessage::AgentToolResult {
                 invoke_id: "i1".into(), call_id: "c1".into(),

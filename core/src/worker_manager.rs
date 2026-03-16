@@ -131,8 +131,8 @@ impl WorkerManager {
         self.get_handle(app_id).await?.agent_invoke(payload).await
     }
 
-    pub async fn dispatch_job(&self, app_id: &str, job_id: String, payload: JsonValue) -> Result<(), RuntimeError> {
-        self.get_handle(app_id).await?.dispatch_job(job_id, payload).await
+    pub async fn dispatch_job(&self, app_id: &str, job_id: String, payload: JsonValue, caller: Option<crate::ipc::RpcCaller>) -> Result<(), RuntimeError> {
+        self.get_handle(app_id).await?.dispatch_job(job_id, payload, caller).await
     }
 
     pub async fn worker_status(&self, app_id: &str) -> Result<WorkerStatus, RuntimeError> {

@@ -64,6 +64,7 @@ pub enum SupervisorCommand {
     Job {
         id: String,
         payload: JsonValue,
+        caller: Option<RpcCaller>,
     },
     AgentInvoke {
         payload: AgentInvokePayload,
@@ -121,8 +122,8 @@ impl SupervisorHandle {
         rx.await.map_err(|_| dead())?.map_err(RuntimeError::Worker)
     }
 
-    pub async fn dispatch_job(&self, id: String, payload: JsonValue) -> Result<(), RuntimeError> {
-        self.send(SupervisorCommand::Job { id, payload }).await
+    pub async fn dispatch_job(&self, id: String, payload: JsonValue, caller: Option<RpcCaller>) -> Result<(), RuntimeError> {
+        self.send(SupervisorCommand::Job { id, payload, caller }).await
     }
 
     pub async fn status(&self) -> Result<WorkerStatus, RuntimeError> {
@@ -250,13 +251,13 @@ async fn supervisor_loop(
                         });
                     }
 
-                    SupervisorCommand::Job { id, payload } => {
+                    SupervisorCommand::Job { id, payload, caller } => {
                         if status != WorkerStatus::Running {
                             warn!(app_id = %app_id, job_id = %id, "worker not running");
                             continue;
                         }
                         if let Some(ref mut w) = ipc_writer
-                            && let Err(e) = w.send(&OutboundMessage::Job { id: id.clone(), payload }).await {
+                            && let Err(e) = w.send(&OutboundMessage::Job { id: id.clone(), payload, caller }).await {
                                 error!(app_id = %app_id, job_id = %id, "send failed: {e}");
                             }
                     }

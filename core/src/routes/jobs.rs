@@ -10,14 +10,14 @@ use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 
 pub async fn enqueue_job(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
     Json(body): Json<JsonValue>,
 ) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
     let pool = pool(&rt).await?;
     let payload = body.get("payload").cloned().unwrap_or(json!({}));
-    let job_id = crate::jobs::enqueue(&pool, &app_id, payload, None).await?;
+    let job_id = crate::jobs::enqueue(&pool, &app_id, payload, None, Some(identity.user_id)).await?;
     if let Some(w) = rt.lock().await.scheduler_wake() {
         w.notify_one();
     }
