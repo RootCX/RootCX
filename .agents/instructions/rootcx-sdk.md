@@ -78,7 +78,7 @@ const { connected, loading, connect, submitCredentials, disconnect, call } = use
 // call(actionId, params?) => execute integration action, returns parsed result
 ```
 
-**Always call `list_integrations` tool first** to discover available integrations, their actions, schemas, and usage instructions.
+**If you need an integration, call `list_integrations` first. Never guess action IDs.**
 
 ---
 
