@@ -2,6 +2,7 @@ mod client;
 mod transport;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -32,11 +33,12 @@ impl Tool for McpTool {
 pub struct McpManager {
     clients: RwLock<HashMap<String, Arc<McpClient>>>,
     tool_registry: Arc<ToolRegistry>,
+    bun_bin: PathBuf,
 }
 
 impl McpManager {
-    pub fn new(tool_registry: Arc<ToolRegistry>) -> Self {
-        Self { clients: RwLock::new(HashMap::new()), tool_registry }
+    pub fn new(tool_registry: Arc<ToolRegistry>, bun_bin: PathBuf) -> Self {
+        Self { clients: RwLock::new(HashMap::new()), tool_registry, bun_bin }
     }
 
     pub async fn start_server(&self, config: &McpServerConfig, env: &HashMap<String, String>) -> Result<Vec<String>, RuntimeError> {
@@ -53,7 +55,8 @@ impl McpManager {
                     args.push("--header".into());
                     args.push(format!("{k}:{v}"));
                 }
-                Arc::new(McpClient::connect_stdio(name, "npx", &args, env, None).await?)
+                let runner = self.bun_bin.to_string_lossy().into_owned();
+                Arc::new(McpClient::connect_stdio(name, &runner, &[&["x".into()], args.as_slice()].concat(), env, None).await?)
             }
         };
 
