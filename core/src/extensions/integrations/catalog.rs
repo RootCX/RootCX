@@ -58,7 +58,7 @@ pub async fn list_catalog(
 }
 
 pub async fn deploy_from_catalog(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
@@ -87,7 +87,7 @@ pub async fn deploy_from_catalog(
     // Brief re-lock: install_app needs &[Box<dyn RuntimeExtension>] which borrows Runtime
     {
         let g = rt.lock().await;
-        crate::manifest::install_app(&pool, &manifest, g.extensions(), uuid::Uuid::nil()).await?;
+        crate::manifest::install_app(&pool, &manifest, g.extensions(), identity.user_id).await?;
     }
 
     if app_dir.exists() {
