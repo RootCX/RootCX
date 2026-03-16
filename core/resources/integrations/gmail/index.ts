@@ -104,12 +104,10 @@ async function listEmails(config: Config, creds: UserCreds, input: any) {
   const list = await gmail(config, creds, `/messages?${params}`);
   if (!list.messages?.length) return { messages: [], resultSizeEstimate: 0 };
 
-  const messages = await Promise.all(
-    list.messages.map((m: any) =>
-      gmail(config, creds, `/messages/${m.id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Subject&metadataHeaders=Date`)
-    )
-  );
-  return { messages: messages.map(parseMessage), resultSizeEstimate: list.resultSizeEstimate ?? messages.length };
+  return {
+    messages: list.messages.map((m: any) => ({ id: m.id, threadId: m.threadId })),
+    resultSizeEstimate: list.resultSizeEstimate ?? list.messages.length,
+  };
 }
 
 async function getEmail(config: Config, creds: UserCreds, input: any) {

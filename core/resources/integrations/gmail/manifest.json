@@ -59,14 +59,7 @@
               "type": "object",
               "properties": {
                 "id": { "type": "string" },
-                "threadId": { "type": "string" },
-                "from": { "type": "string" },
-                "to": { "type": "string" },
-                "subject": { "type": "string" },
-                "date": { "type": "string" },
-                "snippet": { "type": "string" },
-                "labelIds": { "type": "array", "items": { "type": "string" } },
-                "body": { "type": "string" }
+                "threadId": { "type": "string" }
               }
             }
           },
@@ -118,6 +111,6 @@
     }
   ],
   "webhooks": ["push_notification"],
-  "instructions": "Gmail integration with OAuth 2.0 per-user auth.\n\nAll actions return parsed objects (not raw Gmail API responses). Fields like `from`, `to`, `subject`, `body` are already extracted strings.\n\n`list_emails` supports Gmail search syntax in the `query` param (e.g. `from:user@example.com OR to:user@example.com`).\n\n`get_email` returns `body` as decoded HTML or plain text — no base64 decoding needed client-side.\n\nCommon label IDs: INBOX, SENT, DRAFT, SPAM, TRASH, UNREAD, STARRED, IMPORTANT.",
+  "instructions": "Gmail integration with OAuth 2.0 per-user auth.\n\n`list_emails` returns only message IDs and threadIds (lightweight, single API call). Use `get_email` to fetch full content (from, to, subject, date, body) for a specific message.\n\n`get_email` returns `body` as decoded HTML or plain text — no base64 decoding needed client-side.\n\nGmail search syntax supported in `list_emails` `query` param (e.g. `from:user@example.com OR to:user@example.com`).\n\nCommon label IDs: INBOX, SENT, DRAFT, SPAM, TRASH, UNREAD, STARRED, IMPORTANT.",
   "entities": []
 }
