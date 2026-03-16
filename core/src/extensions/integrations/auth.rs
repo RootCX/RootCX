@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Html;
+use hmac::{Hmac, Mac};
 use serde_json::{Value as JsonValue, json};
+use sha2::Sha256;
 use tokio::sync::Mutex;
 use tracing::info;
 use uuid::Uuid;
@@ -15,22 +17,48 @@ use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::routes::SharedRuntime;
 
-struct Pending {
-    app_id: String,
-    integration_id: String,
-    user_id: String,
-    created: Instant,
-}
+type HmacSha256 = Hmac<Sha256>;
+
+struct Pending { app_id: String, integration_id: String, user_id: String, created: Instant }
 
 static PENDING: LazyLock<Mutex<HashMap<String, Pending>>> = LazyLock::new(Default::default);
 const TTL_SECS: u64 = 600;
+const CENTRALIZED_CALLBACK: &str = "https://rootcx.com/api/integrations/auth/callback";
 
-fn base_url(headers: &HeaderMap) -> String {
+fn local_callback_url(headers: &HeaderMap) -> String {
     let host = headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("localhost:9100");
-    // Normalize 127.0.0.1 → localhost for consistent OAuth redirect URIs
     let host = if host.starts_with("127.0.0.1") { host.replacen("127.0.0.1", "localhost", 1) } else { host.to_string() };
     let scheme = headers.get("x-forwarded-proto").and_then(|v| v.to_str().ok()).unwrap_or("http");
-    format!("{scheme}://{host}")
+    format!("{scheme}://{host}/api/v1/integrations/auth/callback")
+}
+
+/// Centralized: HMAC-signed state with tenant ref. Local dev: plain nonce.
+fn build_callback_and_state(headers: &HeaderMap, nonce: &str) -> (String, String) {
+    match (std::env::var("OAUTH_CALLBACK_HMAC_KEY"), std::env::var("ROOTCX_TENANT_REF")) {
+        (Ok(key), Ok(tref)) => {
+            let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let payload = format!("{tref}:{nonce}:{ts}");
+            let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC key");
+            mac.update(payload.as_bytes());
+            (CENTRALIZED_CALLBACK.into(), format!("{payload}:{}", hex::encode(mac.finalize().into_bytes())))
+        }
+        _ => (local_callback_url(headers), nonce.to_string()),
+    }
+}
+
+fn callback_url(headers: &HeaderMap) -> String {
+    std::env::var("OAUTH_CALLBACK_HMAC_KEY").map(|_| CENTRALIZED_CALLBACK.into()).unwrap_or_else(|_| local_callback_url(headers))
+}
+
+fn extract_nonce(state: &str) -> &str {
+    match state.split(':').collect::<Vec<_>>().as_slice() {
+        [_, nonce, _, _] => nonce,
+        _ => state,
+    }
+}
+
+fn iuc_key(integration_id: &str, user_id: &str) -> String {
+    format!("_iuc.{integration_id}.{user_id}")
 }
 
 pub async fn start(
@@ -41,28 +69,22 @@ pub async fn start(
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt).await?;
     let wm = crate::routes::wm(&rt).await?;
-
     let config = super::routes::resolve_config(&pool, &secrets, &integration_id).await?;
 
     let nonce = Uuid::new_v4().to_string();
-    let callback_url = format!("{}/api/v1/integrations/auth/callback", base_url(&headers));
+    let (cb, state) = build_callback_and_state(&headers, &nonce);
 
-    PENDING.lock().await.insert(nonce.clone(), Pending {
-        app_id: app_id.clone(),
-        integration_id: integration_id.clone(),
-        user_id: identity.user_id.to_string(),
-        created: Instant::now(),
+    PENDING.lock().await.insert(nonce, Pending {
+        app_id, integration_id: integration_id.clone(), user_id: identity.user_id.to_string(), created: Instant::now(),
     });
 
     let result = wm.rpc(
-        &integration_id,
-        Uuid::new_v4().to_string(),
-        "__auth_start".into(),
-        json!({ "config": config, "callbackUrl": callback_url, "state": nonce, "userId": identity.user_id.to_string() }),
+        &integration_id, Uuid::new_v4().to_string(), "__auth_start".into(),
+        json!({ "config": config, "callbackUrl": cb, "state": state, "userId": identity.user_id }),
         None,
     ).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    info!(app_id, integration_id, user_id = %identity.user_id, "auth flow started");
+    info!(integration_id, user_id = %identity.user_id, "auth flow started");
     Ok(Json(result))
 }
 
@@ -71,35 +93,27 @@ pub async fn callback(
     headers: HeaderMap,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Html<String>, ApiError> {
-    let state = params.get("state")
-        .ok_or_else(|| ApiError::BadRequest("missing state parameter".into()))?;
-
+    let state = params.get("state").ok_or_else(|| ApiError::BadRequest("missing state".into()))?;
     let pending = {
         let mut map = PENDING.lock().await;
         map.retain(|_, p| p.created.elapsed().as_secs() < TTL_SECS);
-        map.remove(state)
+        map.remove(extract_nonce(state))
     }.ok_or_else(|| ApiError::BadRequest("invalid or expired auth state".into()))?;
 
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt).await?;
     let wm = crate::routes::wm(&rt).await?;
-
     let config = super::routes::resolve_config(&pool, &secrets, &pending.integration_id).await?;
-    let callback_url = format!("{}/api/v1/integrations/auth/callback", base_url(&headers));
 
     let result = wm.rpc(
-        &pending.integration_id,
-        Uuid::new_v4().to_string(),
-        "__auth_callback".into(),
-        json!({ "config": config, "query": params, "userId": pending.user_id, "callbackUrl": callback_url }),
+        &pending.integration_id, Uuid::new_v4().to_string(), "__auth_callback".into(),
+        json!({ "config": config, "query": params, "userId": pending.user_id, "callbackUrl": callback_url(&headers) }),
         None,
     ).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    if let Some(credentials) = result.get("credentials") {
-        let key = format!("_iuc.{}.{}", pending.integration_id, pending.user_id);
-        secrets.set(&pool, &pending.app_id, &key, &credentials.to_string())
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-        info!(app_id = %pending.app_id, integration_id = %pending.integration_id, user_id = %pending.user_id, "user credentials stored");
+    if let Some(creds) = result.get("credentials") {
+        let key = iuc_key(&pending.integration_id, &pending.user_id);
+        secrets.set(&pool, &pending.app_id, &key, &creds.to_string()).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+        info!(integration_id = %pending.integration_id, user_id = %pending.user_id, "user credentials stored");
     }
 
     Ok(Html(format!(
@@ -109,44 +123,32 @@ pub async fn callback(
 }
 
 pub async fn status(
-    identity: Identity,
-    State(rt): State<SharedRuntime>,
+    identity: Identity, State(rt): State<SharedRuntime>,
     Path((app_id, integration_id)): Path<(String, String)>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt).await?;
-    let key = format!("_iuc.{}.{}", integration_id, identity.user_id);
-    let connected = secrets.get(&pool, &app_id, &key).await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
-        .is_some();
+    let connected = secrets.get(&pool, &app_id, &iuc_key(&integration_id, &identity.user_id.to_string())).await
+        .map_err(|e| ApiError::Internal(e.to_string()))?.is_some();
     Ok(Json(json!({ "connected": connected })))
 }
 
 pub async fn submit_credentials(
-    identity: Identity,
-    State(rt): State<SharedRuntime>,
+    identity: Identity, State(rt): State<SharedRuntime>,
     Path((app_id, integration_id)): Path<(String, String)>,
     Json(body): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let credentials = body.get("credentials")
-        .ok_or_else(|| ApiError::BadRequest("missing credentials".into()))?;
-
+    let creds = body.get("credentials").ok_or_else(|| ApiError::BadRequest("missing credentials".into()))?;
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt).await?;
-    let key = format!("_iuc.{}.{}", integration_id, identity.user_id);
-    secrets.set(&pool, &app_id, &key, &credentials.to_string())
-        .await
+    secrets.set(&pool, &app_id, &iuc_key(&integration_id, &identity.user_id.to_string()), &creds.to_string()).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    info!(app_id, integration_id, user_id = %identity.user_id, "user credentials submitted");
     Ok(Json(json!({ "message": "credentials stored" })))
 }
 
 pub async fn disconnect(
-    identity: Identity,
-    State(rt): State<SharedRuntime>,
+    identity: Identity, State(rt): State<SharedRuntime>,
     Path((app_id, integration_id)): Path<(String, String)>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt).await?;
-    let key = format!("_iuc.{}.{}", integration_id, identity.user_id);
-    let _ = secrets.delete(&pool, &app_id, &key).await;
+    let _ = secrets.delete(&pool, &app_id, &iuc_key(&integration_id, &identity.user_id.to_string())).await;
     Ok(Json(json!({ "message": "disconnected" })))
 }
