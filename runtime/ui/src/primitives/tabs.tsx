@@ -19,7 +19,7 @@ const TabsTrigger = forwardRef<ComponentRef<typeof Trigger>, ComponentPropsWitho
     <Trigger
       ref={ref}
       className={cn(
-        "group relative inline-flex h-full items-center justify-center whitespace-nowrap px-3 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 data-[state=active]:text-foreground after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:scale-x-0 after:bg-primary after:transition-transform data-[state=active]:after:scale-x-100",
+        "group relative inline-flex h-full items-center justify-center whitespace-nowrap px-3 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none disabled:pointer-events-none disabled:opacity-50 data-[state=active]:text-foreground after:absolute after:inset-x-0 after:bottom-0 after:h-0.5 after:scale-x-0 after:bg-primary data-[state=active]:after:scale-x-100",
         className,
       )}
       {...props}
