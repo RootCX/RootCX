@@ -55,6 +55,8 @@ Returns: `{ data: T[], total: number, loading, error, refetch, create, bulkCreat
 
 Without `query`: `GET /collections/{entity}` (full list). With `query`: `POST /collections/{entity}/query` (server-side filter/sort/paginate). Auto re-fetches on `query` change.
 
+**Cross-app reads:** `appId` can be any installed app or integration — not limited to the current app. Use another app's ID to read its collections. User must have read permissions on the target app.
+
 `create(fields) → T` · `bulkCreate(fields[]) → T[]` · `update(id, fields) → T` · `remove(id) → void`
 
 ### QueryOptions
