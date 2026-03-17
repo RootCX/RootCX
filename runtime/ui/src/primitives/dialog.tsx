@@ -35,10 +35,10 @@ const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 bg-white p-6",
-        "rounded-2xl",
+        "fixed left-[50%] top-[50%] z-50 w-full max-w-lg max-h-[85vh] translate-x-[-50%] translate-y-[-50%]",
+        "rounded-2xl bg-white",
         "shadow-[0_24px_80px_-12px_rgba(0,0,0,0.14),0_8px_24px_-8px_rgba(0,0,0,0.06)]",
-        "after:pointer-events-none after:absolute after:inset-[3px] after:rounded-[13px] after:border after:border-border",
+        "after:pointer-events-none after:absolute after:inset-[3px] after:z-10 after:rounded-[13px] after:border after:border-border",
         "data-[state=open]:animate-in data-[state=closed]:animate-out",
         "data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
         "duration-150",
@@ -46,8 +46,10 @@ const DialogContent = React.forwardRef<
       )}
       {...props}
     >
-      {children}
-      <DialogPrimitive.Close className="absolute right-5 top-5 cursor-pointer text-foreground/25 transition-colors hover:text-foreground/50 focus:outline-none">
+      <div className="grid max-h-[85vh] gap-4 overflow-y-auto rounded-2xl p-6">
+        {children}
+      </div>
+      <DialogPrimitive.Close className="absolute right-5 top-5 z-20 cursor-pointer text-foreground/25 transition-colors hover:text-foreground/50 focus:outline-none">
         <IconX className="h-[18px] w-[18px]" strokeWidth={1.5} />
         <span className="sr-only">Close</span>
       </DialogPrimitive.Close>
