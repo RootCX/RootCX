@@ -47,6 +47,8 @@ pub fn handle_menu_event(app: &AppHandle, event: &tauri::menu::MenuEvent) {
         let _ = app.emit_to(&target, "toggle-view", id);
     } else if id == "run" {
         let _ = app.emit_to(&target, "run", ());
+    } else if id == "deploy" {
+        let _ = app.emit_to(&target, "deploy", ());
     } else if id == "bundle" {
         let _ = app.emit_to(&target, "bundle", ());
     } else if id == "reset-layout" {
@@ -119,6 +121,7 @@ pub fn setup(app: &mut App) -> tauri::Result<ViewMenuItems> {
 
     let run_menu = SubmenuBuilder::with_id(app, "run-menu", "Run")
         .item(&MenuItem::with_id(app, "run", "Run", true, Some("F5"))?)
+        .item(&MenuItem::with_id(app, "deploy", "Deploy to Core", true, Some("CmdOrCtrl+Shift+D"))?)
         .item(&MenuItem::with_id(app, "bundle", "Bundle for Distribution", true, Some("CmdOrCtrl+Shift+B"))?)
         .build()?;
 
