@@ -549,9 +549,10 @@ async function registerDocumentTypes(config: Config, input: any) {
 }
 
 async function refreshParticipantStatus(config: Config, input: any) {
-  const { dokapiUlid } = input;
-  if (!dokapiUlid) throw new Error("dokapiUlid is required");
-  const result = await dokapiRequest<any>(config, "GET", `/participant-registrations/${dokapiUlid}`);
+  const { peppolId } = input;
+  if (!peppolId) throw new Error("peppolId is required");
+  const result = await dokapiRequest<any>(config, "GET",
+    `/participant-registrations/find?scheme=iso6523-actorid-upis&value=${encodeURIComponent(peppolId)}`);
   return {
     status: (result?.status || "").toLowerCase() || "unknown",
     peppolId: result?.participantIdentifier?.value,
