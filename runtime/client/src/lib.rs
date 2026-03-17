@@ -179,6 +179,11 @@ impl RuntimeClient {
         Ok(body["status"].as_str().unwrap_or("unknown").to_string())
     }
 
+    pub async fn list_integrations(&self) -> Result<Vec<JsonValue>, ClientError> {
+        let resp = self.authed(self.client.get(self.api("/integrations"))).send().await?;
+        check_response(resp).await?.json().await.map_err(Into::into)
+    }
+
     pub async fn get_ai_config(&self) -> Result<Option<AiConfig>, ClientError> {
         let resp = self.authed(self.client.get(self.api("/config/ai"))).send().await?;
         if resp.status().as_u16() == 404 {
