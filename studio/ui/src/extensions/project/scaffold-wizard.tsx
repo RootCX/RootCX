@@ -99,15 +99,15 @@ function Wizard({ onDone }: { onDone: (r: WizardResult | null) => void }) {
     const total = 1 + visibleQs.length;
 
     return (
-        <div className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh]" onClick={cancel}>
-            <div className="absolute inset-0 bg-black/50" />
+        <div className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh] animate-portal-overlay-in" onClick={cancel}>
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-[6px]" />
             <div
-                className="relative w-full max-w-md min-h-[120px] rounded-lg border border-border bg-card shadow-2xl"
+                className="relative w-full max-w-md min-h-[120px] rounded-xl border border-white/[0.06] bg-card shadow-dialog animate-portal-content-in"
                 onClick={(e) => e.stopPropagation()}
                 onKeyDown={(e) => e.key === "Escape" && cancel()}
             >
                 {/* Thin progress track */}
-                <div className="h-px bg-border">
+                <div className="h-px bg-white/[0.04] rounded-t-xl overflow-hidden">
                     <div
                         className="h-px bg-primary/60 transition-all duration-300"
                         style={{ width: `${(step / total) * 100}%` }}
@@ -116,7 +116,7 @@ function Wizard({ onDone }: { onDone: (r: WizardResult | null) => void }) {
 
                 {/* ── Step 0: Project name ── */}
                 {step === 0 && (
-                    <div className="px-3 py-2">
+                    <div className="px-5 py-4">
                         <div className="flex items-center text-xs text-muted-foreground mb-1.5">
                             <span>New Project</span>
                             <span className="ml-auto opacity-50">↵ to continue</span>
@@ -135,7 +135,7 @@ function Wizard({ onDone }: { onDone: (r: WizardResult | null) => void }) {
 
                 {/* ── Step 1+: Questions ── */}
                 {step > 0 && q && (
-                    <div className="px-3 py-2">
+                    <div className="px-5 py-4">
                         <div className="flex items-center text-xs text-muted-foreground mb-2">
                             <span>{q.label}</span>
                             <span className="ml-auto opacity-40">{step}/{visibleQs.length}</span>

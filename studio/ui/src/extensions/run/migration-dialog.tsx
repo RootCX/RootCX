@@ -50,15 +50,15 @@ function MigrationDialog({ changes, onDone }: { changes: SchemaChange[]; onDone:
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh]" onClick={() => onDone(false)}>
-      <div className="absolute inset-0 bg-black/50" />
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh] animate-portal-overlay-in" onClick={() => onDone(false)}>
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-[6px]" />
       <div
-        className="relative w-full max-w-md rounded-lg border border-border bg-card shadow-2xl"
+        className="relative w-full max-w-md rounded-xl border border-white/[0.06] bg-card shadow-dialog animate-portal-content-in"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => e.key === "Escape" && onDone(false)}
       >
-        <div className="px-4 py-3">
-          <div className="text-sm font-medium mb-3">Schema Migration Required</div>
+        <div className="px-5 py-4">
+          <div className="text-[13px] font-semibold tracking-[-0.01em] mb-3">Schema Migration Required</div>
           <div className="space-y-3 max-h-60 overflow-y-auto text-xs font-mono">
             {[...grouped.entries()].map(([entity, items]) => (
               <div key={entity}>
@@ -74,7 +74,7 @@ function MigrationDialog({ changes, onDone }: { changes: SchemaChange[]; onDone:
               </div>
             ))}
           </div>
-          <div className="flex justify-end gap-2 mt-4">
+          <div className="flex justify-end gap-2 mt-5 pt-4 border-t border-white/[0.04]">
             <Button variant="outline" size="sm" onClick={() => onDone(false)}>Cancel</Button>
             <Button size="sm" onClick={() => onDone(true)}>Apply Migration</Button>
           </div>
