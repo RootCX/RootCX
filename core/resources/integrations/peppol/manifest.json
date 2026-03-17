@@ -322,9 +322,9 @@
   ],
   "webhooks": ["document_status", "participant_status", "incoming_document"],
   "instructions": "Peppol e-invoicing integration via Dokapi access point.\n\nTypical registration flow:\n1. `register_participant` with VAT number and company name\n2. `register_document_types` to enable receiving documents\n3. `push_business_card` to appear in Peppol Directory\n4. `register_webhook` for async status updates\n\nSending an invoice:\n- Provide `invoiceParams` for automatic UBL 2.1 generation, or `xml` for pre-built UBL\n- InvoiceParams supplier/customer require: peppolId, name, vatNumber, street, city, postalCode, countryCode\n- Each invoice line: id, description, quantity, unitPrice, taxPercent, lineAmount\n- Optional: paymentInfo (IBAN/BIC), documentReferences (embedded PDF attachments)\n\nWebhook events from Dokapi:\n- `outgoing-peppol-documents.sent/delivered/failed` - document delivery status\n- `participant-registrations.active/failed` - registration completion\n- `incoming-peppol-documents.received` - new incoming document (must download and confirm)\n\nCountry support: BE, NL, FR, DE, IT, ES, AT, LU, PT, IE, FI, SE, NO, DK, PL, CZ, RO, BG, HR, SI, SK, EE, LV, LT, HU, CY, MT, GR, SG, AU, NZ, US, JP.\n\nPeppol ID format: `{ICD}:{identifier}` (e.g. `0208:0501598777` for Belgian KBO).",
-  "entities": [
+  "dataContract": [
     {
-      "entity": "incoming_documents",
+      "entityName": "incoming_documents",
       "fields": [
         { "name": "document_ulid", "type": "string" },
         { "name": "document_type", "type": "string" },
@@ -346,7 +346,7 @@
       ]
     },
     {
-      "entity": "outgoing_status",
+      "entityName": "outgoing_status",
       "fields": [
         { "name": "document_ulid", "type": "string" },
         { "name": "status", "type": "string" },
