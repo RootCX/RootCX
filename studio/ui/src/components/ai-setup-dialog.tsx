@@ -93,23 +93,23 @@ function AISetupWizard({ preselect, onDone }: { preselect?: string; onDone: (ok:
   const canDismiss = step !== "saving";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh]" onClick={() => canDismiss && onDone(false)}>
-      <div className="absolute inset-0 bg-black/50" />
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-[20vh] animate-portal-overlay-in" onClick={() => canDismiss && onDone(false)}>
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-[6px]" />
       <div
-        className="relative max-h-[60vh] w-full max-w-md overflow-y-auto rounded-lg border border-border bg-card shadow-2xl"
+        className="relative max-h-[60vh] w-full max-w-md overflow-y-auto rounded-xl border border-white/[0.06] bg-card shadow-dialog animate-portal-content-in"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="px-4 py-3">
+        <div className="px-5 py-4">
           {step === "provider" && (
             <>
-              <div className="mb-3 text-xs text-muted-foreground">Configure AI Provider</div>
+              <div className="mb-3 text-[13px] font-semibold text-foreground tracking-[-0.01em]">Configure AI Provider</div>
               <div className="flex flex-col gap-1.5">
                 {AI_PROVIDERS.map((p) => (
                   <button
                     key={p.id}
                     className={cn(
-                      "flex items-center gap-3 rounded-md border px-3 py-2 text-left transition-colors",
-                      "border-border bg-background hover:border-primary/50 hover:bg-accent",
+                      "flex items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-all",
+                      "border-white/[0.06] bg-white/[0.02] hover:border-primary/40 hover:bg-white/[0.04]",
                     )}
                     onClick={() => selectProvider(p)}
                   >
@@ -128,7 +128,7 @@ function AISetupWizard({ preselect, onDone }: { preselect?: string; onDone: (ok:
           {step === "key" && selected && (
             <>
               <div className="mb-3 flex items-center text-xs text-muted-foreground">
-                <button className="hover:text-foreground" onClick={() => setStep("provider")}>
+                <button className="hover:text-foreground transition-colors" onClick={() => setStep("provider")}>
                   &larr; {selected.name}
                 </button>
               </div>
@@ -141,8 +141,8 @@ function AISetupWizard({ preselect, onDone }: { preselect?: string; onDone: (ok:
                       className={cn(
                         "rounded-md border px-2.5 py-1 text-[10px] font-medium transition-colors",
                         awsAuthMode === mode
-                          ? "border-primary bg-primary/10 text-primary"
-                          : "border-border text-muted-foreground hover:text-foreground",
+                          ? "border-primary/50 bg-primary/10 text-primary"
+                          : "border-white/[0.06] text-muted-foreground hover:text-foreground",
                       )}
                       onClick={() => { setAwsAuthMode(mode); setSecrets({}); }}
                     >
@@ -183,7 +183,7 @@ function AISetupWizard({ preselect, onDone }: { preselect?: string; onDone: (ok:
           )}
 
           {error && (
-            <div className="mt-2 rounded-md border border-red-800 bg-red-950 px-2 py-1 text-[10px] text-red-300">
+            <div className="mt-2 rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2 text-[11px] text-red-400">
               {error}
             </div>
           )}

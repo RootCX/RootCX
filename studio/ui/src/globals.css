@@ -26,6 +26,15 @@
   --radius-lg: 8px;
 
   --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+
+  --shadow-dialog: 0 0 0 1px rgba(255,255,255,0.03), 0 16px 70px rgba(0,0,0,0.55), 0 2px 8px rgba(0,0,0,0.3);
+
+  --animate-overlay-in: overlay-in 150ms ease-out;
+  --animate-overlay-out: overlay-out 100ms ease-in;
+  --animate-dialog-in: dialog-in 150ms ease-out;
+  --animate-dialog-out: dialog-out 100ms ease-in;
+  --animate-portal-overlay-in: portal-overlay-in 150ms ease-out;
+  --animate-portal-content-in: portal-content-in 150ms ease-out;
 }
 
 * {
@@ -50,12 +59,34 @@ body {
 }
 
 @keyframes pulse-dot {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.4;
-  }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* Dialog / modal animations */
+@keyframes overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes overlay-out {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+@keyframes dialog-in {
+  from { opacity: 0; transform: translate(-50%, -48%) scale(0.96); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+@keyframes dialog-out {
+  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  to { opacity: 0; transform: translate(-50%, -48%) scale(0.96); }
+}
+/* Portal-based dialogs (no Radix transform) */
+@keyframes portal-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes portal-content-in {
+  from { opacity: 0; transform: translateY(-6px) scale(0.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
