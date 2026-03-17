@@ -36,6 +36,7 @@ pub struct LoopContext {
     pub permissions: Arc<PendingPermissions>,
     pub questions: Arc<PendingQuestions>,
     pub emit: EmitFn,
+    pub integration_fetcher: Option<crate::IntegrationFetcher>,
 }
 
 pub async fn agentic_loop(mut ctx: LoopContext, user_text: &str) -> Result<(), ForgeError> {
@@ -246,7 +247,7 @@ async fn execute_with_permission(
         return execute_question(ctx, args).await;
     }
     if tool_name == "list_integrations" {
-        return Ok(execute_list_integrations(&ctx.pool).await);
+        return Ok(execute_list_integrations(&ctx.integration_fetcher).await);
     }
 
     if tools::needs_permission(tool_name)
@@ -304,28 +305,14 @@ async fn execute_question(
     Ok(result)
 }
 
-async fn execute_list_integrations(pool: &PgPool) -> Result<String, String> {
-    let rows: Vec<(String, String, String, Option<Value>)> = sqlx::query_as(
-        "SELECT id, name, version, manifest FROM rootcx_system.apps \
-         WHERE manifest->>'type' = 'integration' AND status = 'installed' ORDER BY name",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let integrations: Vec<Value> = rows.into_iter().map(|(id, name, version, m)| {
-        let m = m.unwrap_or(Value::Null);
-        json!({
-            "id": id, "name": name, "version": version,
-            "description": m.get("description").and_then(Value::as_str).unwrap_or(""),
-            "actions": m.get("actions").unwrap_or(&json!([])),
-            "userAuth": m.get("userAuth"),
-            "webhooks": m.get("webhooks").unwrap_or(&json!([])),
-            "instructions": m.get("instructions"),
-        })
-    }).collect();
-
-    serde_json::to_string_pretty(&integrations).map_err(|e| e.to_string())
+async fn execute_list_integrations(
+    fetcher: &Option<crate::IntegrationFetcher>,
+) -> Result<String, String> {
+    let items = match fetcher {
+        Some(f) => f().await?,
+        None => return Err("no integration source configured".into()),
+    };
+    serde_json::to_string_pretty(&items).map_err(|e| e.to_string())
 }
 
 async fn build_history(

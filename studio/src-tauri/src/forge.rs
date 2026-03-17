@@ -16,10 +16,17 @@ pub fn new_state() -> ForgeState {
     Arc::new(tokio::sync::OnceCell::new())
 }
 
-pub async fn init(state: &ForgeState) {
+pub async fn init(state: &ForgeState, client: RuntimeClient) {
     ensure_instructions().await;
     match ForgeEngine::new(PG_URL).await {
-        Ok(e) => { let _ = state.set(e); info!("forge: ready"); }
+        Ok(mut e) => {
+            e.set_integration_fetcher(Arc::new(move || {
+                let c = client.clone();
+                Box::pin(async move { c.list_integrations().await.map_err(|e| e.to_string()) })
+            }));
+            let _ = state.set(e);
+            info!("forge: ready");
+        }
         Err(e) => warn!("forge: PG connection failed: {e}"),
     }
 }

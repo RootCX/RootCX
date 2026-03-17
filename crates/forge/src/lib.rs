@@ -9,16 +9,23 @@ pub mod session;
 pub mod tools;
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use error::ForgeError;
 use provider::ProviderType;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::PgPool;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::{AbortHandle, JoinHandle};
 use uuid::Uuid;
+
+pub type IntegrationFetcher = Arc<
+    dyn Fn() -> Pin<Box<dyn Future<Output = Result<Vec<Value>, String>> + Send>> + Send + Sync,
+>;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ForgeConfig {
@@ -61,6 +68,7 @@ pub struct ForgeEngine {
     active_loops: Arc<Mutex<HashMap<Uuid, AbortHandle>>>,
     permissions: Arc<permission::PendingPermissions>,
     questions: Arc<question::PendingQuestions>,
+    integration_fetcher: Option<IntegrationFetcher>,
 }
 
 impl ForgeEngine {
@@ -80,6 +88,7 @@ impl ForgeEngine {
             active_loops: Arc::new(Mutex::new(HashMap::new())),
             permissions: permission::PendingPermissions::new(),
             questions: question::PendingQuestions::new(),
+            integration_fetcher: None,
         })
     }
 
@@ -93,6 +102,10 @@ impl ForgeEngine {
 
     pub async fn set_config(&self, config: ForgeConfig) {
         *self.config.write().await = config;
+    }
+
+    pub fn set_integration_fetcher(&mut self, fetcher: IntegrationFetcher) {
+        self.integration_fetcher = Some(fetcher);
     }
 
     pub async fn create_session(&self) -> Result<session::Session, ForgeError> {
@@ -133,6 +146,7 @@ impl ForgeEngine {
             permissions: self.permissions.clone(),
             questions: self.questions.clone(),
             emit: emit_fn,
+            integration_fetcher: self.integration_fetcher.clone(),
         };
 
         let active = self.active_loops.clone();

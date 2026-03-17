@@ -108,7 +108,7 @@ pub fn run() {
                     error!("runtime boot failed: {e}");
                 }
                 let _ = boot_tx.send(true);
-                forge::init(&forge_state).await;
+                forge::init(&forge_state, bg.client()).await;
             });
 
             Ok(())
