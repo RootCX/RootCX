@@ -34,7 +34,7 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
 
 ### Rules
 
-- `id`, `created_at`, `updated_at` are auto-generated — never include in `fields`
+- `id`, `created_at`, `updated_at` are auto-generated — omit from `fields`
 - `entity_link` requires `"references": { "entity": "<name>", "field": "id" }`
 - `"required": true` = mandatory on create; omit key for optional
 - `"enum_values": [...]` restricts text fields to fixed values
@@ -43,48 +43,72 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
 
 ## SDK Hooks
 
-Never use `useState` with mock data. All data comes from hooks.
+All data from hooks. Types exported from `@rootcx/sdk`. Never use `useState` with mock data.
 
 ### useAppCollection
 
 ```tsx
-const { data, loading, error, refetch, create, update, remove } = useAppCollection<T>(appId, entityName);
-// create(fields) => Promise<T>
-// update(id, fields) => Promise<T>
-// remove(id) => Promise<void>
+useAppCollection<T>(appId, entity, query?: QueryOptions)
+```
+
+Returns: `{ data: T[], total: number, loading, error, refetch, create, bulkCreate, update, remove }`
+
+Without `query`: `GET /collections/{entity}` (full list). With `query`: `POST /collections/{entity}/query` (server-side filter/sort/paginate). Auto re-fetches on `query` change.
+
+`create(fields) → T` · `bulkCreate(fields[]) → T[]` · `update(id, fields) → T` · `remove(id) → void`
+
+### QueryOptions
+
+```tsx
+{ where?: WhereClause, orderBy?: string, order?: "asc"|"desc", limit?: number, offset?: number }
+```
+
+**Where operators:** `$eq` `$ne` `$gt` `$gte` `$lt` `$lte` `$like` `$ilike` `$in` `$nin` `$contains` `$isNull`
+**Logical:** `$and` `$or` (WhereClause[]) · `$not` (WhereClause)
+**Shorthand:** `{field: value}` = `{field: {$eq: value}}` · `{field: null}` = IS NULL
+
+```tsx
+useAppCollection<Invoice>(appId, "invoice", {
+  where: { $or: [{status: "pending"}, {amount: {$gte: 1000}}], date: {$gte: "2026-01-01", $lte: "2026-03-31"}, name: {$ilike: "%acme%"} },
+  orderBy: "date", order: "desc", limit: 50, offset: 0,
+});
 ```
 
 ### useAppRecord
 
 ```tsx
-const { data, loading, error, update, remove } = useAppRecord<T>(appId, entityName, recordId);
-// update(fields) => Promise<T>
-// remove() => Promise<void>
+useAppRecord<T>(appId, entity, recordId | null)
 ```
 
-### useRuntimeStatus
+Returns: `{ data: T|null, loading, error, refetch, update, remove }`
 
-```tsx
-const { connected, loading } = useRuntimeStatus();
-```
+`update(fields) → T` · `remove() → void` · `null` id skips fetch
 
 ### useIntegration
 
 ```tsx
 const { connected, loading, connect, submitCredentials, disconnect, call } = useIntegration(appId, integrationId);
-// connect() => triggers OAuth redirect or returns { type: "credentials", schema } for manual form
-// submitCredentials(values) => submit credential form values
-// disconnect() => revoke auth
-// call(actionId, params?) => execute integration action, returns parsed result
 ```
 
-**If you need an integration, call `list_integrations` first. Never guess action IDs.**
+`connect()` → OAuth redirect or `{type:"credentials", schema}` · `call(actionId, params?) → result`
+
+**Call `list_integrations` first. Never guess action IDs.**
+
+### useRuntimeClient
+
+```tsx
+const client = useRuntimeClient();
+```
+
+`client.queryRecords<T>(appId, entity, QueryOptions) → {data, total}` · `client.rpc(appId, method, params?) → unknown`
+
+For imperative calls in event handlers. For reactive data, use `useAppCollection` with `QueryOptions`.
 
 ---
 
 ## Record shape
 
-Records are **flat objects** — no `.fields` wrapper. Auto-fields: `id`, `created_at`, `updated_at`.
+Records are **flat objects**. Auto-fields: `id`, `created_at`, `updated_at`.
 When creating/updating, pass only user-defined fields.
 
 ---
@@ -167,7 +191,7 @@ import type { ColumnDef } from "@tanstack/react-table";
 
 | Component | Key props |
 |-----------|-----------|
-| `DataTable` | `data`, `columns` (ColumnDef[]), `loading`, `searchable`, `pagination`, `pageSize`, `selectable`, `rowActions` [{label,icon,onClick,destructive}], `bulkActions`, `emptyState`, `onRowClick` |
+| `DataTable` | `data`, `columns` (ColumnDef[]), `loading`, `searchable`, `pageSize`, `rowCount`, `onPaginationChange(PaginationState)`, `onSortingChange(SortingState)`, `selectable`, `resizable`, `rowActions` [{label,icon,onClick,destructive}], `bulkActions`, `emptyState`, `onRowClick`. Server-side: pass `rowCount`+`onPaginationChange` for pagination, `onSortingChange` for sorting — tanstack `manualPagination`/`manualSorting` enabled automatically. Types `SortingState`, `PaginationState` re-exported from `@rootcx/ui`. |
 | `KPICard` | `label`, `value`, `trend`, `icon` |
 | `StatusBadge` | `status` — auto-colors: active→green, pending→yellow, error→red |
 
@@ -198,6 +222,8 @@ const columns: ColumnDef<T, unknown>[] = [
 ];
 
 <DataTable data={items} columns={columns} loading={loading} searchable selectable
+  rowCount={totalCount} onPaginationChange={({ pageIndex, pageSize }) => fetchPage(pageIndex, pageSize)}
+  onSortingChange={(s) => s[0] && fetchSorted(s[0].id, s[0].desc ? "desc" : "asc")}
   rowActions={[
     { label: "Edit", icon: <IconEdit className="h-4 w-4" />, onClick: (row) => edit(row) },
     { label: "Delete", icon: <IconTrash className="h-4 w-4" />, onClick: (row) => remove(row.id), destructive: true },

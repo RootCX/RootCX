@@ -1,16 +1,14 @@
-import * as React from "react";
 import {
-  useReactTable,
-  getCoreRowModel,
-  getFilteredRowModel,
-  getPaginationRowModel,
-  getSortedRowModel,
-  flexRender,
-  type ColumnDef,
-  type SortingState,
-  type RowSelectionState,
+  useState, useMemo, useCallback, useRef, type ReactNode,
+} from "react";
+import {
+  useReactTable, getCoreRowModel, getFilteredRowModel,
+  getSortedRowModel, flexRender, type ColumnDef, type SortingState, type RowSelectionState,
+  type ColumnResizeMode, type PaginationState,
 } from "@tanstack/react-table";
-import { IconChevronLeft, IconChevronRight, IconDots, IconSearch, IconArrowUp, IconArrowDown } from "@tabler/icons-react";
+import {
+  IconChevronLeft, IconChevronRight, IconDots, IconSearch, IconArrowUp, IconArrowDown,
+} from "@tabler/icons-react";
 import { cn } from "../lib/utils";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../primitives/table";
 import { Button } from "../primitives/button";
@@ -21,14 +19,14 @@ import {
 
 interface RowAction<T> {
   label: string;
-  icon?: React.ReactNode;
+  icon?: ReactNode;
   onClick: (row: T) => void;
   destructive?: boolean;
 }
 
 interface BulkAction<T> {
   label: string;
-  icon?: React.ReactNode;
+  icon?: ReactNode;
   onClick: (rows: T[]) => void;
   destructive?: boolean;
 }
@@ -39,29 +37,52 @@ interface DataTableProps<T> {
   loading?: boolean;
   searchable?: boolean;
   searchPlaceholder?: string;
-  pagination?: boolean;
   pageSize?: number;
+  rowCount?: number;
+  onPaginationChange?: (pagination: PaginationState) => void;
+  onSortingChange?: (sorting: SortingState) => void;
   selectable?: boolean;
+  resizable?: boolean;
   rowActions?: RowAction<T>[];
   bulkActions?: BulkAction<T>[];
-  emptyState?: React.ReactNode;
+  emptyState?: ReactNode;
   onRowClick?: (row: T) => void;
   className?: string;
 }
 
-function SkeletonRows({ columns, rows = 5 }: { columns: number; rows?: number }) {
+function SkeletonRows({ columns }: { columns: number }) {
+  const widths = useMemo(
+    () => Array.from({ length: columns }, () => `${40 + Math.random() * 50}%`),
+    [columns],
+  );
   return (
     <>
-      {Array.from({ length: rows }).map((_, i) => (
+      {Array.from({ length: 5 }, (_, i) => (
         <TableRow key={i}>
-          {Array.from({ length: columns }).map((_, j) => (
+          {widths.map((w, j) => (
             <TableCell key={j}>
-              <div className="h-4 w-full animate-pulse rounded bg-muted" />
+              <div
+                className="h-3.5 animate-pulse rounded bg-muted"
+                style={{ width: w, animationDelay: `${i * 75}ms` }}
+              />
             </TableCell>
           ))}
         </TableRow>
       ))}
     </>
+  );
+}
+
+function ResizeHandle({ header }: { header: { getResizeHandler: () => (e: unknown) => void; column: { getIsResizing: () => boolean } } }) {
+  return (
+    <div
+      onMouseDown={header.getResizeHandler()}
+      onTouchStart={header.getResizeHandler()}
+      className={cn(
+        "absolute right-0 top-0 h-full w-1 cursor-col-resize select-none touch-none opacity-0 hover:opacity-100 group-hover/head:opacity-50",
+        header.column.getIsResizing() && "opacity-100 bg-primary",
+      )}
+    />
   );
 }
 
@@ -71,20 +92,47 @@ export function DataTable<T extends { id: string }>({
   loading = false,
   searchable = false,
   searchPlaceholder = "Search...",
-  pagination = true,
   pageSize = 10,
+  rowCount,
+  onPaginationChange,
+  onSortingChange: onSortingChangeProp,
   selectable = false,
+  resizable = false,
   rowActions,
   bulkActions,
   emptyState,
   onRowClick,
   className,
 }: DataTableProps<T>) {
-  const [sorting, setSorting] = React.useState<SortingState>([]);
-  const [globalFilter, setGlobalFilter] = React.useState("");
-  const [rowSelection, setRowSelection] = React.useState<RowSelectionState>({});
+  const [sorting, setSorting] = useState<SortingState>([]);
+  const [globalFilter, setGlobalFilter] = useState("");
+  const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
+  const [pagination, setPagination] = useState<PaginationState>({ pageIndex: 0, pageSize });
+  const [focusedIndex, setFocusedIndex] = useState(-1);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  const columns = React.useMemo<ColumnDef<T, unknown>[]>(() => {
+  const manualPagination = rowCount != null && onPaginationChange != null;
+  const manualSorting = onSortingChangeProp != null;
+
+  const handleSortingChange = useCallback(
+    (updater: SortingState | ((prev: SortingState) => SortingState)) => {
+      const next = typeof updater === "function" ? updater(sorting) : updater;
+      setSorting(next);
+      onSortingChangeProp?.(next);
+    },
+    [sorting, onSortingChangeProp],
+  );
+
+  const handlePaginationChange = useCallback(
+    (updater: PaginationState | ((prev: PaginationState) => PaginationState)) => {
+      const next = typeof updater === "function" ? updater(pagination) : updater;
+      setPagination(next);
+      onPaginationChange?.(next);
+    },
+    [pagination, onPaginationChange],
+  );
+
+  const columns = useMemo<ColumnDef<T, unknown>[]>(() => {
     const cols: ColumnDef<T, unknown>[] = [];
 
     if (selectable) {
@@ -103,27 +151,25 @@ export function DataTable<T extends { id: string }>({
             type="checkbox"
             className="h-4 w-4 rounded border-input"
             checked={row.getIsSelected()}
-            onChange={(e) => {
-              e.stopPropagation();
-              row.toggleSelected(e.target.checked);
-            }}
+            onChange={(e) => { e.stopPropagation(); row.toggleSelected(e.target.checked); }}
           />
         ),
         size: 40,
         enableSorting: false,
+        enableResizing: false,
       });
     }
 
     cols.push(...userColumns);
 
-    if (rowActions && rowActions.length > 0) {
+    if (rowActions?.length) {
       cols.push({
         id: "_actions",
         header: () => null,
         cell: ({ row }) => (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="h-8 w-8" onClick={(e) => e.stopPropagation()}>
+              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={(e) => e.stopPropagation()}>
                 <IconDots className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
@@ -141,33 +187,60 @@ export function DataTable<T extends { id: string }>({
             </DropdownMenuContent>
           </DropdownMenu>
         ),
-        size: 48,
+        size: 40,
         enableSorting: false,
+        enableResizing: false,
       });
     }
 
     return cols;
   }, [userColumns, selectable, rowActions]);
 
+  const columnResizeMode: ColumnResizeMode = "onChange";
+
   const table = useReactTable({
     data,
     columns,
-    state: { sorting, globalFilter, rowSelection },
-    onSortingChange: setSorting,
+    state: { sorting, globalFilter, rowSelection, pagination },
+    onSortingChange: handleSortingChange,
     onGlobalFilterChange: setGlobalFilter,
     onRowSelectionChange: setRowSelection,
+    onPaginationChange: handlePaginationChange,
     getCoreRowModel: getCoreRowModel(),
     getFilteredRowModel: getFilteredRowModel(),
-    getSortedRowModel: getSortedRowModel(),
-    ...(pagination ? { getPaginationRowModel: getPaginationRowModel() } : {}),
-    initialState: { pagination: { pageSize } },
+    ...(manualSorting ? { manualSorting: true } : { getSortedRowModel: getSortedRowModel() }),
+    manualPagination,
+    ...(manualPagination ? { rowCount } : {}),
+    ...(resizable ? { columnResizeMode, enableColumnResizing: true } : {}),
     getRowId: (row) => row.id,
   });
 
+  const rows = table.getRowModel().rows;
   const selectedRows = table.getFilteredSelectedRowModel().rows.map((r) => r.original);
+  const pageCount = table.getPageCount();
+
+  const onKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (!rows.length) return;
+    const last = rows.length - 1;
+    let next = focusedIndex;
+
+    switch (e.key) {
+      case "ArrowDown": e.preventDefault(); next = focusedIndex < last ? focusedIndex + 1 : 0; break;
+      case "ArrowUp": e.preventDefault(); next = focusedIndex > 0 ? focusedIndex - 1 : last; break;
+      case "Home": e.preventDefault(); next = 0; break;
+      case "End": e.preventDefault(); next = last; break;
+      case "Enter":
+        if (focusedIndex >= 0 && onRowClick) onRowClick(rows[focusedIndex].original);
+        return;
+      default: return;
+    }
+
+    setFocusedIndex(next);
+    containerRef.current?.querySelectorAll<HTMLElement>("tbody tr")[next]?.scrollIntoView({ block: "nearest" });
+  }, [rows, focusedIndex, onRowClick]);
 
   return (
-    <div className={cn("space-y-4", className)}>
+    <div className={cn("flex flex-col gap-3", className)}>
       {(searchable || (bulkActions && selectedRows.length > 0)) && (
         <div className="flex items-center justify-between gap-2">
           {searchable && (
@@ -200,16 +273,22 @@ export function DataTable<T extends { id: string }>({
         </div>
       )}
 
-      <div className="rounded-md border">
-        <Table>
+      <div
+        ref={containerRef}
+        className="min-h-0 flex-1 overflow-auto rounded-md border outline-none"
+        tabIndex={0}
+        onKeyDown={onKeyDown}
+        onBlur={() => setFocusedIndex(-1)}
+      >
+        <Table style={resizable ? { width: table.getCenterTotalSize() } : undefined}>
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (
-              <TableRow key={headerGroup.id}>
+              <TableRow key={headerGroup.id} className="hover:bg-transparent">
                 {headerGroup.headers.map((header) => (
                   <TableHead
                     key={header.id}
+                    className={cn("group/head", header.column.getCanSort() && "cursor-pointer select-none")}
                     style={{ width: header.getSize() !== 150 ? header.getSize() : undefined }}
-                    className={header.column.getCanSort() ? "cursor-pointer select-none" : undefined}
                     onClick={header.column.getToggleSortingHandler()}
                   >
                     <div className="flex items-center gap-1">
@@ -217,6 +296,7 @@ export function DataTable<T extends { id: string }>({
                       {header.column.getIsSorted() === "asc" && <IconArrowUp className="h-3 w-3" />}
                       {header.column.getIsSorted() === "desc" && <IconArrowDown className="h-3 w-3" />}
                     </div>
+                    {resizable && header.column.getCanResize() && <ResizeHandle header={header} />}
                   </TableHead>
                 ))}
               </TableRow>
@@ -225,19 +305,23 @@ export function DataTable<T extends { id: string }>({
           <TableBody>
             {loading ? (
               <SkeletonRows columns={columns.length} />
-            ) : table.getRowModel().rows.length === 0 ? (
+            ) : rows.length === 0 ? (
               <TableRow>
                 <TableCell colSpan={columns.length} className="h-24 text-center">
                   {emptyState || <span className="text-muted-foreground">No results.</span>}
                 </TableCell>
               </TableRow>
             ) : (
-              table.getRowModel().rows.map((row) => (
+              rows.map((row, i) => (
                 <TableRow
                   key={row.id}
                   data-state={row.getIsSelected() && "selected"}
-                  className={onRowClick ? "cursor-pointer" : undefined}
+                  className={cn(
+                    onRowClick && "cursor-pointer",
+                    i === focusedIndex && "ring-2 ring-inset ring-primary/40",
+                  )}
                   onClick={onRowClick ? () => onRowClick(row.original) : undefined}
+                  onMouseEnter={() => setFocusedIndex(i)}
                 >
                   {row.getVisibleCells().map((cell) => (
                     <TableCell key={cell.id}>
@@ -251,27 +335,17 @@ export function DataTable<T extends { id: string }>({
         </Table>
       </div>
 
-      {pagination && !loading && data.length > pageSize && (
+      {pageCount > 1 && !loading && (
         <div className="flex items-center justify-between">
           <p className="text-sm text-muted-foreground">
-            Page {table.getState().pagination.pageIndex + 1} of {table.getPageCount()}
+            Page {pagination.pageIndex + 1} of {pageCount}
           </p>
           <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => table.previousPage()}
-              disabled={!table.getCanPreviousPage()}
-            >
+            <Button variant="outline" size="sm" onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()}>
               <IconChevronLeft className="h-4 w-4" />
               Previous
             </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => table.nextPage()}
-              disabled={!table.getCanNextPage()}
-            >
+            <Button variant="outline" size="sm" onClick={() => table.nextPage()} disabled={!table.getCanNextPage()}>
               Next
               <IconChevronRight className="h-4 w-4" />
             </Button>

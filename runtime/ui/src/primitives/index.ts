@@ -14,7 +14,7 @@ export {
   DialogContent, DialogHeader, DialogFooter, DialogTitle, DialogDescription,
 } from "./dialog";
 export { Tabs, TabsList, TabsTrigger, TabsContent } from "./tabs";
-export { Table, TableHeader, TableBody, TableFooter, TableHead, TableRow, TableCell, TableCaption } from "./table";
+export { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from "./table";
 export { Separator } from "./separator";
 export { ScrollArea, ScrollBar } from "./scroll-area";
 export { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "./tooltip";
