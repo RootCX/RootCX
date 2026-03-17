@@ -59,6 +59,13 @@ pub enum OutboundMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    CollectionOpResult {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<JsonValue>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     Shutdown,
 }
 
@@ -112,6 +119,13 @@ pub enum InboundMessage {
     },
     Event {
         name: String,
+        #[serde(default)]
+        data: JsonValue,
+    },
+    CollectionOp {
+        id: String,
+        op: String,
+        entity: String,
         #[serde(default)]
         data: JsonValue,
     },
@@ -204,6 +218,7 @@ mod tests {
             (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), database_url: "postgres://localhost:5480/postgres".into(), credentials: HashMap::new() }, "discover"),
             (OutboundMessage::Rpc { id: "r1".into(), method: "echo".into(), params: json!({}), caller: None }, "rpc"),
             (OutboundMessage::Job { id: "j1".into(), payload: json!({}), caller: None }, "job"),
+            (OutboundMessage::CollectionOpResult { id: "c1".into(), result: Some(json!({})), error: None }, "collection_op_result"),
             (OutboundMessage::Shutdown, "shutdown"),
             (OutboundMessage::AgentToolResult {
                 invoke_id: "i1".into(), call_id: "c1".into(),
@@ -303,6 +318,18 @@ mod tests {
         let InboundMessage::AgentSessionCompacted { invoke_id, summary } = msg else { panic!("expected AgentSessionCompacted") };
         assert_eq!(invoke_id, "i1");
         assert_eq!(summary, "conversation about users");
+    }
+
+    #[test]
+    fn inbound_collection_op() {
+        let msg: InboundMessage = serde_json::from_str(
+            r#"{"type":"collection_op","id":"c1","op":"insert","entity":"docs","data":{"title":"test"}}"#
+        ).unwrap();
+        let InboundMessage::CollectionOp { id, op, entity, data } = msg else { panic!("expected CollectionOp") };
+        assert_eq!(id, "c1");
+        assert_eq!(op, "insert");
+        assert_eq!(entity, "docs");
+        assert_eq!(data, json!({"title": "test"}));
     }
 
     #[test]
