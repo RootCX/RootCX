@@ -731,14 +731,17 @@ async function handleWebhook(params: any) {
     case "outgoing-peppol-documents.delivered":
     case "outgoing-peppol-documents.failed": {
       const { ulid, status, as4MessageId, statusMessage } = data;
-      return {
-        event: "document_status",
-        dokapiUlid: ulid,
-        status: STATUS_MAP[status] || status?.toLowerCase(),
-        as4MessageId,
-        errorMessage: statusMessage,
-        deliveredAt: status === "DELIVERED" ? new Date().toISOString() : undefined,
-      };
+      const mapped = STATUS_MAP[status] || status?.toLowerCase();
+      try {
+        await collectionOp("insert", "outgoing_status", {
+          document_ulid: ulid,
+          status: mapped,
+          as4_message_id: as4MessageId || "",
+          error_message: statusMessage || "",
+          delivered_at: status === "DELIVERED" ? new Date().toISOString() : "",
+        });
+      } catch { /* best effort */ }
+      return { event: "document_status", dokapiUlid: ulid, status: mapped };
     }
 
     case "participant-registrations.active":
@@ -769,13 +772,29 @@ async function handleWebhook(params: any) {
 
       try { await dokapiRequest(config, "POST", `/incoming-peppol-documents/${documentUlid}/confirm`, {}); } catch {}
 
-      return {
-        event: "incoming_document",
-        documentUlid, instanceIdentifier, as4MessageId,
-        status: "received",
-        xml,
-        parsed: { ...parsed, attachmentCount: parsed.attachments.length },
-      };
+      try {
+        await collectionOp("insert", "incoming_documents", {
+          document_ulid: documentUlid,
+          document_type: parsed.documentType,
+          document_number: parsed.documentNumber,
+          issue_date: parsed.issueDate,
+          due_date: parsed.dueDate || "",
+          currency: parsed.currency,
+          amount: parsed.amount,
+          sender_peppol_id: parsed.sender.peppolId,
+          sender_name: parsed.sender.name,
+          sender_vat: parsed.sender.vatNumber || "",
+          receiver_peppol_id: parsed.receiver.peppolId,
+          receiver_name: parsed.receiver.name,
+          status: "received",
+          instance_identifier: instanceIdentifier || "",
+          as4_message_id: as4MessageId || "",
+          xml,
+          attachments: parsed.attachments,
+        });
+      } catch { /* best effort */ }
+
+      return { event: "incoming_document", documentUlid, status: "received" };
     }
 
     default:
@@ -807,6 +826,16 @@ const rpcHandlers: Record<string, (params: any) => Promise<any>> = {
 };
 
 const send = (msg: Record<string, unknown>) => process.stdout.write(JSON.stringify(msg) + "\n");
+const pendingOps = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+let opSeq = 0;
+
+function collectionOp(op: string, entity: string, data: Record<string, unknown>): Promise<any> {
+  const id = `cop_${++opSeq}`;
+  return new Promise((resolve, reject) => {
+    pendingOps.set(id, { resolve, reject });
+    send({ type: "collection_op", id, op, entity, data });
+  });
+}
 
 let buffer = "";
 process.stdin.setEncoding("utf-8");
@@ -825,6 +854,13 @@ process.stdin.on("data", (chunk: string) => {
       case "rpc":
         handleRpc(msg);
         break;
+      case "collection_op_result": {
+        const p = pendingOps.get(msg.id);
+        if (!p) break;
+        pendingOps.delete(msg.id);
+        msg.error ? p.reject(new Error(msg.error)) : p.resolve(msg.result);
+        break;
+      }
       case "shutdown":
         process.exit(0);
     }

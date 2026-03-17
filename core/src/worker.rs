@@ -446,6 +446,18 @@ async fn supervisor_loop(
                             }
                             info!(app_id = %app_id, "agent session compacted");
                         }
+                        InboundMessage::CollectionOp { id, op, entity, data } => {
+                            let pool = config.pool.clone();
+                            let aid = config.app_id.clone();
+                            let tx = outbound_tx.clone();
+                            tokio::spawn(async move {
+                                let (result, error) = match collection_op(&pool, &aid, &op, &entity, data).await {
+                                    Ok(v) => (Some(v), None),
+                                    Err(e) => (None, Some(e)),
+                                };
+                                let _ = tx.send(OutboundMessage::CollectionOpResult { id, result, error }).await;
+                            });
+                        }
                         InboundMessage::Event { name, data } => {
                             info!(app_id = %app_id, event = %name, "worker event");
                             emit_log(&log_tx, "event", format!("{name}: {data}"));
@@ -584,6 +596,42 @@ async fn spawn_worker(
     }).await?;
 
     Ok((child, writer, IpcReader::new(stdout), stderr))
+}
+
+async fn collection_op(pool: &PgPool, app_id: &str, op: &str, entity: &str, data: JsonValue) -> Result<JsonValue, String> {
+    use crate::manifest::{field_type_map, quote_ident};
+    use crate::routes::crud::{bind_typed, table};
+
+    let obj = data.as_object().ok_or("data must be a JSON object")?;
+    let tbl = table(app_id, entity);
+    let types = field_type_map(pool, app_id, entity).await.map_err(|e| e.to_string())?;
+
+    let sql = match op {
+        "insert" => {
+            let cols: Vec<_> = obj.keys().map(|k| quote_ident(k)).collect();
+            let phs: Vec<_> = (1..=cols.len()).map(|i| format!("${i}")).collect();
+            format!("INSERT INTO {tbl} ({}) VALUES ({}) RETURNING to_jsonb({tbl}.*) AS row", cols.join(","), phs.join(","))
+        }
+        "update" => {
+            let mut idx = 1usize;
+            let sets: Vec<_> = obj.keys().filter(|k| *k != "id").map(|k| { let s = format!("{} = ${idx}", quote_ident(k)); idx += 1; s }).collect();
+            if sets.is_empty() { return Err("no fields to update".into()); }
+            format!("UPDATE {tbl} SET {} WHERE id = ${idx} RETURNING to_jsonb({tbl}.*) AS row", sets.join(","))
+        }
+        _ => return Err(format!("unsupported op: {op}")),
+    };
+
+    let mut query = sqlx::query_as::<_, (JsonValue,)>(&sql);
+    for (k, v) in obj.iter() {
+        if op == "update" && k == "id" { continue; }
+        query = bind_typed(query, v, types.get(k.as_str()));
+    }
+    if op == "update" {
+        let id = obj.get("id").and_then(|v| v.as_str()).ok_or("id required for update")?;
+        query = query.bind(id);
+    }
+    let (row,) = query.fetch_one(pool).await.map_err(|e| e.to_string())?;
+    Ok(row)
 }
 
 fn backoff_delay(restart_count: u32) -> Duration {
