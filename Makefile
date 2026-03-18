@@ -61,6 +61,7 @@ endif
 # ── Development ───────────────────────────────────────────────────────────────
 
 dev: build-core-dev
+	pnpm --dir studio/ui install
 	cargo tauri dev
 
 ifeq ($(OS),Windows_NT)
