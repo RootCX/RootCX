@@ -82,11 +82,6 @@ impl AppState {
         *self.client.write().unwrap() = RuntimeClient::new(url);
     }
 
-    pub fn is_remote(&self) -> bool {
-        let url = self.core_url();
-        !url.contains("localhost") && !url.contains("127.0.0.1")
-    }
-
     pub fn client(&self) -> RuntimeClient {
         self.client.read().unwrap().clone()
     }

@@ -18,7 +18,7 @@ use error::ForgeError;
 use provider::ProviderType;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::PgPool;
+use sqlx::SqlitePool;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::{AbortHandle, JoinHandle};
 use uuid::Uuid;
@@ -62,20 +62,24 @@ impl Default for ForgeConfig {
 }
 
 pub struct ForgeEngine {
-    pool: PgPool,
+    pool: SqlitePool,
     cwd: Arc<RwLock<PathBuf>>,
     config: Arc<RwLock<ForgeConfig>>,
-    active_loops: Arc<Mutex<HashMap<Uuid, AbortHandle>>>,
+    active_loops: Arc<Mutex<HashMap<String, AbortHandle>>>,
     permissions: Arc<permission::PendingPermissions>,
     questions: Arc<question::PendingQuestions>,
     integration_fetcher: Option<IntegrationFetcher>,
 }
 
 impl ForgeEngine {
-    pub async fn new(pg_url: &str) -> Result<Self, ForgeError> {
-        let pool = PgPool::connect(pg_url).await?;
+    pub async fn new(db_path: &std::path::Path) -> Result<Self, ForgeError> {
+        if let Some(parent) = db_path.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let url = format!("sqlite:{}?mode=rwc", db_path.display());
+        let pool = SqlitePool::connect(&url).await?;
         schema::bootstrap(&pool).await?;
-        tracing::info!("forge engine initialized");
+        tracing::info!("forge engine initialized (sqlite: {})", db_path.display());
 
         Ok(Self {
             pool,
@@ -119,14 +123,14 @@ impl ForgeEngine {
 
     pub async fn get_messages(
         &self,
-        session_id: Uuid,
+        session_id: &str,
     ) -> Result<Vec<session::MessageWithParts>, ForgeError> {
         session::get_messages_with_parts(&self.pool, session_id).await
     }
 
     pub async fn send_message(
         &self,
-        session_id: Uuid,
+        session_id: String,
         text: String,
         emit_fn: engine::EmitFn,
     ) -> JoinHandle<()> {
@@ -135,7 +139,7 @@ impl ForgeEngine {
 
         let ctx = engine::LoopContext {
             pool: self.pool.clone(),
-            session_id,
+            session_id: session_id.clone(),
             cwd: self.cwd.read().await.clone(),
             system_prompt,
             provider: provider::build_provider(
@@ -150,11 +154,12 @@ impl ForgeEngine {
         };
 
         let active = self.active_loops.clone();
+        let sid = session_id.clone();
         let handle = tokio::spawn(async move {
             if let Err(e) = engine::agentic_loop(ctx, &text).await {
                 tracing::warn!(error = %e, "agentic loop failed");
             }
-            active.lock().await.remove(&session_id);
+            active.lock().await.remove(&sid);
         });
 
         self.active_loops
@@ -165,13 +170,13 @@ impl ForgeEngine {
         handle
     }
 
-    pub async fn abort(&self, session_id: Uuid) {
-        if let Some(handle) = self.active_loops.lock().await.remove(&session_id) {
+    pub async fn abort(&self, session_id: &str) {
+        if let Some(handle) = self.active_loops.lock().await.remove(session_id) {
             handle.abort();
         }
     }
 
-    pub async fn reply_permission(&self, id: Uuid, session_id: Uuid, tool: &str, response: &str) {
+    pub async fn reply_permission(&self, id: Uuid, session_id: &str, tool: &str, response: &str) {
         let resp = permission::PermissionResponse::parse(response);
         self.permissions.reply(id, session_id, tool, resp).await;
     }
@@ -201,4 +206,3 @@ impl ForgeEngine {
         prompt
     }
 }
-

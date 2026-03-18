@@ -10,15 +10,19 @@ use uuid::Uuid;
 
 pub type ForgeState = Arc<tokio::sync::OnceCell<ForgeEngine>>;
 
-const PG_URL: &str = "postgres://postgres@localhost:5480/postgres";
-
 pub fn new_state() -> ForgeState {
     Arc::new(tokio::sync::OnceCell::new())
 }
 
+fn db_path() -> PathBuf {
+    rootcx_platform::dirs::rootcx_home()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("forge.db")
+}
+
 pub async fn init(state: &ForgeState, client: RuntimeClient) {
     ensure_instructions().await;
-    match ForgeEngine::new(PG_URL).await {
+    match ForgeEngine::new(&db_path()).await {
         Ok(mut e) => {
             e.set_integration_fetcher(Arc::new(move || {
                 let c = client.clone();
@@ -27,7 +31,7 @@ pub async fn init(state: &ForgeState, client: RuntimeClient) {
             let _ = state.set(e);
             info!("forge: ready");
         }
-        Err(e) => warn!("forge: PG connection failed: {e}"),
+        Err(e) => warn!("forge: init failed: {e}"),
     }
 }
 
@@ -64,7 +68,6 @@ fn parse_provider_model(s: &str) -> (rootcx_types::ProviderType, String) {
     if let Some(m) = s.strip_prefix("openai/") { return (OpenAI, m.into()); }
     if s.starts_with("bedrock/") || s.starts_with("amazon-bedrock/") {
         let model = s.split_once('/').map(|(_, m)| m).unwrap_or(s);
-        // Bedrock needs cross-region inference profile prefix
         let model = if model.starts_with("us.") || model.starts_with("eu.") || model.starts_with("global.") {
             model.to_string()
         } else {
@@ -124,12 +127,12 @@ pub async fn forge_list_sessions(state: State<'_, ForgeState>) -> Result<Vec<roo
 }
 
 #[tauri::command]
-pub async fn forge_get_messages(state: State<'_, ForgeState>, session_id: Uuid) -> Result<Vec<rootcx_forge::session::MessageWithParts>, String> {
-    engine(&state)?.get_messages(session_id).await.map_err(|e| e.to_string())
+pub async fn forge_get_messages(state: State<'_, ForgeState>, session_id: String) -> Result<Vec<rootcx_forge::session::MessageWithParts>, String> {
+    engine(&state)?.get_messages(&session_id).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub async fn forge_send_message(app: AppHandle, state: State<'_, ForgeState>, app_state: State<'_, crate::state::AppState>, session_id: Uuid, text: String) -> Result<(), String> {
+pub async fn forge_send_message(app: AppHandle, state: State<'_, ForgeState>, app_state: State<'_, crate::state::AppState>, session_id: String, text: String) -> Result<(), String> {
     let e = engine(&state)?;
     ensure_config(e, &app_state.client()).await;
     e.send_message(session_id, text, emit_fn(app)).await;
@@ -137,14 +140,14 @@ pub async fn forge_send_message(app: AppHandle, state: State<'_, ForgeState>, ap
 }
 
 #[tauri::command]
-pub async fn forge_abort(state: State<'_, ForgeState>, session_id: Uuid) -> Result<(), String> {
-    engine(&state)?.abort(session_id).await;
+pub async fn forge_abort(state: State<'_, ForgeState>, session_id: String) -> Result<(), String> {
+    engine(&state)?.abort(&session_id).await;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn forge_reply_permission(state: State<'_, ForgeState>, id: Uuid, session_id: Uuid, tool: String, response: String) -> Result<(), String> {
-    engine(&state)?.reply_permission(id, session_id, &tool, &response).await;
+pub async fn forge_reply_permission(state: State<'_, ForgeState>, id: Uuid, session_id: String, tool: String, response: String) -> Result<(), String> {
+    engine(&state)?.reply_permission(id, &session_id, &tool, &response).await;
     Ok(())
 }
 
