@@ -67,9 +67,9 @@ RootCX is an open-source\* infrastructure for building custom internal software 
 
 ## Get Started
 
-### Cloud (fastest)
+### Cloud
 
-Sign up at [rootcx.com](https://rootcx.com/app/register), create a project, and connect Studio. Your project gets its own database, API, and runtime. No setup required.
+Sign up at [rootcx.com](https://rootcx.com/app/register), create a project, and connect Studio. Your project gets its own dedicated Core with a database, API, and runtime.
 
 ### Development
 
