@@ -10,10 +10,10 @@ serde_json.workspace = true
 rootcx-types.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 uuid = { version = "1", features = ["v4", "serde"] }
-chrono = { version = "0.4", features = ["serde"] }
+chrono = "0.4"
 bytes = "1"
 futures = "0.3"
 glob = "0.3"

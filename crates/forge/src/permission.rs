@@ -8,7 +8,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Permission {
     pub id: Uuid,
-    pub session_id: Uuid,
+    pub session_id: String,
     pub tool: String,
     pub title: String,
     pub description: String,
@@ -34,7 +34,7 @@ impl PermissionResponse {
 #[derive(Default)]
 pub struct PendingPermissions {
     pending: Mutex<HashMap<Uuid, oneshot::Sender<PermissionResponse>>>,
-    always_allowed: Mutex<HashMap<Uuid, HashSet<String>>>,
+    always_allowed: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 impl PendingPermissions {
@@ -42,15 +42,15 @@ impl PendingPermissions {
         Arc::new(Self::default())
     }
 
-    pub async fn is_allowed(&self, session_id: Uuid, tool: &str) -> bool {
+    pub async fn is_allowed(&self, session_id: &str, tool: &str) -> bool {
         self.always_allowed.lock().await
-            .get(&session_id)
+            .get(session_id)
             .is_some_and(|tools| tools.contains(tool))
     }
 
     pub async fn request(
         &self,
-        session_id: Uuid,
+        session_id: &str,
         tool: &str,
         description: &str,
     ) -> (Permission, oneshot::Receiver<PermissionResponse>) {
@@ -60,7 +60,7 @@ impl PendingPermissions {
 
         let perm = Permission {
             id,
-            session_id,
+            session_id: session_id.to_string(),
             tool: tool.to_string(),
             title: format!("Allow {tool}?"),
             description: description.to_string(),
@@ -69,20 +69,20 @@ impl PendingPermissions {
         (perm, rx)
     }
 
-    pub async fn clear_session(&self, session_id: Uuid) {
-        self.always_allowed.lock().await.remove(&session_id);
+    pub async fn clear_session(&self, session_id: &str) {
+        self.always_allowed.lock().await.remove(session_id);
     }
 
     pub async fn reply(
         &self,
         id: Uuid,
-        session_id: Uuid,
+        session_id: &str,
         tool: &str,
         response: PermissionResponse,
     ) {
         if response == PermissionResponse::Always {
             self.always_allowed.lock().await
-                .entry(session_id)
+                .entry(session_id.to_string())
                 .or_default()
                 .insert(tool.to_string());
         }

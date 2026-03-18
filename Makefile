@@ -60,7 +60,7 @@ endif
 
 # ── Development ───────────────────────────────────────────────────────────────
 
-dev: build-core-dev
+dev:
 	pnpm --dir runtime/ui install
 	pnpm --dir studio/ui install
 	cargo tauri dev

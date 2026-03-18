@@ -25,7 +25,7 @@ pub struct QuestionInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuestionRequest {
     pub id: Uuid,
-    pub session_id: Uuid,
+    pub session_id: String,
     pub questions: Vec<QuestionInfo>,
 }
 
@@ -46,7 +46,7 @@ impl PendingQuestions {
 
     pub async fn ask(
         &self,
-        session_id: Uuid,
+        session_id: &str,
         questions: Vec<QuestionInfo>,
     ) -> (QuestionRequest, oneshot::Receiver<QuestionResponse>) {
         let id = Uuid::new_v4();
@@ -55,7 +55,7 @@ impl PendingQuestions {
 
         let req = QuestionRequest {
             id,
-            session_id,
+            session_id: session_id.to_string(),
             questions,
         };
 

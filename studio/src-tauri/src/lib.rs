@@ -85,25 +85,7 @@ pub fn run() {
 
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if bg.is_remote() {
-                    let _ = handle.emit("boot-progress", "Connecting to remote server…");
-                } else {
-                    let _ = handle.emit("boot-progress", "Preparing environment…");
-                    match tokio::task::spawn_blocking(rootcx_client::ensure_runtime).await {
-                        Ok(Ok(rootcx_client::RuntimeStatus::Ready)) => {}
-                        Ok(Ok(rootcx_client::RuntimeStatus::NotInstalled)) => {
-                            let _ = handle.emit("boot-progress", "Installing core…");
-                            match tokio::task::spawn_blocking(rootcx_client::prompt_runtime_install).await {
-                                Ok(Err(e)) => error!("runtime: {e}"),
-                                Err(e) => error!("runtime: {e}"),
-                                _ => {}
-                            }
-                        }
-                        Ok(Err(e)) => error!("runtime: {e}"),
-                        Err(e) => error!("runtime: {e}"),
-                    }
-                    let _ = handle.emit("boot-progress", "Starting core…");
-                }
+                let _ = handle.emit("boot-progress", "Connecting to core…");
                 if let Err(e) = bg.boot().await {
                     error!("runtime boot failed: {e}");
                 }

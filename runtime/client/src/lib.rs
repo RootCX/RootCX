@@ -5,7 +5,7 @@ use rootcx_types::{AiConfig, AppManifest, InstalledApp, OsStatus, SchemaVerifica
 use serde_json::Value as JsonValue;
 
 pub mod daemon;
-pub use daemon::{RuntimeStatus, ensure_runtime, prompt_runtime_install, deploy_bundled_backend};
+pub use daemon::{RuntimeStatus, ensure_runtime};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
