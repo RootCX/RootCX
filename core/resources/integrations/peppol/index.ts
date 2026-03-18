@@ -9,6 +9,7 @@ interface Config {
   baseUrl?: string;
   identityUrl?: string;
   webhookSecret?: string;
+  proxyToken?: string;
 }
 
 interface InvoiceParty {
@@ -153,7 +154,8 @@ let cachedToken: { token: string; expiresAt: number } | null = null;
 const DEFAULT_BASE = "https://peppol-api.dokapi.io/v1";
 const DEFAULT_IDENTITY = "https://portal.dokapi.io/api/oauth2/token";
 
-async function getAccessToken(config: Config): Promise<string> {
+async function getAccessToken(config: Config): Promise<string | null> {
+  if (!config.clientId || !config.clientSecret) return config.proxyToken || null;
   if (cachedToken && Date.now() < cachedToken.expiresAt - 60_000) return cachedToken.token;
 
   const res = await fetch(config.identityUrl || DEFAULT_IDENTITY, {
@@ -174,9 +176,11 @@ async function getAccessToken(config: Config): Promise<string> {
 
 async function dokapiRequest<T>(config: Config, method: string, endpoint: string, body?: unknown): Promise<T> {
   const token = await getAccessToken(config);
+  const headers: Record<string, string> = { "Content-Type": "application/json", "User-Agent": USER_AGENT };
+  if (token) headers.Authorization = `Bearer ${token}`;
   const res = await fetch(`${config.baseUrl || DEFAULT_BASE}${endpoint}`, {
     method,
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "User-Agent": USER_AGENT },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   if (!res.ok) {
@@ -814,7 +818,8 @@ const rpcHandlers: Record<string, (params: any) => Promise<any>> = {
 
   async __integration(params) {
     const { action, input, config } = params;
-    if (!config?.clientId || !config?.clientSecret) throw new Error("Dokapi credentials not configured");
+    if (!config?.baseUrl && (!config?.clientId || !config?.clientSecret))
+      throw new Error("Dokapi credentials or baseUrl not configured");
     const handler = actions[action];
     if (!handler) throw new Error(`unknown action: ${action}`);
     return handler(config, input);
