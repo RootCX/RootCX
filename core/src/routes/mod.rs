@@ -4,6 +4,7 @@ pub(crate) mod crud;
 mod deploy;
 mod introspection;
 mod jobs;
+pub(crate) mod query_params;
 mod secrets;
 mod upload;
 mod workers;

@@ -10,7 +10,7 @@ use tracing::info;
 
 use crate::RuntimeError;
 use crate::manifest::quote_ident;
-use crate::routes::{self, SharedRuntime};
+use crate::routes::{self, SharedRuntime, query_params};
 
 use super::RuntimeExtension;
 
@@ -46,6 +46,7 @@ impl RuntimeExtension for AuditExtension {
         )
         .await?;
 
+        exec(pool, "CREATE INDEX IF NOT EXISTS idx_audit_id_desc ON rootcx_system.audit_log (id DESC)").await?;
         exec(pool, "CREATE INDEX IF NOT EXISTS idx_audit_ts ON rootcx_system.audit_log (changed_at DESC)").await?;
         exec(pool, "CREATE INDEX IF NOT EXISTS idx_audit_table ON rootcx_system.audit_log (table_schema, table_name)")
             .await?;
@@ -124,39 +125,36 @@ impl RuntimeExtension for AuditExtension {
     }
 }
 
+const AUDIT_COLS: query_params::ColumnDefs = &[
+    ("table_schema", "TEXT"),
+    ("table_name", "TEXT"),
+    ("record_id", "TEXT"),
+    ("operation", "TEXT"),
+    ("changed_at", "TIMESTAMPTZ"),
+];
+
+const AUDIT_ALIASES: &[(&str, &str)] = &[
+    ("app_id", "table_schema"),
+    ("entity", "table_name"),
+];
+
 async fn list_audit_events(
     _identity: crate::auth::identity::Identity,
     State(rt): State<SharedRuntime>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<JsonValue>>, crate::api_error::ApiError> {
     let pool = routes::pool(&rt).await?;
+    let q = query_params::parse(&params, AUDIT_COLS, AUDIT_ALIASES, 100, "id");
+    let wc = q.where_clause();
 
-    let limit: i64 = params.get("limit").and_then(|v| v.parse().ok()).unwrap_or(100).min(1000).max(1);
-
-    let mut conditions: Vec<String> = Vec::new();
-    let mut bind_values: Vec<String> = Vec::new();
-
-    if let Some(app_id) = params.get("app_id") {
-        bind_values.push(app_id.clone());
-        conditions.push(format!("table_schema = ${}", bind_values.len()));
-    }
-    if let Some(entity) = params.get("entity") {
-        bind_values.push(entity.clone());
-        conditions.push(format!("table_name = ${}", bind_values.len()));
-    }
-
-    let where_clause =
-        if conditions.is_empty() { String::new() } else { format!("WHERE {}", conditions.join(" AND ")) };
-
-    let query = format!(
-        "SELECT to_jsonb(a.*) AS row FROM rootcx_system.audit_log a {where_clause} ORDER BY changed_at DESC LIMIT {limit}"
+    let sql = format!(
+        "SELECT to_jsonb(a.*) AS row FROM rootcx_system.audit_log a {wc} ORDER BY {} {} LIMIT {}",
+        q.order_col, q.order_dir, q.limit
     );
 
-    let mut q = sqlx::query_as::<_, (JsonValue,)>(&query);
-    for val in &bind_values {
-        q = q.bind(val);
-    }
+    let mut query = sqlx::query_as::<_, (JsonValue,)>(&sql);
+    for val in &q.binds { query = query.bind(val); }
 
-    let rows: Vec<(JsonValue,)> = q.fetch_all(&pool).await?;
+    let rows: Vec<(JsonValue,)> = query.fetch_all(&pool).await?;
     Ok(Json(rows.into_iter().map(|(r,)| r).collect()))
 }
