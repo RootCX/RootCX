@@ -119,7 +119,7 @@ declare global {
 }
 
 function resolveBaseUrl(): string {
-  return import.meta.env.VITE_ROOTCX_URL || "http://localhost:9100";
+  return import.meta.env.VITE_ROOTCX_URL ?? "http://localhost:9100";
 }
 
 export const DEFAULT_BASE_URL = resolveBaseUrl();
