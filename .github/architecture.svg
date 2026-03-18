@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 320" fill="none">
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&amp;display=swap');
+    text { font-family: 'Inter', -apple-system, sans-serif; }
+  </style>
+
+  <!-- ─── Apps layer (4 columns) ─── -->
+  <rect x="0" y="0" width="172" height="110" rx="10" fill="#27272a"/>
+  <text x="86" y="50" text-anchor="middle" font-size="13" font-weight="600" fill="#ffffff">Apps</text>
+  <text x="86" y="68" text-anchor="middle" font-size="9.5" font-weight="400" fill="#94a3b8">Backend + Frontend</text>
+
+  <rect x="182" y="0" width="172" height="110" rx="10" fill="#27272a"/>
+  <text x="268" y="50" text-anchor="middle" font-size="13" font-weight="600" fill="#ffffff">AI Agents</text>
+  <text x="268" y="68" text-anchor="middle" font-size="9.5" font-weight="400" fill="#94a3b8">LLM-powered</text>
+
+  <rect x="364" y="0" width="172" height="110" rx="10" fill="#27272a"/>
+  <text x="450" y="50" text-anchor="middle" font-size="13" font-weight="600" fill="#ffffff">Integrations</text>
+  <text x="450" y="68" text-anchor="middle" font-size="9.5" font-weight="400" fill="#94a3b8">Third-party</text>
+
+  <rect x="546" y="0" width="174" height="110" rx="10" fill="#27272a"/>
+  <text x="633" y="50" text-anchor="middle" font-size="13" font-weight="600" fill="#ffffff">MCP Servers</text>
+  <text x="633" y="68" text-anchor="middle" font-size="9.5" font-weight="400" fill="#94a3b8">AI tool access</text>
+
+  <!-- ─── Core layer ─── -->
+  <rect x="0" y="122" width="720" height="198" rx="10" fill="#18181b"/>
+
+  <text x="360" y="160" text-anchor="middle" font-size="15" font-weight="600" fill="#ffffff">Core</text>
+  <text x="360" y="178" text-anchor="middle" font-size="10" font-weight="400" fill="#71717a">Rust daemon · process supervisor · port 9100</text>
+
+  <!-- Core capabilities — 2 rows of 3 -->
+  <rect x="20" y="196" width="220" height="48" rx="8" fill="#27272a"/>
+  <text x="130" y="225" text-anchor="middle" font-size="12" font-weight="500" fill="#e4e4e7">Database</text>
+
+  <rect x="250" y="196" width="220" height="48" rx="8" fill="#27272a"/>
+  <text x="360" y="225" text-anchor="middle" font-size="12" font-weight="500" fill="#e4e4e7">Auth</text>
+
+  <rect x="480" y="196" width="220" height="48" rx="8" fill="#27272a"/>
+  <text x="590" y="225" text-anchor="middle" font-size="12" font-weight="500" fill="#e4e4e7">RBAC</text>
+
+  <rect x="20" y="252" width="220" height="48" rx="8" fill="#27272a"/>
+  <text x="130" y="281" text-anchor="middle" font-size="12" font-weight="500" fill="#e4e4e7">Audit</text>
+
+  <rect x="250" y="252" width="220" height="48" rx="8" fill="#27272a"/>
+  <text x="360" y="281" text-anchor="middle" font-size="12" font-weight="500" fill="#e4e4e7">Secrets</text>
+
+  <rect x="480" y="252" width="220" height="48" rx="8" fill="#27272a"/>
+  <text x="590" y="281" text-anchor="middle" font-size="12" font-weight="500" fill="#e4e4e7">Jobs</text>
+</svg>
