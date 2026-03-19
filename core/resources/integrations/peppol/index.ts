@@ -227,7 +227,8 @@ function generateInvoiceXml(params: InvoiceParams): string {
   const customerId = extractIdentifier(customer.peppolId);
   const supplierVat = formatVat(supplier.vatNumber, supplier.countryCode);
   const customerVat = formatVat(customer.vatNumber, customer.countryCode);
-  const taxCategory = lines[0]?.taxCategory || "S";
+  const resolveTaxCategory = (cat: string | undefined, pct: number) => cat || (pct === 0 ? "E" : "S");
+  const taxCategory = resolveTaxCategory(lines[0]?.taxCategory, lines[0]?.taxPercent ?? 21);
   const taxPercent = lines[0]?.taxPercent ?? 21;
 
   const invoiceLines = lines.map((l) => `
@@ -238,7 +239,7 @@ function generateInvoiceXml(params: InvoiceParams): string {
         <cac:Item>
             <cbc:Name>${escapeXml(l.description)}</cbc:Name>
             <cac:ClassifiedTaxCategory>
-                <cbc:ID>${l.taxCategory || "S"}</cbc:ID>
+                <cbc:ID>${resolveTaxCategory(l.taxCategory, l.taxPercent)}</cbc:ID>
                 <cbc:Percent>${l.taxPercent}</cbc:Percent>
                 <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
             </cac:ClassifiedTaxCategory>
