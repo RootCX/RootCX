@@ -21,12 +21,11 @@ function friendlyError(raw: string): string {
   return ERROR_MAP[msg] ?? msg;
 }
 
-function parseUrl(raw: string): { label: string; host: string; isLocal: boolean } {
+function parseUrl(raw: string): { label: string; host: string } {
   try {
     const u = new URL(raw);
-    const isLocal = u.hostname === "localhost" || u.hostname === "127.0.0.1";
-    return { label: isLocal ? "Local server" : u.hostname, host: u.host, isLocal };
-  } catch { return { label: raw, host: raw, isLocal: false }; }
+    return { label: u.hostname, host: u.host };
+  } catch { return { label: raw, host: raw }; }
 }
 
 const INPUT = "rounded-md border border-border bg-background px-3 py-1.5 text-sm text-foreground outline-none focus:border-primary";
@@ -72,7 +71,7 @@ export function LoginScreen() {
             <div className="flex-1 min-w-0">
               <div className="text-[10px] uppercase tracking-wider text-muted-foreground">Connected to</div>
               <div className="text-sm font-medium text-foreground truncate">{server.label}</div>
-              {!server.isLocal && <div className="text-[10px] font-mono text-muted-foreground truncate">{server.host}</div>}
+              <div className="text-[10px] font-mono text-muted-foreground truncate">{server.host}</div>
             </div>
             <span className="h-2 w-2 shrink-0 rounded-full bg-green-500" />
           </div>

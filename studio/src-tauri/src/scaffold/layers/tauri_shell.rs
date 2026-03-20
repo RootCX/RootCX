@@ -1,7 +1,7 @@
 use crate::scaffold::emitter::Emitter;
 use crate::scaffold::types::{Layer, LayerFuture, ScaffoldContext};
 
-const SCAFFOLD_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' http://127.0.0.1:* http://localhost:* https://*.rootcx.com; img-src 'self' data:";
+const SCAFFOLD_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; img-src 'self' data:";
 
 const ICON: &[u8] = include_bytes!("../../../icons/32x32.png");
 
@@ -35,7 +35,7 @@ tauri = {{ version = "2", features = [] }}
 tauri-plugin-shell = "2"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
-reqwest = {{ version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }}
+reqwest = {{ version = "0.12", default-features = false, features = ["rustls-tls"] }}
 rootcx-client = "0.2"
 "#
                 ),

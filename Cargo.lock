@@ -4501,7 +4501,6 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
- "futures-channel",
  "futures-core",
  "futures-util",
  "http 1.4.0",
@@ -4660,11 +4659,8 @@ dependencies = [
 name = "rootcx-client"
 version = "0.2.0"
 dependencies = [
- "open",
  "reqwest 0.12.28",
- "rootcx-platform",
  "rootcx-types",
- "serde",
  "serde_json",
  "thiserror 2.0.18",
 ]

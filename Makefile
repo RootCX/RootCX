@@ -36,10 +36,7 @@ DIST := target/dist
 .PHONY: release dev deps \
         deps-mac-arm deps-mac-x86 deps-linux deps-linux-arm deps-win \
         require-mac require-linux require-win \
-        build-core-dev build-frontend \
-        build-core-mac-arm build-core-mac-x86 \
-        build-core-linux build-core-linux-arm build-core-win \
-        pack-runtime-mac-arm pack-runtime-mac-x86 \
+        build-frontend \
         dist-mac-arm dist-mac-x86 dist-mac-uni \
         dist-linux dist-linux-arm dist-win
 
@@ -64,16 +61,6 @@ dev:
 	pnpm --dir runtime/ui install
 	pnpm --dir studio/ui install
 	cargo tauri dev
-
-ifeq ($(OS),Windows_NT)
-build-core-dev:
-	cargo build --target $(HOST) -p rootcx-core
-	copy target\$(HOST)\debug\rootcx-core.exe studio\src-tauri\rootcx-core-$(HOST).exe
-else
-build-core-dev:
-	cargo build --target $(HOST) -p rootcx-core
-	cp target/$(HOST)/debug/rootcx-core studio/src-tauri/rootcx-core-$(HOST)
-endif
 
 # ── Resource dependencies (PostgreSQL + Bun) ──────────────────────────────────
 
@@ -100,46 +87,6 @@ require-linux:
 
 require-win:
 	$(if $(findstring windows,$(HOST)),,$(error dist-win requires Windows — current host: $(HOST)))
-
-# ── Daemon sidecar builds ────────────────────────────────────────────────────
-
-build-core-mac-arm:
-	rustup target add $(TARGET_MAC_ARM) 2>/dev/null || true
-	cargo build --release --target $(TARGET_MAC_ARM) -p rootcx-core
-	cp target/$(TARGET_MAC_ARM)/release/rootcx-core studio/src-tauri/rootcx-core-$(TARGET_MAC_ARM)
-
-build-core-mac-x86:
-	rustup target add $(TARGET_MAC_X86) 2>/dev/null || true
-	cargo build --release --target $(TARGET_MAC_X86) -p rootcx-core
-	cp target/$(TARGET_MAC_X86)/release/rootcx-core studio/src-tauri/rootcx-core-$(TARGET_MAC_X86)
-
-build-core-linux:
-	cargo build --release --target $(TARGET_LINUX) -p rootcx-core
-	cp target/$(TARGET_LINUX)/release/rootcx-core studio/src-tauri/rootcx-core-$(TARGET_LINUX)
-
-build-core-linux-arm:
-	cargo build --release --target $(TARGET_LINUX_ARM) -p rootcx-core
-	cp target/$(TARGET_LINUX_ARM)/release/rootcx-core studio/src-tauri/rootcx-core-$(TARGET_LINUX_ARM)
-
-ifeq ($(OS),Windows_NT)
-build-core-win:
-	cargo build --release --target $(TARGET_WIN) -p rootcx-core
-	copy target\$(TARGET_WIN)\release\rootcx-core.exe studio\src-tauri\rootcx-core-$(TARGET_WIN).exe
-else
-build-core-win:
-	cargo build --release --target $(TARGET_WIN) -p rootcx-core
-	cp target/$(TARGET_WIN)/release/rootcx-core.exe studio/src-tauri/rootcx-core-$(TARGET_WIN).exe
-endif
-
-# ── Runtime .pkg installer (shared runtime, installed once) ───────────────────
-
-pack-runtime-mac-arm: require-mac deps-mac-arm build-core-mac-arm $(DIST)
-	target/$(TARGET_MAC_ARM)/release/rootcx-core pack-runtime
-	@echo "" && ls target/dist/RootCX-Runtime-*-$(TARGET_MAC_ARM).pkg
-
-pack-runtime-mac-x86: require-mac deps-mac-x86 build-core-mac-x86 $(DIST)
-	target/$(TARGET_MAC_X86)/release/rootcx-core pack-runtime
-	@echo "" && ls target/dist/RootCX-Runtime-*-$(TARGET_MAC_X86).pkg
 
 # ── Distribution ──────────────────────────────────────────────────────────────
 
