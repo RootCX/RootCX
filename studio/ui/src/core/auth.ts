@@ -63,8 +63,8 @@ async function tryRestoreSession() {
 
 export async function initAuth() {
   try {
-    await getCoreUrl();
-    if (await checkHealth()) {
+    const url = await getCoreUrl();
+    if (url && await checkHealth()) {
       state = { ...state, connected: true };
       await tryRestoreSession();
     }

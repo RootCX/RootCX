@@ -4,9 +4,6 @@ use std::sync::Arc;
 use rootcx_types::{AiConfig, AppManifest, InstalledApp, OsStatus, SchemaVerification};
 use serde_json::Value as JsonValue;
 
-pub mod daemon;
-pub use daemon::{RuntimeStatus, ensure_runtime};
-
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("HTTP request failed: {0}")]
@@ -14,9 +11,6 @@ pub enum ClientError {
 
     #[error("API error ({status}): {message}")]
     Api { status: u16, message: String },
-
-    #[error("failed to start runtime: {0}")]
-    RuntimeStart(String),
 }
 
 #[derive(Clone)]
@@ -49,18 +43,6 @@ impl RuntimeClient {
 
     pub fn token(&self) -> Option<String> {
         self.token.read().unwrap().clone()
-    }
-
-    pub async fn authenticate(&self, username: &str, password: &str) -> Result<(), ClientError> {
-        let creds = serde_json::json!({ "username": username, "password": password });
-        let _ = self.client.post(self.api("/auth/register")).json(&creds).send().await;
-        let resp = self.client.post(self.api("/auth/login")).json(&creds).send().await?;
-        let body: JsonValue = check_response(resp).await?.json().await?;
-        let token = body["accessToken"]
-            .as_str()
-            .ok_or_else(|| ClientError::Api { status: 0, message: "missing accessToken".into() })?;
-        *self.token.write().unwrap() = Some(token.to_string());
-        Ok(())
     }
 
     pub async fn is_available(&self) -> bool {

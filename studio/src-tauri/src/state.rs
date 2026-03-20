@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 pub const STORE_FILE: &str = "studio.json";
-const DEFAULT_CORE_URL: &str = "http://localhost:9100";
+const DEFAULT_CORE_URL: &str = "";
 const MAX_RECENT: usize = 10;
 const DEPLOY_EXCLUDE: &[&str] = &["node_modules", ".git", ".rootcx", "bun.lock", "src-tauri"];
 
@@ -126,10 +126,11 @@ impl AppState {
 
     pub async fn boot(&self) -> Result<(), String> {
         let url = self.core_url();
+        if url.is_empty() { return Ok(()); }
         if !self.client().is_available().await {
-            return Err(format!("core daemon not reachable at {url}"));
+            return Err(format!("core not reachable at {url}"));
         }
-        info!("connected to core daemon at {url}");
+        info!("connected to core at {url}");
         self.reconnect_or_cleanup().await;
         crate::browser::spawn_listener(url.clone());
         let _ = self.app_handle.emit("runtime-booted", ());
