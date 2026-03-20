@@ -4,10 +4,13 @@ pub mod shell;
 pub mod web;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 
 use crate::provider::ToolDef;
+
+pub type ProgressFn = Arc<dyn Fn(&str) + Send + Sync>;
 
 pub fn tool_schemas() -> Vec<ToolDef> {
     vec![
@@ -153,12 +156,12 @@ pub fn tool_schemas() -> Vec<ToolDef> {
     ]
 }
 
-pub async fn execute(name: &str, args: Value, cwd: &Path) -> Result<String, String> {
+pub async fn execute(name: &str, args: Value, cwd: &Path, on_progress: Option<ProgressFn>) -> Result<String, String> {
     match name {
         "read" => fs::read(args, cwd).await,
         "write" => fs::write(args, cwd).await,
         "edit" => fs::edit(args, cwd).await,
-        "bash" => shell::bash(args, cwd).await,
+        "bash" => shell::bash(args, cwd, on_progress).await,
         "grep" => search::grep(args, cwd).await,
         "glob" => fs::glob_files(args, cwd).await,
         "ls" => fs::ls(args, cwd).await,

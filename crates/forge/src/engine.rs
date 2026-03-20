@@ -147,7 +147,8 @@ async fn run_turn(
     let mut reasoning_buf = String::new();
     let text_part_id = Uuid::new_v4().to_string();
     let reasoning_part_id = Uuid::new_v4().to_string();
-    let mut tool_calls: HashMap<String, (String, String)> = HashMap::new();
+    // id → (name, json_buf, part_id, last_emit_len)
+    let mut tool_calls: HashMap<String, (String, String, String, usize)> = HashMap::new();
     let mut stop_reason = StopReason::EndTurn;
     let mut assistant_content: Vec<ContentBlock> = Vec::new();
     let mut tool_results: Vec<ContentBlock> = Vec::new();
@@ -170,45 +171,77 @@ async fn run_turn(
                 (ctx.emit)("forge://part-updated", json!({"part": part}));
             }
             StreamEvent::ToolCallStart { id, name } => {
-                tool_calls.insert(id, (name, String::new()));
+                let tool_part_id = Uuid::new_v4().to_string();
+                let part = session::upsert_part(
+                    &ctx.pool, &tool_part_id, &assistant_msg.id, "tool", "", Some(&name),
+                    Some(&json!({"status": "streaming"})), None,
+                ).await?;
+                (ctx.emit)("forge://part-updated", json!({"part": part}));
+                tool_calls.insert(id, (name, String::new(), tool_part_id, 0));
             }
             StreamEvent::ToolCallDelta { id, json } => {
-                if let Some((_name, buf)) = tool_calls.get_mut(&id) {
+                if let Some((name, buf, part_id, last_len)) = tool_calls.get_mut(&id) {
                     buf.push_str(&json);
+                    if buf.len() - *last_len >= 60 {
+                        if let Some(partial) = try_parse_partial_json(buf) {
+                            let title = format_tool_title(name, &partial);
+                            let part = session::upsert_part(
+                                &ctx.pool, part_id, &assistant_msg.id, "tool", "", Some(name),
+                                Some(&json!({"status": "streaming", "title": title})),
+                                Some(&partial),
+                            ).await?;
+                            (ctx.emit)("forge://part-updated", json!({"part": part}));
+                            *last_len = buf.len();
+                        }
+                    }
                 }
             }
             StreamEvent::ToolCallEnd { id } => {
-                if let Some((name, args_json)) = tool_calls.remove(&id) {
+                if let Some((name, args_json, part_id, _)) = tool_calls.remove(&id) {
                     let args: Value = serde_json::from_str(&args_json).unwrap_or(json!({}));
+                    let title = format_tool_title(&name, &args);
+                    let state = |s: &str| json!({"status": s, "title": title});
 
                     assistant_content.push(ContentBlock::ToolUse {
                         id: id.clone(), name: name.clone(), input: args.clone(),
                     });
 
-                    let tool_part_id = Uuid::new_v4().to_string();
-                    let title = format_tool_title(&name, &args);
                     let part = session::upsert_part(
-                        &ctx.pool, &tool_part_id, &assistant_msg.id, "tool", "", Some(&name),
-                        Some(&json!({"status": "running", "title": title})),
-                        Some(&args),
+                        &ctx.pool, &part_id, &assistant_msg.id, "tool", "",
+                        Some(&name), Some(&state("running")), Some(&args),
                     ).await?;
                     (ctx.emit)("forge://part-updated", json!({"part": part}));
 
-                    let result = execute_with_permission(ctx, &name, &args).await?;
-                    let is_error = result.is_err();
-                    let content = result.unwrap_or_else(|e| e);
-                    let status = if is_error { "error" } else { "completed" };
+                    let progress: ProgressFn = {
+                        let (pool, emit) = (ctx.pool.clone(), ctx.emit.clone());
+                        let (pid, mid, n, t, a) =
+                            (part_id.clone(), assistant_msg.id.clone(), name.clone(), title.clone(), args.clone());
+                        Arc::new(move |content: &str| {
+                            let (pool, emit, pid, mid, n, t, a, c) =
+                                (pool.clone(), emit.clone(), pid.clone(), mid.clone(),
+                                 n.clone(), t.clone(), a.clone(), content.to_string());
+                            tokio::spawn(async move {
+                                if let Ok(p) = session::upsert_part(
+                                    &pool, &pid, &mid, "tool", &c, Some(&n),
+                                    Some(&json!({"status": "running", "title": t})), Some(&a),
+                                ).await {
+                                    (emit)("forge://part-updated", json!({"part": p}));
+                                }
+                            });
+                        })
+                    };
+
+                    let result = execute_with_permission(ctx, &name, &args, Some(progress)).await?;
+                    let (is_error, content) = match &result { Ok(c) => (false, c.as_str()), Err(e) => (true, e.as_str()) };
 
                     let part = session::upsert_part(
-                        &ctx.pool, &tool_part_id, &assistant_msg.id, "tool", &content, Some(&name),
-                        Some(&json!({"status": status, "title": title})),
-                        Some(&args),
+                        &ctx.pool, &part_id, &assistant_msg.id, "tool", content,
+                        Some(&name), Some(&state(if is_error { "error" } else { "completed" })), Some(&args),
                     ).await?;
                     (ctx.emit)("forge://part-updated", json!({"part": part}));
 
-                    tool_results.push(ContentBlock::ToolResult {
-                        tool_use_id: id, content, is_error,
-                    });
+                    let (is_error, content) = match result { Ok(c) => (false, c), Err(e) => (true, e) };
+                    tool_results.push(ContentBlock::ToolResult { tool_use_id: id, content, is_error });
                 }
             }
             StreamEvent::Done(reason) => {
@@ -238,10 +271,13 @@ async fn run_turn(
     }
 }
 
+pub type ProgressFn = Arc<dyn Fn(&str) + Send + Sync>;
+
 async fn execute_with_permission(
     ctx: &LoopContext,
     tool_name: &str,
     args: &Value,
+    on_progress: Option<ProgressFn>,
 ) -> Result<Result<String, String>, ForgeError> {
     if tool_name == "question" {
         return execute_question(ctx, args).await;
@@ -272,7 +308,7 @@ async fn execute_with_permission(
         }
     }
 
-    Ok(tools::execute(tool_name, args.clone(), &ctx.cwd).await)
+    Ok(tools::execute(tool_name, args.clone(), &ctx.cwd, on_progress).await)
 }
 
 async fn execute_question(
@@ -410,6 +446,16 @@ async fn generate_title(pool: SqlitePool, session_id: String, user_text: String,
     if let Ok(s) = session::get_session(&pool, &session_id).await {
         (emit)("forge://session-updated", json!({ "session": s }));
     }
+}
+
+fn try_parse_partial_json(buf: &str) -> Option<Value> {
+    if let Ok(v) = serde_json::from_str(buf) { return Some(v); }
+    // Strip trailing backslash (mid-escape like \n or \") to avoid breaking the close
+    let trimmed = if buf.ends_with('\\') { &buf[..buf.len() - 1] } else { buf };
+    for suffix in [r#""}"#, "}", r#""]}"#, r#""]"}"#, r#"": ""}"#] {
+        if let Ok(v) = serde_json::from_str(&format!("{trimmed}{suffix}")) { return Some(v); }
+    }
+    None
 }
 
 fn format_tool_title(name: &str, args: &Value) -> String {

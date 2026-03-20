@@ -1,113 +1,146 @@
-import { useState, useRef, useEffect, useSyncExternalStore } from "react";
+import { useState, useEffect, useSyncExternalStore } from "react";
 import {
   subscribe, getSnapshot, sendMessage, abortSession,
   createSession, selectSession, replyPermission,
   replyQuestion, rejectQuestion, setCwd,
   type QuestionRequest, type QuestionInfo,
-  type Message, type Part, type Permission, type Session,
+  type Part, type Permission, type Session,
 } from "./store";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/logo";
 import { useProjectContext } from "@/components/layout/app-context";
 import { showAISetupDialog } from "@/components/ai-setup-dialog";
 import { aiConfigStore } from "@/lib/ai-models";
-import { ArrowUp, Square, Plus, ChevronDown } from "lucide-react";
+import { ArrowUp, Square, Plus, ChevronDown, ChevronRight, Check, X, Loader2, Terminal, Search, FileText, FolderOpen, Pencil, Globe, Eye } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Markdown, ChatScrollArea } from "@rootcx/ui";
 
 const NO_PARTS: Part[] = [];
-const TOOL_LABELS: Record<string, string> = { read: "Reading", write: "Writing", edit: "Editing", bash: "Running command", grep: "Searching", glob: "Finding files", ls: "Browsing", web_fetch: "Fetching" };
-const FADE_MASK = "linear-gradient(to bottom, transparent 0%, black 12px, black calc(100% - 12px), transparent 100%)";
-const toolTitle = (t: Part) => t.tool_state?.title ?? TOOL_LABELS[t.tool_name ?? ""] ?? t.tool_name;
 
-function PartView({ part }: { part: Part }) {
-  if (part.part_type !== "text" && part.part_type !== "reasoning") return null;
-  return (
-    <Markdown className={cn(part.part_type === "reasoning" && "italic text-muted-foreground/80")}>{part.content}</Markdown>
-  );
-}
+const TOOL_META: Record<string, { label: string; icon: typeof FileText }> = {
+  read: { label: "Read", icon: Eye },
+  write: { label: "Write", icon: FileText },
+  edit: { label: "Edit", icon: Pencil },
+  bash: { label: "Run", icon: Terminal },
+  grep: { label: "Search", icon: Search },
+  glob: { label: "Find files", icon: FolderOpen },
+  ls: { label: "Browse", icon: FolderOpen },
+  web_fetch: { label: "Fetch", icon: Globe },
+};
 
-function useCinematicScroll(ref: React.RefObject<HTMLDivElement | null>, enabled: boolean, deps: unknown[]) {
-  const raf = useRef(0);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el || !enabled) return;
-    const start = el.scrollTop, distance = el.scrollHeight - el.clientHeight - start;
-    if (distance <= 0) return;
-    cancelAnimationFrame(raf.current);
-    const dur = Math.min(1800, Math.max(800, distance * 12));
-    let t0: number | null = null;
-    const step = (now: number) => {
-      if (!t0) t0 = now;
-      const p = Math.min((now - t0) / dur, 1);
-      el.scrollTop = start + distance * (1 - (1 - p) ** 4);
-      if (p < 1) raf.current = requestAnimationFrame(step);
-    };
-    raf.current = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
-}
-
-function ToolDetailView({ part }: { part: Part }) {
-  if (!part.tool_input && !part.content) return null;
+function toolSummary(part: Part): { label: string; target: string | null } {
+  const meta = TOOL_META[part.tool_name ?? ""];
+  const label = part.tool_state?.title ?? meta?.label ?? part.tool_name ?? "Tool";
   const inp = part.tool_input ?? {};
-  const summary = (inp.command as string) ? `$ ${inp.command}`
-    : (inp.pattern as string) ? `/${inp.pattern}/`
-    : (inp.url as string) ?? (inp.file_path as string) ?? (inp.path as string) ?? null;
-  const lines = part.tool_state?.status !== "running" && part.content ? part.content.split("\n") : null;
-  const preview = lines ? (lines.length > 8 ? lines.slice(0, 8).join("\n") + "\n…" : part.content) : null;
-  return (
-    <div className="mx-3 mb-1.5 rounded-lg bg-[#141414] px-3 py-2 text-[11px] font-mono text-muted-foreground/60">
-      {summary && <div className="truncate">{summary}</div>}
-      {preview && <pre className="mt-1 max-h-[120px] overflow-y-auto whitespace-pre-wrap break-all leading-relaxed opacity-60">{preview}</pre>}
-    </div>
-  );
+  const target = (inp.command as string)
+    ? `$ ${inp.command}`
+    : (inp.pattern as string)
+    ? `/${inp.pattern}/`
+    : (inp.file_path as string) ?? (inp.url as string) ?? (inp.path as string) ?? null;
+  return { label, target };
 }
 
-function MiniToolCard({ tools }: { tools: Part[] }) {
+function StatusIcon({ status }: { status: string }) {
+  if (status === "streaming" || status === "running") return <Loader2 className="h-3 w-3 animate-spin text-primary" />;
+  if (status === "error") return <X className="h-3 w-3 text-destructive" />;
+  return <Check className="h-3 w-3 text-muted-foreground/50" />;
+}
+
+function runningPreview(part: Part): string | null {
+  const inp = part.tool_input ?? {};
+  const name = part.tool_name;
+  if (name === "write") return (inp.content as string) ?? null;
+  if (name === "edit") {
+    const ns = inp.new_string as string;
+    if (ns) return ns;
+    const os = inp.old_string as string;
+    return os ? `- ${os}` : null;
+  }
+  if (name === "bash") return (inp.command as string) ? `$ ${inp.command}` : null;
+  return null;
+}
+
+function ToolCard({ part }: { part: Part }) {
   const [expanded, setExpanded] = useState(false);
-  const errored = tools.some((t) => t.tool_state?.status === "error");
+  const status = part.tool_state?.status ?? "completed";
+  const { label, target } = toolSummary(part);
+  const Icon = TOOL_META[part.tool_name ?? ""]?.icon ?? Terminal;
+  const active = status === "running" || status === "streaming";
+  const isStreaming = status === "streaming";
+
+  const previewText = active ? (part.content || runningPreview(part)) : part.content || null;
+  const lines = previewText ? previewText.split("\n") : [];
+  const hasPreview = lines.length > 0;
+  // Streaming: tail (see code being written). Completed: head (summary).
+  const visibleLines = isStreaming ? lines.slice(-6) : lines.slice(0, 4);
+  const truncAbove = isStreaming && lines.length > 6;
+  const truncBelow = !isStreaming && lines.length > 4;
+  const previewCls = cn("ml-[26px] mr-2 mt-0.5 rounded-md bg-muted/30 px-2.5 py-1.5", active && "border-l-2 border-primary/30");
+
   return (
-    <div className="-mt-3 animate-[settle_0.5s_cubic-bezier(0.16,1,0.3,1)_both]">
+    <div className="group animate-[settle_0.35s_cubic-bezier(0.16,1,0.3,1)_both]">
       <button
-        onClick={() => setExpanded((e) => !e)}
-        className={cn("flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs transition-colors", errored ? "text-destructive/60 hover:text-destructive/80" : "text-muted-foreground/50 hover:text-muted-foreground/70")}
+        onClick={() => hasPreview && setExpanded((e) => !e)}
+        className={cn(
+          "flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-xs transition-colors",
+          hasPreview ? "cursor-pointer hover:bg-muted/50" : "cursor-default",
+        )}
       >
-        <span className={cn("h-1.5 w-1.5 rounded-full", errored ? "bg-destructive" : "bg-green-500")} />
-        {tools.length} operations
-        <ChevronDown className={cn("h-3 w-3 transition-transform duration-200", expanded && "rotate-180")} />
+        <StatusIcon status={status} />
+        <Icon className="h-3 w-3 shrink-0 text-muted-foreground/40" />
+        <span className="font-medium text-muted-foreground/70">{label}</span>
+        {target && <span className="min-w-0 truncate font-mono text-muted-foreground/40">{target}</span>}
+        {(truncBelow || (hasPreview && !isStreaming)) && (
+          <ChevronRight className={cn("ml-auto h-3 w-3 shrink-0 text-muted-foreground/30 transition-transform duration-150", expanded && "rotate-90")} />
+        )}
       </button>
+      {hasPreview && !expanded && (
+        <div className={cn(previewCls, "overflow-hidden")}>
+          <pre className="text-[11px] leading-relaxed text-muted-foreground/50 font-mono whitespace-pre-wrap break-all">
+            {truncAbove ? "⋯\n" : ""}{visibleLines.join("\n")}{truncBelow ? "\n⋯" : ""}
+          </pre>
+        </div>
+      )}
       {expanded && (
-        <div className="mt-1 max-h-[300px] overflow-y-auto rounded-xl border border-border/30 bg-card/20 py-0.5">
-          {tools.map((tool) => (
-            <div key={tool.id}>
-              <div className="px-3 py-1 text-xs truncate text-muted-foreground/60">{toolTitle(tool)}</div>
-              <ToolDetailView part={tool} />
-            </div>
-          ))}
+        <div className={cn(previewCls, "max-h-[400px] overflow-y-auto")}>
+          <pre className="text-[11px] leading-relaxed text-muted-foreground/50 font-mono whitespace-pre-wrap break-all">{previewText}</pre>
         </div>
       )}
     </div>
   );
 }
 
-function MessageView({ msg, parts }: { msg: Message; parts: Part[] }) {
-  const isUser = msg.role === "user";
+function ThinkingBlock({ part, isStreaming }: { part: Part; isStreaming: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const lines = part.content.split("\n").filter(Boolean);
+  const running = isStreaming && !part.content.endsWith("\n\n");
+  // Show last 2 lines as teaser while streaming
+  const teaser = running ? lines.slice(-2).join(" ") : lines[0] ?? "";
+
   return (
-    <div className={cn("flex min-w-0", isUser ? "justify-end" : "justify-start")}>
-      <div className={cn(
-        "min-w-0 overflow-hidden text-[14px] leading-[1.7]",
-        isUser && "max-w-[80%] rounded-2xl rounded-br-md bg-muted/80 px-4 py-2.5",
-        !isUser && "w-full",
-      )}>
-        {parts.length > 0 ? (
-          <div className={cn("flex flex-col", isUser ? "gap-1" : "gap-0.5")}>
-            {parts.map((p) => <PartView key={p.id} part={p} />)}
-          </div>
-        ) : msg.role === "assistant" && msg.error ? (
-          <span className="text-sm text-destructive/80">{msg.error.name ?? "Error"}: {msg.error.message ?? "Unknown error"}</span>
-        ) : null}
+    <div className="animate-[settle_0.35s_cubic-bezier(0.16,1,0.3,1)_both]">
+      <button
+        onClick={() => setExpanded((e) => !e)}
+        className="flex items-center gap-2 rounded-lg px-2 py-1 text-xs text-muted-foreground/50 transition-colors hover:bg-muted/50"
+      >
+        {running ? <Loader2 className="h-3 w-3 animate-spin" /> : <ChevronRight className={cn("h-3 w-3 transition-transform duration-150", expanded && "rotate-90")} />}
+        <span className="font-medium">Thinking</span>
+        {!expanded && teaser && <span className="min-w-0 truncate italic opacity-60">{teaser}</span>}
+      </button>
+      {expanded && (
+        <div className="ml-[26px] mr-2 mt-1 max-h-[300px] overflow-y-auto">
+          <Markdown className="text-xs italic text-muted-foreground/50 leading-relaxed">{part.content}</Markdown>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MessageBubble({ parts }: { parts: Part[] }) {
+  return (
+    <div className="flex justify-end">
+      <div className="max-w-[80%] rounded-2xl rounded-br-md bg-muted/80 px-4 py-2.5 text-[14px] leading-[1.7]">
+        {parts.map((p) => <Markdown key={p.id}>{p.content}</Markdown>)}
       </div>
     </div>
   );
@@ -229,39 +262,20 @@ function SessionSelector({ sessions, currentId, onSelect, onCreate }: {
   );
 }
 
-function Composer({ input, setInput, onSubmit, onAbort, streaming, liveTools, className }: {
+function Composer({ input, setInput, onSubmit, onAbort, streaming, className }: {
   input: string; setInput: (v: string) => void; onSubmit: () => void; onAbort: () => void;
-  streaming: boolean; liveTools: Part[]; className?: string;
+  streaming: boolean; className?: string;
 }) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const live = streaming && liveTools.length > 0;
-
-  useCinematicScroll(scrollRef, live, [liveTools.length, liveTools[liveTools.length - 1]?.tool_state?.status]);
-
   return (
     <div className={cn("mx-auto w-full max-w-3xl", className)}>
-      <div className={cn("flex flex-col rounded-2xl border bg-card shadow-lg shadow-black/20 transition-colors", live ? "border-primary/30" : "border-border/60 focus-within:border-border")}>
-        {live ? (
-          <div
-            ref={scrollRef}
-            className="max-h-[100px] overflow-y-hidden overflow-x-hidden pt-3"
-            style={{ maskImage: FADE_MASK, WebkitMaskImage: FADE_MASK }}
-          >
-            {liveTools.map((tool, i) => (
-              <div key={tool.id} className={cn("px-5 py-1 text-xs truncate text-muted-foreground transition-opacity duration-700", tool.tool_state?.status === "completed" && i !== liveTools.length - 1 && "opacity-40")}>
-                {toolTitle(tool)}
-              </div>
-            ))}
-          </div>
-        ) : (
-          <textarea
-            rows={3}
-            className="w-full resize-none bg-transparent px-5 pt-4 pb-1 text-[14px] leading-relaxed text-foreground placeholder:text-muted-foreground/40 focus:outline-none"
-            placeholder={streaming ? "Thinking..." : "What do you want to build?"}
-            value={input} onChange={(e) => setInput(e.target.value)} disabled={streaming}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSubmit(); } }}
-          />
-        )}
+      <div className="flex flex-col rounded-2xl border border-border/60 bg-card shadow-lg shadow-black/20 transition-colors focus-within:border-border">
+        <textarea
+          rows={3}
+          className="w-full resize-none bg-transparent px-5 pt-4 pb-1 text-[14px] leading-relaxed text-foreground placeholder:text-muted-foreground/40 focus:outline-none"
+          placeholder={streaming ? "Working..." : "What do you want to build?"}
+          value={input} onChange={(e) => setInput(e.target.value)} disabled={streaming}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSubmit(); } }}
+        />
         <div className="flex items-center justify-end px-3 pb-3">
           {streaming ? (
             <button className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-foreground transition-colors hover:bg-muted-foreground/20" onClick={onAbort}>
@@ -306,44 +320,43 @@ export default function ForgePanel() {
             <h1 className="text-2xl font-medium tracking-tight text-foreground/80">What can I help you build?</h1>
             <p className="text-sm text-muted-foreground/50">Describe what you want to create. I can write code, build features, and help you ship.</p>
           </div>
-          <Composer input={input} setInput={setInput} onSubmit={submit} onAbort={abortSession} streaming={streaming} liveTools={[]} className="w-full" />
+          <Composer input={input} setInput={setInput} onSubmit={submit} onAbort={abortSession} streaming={streaming} className="w-full" />
         </div>
         <div className="absolute bottom-3 right-3"><SessionSelector {...sessionProps} /></div>
       </div>
     );
   }
 
+  // Build chronological stream of items
   const items: React.ReactNode[] = [];
-  let turnTools: Part[] = [], turnTexts: React.ReactNode[] = [];
-  let liveTools: Part[] = [];
-  const flush = (live: boolean) => {
-    if (live) { liveTools = [...turnTools]; }
-    else if (turnTools.length) items.push(<MiniToolCard key={`tc-${turnTools[0].id}`} tools={[...turnTools]} />);
-    items.push(...turnTexts);
-    turnTools = []; turnTexts = [];
-  };
   for (const msg of messages) {
     const mp = parts.get(msg.id) ?? NO_PARTS;
-    if (msg.role === "user") { flush(false); items.push(<MessageView key={msg.id} msg={msg} parts={mp} />); }
-    else {
-      const text = mp.filter((p) => p.part_type !== "tool"), tool = mp.filter((p) => p.part_type === "tool");
-      if (text.length || msg.error) turnTexts.push(<MessageView key={msg.id} msg={msg} parts={text} />);
-      turnTools.push(...tool);
+
+    if (msg.role === "user") {
+      items.push(<MessageBubble key={msg.id} parts={mp} />);
+      continue;
     }
+
+    const msgStreaming = streaming && msg === messages[messages.length - 1];
+    for (const p of mp) {
+      if (p.part_type === "reasoning") items.push(<ThinkingBlock key={p.id} part={p} isStreaming={msgStreaming} />);
+      else if (p.part_type === "tool") items.push(<ToolCard key={p.id} part={p} />);
+      else if (p.part_type === "text" && p.content) items.push(<div key={p.id} className="text-[14px] leading-[1.7]"><Markdown>{p.content}</Markdown></div>);
+    }
+    if (msg.error) items.push(<span key={`err-${msg.id}`} className="text-sm text-destructive/80">{msg.error.name ?? "Error"}: {msg.error.message ?? "Unknown error"}</span>);
   }
-  flush(streaming);
 
   return (
     <div className="flex h-full min-w-0 flex-col overflow-hidden">
       <div className="flex shrink-0 items-center justify-end px-4 py-2"><SessionSelector {...sessionProps} /></div>
-      <ChatScrollArea className="min-w-0 flex-1" contentClassName="mx-auto w-full max-w-3xl space-y-5 px-6 py-6">
+      <ChatScrollArea className="min-w-0 flex-1" contentClassName="mx-auto w-full max-w-3xl space-y-3 px-6 py-6">
         {items}
         {permissions.map((perm) => <PermissionCard key={perm.id} perm={perm} />)}
         {questions.length > 0 && <QuestionsPanel requests={questions} />}
         {error && <div className="rounded-xl border border-destructive/20 bg-destructive/5 px-5 py-3 text-sm text-destructive/80">{error}</div>}
       </ChatScrollArea>
       <div className="shrink-0 px-6 pb-5 pt-2">
-        <Composer input={input} setInput={setInput} onSubmit={submit} onAbort={abortSession} streaming={streaming} liveTools={liveTools} />
+        <Composer input={input} setInput={setInput} onSubmit={submit} onAbort={abortSession} streaming={streaming} />
       </div>
     </div>
   );

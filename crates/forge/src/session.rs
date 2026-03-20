@@ -150,7 +150,7 @@ pub async fn upsert_part(
     sqlx::query(
         "INSERT INTO parts (id, message_id, type, content, tool_name, tool_state, tool_input, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-         ON CONFLICT (id) DO UPDATE SET content = $4, tool_state = $6, tool_input = COALESCE(parts.tool_input, $7)"
+         ON CONFLICT (id) DO UPDATE SET content = $4, tool_state = $6, tool_input = COALESCE($7, parts.tool_input)"
     )
     .bind(id).bind(message_id).bind(part_type).bind(content)
     .bind(tool_name).bind(&state_str).bind(&input_str).bind(&ts)
