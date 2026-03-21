@@ -4,8 +4,7 @@ export interface RuntimeClientOptions {
 
 export interface AuthUser {
   id: string;
-  username: string;
-  email: string | null;
+  email: string;
   displayName: string | null;
   createdAt: string;
 }
@@ -18,9 +17,8 @@ export interface LoginResponse {
 }
 
 export interface RegisterInput {
-  username: string;
+  email: string;
   password: string;
-  email?: string;
   displayName?: string;
 }
 
@@ -269,11 +267,11 @@ export class RuntimeClient {
     return res.json();
   }
 
-  async login(username: string, password: string): Promise<LoginResponse> {
+  async login(email: string, password: string): Promise<LoginResponse> {
     const res = await fetch(`${this.baseUrl}/api/v1/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ email, password }),
     });
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     const data: LoginResponse = await res.json();

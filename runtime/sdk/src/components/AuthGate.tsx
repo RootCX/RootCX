@@ -22,13 +22,12 @@ export interface AuthGateProps {
 function friendlyAuthError(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
   const l = raw.toLowerCase();
-  if (l.includes("already taken")) return "This username is already taken.";
-  if (l.includes("invalid credentials")) return "Wrong username or password.";
+  if (l.includes("already taken")) return "This email is already taken.";
+  if (l.includes("invalid credentials")) return "Wrong email or password.";
   if (l.includes("session revoked") || l.includes("expired"))
     return "Your session has expired. Please sign in again.";
   if (l.includes("fetch") || l.includes("network") || l.includes("failed to fetch"))
     return "Unable to reach the server. Please check your connection.";
-  // Surface server validation messages (e.g. password policy)
   try {
     const json = raw.match(/\{[\s\S]*\}$/)?.[0];
     if (json) { const parsed = JSON.parse(json); if (typeof parsed.error === "string") return parsed.error; }
@@ -54,18 +53,18 @@ function DefaultAuthForm({ mode, setMode, error, submitting, onSubmit, appTitle 
             <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</div>
           )}
           <div className="space-y-2">
-            <label htmlFor="username" className="text-sm font-medium leading-none">Username</label>
-            <input id="username" name="username" placeholder="Username" autoComplete="username" required disabled={submitting} className={inputCls} />
+            <label htmlFor="email" className="text-sm font-medium leading-none">Email</label>
+            <input id="email" name="email" type="email" placeholder="Email" autoComplete="email" required disabled={submitting} className={inputCls} />
           </div>
           <div className="space-y-2">
             <label htmlFor="password" className="text-sm font-medium leading-none">Password</label>
-            <input id="password" name="password" type="password" placeholder="Password" autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={8} required disabled={submitting} className={inputCls} />
-            {mode === "register" && <p className="text-xs text-muted-foreground">Must be at least 8 characters.</p>}
+            <input id="password" name="password" type="password" placeholder="Password" autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={6} required disabled={submitting} className={inputCls} />
+            {mode === "register" && <p className="text-xs text-muted-foreground">Must be at least 6 characters.</p>}
           </div>
           {mode === "register" && (
             <div className="space-y-2">
               <label htmlFor="confirmPassword" className="text-sm font-medium leading-none">Confirm password</label>
-              <input id="confirmPassword" name="confirmPassword" type="password" placeholder="Confirm password" autoComplete="new-password" minLength={8} required disabled={submitting} className={inputCls} />
+              <input id="confirmPassword" name="confirmPassword" type="password" placeholder="Confirm password" autoComplete="new-password" minLength={6} required disabled={submitting} className={inputCls} />
             </div>
           )}
           <button type="submit" disabled={submitting} className="inline-flex h-10 w-full items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50">
@@ -104,7 +103,7 @@ export function AuthGate({ appTitle = "Sign in", renderLoading, renderForm, chil
       e.preventDefault();
       setError(null);
       const fd = new FormData(e.currentTarget);
-      const username = (fd.get("username") as string).trim();
+      const email = (fd.get("email") as string).trim();
       const password = fd.get("password") as string;
 
       if (mode === "register") {
@@ -114,7 +113,7 @@ export function AuthGate({ appTitle = "Sign in", renderLoading, renderForm, chil
 
       setSubmitting(true);
       try {
-        await (mode === "register" ? register({ username, password }) : login(username, password));
+        await (mode === "register" ? register({ email, password }) : login(email, password));
       } catch (err) {
         setError(friendlyAuthError(err));
       } finally {

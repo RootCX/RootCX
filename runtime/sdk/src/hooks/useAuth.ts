@@ -6,7 +6,7 @@ export interface UseAuthResult {
   user: AuthUser | null;
   loading: boolean;
   isAuthenticated: boolean;
-  login: (username: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<void>;
   register: (data: RegisterInput) => Promise<void>;
   logout: () => Promise<void>;
 }
@@ -36,8 +36,8 @@ export function useAuth(): UseAuthResult {
   }, [client]);
 
   const login = useCallback(
-    async (username: string, password: string) => {
-      const res = await client.login(username, password);
+    async (email: string, password: string) => {
+      const res = await client.login(email, password);
       persistTokens();
       setUser(res.user);
     },
@@ -48,7 +48,7 @@ export function useAuth(): UseAuthResult {
     async (data: RegisterInput) => {
       await client.register(data);
       // Auto-login after successful registration
-      const res = await client.login(data.username, data.password);
+      const res = await client.login(data.email, data.password);
       persistTokens();
       setUser(res.user);
     },

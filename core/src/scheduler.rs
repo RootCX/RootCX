@@ -18,10 +18,10 @@ pub struct SchedulerHandle {
 }
 
 async fn resolve_caller(pool: &PgPool, auth: &AuthConfig, user_id: uuid::Uuid) -> Option<RpcCaller> {
-    let (username,): (String,) = sqlx::query_as("SELECT username FROM rootcx_system.users WHERE id = $1")
+    let (email,): (String,) = sqlx::query_as("SELECT email FROM rootcx_system.users WHERE id = $1")
         .bind(user_id).fetch_optional(pool).await.ok()??;
-    let token = jwt::encode_access(auth, user_id, &username).ok()?;
-    Some(RpcCaller { user_id: user_id.to_string(), username, auth_token: Some(token) })
+    let token = jwt::encode_access(auth, user_id, &email).ok()?;
+    Some(RpcCaller { user_id: user_id.to_string(), email, auth_token: Some(token) })
 }
 
 pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, auth_config: Arc<AuthConfig>) -> SchedulerHandle {

@@ -47,7 +47,7 @@ impl TestRuntime {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
 
-        let creds = json!({"username":"testadmin","password":"Str0ngPass1"});
+        let creds = json!({"email":"admin@test.local","password":"Str0ngPass1"});
         client.post(format!("{base_url}/api/v1/auth/register")).json(&creds).send().await.ok();
         let res = client.post(format!("{base_url}/api/v1/auth/login")).json(&creds).send().await.unwrap();
         let body: Value = res.json().await.unwrap();

@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { fetchCore } from "@/core/auth";
 
 export interface Role { name: string; description: string | null; inherits: string[]; permissions: string[] }
-export interface User { id: string; username: string; email: string | null; displayName: string | null; createdAt: string }
+export interface User { id: string; email: string; displayName: string | null; createdAt: string }
 export interface Assignment { userId: string; role: string; assignedAt: string }
 export interface PermissionDeclaration { key: string; description: string }
 
