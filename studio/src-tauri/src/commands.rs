@@ -326,73 +326,70 @@ pub fn clear_recent(app_handle: tauri::AppHandle, state: State<'_, AppState>) {
     crate::menu::rebuild_recent_menu(&app_handle, &[]);
 }
 
-fn docker_bin() -> &'static str {
-    #[cfg(target_os = "macos")]
-    { "/usr/local/bin/docker" }
-    #[cfg(target_os = "linux")]
-    { "/usr/bin/docker" }
-    #[cfg(target_os = "windows")]
-    { "docker" }
-}
+const CORE_IMAGE: &str = "ghcr.io/rootcx/core";
+const CORE_CONTAINER: &str = "rootcx-core";
 
-async fn docker_ping() -> bool {
-    #[cfg(unix)]
-    {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let sock = std::env::var("DOCKER_HOST")
-            .ok()
-            .and_then(|h| h.strip_prefix("unix://").map(String::from))
-            .unwrap_or_else(|| "/var/run/docker.sock".into());
-        let Ok(mut stream) = tokio::net::UnixStream::connect(&sock).await else { return false };
-        let _ = stream.write_all(b"GET /_ping HTTP/1.0\r\nHost: localhost\r\n\r\n").await;
-        let mut buf = vec![0u8; 256];
-        let n = stream.read(&mut buf).await.unwrap_or(0);
-        String::from_utf8_lossy(&buf[..n]).contains("OK")
-    }
-    #[cfg(windows)]
-    {
-        // Named pipe not easily pingable — fall back to CLI
-        tokio::process::Command::new("docker").arg("info")
-            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-            .status().await.map(|s| s.success()).unwrap_or(false)
-    }
+fn docker() -> Result<bollard::Docker, String> {
+    bollard::Docker::connect_with_local_defaults().map_err(|e| format!("docker: {e}"))
 }
 
 #[tauri::command]
 pub async fn check_docker() -> Result<bool, String> {
-    Ok(docker_ping().await)
+    let Ok(d) = docker() else { return Ok(false) };
+    Ok(d.ping().await.is_ok())
 }
 
 #[tauri::command]
 pub async fn start_local_core() -> Result<(), String> {
-    let docker = docker_bin();
+    use bollard::models::*;
+    use futures_util::TryStreamExt;
 
-    let running = tokio::process::Command::new(docker)
-        .args(["inspect", "--format", "{{.State.Running}}", "rootcx-core"])
-        .output().await.map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
-        .unwrap_or(false);
-    if running { return Ok(()); }
+    let d = docker()?;
+    let tag = env!("CARGO_PKG_VERSION");
 
-    let _ = tokio::process::Command::new(docker)
-        .args(["rm", "-f", "rootcx-core"])
-        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-        .status().await;
+    if let Ok(info) = d.inspect_container(CORE_CONTAINER, None).await {
+        if info.state.and_then(|s| s.running) == Some(true) {
+            return Ok(());
+        }
+        let opts = bollard::query_parameters::RemoveContainerOptionsBuilder::default()
+            .force(true).build();
+        let _ = d.remove_container(CORE_CONTAINER, Some(opts)).await;
+    }
 
-    let status = tokio::process::Command::new(docker)
-        .args(["run", "-d", "--name", "rootcx-core", "--init",
-               "-p", "9100:9100", "-v", "rootcx-data:/data",
-               "--restart", "unless-stopped",
-               "ghcr.io/rootcx/core:latest"])
-        .status().await.map_err(|e| format!("docker run failed: {e}"))?;
-    if !status.success() { return Err("docker run exited with error".into()); }
+    let pull = bollard::query_parameters::CreateImageOptionsBuilder::default()
+        .from_image(CORE_IMAGE).tag(tag).build();
+    d.create_image(Some(pull), None, None)
+        .try_collect::<Vec<_>>().await
+        .map_err(|e| format!("pull failed: {e}"))?;
+
+    let config = ContainerCreateBody {
+        image: Some(format!("{CORE_IMAGE}:{tag}")),
+        host_config: Some(HostConfig {
+            port_bindings: Some([(
+                "9100/tcp".into(),
+                Some(vec![PortBinding { host_ip: Some("0.0.0.0".into()), host_port: Some("9100".into()) }]),
+            )].into()),
+            binds: Some(vec!["rootcx-data:/data".into()]),
+            restart_policy: Some(RestartPolicy { name: Some(RestartPolicyNameEnum::UNLESS_STOPPED), ..Default::default() }),
+            init: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let name = bollard::query_parameters::CreateContainerOptionsBuilder::default()
+        .name(CORE_CONTAINER).build();
+    d.create_container(Some(name), config).await.map_err(|e| format!("create: {e}"))?;
+    d.start_container(CORE_CONTAINER, None::<bollard::query_parameters::StartContainerOptions>).await
+        .map_err(|e| format!("start: {e}"))?;
 
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        let ok = reqwest::Client::new()
+        if reqwest::Client::new()
             .get("http://localhost:9100/health")
             .timeout(std::time::Duration::from_secs(2))
-            .send().await.map(|r| r.status().is_success()).unwrap_or(false);
-        if ok { return Ok(()); }
+            .send().await.map(|r| r.status().is_success()).unwrap_or(false)
+        { return Ok(()); }
     }
     Err("core started but health check timed out after 30s".into())
 }
