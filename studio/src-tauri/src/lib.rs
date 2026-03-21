@@ -52,6 +52,8 @@ pub fn run() {
             commands::add_to_recent,
             commands::bundle_app,
             commands::clear_recent,
+            commands::check_docker,
+            commands::start_local_core,
             forge::forge_set_cwd,
             forge::forge_create_session,
             forge::forge_list_sessions,
