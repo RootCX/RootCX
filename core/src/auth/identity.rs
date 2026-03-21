@@ -11,7 +11,7 @@ use crate::routes::SharedRuntime;
 
 pub struct Identity {
     pub user_id: Uuid,
-    pub username: String,
+    pub email: String,
 }
 
 impl FromRequestParts<SharedRuntime> for Identity {
@@ -32,13 +32,13 @@ impl FromRequestParts<SharedRuntime> for Identity {
         let claims = jwt::decode(&auth_config, token)
             .map_err(|_| ApiError::Unauthorized("invalid token".into()))?;
 
-        if claims.username.is_empty() {
+        if claims.email.is_empty() {
             return Err(ApiError::Unauthorized("invalid token type".into()));
         }
 
         let user_id: Uuid = claims.sub.parse()
             .map_err(|_| ApiError::Unauthorized("invalid token subject".into()))?;
 
-        Ok(Identity { user_id, username: claims.username })
+        Ok(Identity { user_id, email: claims.email })
     }
 }

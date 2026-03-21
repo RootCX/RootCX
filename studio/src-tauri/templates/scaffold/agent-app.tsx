@@ -178,7 +178,7 @@ function Composer({
   );
 }
 
-function Chat({ user, onLogout }: { user: { username: string }; onLogout: () => void }) {
+function Chat({ user, onLogout }: { user: { email: string }; onLogout: () => void }) {
   const client = useRuntimeClient();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -399,12 +399,12 @@ function Chat({ user, onLogout }: { user: { username: string }; onLogout: () => 
   );
 }
 
-function Header({ user, onLogout }: { user: { username: string }; onLogout: () => void }) {
+function Header({ user, onLogout }: { user: { email: string }; onLogout: () => void }) {
   return (
     <div className="flex h-12 shrink-0 items-center justify-between border-b border-border/60 px-5">
       <span className="text-sm font-semibold tracking-tight">{APP_ID}</span>
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <span>{user.username}</span>
+        <span>{user.email}</span>
         <button
           className="flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground/50 transition-colors hover:bg-muted hover:text-foreground"
           onClick={onLogout}

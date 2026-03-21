@@ -62,13 +62,13 @@ export function ActivityBar() {
                   className="relative flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border border-border/60 text-xs font-medium text-muted-foreground transition-colors hover:border-border hover:text-foreground"
                   onClick={(e) => { e.preventDefault(); setUserMenu({ x: e.clientX, y: e.clientY }); }}
                 >
-                  {(user.displayName || user.username)[0].toUpperCase()}
+                  {(user.displayName || user.email)[0].toUpperCase()}
                   <span className="absolute bottom-0 right-0 h-2 w-2 rounded-full border border-sidebar bg-emerald-500" />
                 </button>
               </TooltipTrigger>
               <TooltipContent side="right" sideOffset={4}>
-                <div className="text-xs font-semibold">{user.displayName || user.username}</div>
-                {user.email && <div className="text-[10px] text-muted-foreground">{user.email}</div>}
+                <div className="text-xs font-semibold">{user.displayName || user.email}</div>
+                {user.displayName && <div className="text-[10px] text-muted-foreground">{user.email}</div>}
               </TooltipContent>
             </Tooltip>
           </div>
@@ -79,7 +79,7 @@ export function ActivityBar() {
         <>
           <div className="fixed inset-0 z-40" onClick={() => setUserMenu(null)} onContextMenu={(e) => { e.preventDefault(); setUserMenu(null); }} />
           <div className="fixed z-50 min-w-[160px] rounded-[5px] border border-[#454545] bg-[#252526] p-[4px] shadow-[0_2px_8px_rgba(0,0,0,0.5)]" style={{ left: userMenu.x, top: userMenu.y - 40 }}>
-            <div className="px-2 py-1 text-[11px] text-muted-foreground/60">{user.displayName || user.username}</div>
+            <div className="px-2 py-1 text-[11px] text-muted-foreground/60">{user.displayName || user.email}</div>
             <button
               className="flex w-full items-center gap-2 rounded-[3px] px-2 py-[3px] text-[13px] text-foreground hover:bg-[#2a2d2e]"
               onClick={() => { setUserMenu(null); logout(); }}

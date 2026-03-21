@@ -171,8 +171,8 @@ function UsersView({ users, roles, assignments, isAdmin }: {
             <PopoverTrigger asChild>
               <div>
                 <ListRow className="cursor-pointer">
-                  <span className="min-w-[80px] truncate text-xs" title={u.username}>
-                    {u.displayName || u.username}
+                  <span className="min-w-[80px] truncate text-xs" title={u.email}>
+                    {u.displayName || u.email}
                   </span>
                   <div className="flex flex-1 flex-wrap items-center gap-1">
                     {[...userRoles].map((r) => (
@@ -196,7 +196,7 @@ function UsersView({ users, roles, assignments, isAdmin }: {
             </PopoverTrigger>
             <PopoverContent className="min-w-[160px]">
               <div className="px-2 py-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                Roles for {u.displayName || u.username}
+                Roles for {u.displayName || u.email}
               </div>
               {roles.map((r) => {
                 const hasIt = userRoles.has(r.name);

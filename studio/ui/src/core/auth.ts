@@ -18,8 +18,7 @@ const CONNECTIONS_KEY = "rootcx_connections";
 
 export interface AuthUser {
   id: string;
-  username: string;
-  email: string | null;
+  email: string;
   displayName: string | null;
 }
 
@@ -99,11 +98,11 @@ export async function disconnect() {
   emit();
 }
 
-export async function login(username: string, password: string) {
+export async function login(email: string, password: string) {
   const res = await fetch(`${BASE}/api/v1/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ email, password }),
   });
   if (!res.ok) throw new Error(await res.text().catch(() => "login failed"));
   const data = await res.json();
@@ -115,14 +114,14 @@ export async function login(username: string, password: string) {
   emit();
 }
 
-export async function register(input: { username: string; password: string; email?: string; displayName?: string }) {
+export async function register(input: { email: string; password: string; displayName?: string }) {
   const res = await fetch(`${BASE}/api/v1/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
   if (!res.ok) throw new Error(await res.text().catch(() => "registration failed"));
-  await login(input.username, input.password);
+  await login(input.email, input.password);
 }
 
 export async function logout() {

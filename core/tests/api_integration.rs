@@ -856,7 +856,7 @@ async fn auth_register_login_me_logout() {
     // register new user
     let (s, body) = rt.post_unauthed(
         "/api/v1/auth/register",
-        &json!({"username":"newuser","password":"Str0ngPass!"}),
+        &json!({"email":"newuser@test.local","password":"Str0ngPass!"}),
     ).await;
     assert_eq!(s, 201);
     assert!(body["user"]["id"].is_string());
@@ -864,7 +864,7 @@ async fn auth_register_login_me_logout() {
     // login
     let (s, body) = rt.post_unauthed(
         "/api/v1/auth/login",
-        &json!({"username":"newuser","password":"Str0ngPass!"}),
+        &json!({"email":"newuser@test.local","password":"Str0ngPass!"}),
     ).await;
     assert_eq!(s, 200);
     let access = body["accessToken"].as_str().unwrap();
@@ -875,7 +875,7 @@ async fn auth_register_login_me_logout() {
     let r = rt.client.get(rt.url("/api/v1/auth/me")).bearer_auth(access).send().await.unwrap();
     assert_eq!(r.status(), 200);
     let me: Value = r.json().await.unwrap();
-    assert_eq!(me["username"], "newuser");
+    assert_eq!(me["email"], "newuser@test.local");
 
     // refresh
     let r = rt.client.post(rt.url("/api/v1/auth/refresh")).json(&json!({"refreshToken": refresh})).send().await.unwrap();
@@ -895,7 +895,7 @@ async fn auth_login_wrong_password() {
     let rt = TestRuntime::boot().await;
     let (s, _) = rt.post_unauthed(
         "/api/v1/auth/login",
-        &json!({"username":"testadmin","password":"wrongpassword"}),
+        &json!({"email":"admin@test.local","password":"wrongpassword"}),
     ).await;
     assert_eq!(s, 401);
     rt.shutdown().await;
@@ -906,7 +906,7 @@ async fn auth_register_weak_password() {
     let rt = TestRuntime::boot().await;
     let (s, _) = rt.post_unauthed(
         "/api/v1/auth/register",
-        &json!({"username":"weakuser","password":"short"}),
+        &json!({"email":"weak@test.local","password":"short"}),
     ).await;
     assert_eq!(s, 400);
     rt.shutdown().await;
@@ -918,7 +918,7 @@ async fn auth_list_users() {
     let (s, body) = rt.get_json("/api/v1/users").await;
     assert_eq!(s, 200);
     let users = body.as_array().unwrap();
-    assert!(users.iter().any(|u| u["username"] == "testadmin"));
+    assert!(users.iter().any(|u| u["email"] == "admin@test.local"));
     rt.shutdown().await;
 }
 
@@ -976,13 +976,13 @@ async fn rbac_assign_and_revoke_role() {
     // register a second user
     rt.post_unauthed(
         "/api/v1/auth/register",
-        &json!({"username":"rbacuser","password":"Str0ngPass1"}),
+        &json!({"email":"rbacuser@test.local","password":"Str0ngPass1"}),
     ).await;
 
     // get user id
     let (_, users) = rt.get_json("/api/v1/users").await;
     let user_id = users.as_array().unwrap().iter()
-        .find(|u| u["username"] == "rbacuser").unwrap()["id"].as_str().unwrap().to_string();
+        .find(|u| u["email"] == "rbacuser@test.local").unwrap()["id"].as_str().unwrap().to_string();
 
     // create role
     rt.post_json("/api/v1/apps/rbacas/roles", &json!({"name":"viewer","permissions":["items.read"]})).await;

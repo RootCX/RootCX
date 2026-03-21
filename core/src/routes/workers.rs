@@ -73,7 +73,7 @@ pub async fn rpc_proxy(
     let raw_token = headers.get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer ").map(String::from));
-    let caller = Some(RpcCaller { user_id: identity.user_id.to_string(), username: identity.username, auth_token: raw_token });
+    let caller = Some(RpcCaller { user_id: identity.user_id.to_string(), email: identity.email, auth_token: raw_token });
 
     Ok(Json(wm(&rt).await?.rpc(&app_id, id, method, params, caller).await?))
 }

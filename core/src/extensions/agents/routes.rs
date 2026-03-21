@@ -144,7 +144,7 @@ pub async fn invoke_agent(
         config: agent_config,
         auth_token: agent_token.clone(),
         history,
-        caller: Some(RpcCaller { user_id: identity.user_id.to_string(), username: identity.username.clone(), auth_token: Some(agent_token) }),
+        caller: Some(RpcCaller { user_id: identity.user_id.to_string(), email: identity.email.clone(), auth_token: Some(agent_token) }),
     };
 
     let stream_rx = wm.agent_invoke(&app_id, payload).await?;

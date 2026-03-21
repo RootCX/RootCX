@@ -14,15 +14,14 @@ use crate::routes::SharedRuntime;
 
 #[derive(Deserialize)]
 pub struct RegisterRequest {
-    pub username: String,
+    pub email: String,
     pub password: String,
-    pub email: Option<String>,
     pub display_name: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
-    pub username: String,
+    pub email: String,
     pub password: String,
 }
 
@@ -36,8 +35,7 @@ pub struct RefreshRequest {
 #[serde(rename_all = "camelCase")]
 pub struct AuthUserResponse {
     pub id: String,
-    pub username: String,
-    pub email: Option<String>,
+    pub email: String,
     pub display_name: Option<String>,
     pub created_at: String,
 }
@@ -51,15 +49,14 @@ pub struct LoginResponse {
     pub user: AuthUserResponse,
 }
 
-type UserRow = (Uuid, String, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>);
+type UserRow = (Uuid, String, Option<String>, chrono::DateTime<chrono::Utc>);
 
 fn user_response(row: UserRow) -> AuthUserResponse {
     AuthUserResponse {
         id: row.0.to_string(),
-        username: row.1,
-        email: row.2,
-        display_name: row.3,
-        created_at: row.4.to_rfc3339(),
+        email: row.1,
+        display_name: row.2,
+        created_at: row.3.to_rfc3339(),
     }
 }
 
@@ -75,23 +72,21 @@ pub async fn register(
     State(rt): State<SharedRuntime>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
-    if req.username.is_empty() {
-        return Err(ApiError::BadRequest("username required".into()));
+    if req.email.is_empty() {
+        return Err(ApiError::BadRequest("email required".into()));
     }
-    let pw = &req.password;
-    if pw.len() < 10 || !pw.chars().any(|c| c.is_uppercase()) || !pw.chars().any(|c| c.is_lowercase()) || !pw.chars().any(|c| c.is_ascii_digit()) {
-        return Err(ApiError::BadRequest("password must be ≥10 chars with uppercase, lowercase, and digit".into()));
+    if req.password.len() < 6 {
+        return Err(ApiError::BadRequest("password must be at least 6 characters".into()));
     }
 
     let pool = super::pool(&rt).await?;
     let pw_hash = password::hash(&req.password)?;
 
     let row: UserRow = sqlx::query_as(
-        "INSERT INTO rootcx_system.users (username, email, display_name, password_hash)
-         VALUES ($1, $2, $3, $4)
-         RETURNING id, username, email, display_name, created_at",
+        "INSERT INTO rootcx_system.users (email, display_name, password_hash)
+         VALUES ($1, $2, $3)
+         RETURNING id, email, display_name, created_at",
     )
-    .bind(&req.username)
     .bind(&req.email)
     .bind(&req.display_name)
     .bind(&pw_hash)
@@ -99,7 +94,7 @@ pub async fn register(
     .await
     .map_err(|e| {
         if e.to_string().contains("unique") || e.to_string().contains("duplicate") {
-            ApiError::BadRequest(format!("username '{}' already taken", req.username))
+            ApiError::BadRequest(format!("email '{}' already taken", req.email))
         } else {
             ApiError::Internal(e.to_string())
         }
@@ -128,24 +123,24 @@ pub async fn login(
 ) -> Result<Json<LoginResponse>, ApiError> {
     let pool = super::pool(&rt).await?;
 
-    let row: Option<(Uuid, String, Option<String>, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>)> =
+    let row: Option<(Uuid, String, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>)> =
         sqlx::query_as(
-            "SELECT id, username, email, display_name, password_hash, created_at
-             FROM rootcx_system.users WHERE username = $1",
+            "SELECT id, email, display_name, password_hash, created_at
+             FROM rootcx_system.users WHERE email = $1",
         )
-        .bind(&req.username)
+        .bind(&req.email)
         .fetch_optional(&pool)
         .await?;
 
-    let (user_id, username, email, display_name, pw_hash, created_at) =
+    let (user_id, email, display_name, pw_hash, created_at) =
         row.ok_or_else(|| {
-            tracing::warn!(username = %req.username, "login failed: unknown user");
+            tracing::warn!(email = %req.email, "login failed: unknown user");
             ApiError::Unauthorized("invalid credentials".into())
         })?;
 
     let pw_hash = pw_hash.ok_or_else(|| ApiError::Unauthorized("password login not available".into()))?;
     if !password::verify(&req.password, &pw_hash) {
-        tracing::warn!(username = %req.username, "login failed: invalid password");
+        tracing::warn!(email = %req.email, "login failed: invalid password");
         return Err(ApiError::Unauthorized("invalid credentials".into()));
     }
 
@@ -158,14 +153,14 @@ pub async fn login(
         .execute(&pool)
         .await?;
 
-    let access_token = jwt::encode_access(&auth_config, user_id, &username)?;
+    let access_token = jwt::encode_access(&auth_config, user_id, &email)?;
     let refresh_token = jwt::encode_refresh(&auth_config, user_id, session_id)?;
 
     Ok(Json(LoginResponse {
         access_token,
         refresh_token,
         expires_in: auth_config.access_ttl.as_secs() as i64,
-        user: user_response((user_id, username, email, display_name, created_at)),
+        user: user_response((user_id, email, display_name, created_at)),
     }))
 }
 
@@ -188,13 +183,13 @@ pub async fn refresh(
         return Err(ApiError::Unauthorized("session revoked or expired".into()));
     }
 
-    let (username,): (String,) = sqlx::query_as("SELECT username FROM rootcx_system.users WHERE id = $1")
+    let (email,): (String,) = sqlx::query_as("SELECT email FROM rootcx_system.users WHERE id = $1")
         .bind(user_id)
         .fetch_optional(&pool)
         .await?
         .ok_or_else(|| ApiError::Unauthorized("user not found".into()))?;
 
-    let access_token = jwt::encode_access(&auth_config, user_id, &username)?;
+    let access_token = jwt::encode_access(&auth_config, user_id, &email)?;
 
     Ok(Json(json!({
         "accessToken": access_token,
@@ -229,8 +224,8 @@ pub async fn list_users(
 ) -> Result<Json<Vec<AuthUserResponse>>, ApiError> {
     let pool = super::pool(&rt).await?;
     let rows: Vec<UserRow> = sqlx::query_as(
-        "SELECT id, username, email, display_name, created_at
-         FROM rootcx_system.users WHERE is_system = false ORDER BY username",
+        "SELECT id, email, display_name, created_at
+         FROM rootcx_system.users WHERE is_system = false ORDER BY email",
     )
     .fetch_all(&pool)
     .await?;
@@ -241,7 +236,7 @@ pub async fn me(State(rt): State<SharedRuntime>, identity: Identity) -> Result<J
     let pool = super::pool(&rt).await?;
 
     let row: UserRow = sqlx::query_as(
-        "SELECT id, username, email, display_name, created_at
+        "SELECT id, email, display_name, created_at
          FROM rootcx_system.users WHERE id = $1",
     )
     .bind(identity.user_id)

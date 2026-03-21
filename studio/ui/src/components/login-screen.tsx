@@ -5,9 +5,8 @@ import { Logo } from "@/components/logo";
 import { login, register, disconnect, getCoreUrl, fetchCore } from "@/core/auth";
 
 const ERROR_MAP: Record<string, string> = {
-  "invalid credentials": "Incorrect username or password",
+  "invalid credentials": "Incorrect email or password",
   "password login not available": "Password login is not available for this account",
-  "username required, password min 8 chars": "Username is required and password must be at least 8 characters",
   "session revoked or expired": "Your session has expired, please sign in again",
 };
 
@@ -32,9 +31,9 @@ const INPUT = "rounded-md border border-border bg-background px-3 py-1.5 text-sm
 
 export function LoginScreen() {
   const [mode, setMode] = useState<"login" | "register">("login");
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -54,10 +53,14 @@ export function LoginScreen() {
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
+    if (mode === "register" && password !== confirmPassword) {
+      setError("Passwords do not match");
+      return;
+    }
     setSubmitting(true);
     try {
-      if (mode === "login") await login(username, password);
-      else await register({ username, password, email: email || undefined, displayName: displayName || undefined });
+      if (mode === "login") await login(email, password);
+      else await register({ email, password, displayName: displayName || undefined });
     } catch (err) {
       setError(friendlyError(err instanceof Error ? err.message : String(err)));
     } finally {
@@ -96,27 +99,28 @@ export function LoginScreen() {
             {mode === "login" ? "Sign in" : "Create account"}
           </h1>
 
+          {mode === "register" && (
+            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+              Full name
+              <input type="text" autoFocus value={displayName} onChange={(e) => setDisplayName(e.target.value)} className={INPUT} />
+            </label>
+          )}
+
           <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-            Username
-            <input type="text" required autoFocus value={username} onChange={(e) => setUsername(e.target.value)} className={INPUT} />
+            Email
+            <input type="email" required autoFocus={mode === "login"} value={email} onChange={(e) => setEmail(e.target.value)} className={INPUT} />
           </label>
 
           <label className="flex flex-col gap-1 text-xs text-muted-foreground">
             Password
-            <input type="password" required minLength={8} value={password} onChange={(e) => setPassword(e.target.value)} className={INPUT} />
+            <input type="password" required minLength={6} value={password} onChange={(e) => setPassword(e.target.value)} className={INPUT} />
           </label>
 
           {mode === "register" && (
-            <>
-              <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                Email
-                <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className={INPUT} />
-              </label>
-              <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-                Display name
-                <input type="text" value={displayName} onChange={(e) => setDisplayName(e.target.value)} className={INPUT} />
-              </label>
-            </>
+            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+              Confirm password
+              <input type="password" required minLength={6} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className={INPUT} />
+            </label>
           )}
 
           {error && <div className="rounded-md border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-400">{error}</div>}

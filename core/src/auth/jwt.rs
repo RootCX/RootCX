@@ -9,7 +9,7 @@ use crate::RuntimeError;
 pub struct Claims {
     pub sub: String,
     #[serde(default)]
-    pub username: String,
+    pub email: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<Uuid>,
     pub exp: i64,
@@ -21,13 +21,13 @@ fn encode(config: &AuthConfig, claims: &Claims) -> Result<String, RuntimeError> 
         .map_err(|e| RuntimeError::Auth(e.to_string()))
 }
 
-pub fn encode_access(config: &AuthConfig, user_id: Uuid, username: &str) -> Result<String, RuntimeError> {
+pub fn encode_access(config: &AuthConfig, user_id: Uuid, email: &str) -> Result<String, RuntimeError> {
     let now = chrono::Utc::now().timestamp();
     encode(
         config,
         &Claims {
             sub: user_id.to_string(),
-            username: username.to_string(),
+            email: email.to_string(),
             session_id: None,
             exp: now + config.access_ttl.as_secs() as i64,
             iat: now,
@@ -41,7 +41,7 @@ pub fn encode_refresh(config: &AuthConfig, user_id: Uuid, session_id: Uuid) -> R
         config,
         &Claims {
             sub: user_id.to_string(),
-            username: String::new(),
+            email: String::new(),
             session_id: Some(session_id),
             exp: now + config.refresh_ttl.as_secs() as i64,
             iat: now,
@@ -77,10 +77,10 @@ mod tests {
     fn access_token_roundtrip() {
         let config = test_config();
         let uid = Uuid::new_v4();
-        let token = encode_access(&config, uid, "alice").unwrap();
+        let token = encode_access(&config, uid, "alice@test.com").unwrap();
         let claims = decode(&config, &token).unwrap();
         assert_eq!(claims.sub, uid.to_string());
-        assert_eq!(claims.username, "alice");
+        assert_eq!(claims.email, "alice@test.com");
         assert!(claims.session_id.is_none());
     }
 

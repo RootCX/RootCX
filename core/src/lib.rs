@@ -107,6 +107,7 @@ impl Runtime {
 
         let pool = PgPool::connect(&db_url).await.map_err(RuntimeError::Database)?;
         schema::bootstrap(&pool).await?;
+        sqlx::migrate!("./migrations").run(&pool).await.map_err(|e| RuntimeError::Schema(e.into()))?;
 
         for ext in &self.extensions {
             ext.bootstrap(&pool).await?;
