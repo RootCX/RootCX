@@ -36,3 +36,5 @@ notify = "7"
 notify-debouncer-mini = "0.5"
 uuid = { version = "1", features = ["v4"] }
 urlencoding = "2"
+bollard = "0.20"
+futures-util = "0.3"
