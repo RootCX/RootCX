@@ -215,8 +215,12 @@ pub async fn logout(
     Ok(Json(json!({ "message": "logged out" })))
 }
 
-pub async fn auth_mode() -> Json<JsonValue> {
-    Json(json!({ "authRequired": true }))
+pub async fn auth_mode(State(rt): State<SharedRuntime>) -> Result<Json<JsonValue>, ApiError> {
+    let pool = super::pool(&rt).await?;
+    let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM rootcx_system.users WHERE is_system = false")
+        .fetch_one(&pool)
+        .await?;
+    Ok(Json(json!({ "authRequired": true, "setupRequired": count == 0 })))
 }
 
 pub async fn list_users(
