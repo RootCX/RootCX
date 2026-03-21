@@ -326,6 +326,47 @@ pub fn clear_recent(app_handle: tauri::AppHandle, state: State<'_, AppState>) {
     crate::menu::rebuild_recent_menu(&app_handle, &[]);
 }
 
+#[tauri::command]
+pub async fn check_docker() -> Result<bool, String> {
+    tokio::process::Command::new("docker").arg("info")
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .status().await.map(|s| s.success()).map_err(|_| "docker not found".into())
+}
+
+#[tauri::command]
+pub async fn start_local_core() -> Result<(), String> {
+    let running = tokio::process::Command::new("docker")
+        .args(["inspect", "--format", "{{.State.Running}}", "rootcx-core"])
+        .output().await.map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+        .unwrap_or(false);
+    if running { return Ok(()); }
+
+    // Remove stopped container if exists
+    let _ = tokio::process::Command::new("docker")
+        .args(["rm", "-f", "rootcx-core"])
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .status().await;
+
+    let status = tokio::process::Command::new("docker")
+        .args(["run", "-d", "--name", "rootcx-core", "--init",
+               "-p", "9100:9100", "-v", "rootcx-data:/data",
+               "--restart", "unless-stopped",
+               "ghcr.io/rootcx/core:latest"])
+        .status().await.map_err(|e| format!("docker run failed: {e}"))?;
+    if !status.success() { return Err("docker run exited with error".into()); }
+
+    // Wait for health
+    for _ in 0..30 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let ok = reqwest::Client::new()
+            .get("http://localhost:9100/api/v1/status")
+            .timeout(std::time::Duration::from_secs(2))
+            .send().await.map(|r| r.status().is_success()).unwrap_or(false);
+        if ok { return Ok(()); }
+    }
+    Err("core started but health check timed out after 30s".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

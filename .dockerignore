@@ -1,0 +1,10 @@
+target/
+node_modules/
+.git/
+core/resources/
+studio/ui/
+runtime/ui/
+*.dmg
+*.app
+*.exe
+*.AppImage
