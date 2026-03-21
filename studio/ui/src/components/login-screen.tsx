@@ -2,7 +2,7 @@ import { useState, useEffect, type FormEvent } from "react";
 import { Server, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/logo";
-import { login, register, disconnect, getCoreUrl } from "@/core/auth";
+import { login, register, disconnect, getCoreUrl, fetchCore } from "@/core/auth";
 
 const ERROR_MAP: Record<string, string> = {
   "invalid credentials": "Incorrect username or password",
@@ -41,6 +41,13 @@ export function LoginScreen() {
   const [coreUrl, setCoreUrl] = useState("");
 
   useEffect(() => { getCoreUrl().then(setCoreUrl); }, []);
+
+  useEffect(() => {
+    fetchCore("/api/v1/auth/mode")
+      .then((r) => r.json())
+      .then((d) => { if (d.setupRequired) setMode("register"); })
+      .catch(() => {});
+  }, []);
 
   const server = parseUrl(coreUrl);
 

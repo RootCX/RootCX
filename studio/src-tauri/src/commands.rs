@@ -326,28 +326,59 @@ pub fn clear_recent(app_handle: tauri::AppHandle, state: State<'_, AppState>) {
     crate::menu::rebuild_recent_menu(&app_handle, &[]);
 }
 
+fn docker_bin() -> &'static str {
+    #[cfg(target_os = "macos")]
+    { "/usr/local/bin/docker" }
+    #[cfg(target_os = "linux")]
+    { "/usr/bin/docker" }
+    #[cfg(target_os = "windows")]
+    { "docker" }
+}
+
+async fn docker_ping() -> bool {
+    #[cfg(unix)]
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let sock = std::env::var("DOCKER_HOST")
+            .ok()
+            .and_then(|h| h.strip_prefix("unix://").map(String::from))
+            .unwrap_or_else(|| "/var/run/docker.sock".into());
+        let Ok(mut stream) = tokio::net::UnixStream::connect(&sock).await else { return false };
+        let _ = stream.write_all(b"GET /_ping HTTP/1.0\r\nHost: localhost\r\n\r\n").await;
+        let mut buf = vec![0u8; 256];
+        let n = stream.read(&mut buf).await.unwrap_or(0);
+        String::from_utf8_lossy(&buf[..n]).contains("OK")
+    }
+    #[cfg(windows)]
+    {
+        // Named pipe not easily pingable — fall back to CLI
+        tokio::process::Command::new("docker").arg("info")
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .status().await.map(|s| s.success()).unwrap_or(false)
+    }
+}
+
 #[tauri::command]
 pub async fn check_docker() -> Result<bool, String> {
-    tokio::process::Command::new("docker").arg("info")
-        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
-        .status().await.map(|s| s.success()).map_err(|_| "docker not found".into())
+    Ok(docker_ping().await)
 }
 
 #[tauri::command]
 pub async fn start_local_core() -> Result<(), String> {
-    let running = tokio::process::Command::new("docker")
+    let docker = docker_bin();
+
+    let running = tokio::process::Command::new(docker)
         .args(["inspect", "--format", "{{.State.Running}}", "rootcx-core"])
         .output().await.map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
         .unwrap_or(false);
     if running { return Ok(()); }
 
-    // Remove stopped container if exists
-    let _ = tokio::process::Command::new("docker")
+    let _ = tokio::process::Command::new(docker)
         .args(["rm", "-f", "rootcx-core"])
         .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
         .status().await;
 
-    let status = tokio::process::Command::new("docker")
+    let status = tokio::process::Command::new(docker)
         .args(["run", "-d", "--name", "rootcx-core", "--init",
                "-p", "9100:9100", "-v", "rootcx-data:/data",
                "--restart", "unless-stopped",
@@ -355,11 +386,10 @@ pub async fn start_local_core() -> Result<(), String> {
         .status().await.map_err(|e| format!("docker run failed: {e}"))?;
     if !status.success() { return Err("docker run exited with error".into()); }
 
-    // Wait for health
     for _ in 0..30 {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let ok = reqwest::Client::new()
-            .get("http://localhost:9100/api/v1/status")
+            .get("http://localhost:9100/health")
             .timeout(std::time::Duration::from_secs(2))
             .send().await.map(|r| r.status().is_success()).unwrap_or(false);
         if ok { return Ok(()); }
