@@ -24,6 +24,7 @@ jobs:
       matrix:
         include:
           - { os: macos-14,       target: aarch64-apple-darwin,      bundles: "app,dmg",    name: macos-arm64 }
+          - { os: macos-15-intel, target: x86_64-apple-darwin,       bundles: "app,dmg",    name: macos-x86_64 }
           - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu, bundles: "appimage,deb", name: linux-x86_64 }
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   bundles: nsis,         name: windows-x86_64 }
 
@@ -76,6 +77,7 @@ jobs:
         run: |
           echo "$APPLE_CERTIFICATE" | base64 --decode > cert.p12
           security create-keychain -p actions build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
           security default-keychain -s build.keychain
           security unlock-keychain -p actions build.keychain
           security import cert.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
@@ -128,6 +130,19 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Create version-free copies for stable download URLs
+        shell: bash
+        run: |
+          cd artifacts
+          for f in $(find . -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \)); do
+            base=$(basename "$f")
+            stable=$(echo "$base" | sed 's/_[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*_/_/')
+            if [ "$base" != "$stable" ]; then
+              cp "$f" "$(dirname "$f")/$stable"
+              echo "  $base -> $stable"
+            fi
+          done
+
       - name: Generate latest.json
         shell: bash
         run: |
@@ -138,7 +153,8 @@ jobs:
           sig() { cat "$1" 2>/dev/null || echo ""; }
           url() { echo "${BASE}/$(basename "$1" 2>/dev/null)"; }
 
-          MAC=$(echo artifacts/**/*.app.tar.gz)
+          MAC_ARM=$(echo artifacts/**/*aarch64*.app.tar.gz)
+          MAC_X64=$(echo artifacts/**/*x86_64*.app.tar.gz)
           LINUX=$(echo artifacts/**/*.AppImage)
           WIN=$(echo artifacts/**/*-setup.exe)
 
@@ -146,8 +162,10 @@ jobs:
             --arg v "$VERSION" \
             --arg notes "Release ${TAG}" \
             --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg mac_sig "$(sig "${MAC}.sig")" \
-            --arg mac_url "$(url "$MAC")" \
+            --arg mac_arm_sig "$(sig "${MAC_ARM}.sig")" \
+            --arg mac_arm_url "$(url "$MAC_ARM")" \
+            --arg mac_x64_sig "$(sig "${MAC_X64}.sig")" \
+            --arg mac_x64_url "$(url "$MAC_X64")" \
             --arg linux_sig "$(sig "${LINUX}.sig")" \
             --arg linux_url "$(url "$LINUX")" \
             --arg win_sig "$(sig "${WIN}.sig")" \
@@ -157,7 +175,8 @@ jobs:
               notes: $notes,
               pub_date: $date,
               platforms: {
-                "darwin-aarch64": { signature: $mac_sig, url: $mac_url },
+                "darwin-aarch64": { signature: $mac_arm_sig, url: $mac_arm_url },
+                "darwin-x86_64": { signature: $mac_x64_sig, url: $mac_x64_url },
                 "linux-x86_64": { signature: $linux_sig, url: $linux_url },
                 "windows-x86_64": { signature: $win_sig, url: $win_url }
               }
