@@ -318,6 +318,34 @@
         "type": "object",
         "properties": { "success": { "type": "boolean" } }
       }
+    },
+    {
+      "id": "reject_invoice",
+      "name": "Reject Invoice",
+      "description": "Send an Invoice Response Message (BIS 3.0) to reject an incoming invoice via the Peppol network",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "senderPeppolId": { "type": "string", "description": "Your Peppol ID (the rejecting party)" },
+          "senderName": { "type": "string", "description": "Your company name" },
+          "receiverPeppolId": { "type": "string", "description": "Original invoice sender's Peppol ID" },
+          "receiverName": { "type": "string", "description": "Original invoice sender's name" },
+          "originalInvoiceNumber": { "type": "string", "description": "Invoice number being rejected" },
+          "originalInvoiceDate": { "type": "string", "description": "Original invoice issue date (YYYY-MM-DD)" },
+          "countryCode": { "type": "string", "default": "BE" },
+          "reason": { "type": "string", "description": "Human-readable rejection reason" },
+          "reasonCode": { "type": "string", "description": "OPStatusReason code (REF=reference issue, LEG=legal, REC=receiver unknown, QUA=quality, DEL=delivery, PRI=price, QTY=quantity, ITM=item, PAY=payment, UNR=unrecognized, FIN=finance, OTH=other)", "default": "OTH" }
+        },
+        "required": ["senderPeppolId", "senderName", "receiverPeppolId", "receiverName", "originalInvoiceNumber"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "dokapiUlid": { "type": "string" },
+          "responseId": { "type": "string" },
+          "status": { "type": "string" }
+        }
+      }
     }
   ],
   "webhooks": ["document_status", "participant_status", "incoming_document"],
