@@ -2,6 +2,7 @@ target/
 node_modules/
 .git/
 core/resources/
+!core/resources/integrations/
 studio/ui/
 runtime/ui/
 *.dmg
