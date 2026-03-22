@@ -693,8 +693,12 @@ function generateInvoiceResponseXml(
 ): string {
   const today = new Date().toISOString().slice(0, 10);
   const esc = escapeXml;
+  const senderScheme = sender.peppolId.split(":")[0];
+  const senderValue = sender.peppolId.split(":").slice(1).join(":");
+  const receiverScheme = receiver.peppolId.split(":")[0];
+  const receiverValue = receiver.peppolId.split(":").slice(1).join(":");
   return `<?xml version="1.0" encoding="UTF-8"?>
-<ubl:ApplicationResponse xmlns:ubl="urn:oasis:names:specification:ubl:schema:xsd:ApplicationResponse-2"
+<ApplicationResponse xmlns="urn:oasis:names:specification:ubl:schema:xsd:ApplicationResponse-2"
   xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"
   xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
   <cbc:CustomizationID>urn:fdc:peppol.eu:poacc:trns:invoice_response:3</cbc:CustomizationID>
@@ -703,16 +707,16 @@ function generateInvoiceResponseXml(
   <cbc:IssueDate>${today}</cbc:IssueDate>
   <cbc:Note>${esc(reason)}</cbc:Note>
   <cac:SenderParty>
-    <cbc:EndpointID schemeID="${sender.peppolId.split(":")[0]}">${esc(sender.peppolId)}</cbc:EndpointID>
+    <cbc:EndpointID schemeID="${senderScheme}">${esc(senderValue)}</cbc:EndpointID>
     <cac:PartyLegalEntity><cbc:RegistrationName>${esc(sender.name)}</cbc:RegistrationName></cac:PartyLegalEntity>
   </cac:SenderParty>
   <cac:ReceiverParty>
-    <cbc:EndpointID schemeID="${receiver.peppolId.split(":")[0]}">${esc(receiver.peppolId)}</cbc:EndpointID>
+    <cbc:EndpointID schemeID="${receiverScheme}">${esc(receiverValue)}</cbc:EndpointID>
     <cac:PartyLegalEntity><cbc:RegistrationName>${esc(receiver.name)}</cbc:RegistrationName></cac:PartyLegalEntity>
   </cac:ReceiverParty>
   <cac:DocumentResponse>
     <cac:Response>
-      <cbc:ResponseCode listID="UNCL4343OpSubset">RE</cbc:ResponseCode>
+      <cbc:ResponseCode>RE</cbc:ResponseCode>
       <cbc:EffectiveDate>${today}</cbc:EffectiveDate>
       <cac:Status>
         <cbc:StatusReasonCode listID="OPStatusReason">${esc(reasonCode)}</cbc:StatusReasonCode>
@@ -721,10 +725,10 @@ function generateInvoiceResponseXml(
     </cac:Response>
     <cac:DocumentReference>
       <cbc:ID>${esc(invoiceRef.number)}</cbc:ID>${invoiceRef.date ? `\n      <cbc:IssueDate>${esc(invoiceRef.date)}</cbc:IssueDate>` : ""}
-      <cbc:DocumentTypeCode listID="UNECE1001">380</cbc:DocumentTypeCode>
+      <cbc:DocumentTypeCode>380</cbc:DocumentTypeCode>
     </cac:DocumentReference>
   </cac:DocumentResponse>
-</ubl:ApplicationResponse>`;
+</ApplicationResponse>`;
 }
 
 async function rejectInvoice(config: Config, input: any) {
