@@ -134,7 +134,7 @@ jobs:
         shell: bash
         run: |
           cd artifacts
-          for f in $(find . -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \)); do
+          find . -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \) -print0 | while IFS= read -r -d '' f; do
             base=$(basename "$f")
             stable=$(echo "$base" | sed 's/_[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*_/_/')
             if [ "$base" != "$stable" ]; then
