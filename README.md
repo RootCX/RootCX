@@ -29,13 +29,71 @@ Build a fleet of interconnected apps and AI agents with managed database, Auth, 
 
 <br />
 
+## Table of Contents
+
+- [What is RootCX?](#what-is-rootcx)
+- [Quickstart](#quickstart)
+  - [1. Download Studio](#1-download-studio)
+  - [2. Connect to a Core](#2-connect-to-a-core)
+- [Architecture](#architecture)
+- [Development](#development)
+- [Community](#community)
+- [License](#license)
+
 ## What is RootCX?
 
 RootCX is an open-source\* infrastructure for building custom internal software and AI agents. Build a unified fleet of interconnected apps that combines the experience of a modern SaaS with the robustness of an ERP. Full ownership of your code, absolute control over your data.
 
 **Develop locally. Deploy anywhere. Self-host or use our cloud.**
 
-### How it works
+## Quickstart
+
+### 1. Download Studio
+
+RootCX Studio is the native desktop app where you build, deploy, and manage everything.
+
+| Platform | Download |
+|----------|----------|
+| macOS (Apple Silicon) | [RootCX Studio (.dmg)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_aarch64.dmg) |
+| macOS (Intel) | [RootCX Studio (.dmg)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_x86_64.dmg) |
+| Windows | [RootCX Studio (.exe)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_x64-setup.exe) |
+| Linux (.deb) | [RootCX Studio (.deb)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_amd64.deb) |
+| Linux (.AppImage) | [RootCX Studio (.AppImage)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_amd64.AppImage) |
+
+### 2. Connect to a Core
+
+On first launch, Studio asks how you want to connect to a RootCX Core instance. You have two options:
+
+#### Option A: RootCX Cloud (fastest)
+
+No installation, no Docker, no infrastructure. A managed Core is provisioned for you in minutes.
+
+1. Sign up at [rootcx.com/app/register](https://rootcx.com/app/register).
+2. Create a project and hit **Launch Project**.
+3. Once active, copy the **API URL** from the project overview.
+4. In Studio, go to **Settings** (`Cmd+,` / `Ctrl+,`) and paste the URL.
+
+You're ready to build. Your project gets its own dedicated Core with a managed database, API, authentication, and AI runtime.
+
+#### Option B: Run locally with Docker
+
+Run a Core instance on your own machine. Ideal for offline development or full control.
+
+**Prerequisite:** [Docker Desktop](https://docker.com/get-started) must be installed and running.
+
+1. In Studio's welcome screen, select **Run locally**.
+2. Studio pulls and starts the `ghcr.io/rootcx/core` Docker container automatically.
+3. Once the Core is healthy, Studio connects to `http://localhost:9100`.
+
+No manual configuration required. You can also run the container yourself:
+
+```bash
+docker run -d --name rootcx-core -p 9100:9100 -e ROOTCX_BIND=1 ghcr.io/rootcx/core:latest
+```
+
+For production self-hosting, see the [Self-Hosting guide](https://rootcx.com/docs/developers/self-hosting).
+
+## Architecture
 
 <p align="center">
   <picture>
@@ -65,13 +123,7 @@ RootCX is an open-source\* infrastructure for building custom internal software 
 - Integrated terminal and live log streaming
 - One-click deploy to any connected Core
 
-## Get Started
-
-### Cloud
-
-Sign up at [rootcx.com](https://rootcx.com/app/register), create a project, and connect Studio. Your project gets its own dedicated Core with a database, API, and runtime.
-
-### Development
+## Development
 
 ```bash
 # Clone the repo
