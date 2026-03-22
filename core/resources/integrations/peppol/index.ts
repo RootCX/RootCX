@@ -515,6 +515,13 @@ async function registerParticipant(config: Config, input: any) {
     throw err;
   }
 
+  // Publish business card to Peppol Directory
+  try {
+    await dokapiRequest(config, "POST", "/participant-registrations/business-cards/push", {
+      scheme: "iso6523-actorid-upis", value: peppolId,
+    });
+  } catch { /* best-effort — registration itself succeeded */ }
+
   return { peppolId, dokapiUlid: registration?.ulid, status: registration?.status || "active" };
 }
 
