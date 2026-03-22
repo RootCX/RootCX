@@ -71,7 +71,7 @@ No installation, no Docker, no infrastructure. A managed Core is provisioned for
 1. Sign up at [rootcx.com/app/register](https://rootcx.com/app/register).
 2. Create a project and hit **Launch Project**.
 3. Once active, copy the **API URL** from the project overview.
-4. In Studio, go to **Settings** (`Cmd+,` / `Ctrl+,`) and paste the URL.
+4. In Studio, select **Connect to a server** and paste the URL.
 
 You're ready to build. Your project gets its own dedicated Core with a managed database, API, authentication, and AI runtime.
 
