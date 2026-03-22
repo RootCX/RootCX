@@ -100,6 +100,8 @@ interface ParsedUBLDocument {
 const BIS3_INVOICE = "urn:oasis:names:specification:ubl:schema:xsd:Invoice-2::Invoice##urn:cen.eu:en16931:2017#compliant#urn:fdc:peppol.eu:2017:poacc:billing:3.0::2.1";
 const BIS3_CREDIT = "urn:oasis:names:specification:ubl:schema:xsd:CreditNote-2::CreditNote##urn:cen.eu:en16931:2017#compliant#urn:fdc:peppol.eu:2017:poacc:billing:3.0::2.1";
 const BIS3_PROCESS = "urn:fdc:peppol.eu:2017:poacc:billing:01:1.0";
+const BIS3_IMR_DOCTYPE = "urn:oasis:names:specification:ubl:schema:xsd:ApplicationResponse-2::ApplicationResponse##urn:fdc:peppol.eu:poacc:trns:invoice_response:3::2.1";
+const BIS3_IMR_PROCESS = "urn:fdc:peppol.eu:poacc:bis:invoice_response:3";
 
 const STANDARD_DOC_TYPES = [
   { name: "BIS Billing 3.0 Invoice", documentTypeIdentifier: BIS3_INVOICE, processIdentifier: BIS3_PROCESS },
@@ -685,6 +687,80 @@ async function pushBusinessCard(config: Config, input: any) {
   return { success: true };
 }
 
+function generateInvoiceResponseXml(
+  id: string, sender: { peppolId: string; name: string }, receiver: { peppolId: string; name: string },
+  invoiceRef: { number: string; date?: string }, reasonCode: string, reason: string,
+): string {
+  const today = new Date().toISOString().slice(0, 10);
+  const esc = escapeXml;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<ubl:ApplicationResponse xmlns:ubl="urn:oasis:names:specification:ubl:schema:xsd:ApplicationResponse-2"
+  xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"
+  xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">
+  <cbc:CustomizationID>urn:fdc:peppol.eu:poacc:trns:invoice_response:3</cbc:CustomizationID>
+  <cbc:ProfileID>urn:fdc:peppol.eu:poacc:bis:invoice_response:3</cbc:ProfileID>
+  <cbc:ID>${esc(id)}</cbc:ID>
+  <cbc:IssueDate>${today}</cbc:IssueDate>
+  <cbc:Note>${esc(reason)}</cbc:Note>
+  <cac:SenderParty>
+    <cbc:EndpointID schemeID="${sender.peppolId.split(":")[0]}">${esc(sender.peppolId)}</cbc:EndpointID>
+    <cac:PartyLegalEntity><cbc:RegistrationName>${esc(sender.name)}</cbc:RegistrationName></cac:PartyLegalEntity>
+  </cac:SenderParty>
+  <cac:ReceiverParty>
+    <cbc:EndpointID schemeID="${receiver.peppolId.split(":")[0]}">${esc(receiver.peppolId)}</cbc:EndpointID>
+    <cac:PartyLegalEntity><cbc:RegistrationName>${esc(receiver.name)}</cbc:RegistrationName></cac:PartyLegalEntity>
+  </cac:ReceiverParty>
+  <cac:DocumentResponse>
+    <cac:Response>
+      <cbc:ResponseCode listID="UNCL4343OpSubset">RE</cbc:ResponseCode>
+      <cbc:EffectiveDate>${today}</cbc:EffectiveDate>
+      <cac:Status>
+        <cbc:StatusReasonCode listID="OPStatusReason">${esc(reasonCode)}</cbc:StatusReasonCode>
+        <cbc:StatusReason>${esc(reason)}</cbc:StatusReason>
+      </cac:Status>
+    </cac:Response>
+    <cac:DocumentReference>
+      <cbc:ID>${esc(invoiceRef.number)}</cbc:ID>${invoiceRef.date ? `\n      <cbc:IssueDate>${esc(invoiceRef.date)}</cbc:IssueDate>` : ""}
+      <cbc:DocumentTypeCode listID="UNECE1001">380</cbc:DocumentTypeCode>
+    </cac:DocumentReference>
+  </cac:DocumentResponse>
+</ubl:ApplicationResponse>`;
+}
+
+async function rejectInvoice(config: Config, input: any) {
+  const { senderPeppolId, senderName, receiverPeppolId, receiverName,
+          originalInvoiceNumber, originalInvoiceDate, countryCode = "BE",
+          reason = "Invoice rejected", reasonCode = "OTH" } = input;
+  for (const [k, v] of [["senderPeppolId", senderPeppolId], ["senderName", senderName],
+    ["receiverPeppolId", receiverPeppolId], ["receiverName", receiverName],
+    ["originalInvoiceNumber", originalInvoiceNumber]] as const)
+    if (!v) throw new Error(`${k} is required`);
+
+  const responseId = `IMR-${Date.now()}`;
+  const xml = generateInvoiceResponseXml(responseId,
+    { peppolId: senderPeppolId, name: senderName },
+    { peppolId: receiverPeppolId, name: receiverName },
+    { number: originalInvoiceNumber, date: originalInvoiceDate }, reasonCode, reason);
+
+  const peppolParticipant = (id: string) => {
+    const [scheme, raw] = id.split(":");
+    return { scheme: "iso6523-actorid-upis", value: `${scheme}:${extractIdentifier(raw || "")}` };
+  };
+
+  const res = await dokapiRequest<any>(config, "POST", "/outgoing-peppol-documents", {
+    c1CountryCode: countryCode.toUpperCase(),
+    sender: peppolParticipant(senderPeppolId),
+    receiver: peppolParticipant(receiverPeppolId),
+    documentTypeIdentifier: { scheme: "busdox-docid-qns", value: BIS3_IMR_DOCTYPE },
+    processIdentifier: { scheme: "cenbii-procid-ubl", value: BIS3_IMR_PROCESS },
+  });
+
+  const upload = await fetch(res.preSignedUploadUrl, { method: "PUT", headers: { "Content-Type": "application/xml" }, body: xml });
+  if (!upload.ok) throw new Error(`Upload failed: ${upload.status}`);
+
+  return { dokapiUlid: res.document.ulid, responseId, status: res.document.status || "sending" };
+}
+
 // ─── Action Dispatch ─────────────────────────────────────────────────────────
 
 const actions: Record<string, (config: Config, input: any) => Promise<any> | any> = {
@@ -703,6 +779,7 @@ const actions: Record<string, (config: Config, input: any) => Promise<any> | any
   download_document: downloadDocument,
   confirm_document_download: confirmDocumentDownload,
   push_business_card: pushBusinessCard,
+  reject_invoice: rejectInvoice,
 };
 
 // ─── Webhook Handler ─────────────────────────────────────────────────────────
