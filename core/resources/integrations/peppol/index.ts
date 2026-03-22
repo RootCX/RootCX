@@ -508,11 +508,11 @@ async function registerParticipant(config: Config, input: any) {
       },
     });
   } catch (err: any) {
-    // 409 = already registered, fetch existing via scoped lookup
+    // 409 = already registered — participant exists, treat as active
     if (err.message?.includes("409")) {
-      registration = await dokapiRequest<any>(config, "GET", `/participant-registrations/find?value=${encodeURIComponent(peppolId)}`);
-      if (!registration) throw new Error("Registration exists in Dokapi but could not be found");
-    } else throw err;
+      return { peppolId, dokapiUlid: "", status: "active" };
+    }
+    throw err;
   }
 
   return { peppolId, dokapiUlid: registration?.ulid, status: registration?.status || "active" };
