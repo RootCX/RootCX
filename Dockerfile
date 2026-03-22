@@ -54,6 +54,7 @@ RUN apt-get update -q \
 
 COPY --from=builder /src/target/release/rootcx-core /usr/local/bin/rootcx-core
 COPY --from=deps    /resources /opt/rootcx/resources
+COPY --from=builder /src/core/resources/integrations /opt/rootcx/resources/integrations
 
 ENV ROOTCX_RESOURCES=/opt/rootcx/resources \
     XDG_DATA_HOME=/data \
