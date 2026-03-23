@@ -4726,7 +4726,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-browser"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chromiumoxide",
  "futures",
@@ -4750,7 +4750,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -4786,7 +4786,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-forge"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -4824,7 +4824,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-postgres-mgmt"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "rootcx-platform",
  "serde",
@@ -4835,7 +4835,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-studio"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bollard",
  "fix-path-env",
