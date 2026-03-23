@@ -3,7 +3,9 @@ use crate::scaffold::types::{Layer, LayerFuture, ScaffoldContext};
 
 const SCAFFOLD_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; img-src 'self' data:";
 
-const ICON: &[u8] = include_bytes!("../../../icons/32x32.png");
+const ICON_PNG: &[u8] = include_bytes!("../../../icons/32x32.png");
+const ICON_ICO: &[u8] = include_bytes!("../../../icons/icon.ico");
+const ICON_ICNS: &[u8] = include_bytes!("../../../icons/icon.icns");
 
 /// Emits: src-tauri/* (Cargo.toml, tauri.conf.json, lib.rs, main.rs, icons, capabilities)
 pub struct TauriLayer;
@@ -13,7 +15,9 @@ impl Layer for TauriLayer {
         Box::pin(async move {
             let ScaffoldContext { app_id, identifier, port, .. } = ctx;
 
-            e.write_bytes("src-tauri/icons/icon.png", ICON).await?;
+            e.write_bytes("src-tauri/icons/icon.png", ICON_PNG).await?;
+            e.write_bytes("src-tauri/icons/icon.ico", ICON_ICO).await?;
+            e.write_bytes("src-tauri/icons/icon.icns", ICON_ICNS).await?;
 
             e.write(
                 "src-tauri/Cargo.toml",
@@ -63,7 +67,7 @@ rootcx-client = "0.2"
   }},
   "bundle": {{
     "active": true,
-    "icon": ["icons/icon.png"]
+    "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"]
   }}
 }}
 "#
