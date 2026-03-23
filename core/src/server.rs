@@ -67,7 +67,7 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .allow_origin(AllowOrigin::predicate(|origin, _| {
             let o = origin.as_bytes();
             o.starts_with(b"http://localhost:") || o.starts_with(b"http://127.0.0.1:")
-                || o.starts_with(b"tauri://") || o.starts_with(b"https://tauri.")
+                || o.starts_with(b"tauri://") || o == b"http://tauri.localhost"
         }))
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any);
