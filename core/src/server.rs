@@ -16,6 +16,7 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .route("/api/v1/apps/{app_id}", delete(routes::uninstall_app))
         .route("/api/v1/apps/{app_id}/collections/{entity}", get(routes::list_records).post(routes::create_record))
         .route("/api/v1/apps/{app_id}/collections/{entity}/query", post(routes::query_records))
+        .route("/api/v1/federated/{identity_kind}/query", post(routes::federated_query))
         .route("/api/v1/apps/{app_id}/collections/{entity}/bulk", post(routes::bulk_create_records))
         .route(
             "/api/v1/apps/{app_id}/collections/{entity}/{id}",

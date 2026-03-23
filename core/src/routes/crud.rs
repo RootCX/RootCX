@@ -13,7 +13,7 @@ use super::{SharedRuntime, parse_uuid, pool};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::extensions::rbac::policy::resolve_permissions;
-use crate::manifest::{field_type_map, map_field_type, quote_ident};
+use crate::manifest::{entity_identity, field_type_map, find_entities_by_identity, map_field_type, quote_ident};
 
 async fn require_perm(pool: &PgPool, app_id: &str, user_id: Uuid, perm: &str) -> Result<(), ApiError> {
     let (_, perms) = resolve_permissions(pool, app_id, user_id).await?;
@@ -43,7 +43,7 @@ fn require_object(body: &JsonValue) -> Result<&serde_json::Map<String, JsonValue
     Ok(obj)
 }
 
-const RESERVED_PARAMS: &[&str] = &["limit", "offset", "sort", "order"];
+const RESERVED_PARAMS: &[&str] = &["limit", "offset", "sort", "order", "linked"];
 
 fn pg_cast_suffix(manifest_type: Option<&str>) -> &'static str {
     match manifest_type.map(map_field_type) {
@@ -263,6 +263,15 @@ pub struct QueryRequest {
     limit: i64,
     #[serde(default)]
     offset: i64,
+    #[serde(default)]
+    linked: Option<LinkedOption>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum LinkedOption {
+    All(bool),
+    Apps(Vec<String>),
 }
 
 fn default_query_limit() -> i64 {
@@ -301,7 +310,80 @@ pub async fn list_records(
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
     for s in &binds { query = query.bind(s.as_str()); }
     let rows: Vec<(JsonValue,)> = query.fetch_all(&pool).await?;
-    Ok(Json(rows.into_iter().map(|(r,)| r).collect()))
+    let mut data: Vec<JsonValue> = rows.into_iter().map(|(r,)| r).collect();
+
+    if let Some(lp) = params.get("linked") {
+        let linked = match lp.as_str() {
+            "true" => LinkedOption::All(true),
+            apps => LinkedOption::Apps(apps.split(',').map(String::from).collect()),
+        };
+        enrich_linked(&pool, identity.user_id, &app_id, &entity, &mut data, &linked).await?;
+    }
+
+    Ok(Json(data))
+}
+
+async fn enrich_linked(
+    pool: &PgPool,
+    user_id: Uuid,
+    source_app: &str,
+    entity: &str,
+    rows: &mut [JsonValue],
+    linked: &LinkedOption,
+) -> Result<(), ApiError> {
+    let Some((identity_kind, identity_key)) = entity_identity(pool, source_app, entity)
+        .await.map_err(|e| ApiError::Internal(e.to_string()))?
+    else { return Ok(()) };
+
+    let targets: Vec<_> = find_entities_by_identity(pool, &identity_kind, Some(source_app))
+        .await.map_err(|e| ApiError::Internal(e.to_string()))?
+        .into_iter()
+        .filter(|(app, _, _)| match linked {
+            LinkedOption::All(true) => true,
+            LinkedOption::Apps(apps) => apps.contains(app),
+            _ => false,
+        })
+        .collect();
+
+    let key_values: Vec<String> = rows.iter()
+        .filter_map(|r| r.get(&identity_key).and_then(|v| v.as_str()).map(String::from))
+        .collect();
+
+    if targets.is_empty() || key_values.is_empty() { return Ok(()) }
+
+    for (target_app, target_entity, target_key) in &targets {
+        if require_perm(pool, target_app, user_id, &format!("{target_entity}.read")).await.is_err() {
+            continue;
+        }
+
+        let tbl = table(target_app, target_entity);
+        let phs: String = (1..=key_values.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(",");
+        let q = format!("SELECT to_jsonb(t.*) AS row FROM {tbl} t WHERE t.{} IN ({phs})", quote_ident(target_key));
+        let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
+        for v in &key_values { query = query.bind(v.as_str()); }
+        let Ok(linked_rows) = query.fetch_all(pool).await else { continue };
+
+        let by_key: HashMap<&str, &JsonValue> = linked_rows.iter()
+            .filter_map(|(row,)| row.get(target_key).and_then(|v| v.as_str()).map(|k| (k, row)))
+            .collect();
+
+        for row in rows.iter_mut() {
+            let kv = row.get(&identity_key).and_then(|v| v.as_str()).unwrap_or_default();
+            if let Some(&linked_record) = by_key.get(kv) {
+                row.as_object_mut().unwrap()
+                    .entry("_linked")
+                    .or_insert_with(|| serde_json::json!({}))
+                    .as_object_mut().unwrap()
+                    .insert(target_app.clone(), serde_json::json!({
+                        "entity": target_entity,
+                        "recordId": linked_record.get("id"),
+                        "data": linked_record
+                    }));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 pub async fn query_records(
@@ -338,7 +420,12 @@ pub async fn query_records(
     let rows: Vec<(JsonValue, i64)> = query.fetch_all(&pool).await?;
 
     let total = rows.first().map(|(_, t)| *t).unwrap_or(0);
-    let data: Vec<JsonValue> = rows.into_iter().map(|(r, _)| r).collect();
+    let mut data: Vec<JsonValue> = rows.into_iter().map(|(r, _)| r).collect();
+
+    if let Some(ref linked) = body.linked {
+        enrich_linked(&pool, identity.user_id, &app_id, &entity, &mut data, linked).await?;
+    }
+
     Ok(Json(serde_json::json!({ "data": data, "total": total })))
 }
 
@@ -529,6 +616,78 @@ pub async fn delete_record(
         return Err(ApiError::NotFound(format!("record '{id}' not found")));
     }
     Ok(Json(serde_json::json!({ "message": format!("record '{id}' deleted") })))
+}
+
+pub async fn federated_query(
+    State(rt): State<SharedRuntime>,
+    Path(identity_kind): Path<String>,
+    identity: Identity,
+    Json(body): Json<QueryRequest>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let pool = pool(&rt).await?;
+    let targets = find_entities_by_identity(&pool, &identity_kind, None)
+        .await.map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let mut unions: Vec<String> = Vec::new();
+    let mut all_binds: Vec<String> = Vec::new();
+    let mut bind_offset = 0usize;
+
+    for (app_id, entity_name, _key) in &targets {
+        if require_perm(&pool, app_id, identity.user_id, &format!("{entity_name}.read")).await.is_err() {
+            continue;
+        }
+
+        let tbl = table(app_id, entity_name);
+        let types = field_type_map(&pool, app_id, entity_name).await?;
+        let (mut idx, mut conditions, mut binds) = (bind_offset, Vec::new(), Vec::new());
+
+        if let Some(ref w) = body.where_clause {
+            let sql = build_where_clause(w, &types, &mut binds, &mut idx)?;
+            if sql != "TRUE" { conditions.push(sql); }
+        }
+
+        let wh = join_where(&conditions);
+        // _source built via bind params to avoid SQL injection from app_id/entity_name
+        idx += 1;
+        let app_bind = idx;
+        binds.push(app_id.clone());
+        idx += 1;
+        let ent_bind = idx;
+        binds.push(entity_name.clone());
+
+        unions.push(format!(
+            "SELECT to_jsonb(t.*) || jsonb_build_object('_source', jsonb_build_object('app', ${app_bind}::text, 'entity', ${ent_bind}::text)) AS row FROM {tbl} t{wh}"
+        ));
+
+        bind_offset = idx;
+        all_binds.extend(binds);
+    }
+
+    if unions.is_empty() {
+        return Ok(Json(serde_json::json!({ "data": [], "total": 0 })));
+    }
+
+    let limit = body.limit.min(1000).max(1);
+    let offset = body.offset.max(0);
+    let sort_field = body.order_by.as_deref().unwrap_or("created_at");
+    if !sort_field.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
+        return Err(ApiError::BadRequest(format!("invalid sort field: '{sort_field}'")));
+    }
+    let order = validate_order(body.order.as_ref());
+
+    let q = format!(
+        "SELECT row, COUNT(*) OVER() AS total FROM ({}) sub \
+         ORDER BY row->>'{sort_field}' {order} LIMIT {limit} OFFSET {offset}",
+        unions.join(" UNION ALL ")
+    );
+
+    let mut query = sqlx::query_as::<_, (JsonValue, i64)>(&q);
+    for s in &all_binds { query = query.bind(s.as_str()); }
+    let rows: Vec<(JsonValue, i64)> = query.fetch_all(&pool).await?;
+
+    let total = rows.first().map(|(_, t)| *t).unwrap_or(0);
+    let data: Vec<JsonValue> = rows.into_iter().map(|(r, _)| r).collect();
+    Ok(Json(serde_json::json!({ "data": data, "total": total })))
 }
 
 pub(crate) type QA<'q> = sqlx::query::QueryAs<'q, sqlx::Postgres, (JsonValue,), sqlx::postgres::PgArguments>;

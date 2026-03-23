@@ -105,6 +105,10 @@ fn default_version() -> String {
 pub struct EntityContract {
     pub entity_name: String,
     pub fields: Vec<FieldContract>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

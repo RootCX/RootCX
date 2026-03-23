@@ -104,12 +104,15 @@ export interface QueryOptions {
   order?: "asc" | "desc";
   limit?: number;
   offset?: number;
+  linked?: boolean | string[];
 }
 
 export interface QueryResult<T> {
   data: T[];
   total: number;
 }
+
+export type IdentityRecord<T> = T & { _source: { app: string; entity: string } };
 
 declare global {
   interface ImportMetaEnv { VITE_ROOTCX_URL?: string }
@@ -174,6 +177,20 @@ export class RuntimeClient {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(opts),
+    });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async identityQuery<T = Record<string, unknown>>(
+    identityKind: string,
+    opts?: QueryOptions,
+  ): Promise<QueryResult<IdentityRecord<T>>> {
+    const url = `${this.baseUrl}/api/v1/federated/${enc(identityKind)}/query`;
+    const res = await this.authFetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(opts ?? {}),
     });
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();

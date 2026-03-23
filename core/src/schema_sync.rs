@@ -4,7 +4,7 @@ use sqlx::{Connection, PgPool};
 use tracing::info;
 
 use crate::RuntimeError;
-use crate::manifest::{json_to_sql_default, map_field_type, quote_ident};
+use crate::manifest::{identity_index_name, json_to_sql_default, list_identity_indexes, map_field_type, quote_ident};
 use rootcx_types::{EntityContract, FieldContract, SchemaChange, SchemaVerification};
 
 const PROTECTED_COLUMNS: &[&str] = &["id", "created_at", "updated_at"];
@@ -445,7 +445,44 @@ pub async fn verify_all(
         });
     }
 
+    changes.extend(verify_identity_indexes(pool, app_id, entities).await?);
+
     Ok(SchemaVerification { compliant: changes.is_empty(), changes })
+}
+
+async fn verify_identity_indexes(
+    pool: &PgPool,
+    app_id: &str,
+    entities: &[EntityContract],
+) -> Result<Vec<SchemaChange>, RuntimeError> {
+    let mut changes = Vec::new();
+    for entity in entities {
+        let expected = identity_index_name(entity);
+        let existing = list_identity_indexes(pool, app_id, &entity.entity_name).await?;
+
+        if let Some(ref idx_name) = expected {
+            if !existing.contains(idx_name) {
+                changes.push(SchemaChange {
+                    entity: entity.entity_name.clone(),
+                    change_type: "add_identity_index".to_string(),
+                    column: entity.identity_key.clone().unwrap_or_default(),
+                    detail: entity.identity_kind.clone(),
+                });
+            }
+        }
+
+        for name in &existing {
+            if expected.as_ref() != Some(name) {
+                changes.push(SchemaChange {
+                    entity: entity.entity_name.clone(),
+                    change_type: "drop_identity_index".to_string(),
+                    column: name.clone(),
+                    detail: None,
+                });
+            }
+        }
+    }
+    Ok(changes)
 }
 
 pub async fn drop_orphaned_tables(
@@ -924,7 +961,7 @@ mod tests {
     }
 
     fn mentity(name: &str, fields: Vec<FieldContract>) -> EntityContract {
-        EntityContract { entity_name: name.to_string(), fields }
+        EntityContract { entity_name: name.to_string(), fields, identity_kind: None, identity_key: None }
     }
 
     #[test]

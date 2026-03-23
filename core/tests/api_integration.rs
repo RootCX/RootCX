@@ -1579,3 +1579,242 @@ async fn verify_schema_no_table_detects_create() {
     assert!(result.changes.iter().any(|c| c.change_type == "create_table" && c.entity == "items"));
     rt.shutdown().await;
 }
+
+#[tokio::test]
+async fn identity_linked_query_cross_app() {
+    let rt = TestRuntime::boot().await;
+
+    // CRM with companies identified by name
+    rt.install_manifest(&json!({
+        "appId": "crm_link", "name": "CRM", "version": "1.0.0",
+        "dataContract": [{ "entityName": "companies", "identityKind": "organization", "identityKey": "name", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "industry", "type": "text" }
+        ]}]
+    })).await;
+
+    // Billing with customers identified by the same key
+    rt.install_manifest(&json!({
+        "appId": "bill_link", "name": "Billing", "version": "1.0.0",
+        "dataContract": [{ "entityName": "customers", "identityKind": "organization", "identityKey": "name", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "vat_number", "type": "text" }
+        ]}]
+    })).await;
+
+    // Create matching records
+    rt.create("crm_link", "companies", &json!({"name": "Acme Corp", "industry": "Tech"})).await;
+    rt.create("bill_link", "customers", &json!({"name": "Acme Corp", "vat_number": "BE123"})).await;
+    rt.create("crm_link", "companies", &json!({"name": "Other Inc", "industry": "Finance"})).await;
+
+    // Query with linked=true
+    let (s, body) = rt.post_json("/api/v1/apps/crm_link/collections/companies/query", &json!({"linked": true})).await;
+    assert_eq!(s, 200);
+    let data = body["data"].as_array().unwrap();
+
+    let acme = data.iter().find(|r| r["name"] == "Acme Corp").unwrap();
+    assert!(acme["_linked"]["bill_link"].is_object(), "Acme should have billing linked data");
+    assert_eq!(acme["_linked"]["bill_link"]["entity"], "customers");
+    assert_eq!(acme["_linked"]["bill_link"]["data"]["vat_number"], "BE123");
+
+    let other = data.iter().find(|r| r["name"] == "Other Inc").unwrap();
+    assert!(other.get("_linked").is_none(), "Other Inc has no billing match");
+
+    // Query with linked=["bill_link"] (subset)
+    let (_, body2) = rt.post_json("/api/v1/apps/crm_link/collections/companies/query", &json!({"linked": ["bill_link"]})).await;
+    let acme2 = body2["data"].as_array().unwrap().iter().find(|r| r["name"] == "Acme Corp").unwrap();
+    assert!(acme2["_linked"]["bill_link"].is_object());
+
+    // Query without linked — no _linked field
+    let (_, body3) = rt.post_json("/api/v1/apps/crm_link/collections/companies/query", &json!({})).await;
+    let acme3 = body3["data"].as_array().unwrap().iter().find(|r| r["name"] == "Acme Corp").unwrap();
+    assert!(acme3.get("_linked").is_none(), "no _linked without opt-in");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn identity_linked_via_get_query_param() {
+    let rt = TestRuntime::boot().await;
+
+    rt.install_manifest(&json!({
+        "appId": "crm_qp", "name": "CRM", "version": "1.0.0",
+        "dataContract": [{ "entityName": "contacts", "identityKind": "person", "identityKey": "email", "fields": [
+            { "name": "email", "type": "text", "required": true },
+            { "name": "name", "type": "text" }
+        ]}]
+    })).await;
+    rt.install_manifest(&json!({
+        "appId": "help_qp", "name": "Helpdesk", "version": "1.0.0",
+        "dataContract": [{ "entityName": "requesters", "identityKind": "person", "identityKey": "email", "fields": [
+            { "name": "email", "type": "text", "required": true },
+            { "name": "priority", "type": "text" }
+        ]}],
+        "permissions": { "permissions": [{ "key": "requesters.read", "description": "read" }]}
+    })).await;
+
+    rt.create("crm_qp", "contacts", &json!({"email": "john@acme.com", "name": "John"})).await;
+    rt.create("help_qp", "requesters", &json!({"email": "john@acme.com", "priority": "high"})).await;
+
+    let (s, body) = rt.get_json("/api/v1/apps/crm_qp/collections/contacts?linked=true").await;
+    assert_eq!(s, 200);
+    let data = body.as_array().unwrap();
+    let john = &data[0];
+    assert_eq!(john["_linked"]["help_qp"]["data"]["priority"], "high");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn identity_index_cleanup_on_removal() {
+    let rt = TestRuntime::boot().await;
+
+    // Install with identity
+    rt.install_manifest(&json!({
+        "appId": "idx_clean", "name": "Test", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "identityKind": "product", "identityKey": "sku", "fields": [
+            { "name": "sku", "type": "text", "required": true }
+        ]}]
+    })).await;
+
+    // Reinstall without identity
+    rt.install_manifest(&json!({
+        "appId": "idx_clean", "name": "Test", "version": "1.0.1",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "sku", "type": "text", "required": true }
+        ]}]
+    })).await;
+
+    // Verify no _linked enrichment happens (identity was removed)
+    rt.create("idx_clean", "items", &json!({"sku": "ABC"})).await;
+    let (_, body) = rt.post_json("/api/v1/apps/idx_clean/collections/items/query", &json!({"linked": true})).await;
+    let item = &body["data"].as_array().unwrap()[0];
+    assert!(item.get("_linked").is_none(), "no identity = no linked enrichment");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn identity_manifest_validation_rejects_invalid() {
+    let rt = TestRuntime::boot().await;
+
+    // identityKind without identityKey
+    let (s, _) = rt.post_json("/api/v1/apps", &json!({
+        "appId": "bad_id", "name": "Bad", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "identityKind": "product", "fields": [
+            { "name": "sku", "type": "text" }
+        ]}]
+    })).await;
+    assert_eq!(s, 500, "should reject identityKind without identityKey");
+
+    // identityKey pointing to nonexistent field
+    let (s2, _) = rt.post_json("/api/v1/apps", &json!({
+        "appId": "bad_id2", "name": "Bad", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "identityKind": "product", "identityKey": "missing_field", "fields": [
+            { "name": "sku", "type": "text" }
+        ]}]
+    })).await;
+    assert_eq!(s2, 500, "should reject identityKey referencing nonexistent field");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn identity_verify_detects_index_changes() {
+    let rt = TestRuntime::boot().await;
+
+    // Install without identity
+    rt.install_manifest(&json!({
+        "appId": "vfy_id", "name": "Test", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "sku", "type": "text", "required": true }
+        ]}]
+    })).await;
+
+    // Verify with identity added — should detect missing index
+    let (s, body) = rt.post_json("/api/v1/apps/schema/verify", &json!({
+        "appId": "vfy_id", "name": "Test", "version": "1.0.1",
+        "dataContract": [{ "entityName": "items", "identityKind": "product", "identityKey": "sku", "fields": [
+            { "name": "sku", "type": "text", "required": true }
+        ]}]
+    })).await;
+    assert_eq!(s, 200);
+    let result: SchemaVerification = serde_json::from_value(body).unwrap();
+    assert!(!result.compliant);
+    assert!(result.changes.iter().any(|c| c.change_type == "add_identity_index" && c.entity == "items"));
+
+    // Now install with identity
+    rt.install_manifest(&json!({
+        "appId": "vfy_id", "name": "Test", "version": "1.0.1",
+        "dataContract": [{ "entityName": "items", "identityKind": "product", "identityKey": "sku", "fields": [
+            { "name": "sku", "type": "text", "required": true }
+        ]}]
+    })).await;
+
+    // Verify removing identity — should detect orphaned index
+    let (_, body2) = rt.post_json("/api/v1/apps/schema/verify", &json!({
+        "appId": "vfy_id", "name": "Test", "version": "1.0.2",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "sku", "type": "text", "required": true }
+        ]}]
+    })).await;
+    let result2: SchemaVerification = serde_json::from_value(body2).unwrap();
+    assert!(!result2.compliant);
+    assert!(result2.changes.iter().any(|c| c.change_type == "drop_identity_index" && c.entity == "items"));
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn federated_query_across_apps() {
+    let rt = TestRuntime::boot().await;
+
+    rt.install_manifest(&json!({
+        "appId": "crm_fed", "name": "CRM", "version": "1.0.0",
+        "dataContract": [{ "entityName": "companies", "identityKind": "company", "identityKey": "name", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "industry", "type": "text" }
+        ]}]
+    })).await;
+
+    rt.install_manifest(&json!({
+        "appId": "bill_fed", "name": "Billing", "version": "1.0.0",
+        "dataContract": [{ "entityName": "company", "identityKind": "company", "identityKey": "name", "fields": [
+            { "name": "name", "type": "text", "required": true },
+            { "name": "vat", "type": "text" }
+        ]}]
+    })).await;
+
+    rt.create("crm_fed", "companies", &json!({"name": "Acme Corp", "industry": "Tech"})).await;
+    rt.create("crm_fed", "companies", &json!({"name": "Beta Inc", "industry": "Finance"})).await;
+    rt.create("bill_fed", "company", &json!({"name": "Acme Corp", "vat": "BE123"})).await;
+    rt.create("bill_fed", "company", &json!({"name": "Gamma Ltd", "vat": "FR456"})).await;
+
+    let (s, body) = rt.post_json("/api/v1/federated/company/query", &json!({})).await;
+    assert_eq!(s, 200);
+    let data = body["data"].as_array().unwrap();
+    assert_eq!(body["total"], 4, "should return all companies from both apps");
+
+    // Each record has _source
+    for record in data {
+        assert!(record["_source"]["app"].is_string(), "missing _source.app");
+        assert!(record["_source"]["entity"].is_string(), "missing _source.entity");
+    }
+
+    let crm_records: Vec<_> = data.iter().filter(|r| r["_source"]["app"] == "crm_fed").collect();
+    let bill_records: Vec<_> = data.iter().filter(|r| r["_source"]["app"] == "bill_fed").collect();
+    assert_eq!(crm_records.len(), 2);
+    assert_eq!(bill_records.len(), 2);
+
+    // With where filter
+    let (_, body2) = rt.post_json("/api/v1/federated/company/query", &json!({"where": {"name": "Acme Corp"}})).await;
+    let data2 = body2["data"].as_array().unwrap();
+    assert_eq!(data2.len(), 2, "Acme Corp exists in both apps");
+
+    // Empty identityKind
+    let (s3, body3) = rt.post_json("/api/v1/federated/nonexistent/query", &json!({})).await;
+    assert_eq!(s3, 200);
+    assert_eq!(body3["total"], 0);
+
+    rt.shutdown().await;
+}

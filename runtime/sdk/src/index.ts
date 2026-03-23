@@ -17,6 +17,7 @@ export type {
   IntegrationSummary,
   ActionDefinition,
   IntegrationBinding,
+  IdentityRecord,
 } from "./client";
 
 export { RuntimeProvider, useRuntimeClient } from "./components/RuntimeProvider";
@@ -36,6 +37,9 @@ export type { UsePermissionsResult } from "./hooks/usePermissions";
 
 export { useIntegration } from "./hooks/useIntegration";
 export type { UseIntegrationResult } from "./hooks/useIntegration";
+
+export { useIdentity } from "./hooks/useIdentity";
+export type { UseIdentityResult } from "./hooks/useIdentity";
 
 export { PermissionsProvider, usePermissionsContext } from "./components/PermissionsProvider";
 export type { PermissionsProviderProps } from "./components/PermissionsProvider";
