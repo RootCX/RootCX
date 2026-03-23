@@ -121,7 +121,7 @@ pub async fn verify_schema(
 }
 
 pub use config::{get_ai_config, get_forge_config, set_ai_config};
-pub use crud::{bulk_create_records, create_record, delete_record, get_record, list_records, query_records, update_record};
+pub use crud::{bulk_create_records, create_record, delete_record, federated_query, get_record, list_records, query_records, update_record};
 pub use deploy::{deploy_backend, deploy_frontend, serve_frontend, serve_frontend_root};
 pub use jobs::{enqueue_job, get_job, list_jobs};
 pub use secrets::{delete_secret, list_secrets, set_secret};

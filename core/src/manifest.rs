@@ -49,6 +49,17 @@ pub async fn install_app(
             for stmt in &fk_statements {
                 sqlx::query(stmt).execute(pool).await.map_err(RuntimeError::Schema)?;
             }
+            if let Some(ref key) = entity.identity_key {
+                let idx = format!(
+                    "CREATE INDEX IF NOT EXISTS {} ON {}.{} ({})",
+                    quote_ident(&format!("idx_identity_{}_{}", entity.entity_name, key)),
+                    quote_ident(app_id),
+                    quote_ident(&entity.entity_name),
+                    quote_ident(key),
+                );
+                sqlx::query(&idx).execute(pool).await.map_err(RuntimeError::Schema)?;
+            }
+            drop_orphaned_identity_indexes(pool, app_id, entity).await?;
         }
     }
 
@@ -236,11 +247,11 @@ pub(crate) fn json_to_sql_default(val: &serde_json::Value, pg_type: &str) -> Opt
     }
 }
 
-pub async fn field_type_map(
+async fn load_entity(
     pool: &PgPool,
     app_id: &str,
     entity: &str,
-) -> Result<HashMap<String, String>, crate::RuntimeError> {
+) -> Result<Option<EntityContract>, crate::RuntimeError> {
     let Some((json,)): Option<(serde_json::Value,)> =
         sqlx::query_as("SELECT manifest FROM rootcx_system.apps WHERE id = $1")
             .bind(app_id)
@@ -248,16 +259,93 @@ pub async fn field_type_map(
             .await
             .map_err(crate::RuntimeError::Schema)?
     else {
-        return Ok(HashMap::new());
+        return Ok(None);
     };
-    let Ok(m) = serde_json::from_value::<AppManifest>(json) else {
-        return Ok(HashMap::new());
-    };
-    Ok(m.data_contract
-        .iter()
-        .find(|e| e.entity_name == entity)
+    let Ok(m) = serde_json::from_value::<AppManifest>(json) else { return Ok(None) };
+    Ok(m.data_contract.into_iter().find(|e| e.entity_name == entity))
+}
+
+pub async fn field_type_map(
+    pool: &PgPool,
+    app_id: &str,
+    entity: &str,
+) -> Result<HashMap<String, String>, crate::RuntimeError> {
+    Ok(load_entity(pool, app_id, entity)
+        .await?
         .map(|ec| ec.fields.iter().map(|f| (f.name.clone(), f.field_type.clone())).collect())
         .unwrap_or_default())
+}
+
+pub async fn entity_identity(
+    pool: &PgPool,
+    app_id: &str,
+    entity: &str,
+) -> Result<Option<(String, String)>, crate::RuntimeError> {
+    Ok(load_entity(pool, app_id, entity)
+        .await?
+        .and_then(|e| e.identity_kind.zip(e.identity_key)))
+}
+
+pub async fn find_entities_by_identity(
+    pool: &PgPool,
+    identity_kind: &str,
+    exclude_app: Option<&str>,
+) -> Result<Vec<(String, String, String)>, crate::RuntimeError> {
+    let rows: Vec<(Option<serde_json::Value>,)> = match exclude_app {
+        Some(app) => sqlx::query_as("SELECT manifest FROM rootcx_system.apps WHERE id != $1 AND manifest IS NOT NULL")
+            .bind(app).fetch_all(pool).await,
+        None => sqlx::query_as("SELECT manifest FROM rootcx_system.apps WHERE manifest IS NOT NULL")
+            .fetch_all(pool).await,
+    }.map_err(crate::RuntimeError::Schema)?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(json,)| serde_json::from_value::<AppManifest>(json?).ok())
+        .flat_map(|m| {
+            let app_id = m.app_id;
+            m.data_contract.into_iter().filter_map(move |e| {
+                e.identity_kind.as_deref()
+                    .filter(|k| *k == identity_kind)
+                    .and(e.identity_key)
+                    .map(|key| (app_id.clone(), e.entity_name, key))
+            })
+        })
+        .collect())
+}
+
+pub fn identity_index_name(entity: &EntityContract) -> Option<String> {
+    entity.identity_key.as_ref().map(|k| format!("idx_identity_{}_{}", entity.entity_name, k))
+}
+
+pub async fn list_identity_indexes(
+    pool: &PgPool,
+    app_id: &str,
+    table: &str,
+) -> Result<Vec<String>, RuntimeError> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND tablename = $2 AND indexname LIKE 'idx_identity_%'"
+    )
+    .bind(app_id)
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .map_err(RuntimeError::Schema)?;
+    Ok(rows.into_iter().map(|(n,)| n).collect())
+}
+
+async fn drop_orphaned_identity_indexes(
+    pool: &PgPool,
+    app_id: &str,
+    entity: &EntityContract,
+) -> Result<(), RuntimeError> {
+    let expected = identity_index_name(entity);
+    for name in list_identity_indexes(pool, app_id, &entity.entity_name).await? {
+        if expected.as_ref() != Some(&name) {
+            sqlx::query(&format!("DROP INDEX IF EXISTS {}.{}", quote_ident(app_id), quote_ident(&name)))
+                .execute(pool).await.map_err(RuntimeError::Schema)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn quote_ident(ident: &str) -> String {
@@ -283,6 +371,18 @@ fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
         validate_ident(&entity.entity_name, "entity name")?;
         for field in &entity.fields {
             validate_ident(&field.name, "field name")?;
+        }
+        if let (Some(kind), Some(key)) = (&entity.identity_kind, &entity.identity_key) {
+            validate_ident(kind, "identityKind")?;
+            if !entity.fields.iter().any(|f| f.name == *key) {
+                return Err(RuntimeError::Schema(sqlx::Error::Protocol(format!(
+                    "identityKey '{key}' not found in fields of entity '{}'", entity.entity_name
+                ))));
+            }
+        } else if entity.identity_kind.is_some() != entity.identity_key.is_some() {
+            return Err(RuntimeError::Schema(sqlx::Error::Protocol(
+                "identityKind and identityKey must both be set or both be absent".into()
+            )));
         }
     }
     Ok(())
@@ -334,7 +434,7 @@ mod tests {
     }
 
     fn entity(name: &str, fields: Vec<FieldContract>) -> EntityContract {
-        EntityContract { entity_name: name.to_string(), fields }
+        EntityContract { entity_name: name.to_string(), fields, identity_kind: None, identity_key: None }
     }
 
     #[test]
@@ -496,5 +596,71 @@ mod tests {
         let all = vec![e.clone()];
         let stmts = generate_foreign_keys("myapp", &e, &all);
         assert!(stmts.is_empty(), "no entity_link fields should produce no FK stmts: {stmts:?}");
+    }
+
+    fn manifest_with(entities: Vec<EntityContract>) -> AppManifest {
+        AppManifest {
+            app_id: "testapp".into(),
+            name: "Test".into(),
+            version: "1.0.0".into(),
+            description: String::new(),
+            app_type: Default::default(),
+            permissions: None,
+            data_contract: entities,
+            actions: vec![],
+            config_schema: None,
+            user_auth: None,
+            webhooks: vec![],
+            instructions: None,
+        }
+    }
+
+    #[test]
+    fn validate_identity_rejects_mismatched_kind_key() {
+        let cases: Vec<(Option<&str>, Option<&str>, &str)> = vec![
+            (Some("person"), None, "kind without key"),
+            (None, Some("email"), "key without kind"),
+        ];
+        for (kind, key, label) in cases {
+            let mut e = entity("contacts", vec![field("email", "text")]);
+            e.identity_kind = kind.map(String::from);
+            e.identity_key = key.map(String::from);
+            let m = manifest_with(vec![e]);
+            assert!(validate_manifest(&m).is_err(), "should reject: {label}");
+        }
+    }
+
+    #[test]
+    fn validate_identity_rejects_missing_field() {
+        let mut e = entity("contacts", vec![field("name", "text")]);
+        e.identity_kind = Some("person".into());
+        e.identity_key = Some("email".into());
+        let m = manifest_with(vec![e]);
+        let err = validate_manifest(&m).unwrap_err().to_string();
+        assert!(err.contains("identityKey 'email' not found"), "expected field-not-found error, got: {err}");
+    }
+
+    #[test]
+    fn validate_identity_rejects_invalid_kind() {
+        let mut e = entity("contacts", vec![field("email", "text")]);
+        e.identity_kind = Some("My-Kind".into());
+        e.identity_key = Some("email".into());
+        let m = manifest_with(vec![e]);
+        assert!(validate_manifest(&m).is_err(), "should reject non-snake_case identityKind");
+    }
+
+    #[test]
+    fn validate_identity_accepts_valid() {
+        let mut e = entity("contacts", vec![field("email", "text")]);
+        e.identity_kind = Some("person".into());
+        e.identity_key = Some("email".into());
+        let m = manifest_with(vec![e]);
+        assert!(validate_manifest(&m).is_ok());
+    }
+
+    #[test]
+    fn validate_identity_accepts_absent() {
+        let m = manifest_with(vec![entity("contacts", vec![field("name", "text")])]);
+        assert!(validate_manifest(&m).is_ok());
     }
 }
