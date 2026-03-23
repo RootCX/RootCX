@@ -39,8 +39,7 @@ tauri = {{ version = "2", features = [] }}
 tauri-plugin-shell = "2"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
-reqwest = {{ version = "0.12", default-features = false, features = ["rustls-tls"] }}
-rootcx-client = "0.2"
+rootcx-client = "0.3"
 "#
                 ),
             )
