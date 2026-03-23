@@ -89,7 +89,9 @@ pub(crate) fn validate_fs_path(path: &str) -> Result<(), String> {
         return Err("path must be absolute".into());
     }
 
+    // canonicalize both so prefixes match (Windows adds \\?\ via canonicalize)
     let resolved = std::fs::canonicalize(raw).unwrap_or_else(|_| normalize_lexical(raw));
+    let home = std::fs::canonicalize(&home).unwrap_or(home);
 
     if !resolved.starts_with(&home) {
         return Err("path must be under home directory".into());
