@@ -493,38 +493,29 @@ async function registerParticipant(config: Config, input: any) {
   if (!companyName) throw new Error("companyName is required");
 
   const cc = countryCode.toUpperCase();
-  const countryConfig = getCountryConfig(cc);
-  const peppolId = formatToPeppolId(vatNumber, countryConfig);
+  const peppolId = formatToPeppolId(vatNumber, getCountryConfig(cc));
+  const pid = { scheme: "iso6523-actorid-upis", value: peppolId };
 
-  let registration: any;
+  let reg: any;
   try {
-    registration = await dokapiRequest(config, "POST", "/participant-registrations", {
-      participantIdentifier: { scheme: "iso6523-actorid-upis", value: peppolId },
-      countryCode: cc,
-      businessCardInfo: {
-        name: companyName,
-        iso3166Alpha2CountryCode: cc,
-        identifiers: [{ scheme: `${cc}:VAT`, value: vatNumber.replace(/[^0-9A-Z]/gi, "").toUpperCase() }],
-      },
+    const res = await dokapiRequest<any>(config, "POST", "/participant-registrations", {
+      participantIdentifier: pid, countryCode: cc,
+      completeBusinessCard: { businessEntity: [{
+        name: [{ value: companyName }], countryCode: cc,
+        identifier: [{ scheme: `${cc}:VAT`, value: vatNumber.replace(/[^0-9A-Z]/gi, "").toUpperCase() }],
+      }] },
     });
+    reg = res?.participantRegistration;
   } catch (err: any) {
-    // 409 = already registered, fetch existing
-    if (err.message?.includes("409")) {
-      const regs = await dokapiRequest<any>(config, "GET", "/participant-registrations");
-      const items = regs?.Items || regs;
-      registration = Array.isArray(items) ? items.find((r: any) => r.participantIdentifier?.value === peppolId) : null;
-      if (!registration) throw new Error("Registration exists in Dokapi but could not be found");
-    } else throw err;
+    if (!err.message?.includes("409")) throw err;
+    // 409 — already registered, try scoped lookup (may fail on proxy ownership check)
+    try { reg = await dokapiRequest<any>(config, "GET", `/participant-registrations/find?scheme=${pid.scheme}&value=${encodeURIComponent(pid.value)}`); }
+    catch { return { peppolId, dokapiUlid: null, status: "active" }; }
   }
 
-  // Publish business card to Peppol Directory
-  try {
-    await dokapiRequest(config, "POST", "/participant-registrations/business-cards/push", {
-      scheme: "iso6523-actorid-upis", value: peppolId,
-    });
-  } catch { /* best-effort — registration itself succeeded */ }
+  try { await dokapiRequest(config, "POST", "/participant-registrations/business-cards/push", pid); } catch {}
 
-  return { peppolId, dokapiUlid: registration?.ulid, status: registration?.status || "active" };
+  return { peppolId, dokapiUlid: reg?.ulid, status: reg?.status || "active" };
 }
 
 async function deregisterParticipant(config: Config, input: any) {
