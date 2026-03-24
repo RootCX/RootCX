@@ -37,7 +37,8 @@ async function executeStep(step: string, projectPath: string): Promise<boolean> 
   switch (step) {
     case "verify_schema": {
       try {
-        const result = await verifySchema(await readManifest(projectPath));
+        const manifest = await readManifest(projectPath);
+        const result = await verifySchema(manifest);
         if (!result.compliant) return await showMigrationDialog(result.changes);
       } catch (e) { return logError("verify_schema", e); }
       return true;

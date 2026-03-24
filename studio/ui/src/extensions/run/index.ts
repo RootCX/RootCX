@@ -28,4 +28,22 @@ export function activate() {
       }
     },
   });
+
+  commands.register("rootcx.applyMigrations", {
+    title: "Apply Migrations",
+    category: "Project",
+    handler: async () => {
+      layout.showView("output");
+      const pp = workspace.projectPath;
+      if (!pp) return;
+
+      emit("run-output", "\x1b[36m[migrations] Deploying backend...\x1b[0m\r\n");
+      try {
+        await invoke("deploy_backend", { projectPath: pp });
+        emit("run-output", "\x1b[32m[migrations] Applied successfully.\x1b[0m\r\n");
+      } catch (e) {
+        emit("run-output", `\x1b[31m[migrations] ${e instanceof Error ? e.message : e}\x1b[0m\r\n`);
+      }
+    },
+  });
 }

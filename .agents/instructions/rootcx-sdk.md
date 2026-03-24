@@ -41,6 +41,40 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
 
 ---
 
+## Migrations
+
+**Two sources of truth:** `manifest.json` defines what the API layer expects (routing, validation, types). `backend/migrations/*.sql` defines what the DB actually has. Both must agree. Changing one without the other causes schema drift — Core warns but does not auto-fix.
+
+**You own the DDL.** Core never generates or runs DDL from manifest. All schema changes are explicit SQL files you write. This is intentional — auto-sync cannot handle data transforms, backfills, or safe renames.
+
+### Format
+
+Files in `backend/migrations/`, named `NNN_description.sql` (e.g. `001_initial.sql`). Numeric prefix = execution order, must be unique across the app's lifetime. Multi-statement OK (`;`-separated, `$$` blocks respected). Pure PostgreSQL.
+
+Core runs pending migrations sequentially on deploy, each in its own transaction. Tracks applied state in `"{appId}"._migrations`. Already-applied files are skipped.
+
+### Manifest → migration mapping
+
+Every `dataContract` change requires a matching migration. Schema = `"{appId}"`, all identifiers double-quoted.
+
+| Manifest change | Migration SQL |
+|----------------|---------------|
+| New entity | `CREATE TABLE IF NOT EXISTS "{appId}"."{entity}" ("id" UUID PRIMARY KEY DEFAULT gen_random_uuid(), ..., "created_at" TIMESTAMPTZ NOT NULL DEFAULT now(), "updated_at" TIMESTAMPTZ NOT NULL DEFAULT now())` |
+| Add field | `ALTER TABLE "{appId}"."{entity}" ADD COLUMN IF NOT EXISTS "{field}" {PG_TYPE}` |
+| Change type | `ALTER TABLE ... ALTER COLUMN "{field}" TYPE {NEW_TYPE} USING "{field}"::{NEW_TYPE}` |
+| Set `required` | `ALTER TABLE ... ALTER COLUMN "{field}" SET NOT NULL` (backfill nulls first) |
+| Add `enum_values` | `ALTER TABLE ... ADD CONSTRAINT "chk_{entity}_{field}" CHECK ("{field}" IN ('a','b'))` |
+| Rename field | `ADD COLUMN "new"` → `UPDATE ... SET "new" = "old"` → `DROP COLUMN "old"` |
+| Remove field | `ALTER TABLE ... DROP COLUMN IF EXISTS "{field}" CASCADE` |
+
+Initial migration must start with `CREATE SCHEMA IF NOT EXISTS "{appId}"`. Auto-columns (`id`, `created_at`, `updated_at`) are not in manifest `fields` but must be in CREATE TABLE.
+
+Type mapping: `text`→`TEXT`, `number`→`DOUBLE PRECISION`, `boolean`→`BOOLEAN`, `date`→`DATE`, `timestamp`→`TIMESTAMPTZ`, `json`→`JSONB`, `file`→`TEXT`, `entity_link`→`UUID`, `[text]`→`TEXT[]`, `[number]`→`DOUBLE PRECISION[]`.
+
+Apps without `backend/migrations/` get no schema changes — Core only warns about drift. Migrations are mandatory for DDL.
+
+---
+
 ## SDK Hooks
 
 All data from hooks. Types exported from `@rootcx/sdk`. Never use `useState` with mock data.
