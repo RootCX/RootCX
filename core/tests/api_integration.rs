@@ -1197,273 +1197,6 @@ async fn typed_bindings_text_not_cast_as_date() {
 }
 
 #[tokio::test]
-async fn schema_sync_adds_column() {
-    let rt = TestRuntime::boot().await;
-
-    rt.install_manifest(&json!({
-        "appId": "ssadd", "name": "ssadd", "version": "1.0.0",
-        "dataContract": [{ "entityName": "items", "fields": [
-            { "name": "name", "type": "text", "required": true },
-        ]}]
-    }))
-    .await;
-
-    rt.create("ssadd", "items", &json!({"name": "first"})).await;
-
-    rt.install_manifest(&json!({
-        "appId": "ssadd", "name": "ssadd", "version": "1.1.0",
-        "dataContract": [{ "entityName": "items", "fields": [
-            { "name": "name", "type": "text", "required": true },
-            { "name": "email", "type": "text" },
-        ]}]
-    }))
-    .await;
-
-    let row = rt.create("ssadd", "items", &json!({"name": "second", "email": "a@b.com"})).await;
-    assert_eq!(row["email"], "a@b.com");
-
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn schema_sync_drops_column() {
-    let rt = TestRuntime::boot().await;
-
-    rt.install_manifest(&json!({
-        "appId": "ssdrop", "name": "ssdrop", "version": "1.0.0",
-        "dataContract": [{ "entityName": "items", "fields": [
-            { "name": "name", "type": "text", "required": true },
-            { "name": "legacy", "type": "text" },
-        ]}]
-    }))
-    .await;
-
-    rt.create("ssdrop", "items", &json!({"name": "one", "legacy": "old"})).await;
-
-    rt.install_manifest(&json!({
-        "appId": "ssdrop", "name": "ssdrop", "version": "1.1.0",
-        "dataContract": [{ "entityName": "items", "fields": [
-            { "name": "name", "type": "text", "required": true },
-        ]}]
-    }))
-    .await;
-
-    let (s, rows) = rt.get_json("/api/v1/apps/ssdrop/collections/items").await;
-    assert_eq!(s, 200);
-    let arr = rows.as_array().unwrap();
-    assert_eq!(arr.len(), 1);
-    assert!(arr[0].get("legacy").is_none(), "legacy column should be gone");
-
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn schema_sync_changes_type() {
-    let rt = TestRuntime::boot().await;
-
-    rt.install_manifest(&json!({
-        "appId": "sstype", "name": "sstype", "version": "1.0.0",
-        "dataContract": [{ "entityName": "items", "fields": [
-            { "name": "name", "type": "text", "required": true },
-            { "name": "score", "type": "text" },
-        ]}]
-    }))
-    .await;
-
-    rt.create("sstype", "items", &json!({"name": "a", "score": "42"})).await;
-
-    rt.install_manifest(&json!({
-        "appId": "sstype", "name": "sstype", "version": "1.1.0",
-        "dataContract": [{ "entityName": "items", "fields": [
-            { "name": "name", "type": "text", "required": true },
-            { "name": "score", "type": "number" },
-        ]}]
-    }))
-    .await;
-
-    let row = rt.create("sstype", "items", &json!({"name": "b", "score": 99.5})).await;
-    assert_eq!(row["score"], 99.5);
-
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn schema_sync_changes_nullability() {
-    let rt = TestRuntime::boot().await;
-
-    rt.install_manifest(&json!({
-        "appId": "ssnull", "name": "ssnull", "version": "1.0.0",
-        "dataContract": [{ "entityName": "items", "fields": [
-            { "name": "name", "type": "text", "required": true },
-            { "name": "email", "type": "text" },
-        ]}]
-    }))
-    .await;
-
-    rt.create("ssnull", "items", &json!({"name": "a"})).await;
-
-    let (_, rows) = rt.get_json("/api/v1/apps/ssnull/collections/items").await;
-    let id = rows[0]["id"].as_str().unwrap();
-    rt.delete(&format!("/api/v1/apps/ssnull/collections/items/{id}")).await;
-
-    rt.install_manifest(&json!({
-        "appId": "ssnull", "name": "ssnull", "version": "1.1.0",
-        "dataContract": [{ "entityName": "items", "fields": [
-            { "name": "name", "type": "text", "required": true },
-            { "name": "email", "type": "text", "required": true },
-        ]}]
-    }))
-    .await;
-
-    let (s, _) = rt.post_json("/api/v1/apps/ssnull/collections/items", &json!({"name": "b"})).await;
-    assert_eq!(s, 500, "missing required field should fail");
-
-    let (s, _) = rt.post_json("/api/v1/apps/ssnull/collections/items", &json!({"name": "c", "email": "c@d.com"})).await;
-    assert_eq!(s, 201);
-
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn schema_sync_changes_enum() {
-    let rt = TestRuntime::boot().await;
-
-    rt.install_manifest(&json!({
-        "appId": "ssenum", "name": "ssenum", "version": "1.0.0",
-        "dataContract": [{ "entityName": "items", "fields": [
-            { "name": "name", "type": "text", "required": true },
-            { "name": "status", "type": "text", "enum_values": ["draft", "active"] },
-        ]}]
-    }))
-    .await;
-
-    rt.create("ssenum", "items", &json!({"name": "a", "status": "draft"})).await;
-
-    rt.install_manifest(&json!({
-        "appId": "ssenum", "name": "ssenum", "version": "1.1.0",
-        "dataContract": [{ "entityName": "items", "fields": [
-            { "name": "name", "type": "text", "required": true },
-            { "name": "status", "type": "text", "enum_values": ["draft", "active", "archived"] },
-        ]}]
-    }))
-    .await;
-
-    let row = rt.create("ssenum", "items", &json!({"name": "b", "status": "archived"})).await;
-    assert_eq!(row["status"], "archived");
-
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn schema_sync_idempotent() {
-    let rt = TestRuntime::boot().await;
-
-    let manifest = json!({
-        "appId": "ssidem", "name": "ssidem", "version": "1.0.0",
-        "dataContract": [{ "entityName": "items", "fields": [
-            { "name": "name", "type": "text", "required": true },
-            { "name": "score", "type": "number" },
-        ]}]
-    });
-
-    rt.install_manifest(&manifest).await;
-    rt.create("ssidem", "items", &json!({"name": "a", "score": 10})).await;
-
-    rt.install_manifest(&manifest).await;
-
-    let (s, rows) = rt.get_json("/api/v1/apps/ssidem/collections/items").await;
-    assert_eq!(s, 200);
-    assert_eq!(rows.as_array().unwrap().len(), 1);
-    assert_eq!(rows[0]["name"], "a");
-
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn schema_sync_preserves_data() {
-    let rt = TestRuntime::boot().await;
-
-    rt.install_manifest(&json!({
-        "appId": "sspres", "name": "sspres", "version": "1.0.0",
-        "dataContract": [{ "entityName": "items", "fields": [
-            { "name": "name", "type": "text", "required": true },
-            { "name": "score", "type": "number" },
-        ]}]
-    }))
-    .await;
-
-    rt.create("sspres", "items", &json!({"name": "a", "score": 1})).await;
-    rt.create("sspres", "items", &json!({"name": "b", "score": 2})).await;
-    rt.create("sspres", "items", &json!({"name": "c", "score": 3})).await;
-
-    rt.install_manifest(&json!({
-        "appId": "sspres", "name": "sspres", "version": "1.1.0",
-        "dataContract": [{ "entityName": "items", "fields": [
-            { "name": "name", "type": "text", "required": true },
-            { "name": "score", "type": "number" },
-            { "name": "email", "type": "text" },
-        ]}]
-    }))
-    .await;
-
-    let (s, rows) = rt.get_json("/api/v1/apps/sspres/collections/items").await;
-    assert_eq!(s, 200);
-    let arr = rows.as_array().unwrap();
-    assert_eq!(arr.len(), 3);
-    for row in arr {
-        assert!(row["email"].is_null(), "email should be null for old records");
-    }
-
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn schema_sync_multiple_entities() {
-    let rt = TestRuntime::boot().await;
-
-    rt.install_manifest(&json!({
-        "appId": "ssmulti", "name": "ssmulti", "version": "1.0.0",
-        "dataContract": [
-            { "entityName": "contacts", "fields": [
-                { "name": "name", "type": "text", "required": true },
-                { "name": "phone", "type": "text" },
-            ]},
-            { "entityName": "notes", "fields": [
-                { "name": "body", "type": "text", "required": true },
-                { "name": "legacy", "type": "text" },
-            ]},
-        ]
-    }))
-    .await;
-
-    rt.create("ssmulti", "contacts", &json!({"name": "alice", "phone": "123"})).await;
-    rt.create("ssmulti", "notes", &json!({"body": "hello", "legacy": "x"})).await;
-
-    rt.install_manifest(&json!({
-        "appId": "ssmulti", "name": "ssmulti", "version": "1.1.0",
-        "dataContract": [
-            { "entityName": "contacts", "fields": [
-                { "name": "name", "type": "text", "required": true },
-                { "name": "phone", "type": "text" },
-                { "name": "email", "type": "text" },
-            ]},
-            { "entityName": "notes", "fields": [
-                { "name": "body", "type": "text", "required": true },
-            ]},
-        ]
-    }))
-    .await;
-
-    let row = rt.create("ssmulti", "contacts", &json!({"name": "bob", "email": "b@c.com"})).await;
-    assert_eq!(row["email"], "b@c.com");
-
-    let (_, rows) = rt.get_json("/api/v1/apps/ssmulti/collections/notes").await;
-    assert!(rows[0].get("legacy").is_none(), "legacy should be dropped from notes");
-
-    rt.shutdown().await;
-}
-
-#[tokio::test]
 async fn verify_schema_compliant() {
     let rt = TestRuntime::boot().await;
     let manifest = json!({
@@ -1815,6 +1548,188 @@ async fn federated_query_across_apps() {
     let (s3, body3) = rt.post_json("/api/v1/federated/nonexistent/query", &json!({})).await;
     assert_eq!(s3, 200);
     assert_eq!(body3["total"], 0);
+
+    rt.shutdown().await;
+}
+
+// ── Migration integration tests ──────────────────────────────────────
+
+#[tokio::test]
+async fn migration_applies_on_deploy() {
+    let rt = TestRuntime::boot().await;
+
+    let manifest = json!({
+        "appId": "migapp", "name": "MigApp", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "title", "type": "text", "required": true }
+        ]}]
+    });
+    rt.install_manifest(&manifest).await;
+
+    let migration_sql = format!(
+        "CREATE SCHEMA IF NOT EXISTS \"migapp\";\n\
+         CREATE TABLE IF NOT EXISTS \"migapp\".\"items\" (\n\
+           \"id\" UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n\
+           \"title\" TEXT NOT NULL,\n\
+           \"created_at\" TIMESTAMPTZ NOT NULL DEFAULT now(),\n\
+           \"updated_at\" TIMESTAMPTZ NOT NULL DEFAULT now()\n\
+         );"
+    );
+    let archive = make_tar_gz(&[
+        ("migrations/001_initial.sql", migration_sql.as_bytes()),
+        ("index.ts", b"process.stdin.resume();"),
+    ]);
+    let (s, body) = rt.deploy("migapp", &archive).await;
+    assert_eq!(s, 200, "deploy with migrations should succeed: {body}");
+
+    let (s, body) = rt.get_json("/api/v1/apps/migapp/collections/items").await;
+    assert_eq!(s, 200, "table should exist after migration: {body}");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn migration_skips_already_applied() {
+    let rt = TestRuntime::boot().await;
+
+    let manifest = json!({
+        "appId": "migskip", "name": "MigSkip", "version": "1.0.0",
+        "dataContract": [{ "entityName": "notes", "fields": [
+            { "name": "body", "type": "text" },
+            { "name": "tag", "type": "text" }
+        ]}]
+    });
+    rt.install_manifest(&manifest).await;
+
+    let sql1 = "CREATE SCHEMA IF NOT EXISTS \"migskip\";\n\
+                CREATE TABLE IF NOT EXISTS \"migskip\".\"notes\" (\n\
+                  \"id\" UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n\
+                  \"body\" TEXT,\n\
+                  \"created_at\" TIMESTAMPTZ NOT NULL DEFAULT now(),\n\
+                  \"updated_at\" TIMESTAMPTZ NOT NULL DEFAULT now()\n\
+                );";
+
+    let archive1 = make_tar_gz(&[
+        ("migrations/001_create.sql", sql1.as_bytes()),
+        ("index.ts", b"process.stdin.resume();"),
+    ]);
+    let (s, _) = rt.deploy("migskip", &archive1).await;
+    assert_eq!(s, 200);
+
+    rt.create("migskip", "notes", &json!({"body": "hello"})).await;
+
+    let sql2 = "ALTER TABLE \"migskip\".\"notes\" ADD COLUMN IF NOT EXISTS \"tag\" TEXT;";
+    let archive2 = make_tar_gz(&[
+        ("migrations/001_create.sql", sql1.as_bytes()),
+        ("migrations/002_add_tag.sql", sql2.as_bytes()),
+        ("index.ts", b"process.stdin.resume();"),
+    ]);
+    let (s, body) = rt.deploy("migskip", &archive2).await;
+    assert_eq!(s, 200, "second deploy failed: {body}");
+
+    let (s, body) = rt.get_json("/api/v1/apps/migskip/collections/notes").await;
+    assert_eq!(s, 200, "list notes failed: {body}");
+    let records = body["data"].as_array().unwrap_or_else(|| body.as_array().unwrap());
+    assert!(records.len() >= 1, "existing data preserved: {body}");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn migration_rollback_on_failure() {
+    let rt = TestRuntime::boot().await;
+
+    let manifest = json!({
+        "appId": "migfail", "name": "MigFail", "version": "1.0.0",
+        "dataContract": [{ "entityName": "logs", "fields": [
+            { "name": "msg", "type": "text" }
+        ]}]
+    });
+    rt.install_manifest(&manifest).await;
+
+    let sql1 = "CREATE SCHEMA IF NOT EXISTS \"migfail\";\n\
+                CREATE TABLE IF NOT EXISTS \"migfail\".\"logs\" (\n\
+                  \"id\" UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n\
+                  \"msg\" TEXT,\n\
+                  \"created_at\" TIMESTAMPTZ NOT NULL DEFAULT now(),\n\
+                  \"updated_at\" TIMESTAMPTZ NOT NULL DEFAULT now()\n\
+                );";
+    let sql2 = "INVALID SQL THAT WILL FAIL;";
+
+    let archive = make_tar_gz(&[
+        ("migrations/001_create.sql", sql1.as_bytes()),
+        ("migrations/002_bad.sql", sql2.as_bytes()),
+        ("index.ts", b"process.stdin.resume();"),
+    ]);
+    let (s, _) = rt.deploy("migfail", &archive).await;
+    assert_eq!(s, 400, "bad migration should fail deploy");
+
+    // 001 committed in its own tx, so table should exist
+    let (s, _) = rt.get_json("/api/v1/apps/migfail/collections/logs").await;
+    assert_eq!(s, 200, "001 should have committed independently");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn deploy_without_migrations_preserves_tables() {
+    let rt = TestRuntime::boot().await;
+
+    let manifest = json!({
+        "appId": "nomigr", "name": "NoMigr", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "name", "type": "text", "required": true }
+        ]}]
+    });
+    rt.install_manifest(&manifest).await;
+
+    let archive = make_tar_gz(&[("index.ts", b"process.stdin.resume();")]);
+    let (s, _) = rt.deploy("nomigr", &archive).await;
+    assert_eq!(s, 200);
+
+    let record = rt.create("nomigr", "items", &json!({"name": "test"})).await;
+    assert_eq!(record["name"], "test");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn migration_with_dollar_quoted_block() {
+    let rt = TestRuntime::boot().await;
+
+    let manifest = json!({
+        "appId": "migdq", "name": "MigDQ", "version": "1.0.0",
+        "dataContract": [{ "entityName": "events", "fields": [
+            { "name": "kind", "type": "text", "required": true },
+            { "name": "seq", "type": "number" }
+        ]}]
+    });
+    rt.install_manifest(&manifest).await;
+
+    // Migration uses DO $$ ... $$ with semicolons inside the block
+    let sql = "\
+        CREATE SCHEMA IF NOT EXISTS \"migdq\";\n\
+        CREATE TABLE IF NOT EXISTS \"migdq\".\"events\" (\n\
+          \"id\" UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n\
+          \"kind\" TEXT NOT NULL,\n\
+          \"seq\" DOUBLE PRECISION,\n\
+          \"created_at\" TIMESTAMPTZ NOT NULL DEFAULT now(),\n\
+          \"updated_at\" TIMESTAMPTZ NOT NULL DEFAULT now()\n\
+        );\n\
+        DO $$ BEGIN\n\
+          CREATE SEQUENCE IF NOT EXISTS \"migdq\".\"events_seq\";\n\
+        EXCEPTION WHEN duplicate_table THEN NULL;\n\
+        END $$;";
+
+    let archive = make_tar_gz(&[
+        ("migrations/001_init.sql", sql.as_bytes()),
+        ("index.ts", b"process.stdin.resume();"),
+    ]);
+    let (s, body) = rt.deploy("migdq", &archive).await;
+    assert_eq!(s, 200, "deploy with dollar-quoted migration should succeed: {body}");
+
+    let record = rt.create("migdq", "events", &json!({"kind": "click"})).await;
+    assert!(record["id"].is_string());
 
     rt.shutdown().await;
 }

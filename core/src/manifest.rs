@@ -34,7 +34,6 @@ pub async fn install_app(
         crate::schema_sync::sync_schema(pool, app_id, &manifest.data_contract, &pk_types).await?;
     }
 
-    crate::schema_sync::drop_orphaned_tables(pool, app_id, &manifest.data_contract).await?;
     register_app(pool, manifest).await?;
 
     if !manifest.data_contract.is_empty() {

@@ -128,18 +128,17 @@ impl TestRuntime {
                 { "name": "notes", "type": "text" },
             ]}]
         });
-        let (s, _) = self.post_json("/api/v1/apps", &manifest).await;
-        assert_eq!(s, 200, "install {app_id} failed");
+        self.install_manifest(&manifest).await;
     }
 
     pub async fn install_manifest(&self, manifest: &Value) {
-        let (s, _) = self.post_json("/api/v1/apps", manifest).await;
-        assert_eq!(s, 200, "install_manifest failed");
+        let (s, body) = self.post_json("/api/v1/apps", manifest).await;
+        assert_eq!(s, 200, "install_manifest failed: {body}");
     }
 
     pub async fn create(&self, app: &str, entity: &str, body: &Value) -> Value {
         let (s, v) = self.post_json(&format!("/api/v1/apps/{app}/collections/{entity}"), body).await;
-        assert_eq!(s, 201);
+        assert_eq!(s, 201, "create {app}/{entity} failed: {v}");
         v
     }
 

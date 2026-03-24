@@ -40,6 +40,7 @@ impl From<crate::RuntimeError> for ApiError {
             crate::RuntimeError::Worker(_) | crate::RuntimeError::Job(_) | crate::RuntimeError::Ipc(_) => {
                 Self::Internal(e.to_string())
             }
+            crate::RuntimeError::Migration(_) => Self::BadRequest(e.to_string()),
             _ => {
                 tracing::error!("runtime error: {e}");
                 Self::Internal("internal error".into())
