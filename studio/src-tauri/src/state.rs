@@ -132,7 +132,6 @@ impl AppState {
         }
         info!("connected to core at {url}");
         self.reconnect_or_cleanup().await;
-        crate::browser::spawn_listener(url.clone());
         let _ = self.app_handle.emit("runtime-booted", ());
         Ok(())
     }
@@ -354,7 +353,6 @@ impl AppState {
     }
 
     pub async fn shutdown(&self) {
-        crate::browser::shutdown().await;
         if let Some(handle) = self.log_stream_abort.lock().await.take() {
             handle.abort();
         }

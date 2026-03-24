@@ -8,7 +8,10 @@ export interface McpServer {
 
 export interface McpServerConfig {
   name: string;
-  transport: { type: "stdio"; command: string; args?: string[] } | { type: "sse"; url: string; headers?: Record<string, string> };
+  transport:
+    | { type: "stdio"; command: string; args?: string[] }
+    | { type: "sse"; url: string; headers?: Record<string, string> }
+    | { type: "cli"; install: string };
 }
 
 interface State { servers: McpServer[]; loading: boolean; error: string | null }

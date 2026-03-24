@@ -59,15 +59,11 @@ impl Runtime {
     pub fn new(pg: PostgresManager, data_dir: PathBuf, resources_dir: PathBuf, bun_bin: PathBuf) -> Self {
         let auth_config = AuthConfig::load(&data_dir).expect("failed to load auth config");
 
-        let browser_queue = Arc::new(extensions::browser::queue::BrowserQueue::new());
-        let extensions = builtin_extensions(
-            Arc::clone(&auth_config), Arc::clone(&browser_queue),
-        );
+        let extensions = builtin_extensions(Arc::clone(&auth_config));
 
         let tool_registry = Arc::new(ToolRegistry::default());
         tool_registry.register(tools::query_data::QueryDataTool);
         tool_registry.register(tools::mutate_data::MutateDataTool);
-        tool_registry.register(tools::browser::BrowserTool::new(browser_queue));
         tool_registry.register(tools::list_apps::ListAppsTool);
         tool_registry.register(tools::describe_app::DescribeAppTool);
         tool_registry.register(tools::list_integrations::ListIntegrationsTool);

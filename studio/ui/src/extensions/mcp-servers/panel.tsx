@@ -9,6 +9,13 @@ import { setSecret } from "@/core/api";
 const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
 const statusColor = { running: "bg-green-500", error: "bg-red-500", stopped: "bg-zinc-500" } as const;
 
+function serverCmd(server: McpServer): string {
+  const { transport } = server.config;
+  if (transport.type === "sse") return transport.url;
+  if (transport.type === "cli") return transport.install;
+  return `${transport.command} ${transport.args?.join(" ") ?? ""}`.trim();
+}
+
 function ServerCard({ server }: { server: McpServer }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -22,10 +29,6 @@ function ServerCard({ server }: { server: McpServer }) {
   };
 
   const running = server.status === "running";
-  const { transport } = server.config;
-  const cmd = transport.type === "stdio"
-    ? `${transport.command} ${transport.args?.join(" ") ?? ""}`.trim()
-    : transport.url;
 
   return (
     <div className="rounded-md border border-border">
@@ -38,7 +41,7 @@ function ServerCard({ server }: { server: McpServer }) {
       </button>
       {open && (
         <div className="flex flex-col gap-2 border-t border-border px-3 py-2">
-          <p className="truncate font-mono text-[10px] text-muted-foreground">{cmd}</p>
+          <p className="truncate font-mono text-[10px] text-muted-foreground">{serverCmd(server)}</p>
           <div className="flex items-center gap-1.5">
             <Button size="xs" variant="outline" disabled={busy}
               onClick={() => act(() => running ? stop(server.name) : start(server.name))}>
@@ -80,9 +83,12 @@ function PasswordInput({ value, onChange, placeholder }: {
   );
 }
 
+type TransportType = "stdio" | "sse" | "cli";
+
 function AddServerForm({ onDone }: { onDone: () => void }) {
   const [name, setName] = useState("");
-  const [transport, setTransport] = useState<"stdio" | "sse">("stdio");
+  const [transport, setTransport] = useState<TransportType>("stdio");
+  const [install, setInstall] = useState("");
   const [command, setCommand] = useState("");
   const [args, setArgs] = useState("");
   const [url, setUrl] = useState("");
@@ -90,7 +96,9 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const valid = name.trim() && (transport === "stdio" ? command.trim() : url.trim());
+  const valid = name.trim() && (
+    transport === "sse" ? url.trim() : transport === "cli" ? install.trim() : command.trim()
+  );
 
   const updateEnv = (i: number, field: "key" | "value", v: string) =>
     setEnvRows(envRows.map((r, j) => j === i ? { ...r, [field]: v } : r));
@@ -99,14 +107,18 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
     if (!valid) return;
     setSaving(true); setError(null);
     try {
-      const secrets = envRows.filter(r => r.key.trim() && r.value);
-      for (const s of secrets) await setSecret(s.key.trim(), s.value);
-      await register({
-        name: name.trim(),
-        transport: transport === "stdio"
-          ? { type: "stdio", command: command.trim(), args: args.trim() ? args.trim().split(/\s+/) : [] }
-          : { type: "sse", url: url.trim() },
-      }, true);
+      if (transport !== "cli") {
+        const secrets = envRows.filter(r => r.key.trim() && r.value);
+        for (const s of secrets) await setSecret(s.key.trim(), s.value);
+      }
+      const parsedArgs = args.trim() ? args.trim().split(/\s+/) : [];
+      const transportConfig = transport === "sse"
+        ? { type: "sse" as const, url: url.trim() }
+        : transport === "cli"
+          ? { type: "cli" as const, install: install.trim() }
+          : { type: "stdio" as const, command: command.trim(), args: parsedArgs };
+
+      await register({ name: name.trim(), transport: transportConfig }, true);
       onDone();
     } catch (e) { setError(errMsg(e)); }
     finally { setSaving(false); }
@@ -119,33 +131,41 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
       <div className="flex gap-1">
         <Button size="xs" variant={transport === "stdio" ? "default" : "outline"} onClick={() => setTransport("stdio")}>stdio</Button>
         <Button size="xs" variant={transport === "sse" ? "default" : "outline"} onClick={() => setTransport("sse")}>SSE</Button>
+        <Button size="xs" variant={transport === "cli" ? "default" : "outline"} onClick={() => setTransport("cli")}>CLI</Button>
       </div>
-      {transport === "stdio" ? (
+      {transport === "sse" && (
+        <Input size="xs" className="font-mono" placeholder="https://mcp.example.com/sse" value={url}
+          onChange={(e) => setUrl(e.target.value)} />
+      )}
+      {transport === "stdio" && (
         <div className="flex gap-1.5">
           <Input size="xs" className="w-1/4 font-mono" placeholder="npx" value={command}
             onChange={(e) => setCommand(e.target.value)} />
           <Input size="xs" className="flex-1 font-mono" placeholder="-y @anysite/mcp" value={args}
             onChange={(e) => setArgs(e.target.value)} />
         </div>
-      ) : (
-        <Input size="xs" className="font-mono" placeholder="https://mcp.example.com/sse" value={url}
-          onChange={(e) => setUrl(e.target.value)} />
       )}
-      {envRows.map((r, i) => (
-        <div key={i} className="flex items-center gap-1.5">
-          <Input size="xs" className="w-1/3 font-mono" placeholder="ENV_KEY" value={r.key}
-            onChange={(e) => updateEnv(i, "key", e.target.value.replace(/[^A-Z0-9_]/gi, "").toUpperCase())} />
-          <PasswordInput value={r.value} onChange={(v) => updateEnv(i, "value", v)} placeholder="secret value" />
-          {envRows.length > 1 && (
-            <button className="text-muted-foreground hover:text-red-400"
-              onClick={() => setEnvRows(envRows.filter((_, j) => j !== i))}>
-              <Trash2 className="h-3 w-3" />
-            </button>
-          )}
-        </div>
-      ))}
-      <button className="self-start text-[10px] text-muted-foreground hover:text-foreground"
-        onClick={() => setEnvRows([...envRows, { key: "", value: "" }])}>+ env variable</button>
+      {transport === "cli" && (
+        <Input size="xs" className="font-mono" placeholder="npm install -g agent-browser" value={install}
+          onChange={(e) => setInstall(e.target.value)} />
+      )}
+      {transport !== "cli" && (<>
+        {envRows.map((r, i) => (
+          <div key={i} className="flex items-center gap-1.5">
+            <Input size="xs" className="w-1/3 font-mono" placeholder="ENV_KEY" value={r.key}
+              onChange={(e) => updateEnv(i, "key", e.target.value.replace(/[^A-Z0-9_]/gi, "").toUpperCase())} />
+            <PasswordInput value={r.value} onChange={(v) => updateEnv(i, "value", v)} placeholder="secret value" />
+            {envRows.length > 1 && (
+              <button className="text-muted-foreground hover:text-red-400"
+                onClick={() => setEnvRows(envRows.filter((_, j) => j !== i))}>
+                <Trash2 className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+        ))}
+        <button className="self-start text-[10px] text-muted-foreground hover:text-foreground"
+          onClick={() => setEnvRows([...envRows, { key: "", value: "" }])}>+ env variable</button>
+      </>)}
       <div className="flex items-center gap-2 pt-1">
         <Button size="xs" onClick={handleSubmit} disabled={!valid || saving}>
           {saving ? "..." : "Add & Start"}
@@ -165,7 +185,7 @@ export default function McpServersPanel() {
   return (
     <div className="flex h-full flex-col">
       <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2">
-        <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">MCP Servers</span>
+        <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">Tool Servers</span>
         {!showAdd && (
           <Button size="xs" variant="outline" onClick={() => setShowAdd(true)}>
             <Plus className="h-3 w-3" /> Add
@@ -177,7 +197,7 @@ export default function McpServersPanel() {
           {showAdd && <AddServerForm onDone={() => setShowAdd(false)} />}
           {servers.map((s) => <ServerCard key={s.name} server={s} />)}
           {loading && servers.length === 0 && <p className="py-6 text-center text-xs text-muted-foreground">Loading...</p>}
-          {!loading && servers.length === 0 && !showAdd && <p className="py-8 text-center text-xs text-muted-foreground">No MCP servers configured</p>}
+          {!loading && servers.length === 0 && !showAdd && <p className="py-8 text-center text-xs text-muted-foreground">No tool servers configured</p>}
           {error && <p className="text-[10px] text-red-400">{error}</p>}
         </div>
       </div>

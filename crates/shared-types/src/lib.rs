@@ -291,6 +291,7 @@ pub enum McpTransport {
     Http { url: String, #[serde(default)] headers: std::collections::HashMap<String, String> },
     #[deprecated = "use Http"]
     Sse { url: String, #[serde(default)] headers: std::collections::HashMap<String, String> },
+    Cli { install: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

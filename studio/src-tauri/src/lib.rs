@@ -1,4 +1,3 @@
-mod browser;
 mod commands;
 mod forge;
 mod launch;

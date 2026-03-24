@@ -1,4 +1,4 @@
-pub mod browser;
+pub mod cli;
 pub mod describe_app;
 pub mod list_apps;
 pub mod list_integrations;
@@ -50,6 +50,10 @@ impl ToolRegistry {
         let desc = tool.descriptor();
         let name = desc.name.clone();
         self.tools.write().unwrap().insert(name, (Arc::new(tool), desc));
+    }
+
+    pub fn unregister(&self, name: &str) {
+        self.tools.write().unwrap().remove(name);
     }
 
     pub fn unregister_prefix(&self, prefix: &str) {
