@@ -43,35 +43,44 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
 
 ## Migrations
 
-**Two sources of truth:** `manifest.json` defines what the API layer expects (routing, validation, types). `backend/migrations/*.sql` defines what the DB actually has. Both must agree. Changing one without the other causes schema drift — Core warns but does not auto-fix.
+**Dual model.** Manifest drives initial DDL (`CREATE TABLE`) and safe auto-sync. Migrations handle everything else.
 
-**You own the DDL.** Core never generates or runs DDL from manifest. All schema changes are explicit SQL files you write. This is intentional — auto-sync cannot handle data transforms, backfills, or safe renames.
+### What Core does automatically from manifest
 
-### Format
+On install/deploy, Core runs `CREATE SCHEMA IF NOT EXISTS` + `CREATE TABLE IF NOT EXISTS` for each entity in `dataContract`. Then `sync_schema` diffs DB vs manifest and auto-applies safe changes only:
 
-Files in `backend/migrations/`, named `NNN_description.sql` (e.g. `001_initial.sql`). Numeric prefix = execution order, must be unique across the app's lifetime. Multi-statement OK (`;`-separated, `$$` blocks respected). Pure PostgreSQL.
+| Safe (auto-applied) | Dangerous (requires migration) |
+|---|---|
+| Add nullable column | Drop column |
+| Add column with default | Alter column type |
+| Drop NOT NULL | Set NOT NULL |
+| Set/drop DEFAULT | Replace CHECK constraint |
+| Drop CHECK constraint | |
 
-Core runs pending migrations sequentially on deploy, each in its own transaction. Tracks applied state in `"{appId}"._migrations`. Already-applied files are skipped.
+Dangerous changes are logged as warnings, not applied. Orphaned tables (in DB but not in manifest) are warned — Core never auto-drops tables.
 
-### Manifest → migration mapping
+### App-owned migrations
 
-Every `dataContract` change requires a matching migration. Schema = `"{appId}"`, all identifiers double-quoted.
+Files in `migrations/` (root of deployed archive), named `NNN_description.sql` (e.g. `001_add_status_index.sql`). Numeric prefix = execution order, must be unique. Multi-statement OK (`;`-separated, `$$` blocks respected). Pure PostgreSQL.
 
-| Manifest change | Migration SQL |
-|----------------|---------------|
-| New entity | `CREATE TABLE IF NOT EXISTS "{appId}"."{entity}" ("id" UUID PRIMARY KEY DEFAULT gen_random_uuid(), ..., "created_at" TIMESTAMPTZ NOT NULL DEFAULT now(), "updated_at" TIMESTAMPTZ NOT NULL DEFAULT now())` |
-| Add field | `ALTER TABLE "{appId}"."{entity}" ADD COLUMN IF NOT EXISTS "{field}" {PG_TYPE}` |
-| Change type | `ALTER TABLE ... ALTER COLUMN "{field}" TYPE {NEW_TYPE} USING "{field}"::{NEW_TYPE}` |
-| Set `required` | `ALTER TABLE ... ALTER COLUMN "{field}" SET NOT NULL` (backfill nulls first) |
-| Add `enum_values` | `ALTER TABLE ... ADD CONSTRAINT "chk_{entity}_{field}" CHECK ("{field}" IN ('a','b'))` |
-| Rename field | `ADD COLUMN "new"` → `UPDATE ... SET "new" = "old"` → `DROP COLUMN "old"` |
-| Remove field | `ALTER TABLE ... DROP COLUMN IF EXISTS "{field}" CASCADE` |
+Core creates the schema automatically before running migrations. Each migration runs in its own transaction. Applied state tracked in `"{appId}"._migrations`. Already-applied files skipped. No `migrations/` dir = no migrations run (tables still created from manifest).
 
-Initial migration must start with `CREATE SCHEMA IF NOT EXISTS "{appId}"`. Auto-columns (`id`, `created_at`, `updated_at`) are not in manifest `fields` but must be in CREATE TABLE.
+### When you need a migration
 
-Type mapping: `text`→`TEXT`, `number`→`DOUBLE PRECISION`, `boolean`→`BOOLEAN`, `date`→`DATE`, `timestamp`→`TIMESTAMPTZ`, `json`→`JSONB`, `file`→`TEXT`, `entity_link`→`UUID`, `[text]`→`TEXT[]`, `[number]`→`DOUBLE PRECISION[]`.
+Only for dangerous changes the auto-sync won't apply:
 
-Apps without `backend/migrations/` get no schema changes — Core only warns about drift. Migrations are mandatory for DDL.
+| Operation | Migration SQL |
+|---|---|
+| Change type | `ALTER TABLE "{appId}"."{entity}" ALTER COLUMN "{field}" TYPE {NEW_TYPE} USING "{field}"::{NEW_TYPE}` |
+| Set required | Backfill nulls first, then `ALTER TABLE ... ALTER COLUMN "{field}" SET NOT NULL` |
+| Drop column | `ALTER TABLE ... DROP COLUMN IF EXISTS "{field}" CASCADE` |
+| Rename field | `ADD COLUMN "new"` → `UPDATE SET "new" = "old"` → `DROP COLUMN "old"` |
+| Update enum | `DROP CONSTRAINT` old check → `ADD CONSTRAINT "chk_{entity}_{field}" CHECK (...)` |
+| Custom indexes, data backfills, triggers | Raw SQL |
+
+### Manifest ↔ DB contract
+
+`dataContract` fields map to columns. Auto-columns (`id UUID`, `created_at`, `updated_at`) added by Core — omit from manifest `fields`. Type mapping: `text`→`TEXT`, `number`→`DOUBLE PRECISION`, `boolean`→`BOOLEAN`, `date`→`DATE`, `timestamp`→`TIMESTAMPTZ`, `json`→`JSONB`, `file`→`TEXT`, `entity_link`→`UUID`, `[text]`→`TEXT[]`, `[number]`→`DOUBLE PRECISION[]`.
 
 ---
 
