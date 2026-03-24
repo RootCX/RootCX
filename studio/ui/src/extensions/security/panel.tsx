@@ -325,13 +325,28 @@ function RoleDetailView({ role, availablePermissions, isAdmin, onBack }: {
         </div>
       </div>
 
+      {/* Wildcard toggle */}
+      {!isBuiltIn && isAdmin && (
+        <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
+          <span className="text-[10px] text-muted-foreground">
+            {isWildcard ? "All permissions granted" : "Granular permissions"}
+          </span>
+          <Button size="xs" variant="outline" className="text-[10px]"
+            onClick={() => updateRole(role.name, {
+              permissions: isWildcard ? availablePermissions.map(p => p.key) : ["*"]
+            })}>
+            {isWildcard ? "Restrict" : "Grant all"}
+          </Button>
+        </div>
+      )}
+      {isBuiltIn && isWildcard && (
+        <div className="shrink-0 border-b border-border px-3 py-1.5 text-[10px] text-amber-400">
+          All permissions granted (built-in)
+        </div>
+      )}
+
       {/* Permission groups */}
       <div className="flex-1 overflow-auto">
-        {isWildcard && (
-          <div className="px-3 py-2 text-[10px] text-amber-400">
-            This role has wildcard access — all permissions are granted.
-          </div>
-        )}
         {filtered.map(([ns, perms]) => {
           const selectedCount = perms.filter((p) => isWildcard || role.permissions.includes(p.key)).length;
           return (

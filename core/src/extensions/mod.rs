@@ -1,7 +1,6 @@
 pub mod agents;
 mod audit;
 pub mod auth;
-pub mod browser;
 pub mod integrations;
 pub mod logs;
 pub mod mcp;
@@ -45,17 +44,13 @@ pub trait RuntimeExtension: Send + Sync {
 
 /// Build all built-in extensions in correct bootstrap order.
 /// Auth must come before RBAC (rbac_assignments references users table).
-pub fn builtin_extensions(
-    auth_config: Arc<AuthConfig>,
-    browser_queue: Arc<browser::queue::BrowserQueue>,
-) -> Vec<Box<dyn RuntimeExtension>> {
+pub fn builtin_extensions(auth_config: Arc<AuthConfig>) -> Vec<Box<dyn RuntimeExtension>> {
     vec![
         Box::new(audit::AuditExtension),
         Box::new(logs::LogsExtension),
         Box::new(auth::AuthExtension { config: auth_config }),
         Box::new(rbac::RbacExtension),
         Box::new(agents::AgentExtension),
-        Box::new(browser::BrowserExtension::with_queue(browser_queue)),
         Box::new(integrations::IntegrationsExtension),
         Box::new(mcp::McpExtension),
     ]
