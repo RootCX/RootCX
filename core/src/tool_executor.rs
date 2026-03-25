@@ -18,6 +18,8 @@ pub(crate) async fn execute(
     user_id: Uuid,
     permissions: Vec<String>,
     pool: PgPool,
+    runtime_url: String,
+    auth_token: String,
     out_tx: mpsc::Sender<OutboundMessage>,
     stream_tx: Option<mpsc::Sender<AgentEvent>>,
     invoke_id: String,
@@ -31,7 +33,7 @@ pub(crate) async fn execute(
     let start = Instant::now();
     let (result, err) = match tool {
         Some(t) => {
-            let ctx = ToolContext { pool, app_id, user_id, permissions, args };
+            let ctx = ToolContext { pool, app_id, user_id, permissions, args, runtime_url, auth_token };
             match t.execute(&ctx).await {
                 Ok(v) => (Some(v), None),
                 Err(e) => (None, Some(e)),

@@ -67,6 +67,7 @@ impl Runtime {
         tool_registry.register(tools::list_apps::ListAppsTool);
         tool_registry.register(tools::describe_app::DescribeAppTool);
         tool_registry.register(tools::list_integrations::ListIntegrationsTool);
+        tool_registry.register(tools::invoke_agent::InvokeAgentTool);
 
         let mcp_manager = Arc::new(McpManager::new(Arc::clone(&tool_registry), bun_bin.clone()));
 
