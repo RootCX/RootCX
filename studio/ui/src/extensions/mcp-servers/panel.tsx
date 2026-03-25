@@ -92,6 +92,7 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
   const [command, setCommand] = useState("");
   const [args, setArgs] = useState("");
   const [url, setUrl] = useState("");
+  const [headerRows, setHeaderRows] = useState([{ key: "", value: "" }]);
   const [envRows, setEnvRows] = useState([{ key: "", value: "" }]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -100,6 +101,8 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
     transport === "sse" ? url.trim() : transport === "cli" ? install.trim() : command.trim()
   );
 
+  const updateHeader = (i: number, field: "key" | "value", v: string) =>
+    setHeaderRows(headerRows.map((r, j) => j === i ? { ...r, [field]: v } : r));
   const updateEnv = (i: number, field: "key" | "value", v: string) =>
     setEnvRows(envRows.map((r, j) => j === i ? { ...r, [field]: v } : r));
 
@@ -112,8 +115,11 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
         for (const s of secrets) await setSecret(s.key.trim(), s.value);
       }
       const parsedArgs = args.trim() ? args.trim().split(/\s+/) : [];
+      const headers = Object.fromEntries(
+        headerRows.filter(r => r.key.trim() && r.value).map(r => [r.key.trim(), r.value])
+      );
       const transportConfig = transport === "sse"
-        ? { type: "sse" as const, url: url.trim() }
+        ? { type: "sse" as const, url: url.trim(), ...(Object.keys(headers).length && { headers }) }
         : transport === "cli"
           ? { type: "cli" as const, install: install.trim() }
           : { type: "stdio" as const, command: command.trim(), args: parsedArgs };
@@ -126,17 +132,33 @@ function AddServerForm({ onDone }: { onDone: () => void }) {
 
   return (
     <div className="flex flex-col gap-2 rounded-md border border-border p-3">
-      <Input size="xs" className="font-mono" placeholder="Server name" value={name}
-        onChange={(e) => setName(e.target.value.replace(/[^a-z0-9_-]/gi, "").toLowerCase())} />
       <div className="flex gap-1">
         <Button size="xs" variant={transport === "stdio" ? "default" : "outline"} onClick={() => setTransport("stdio")}>stdio</Button>
         <Button size="xs" variant={transport === "sse" ? "default" : "outline"} onClick={() => setTransport("sse")}>SSE</Button>
         <Button size="xs" variant={transport === "cli" ? "default" : "outline"} onClick={() => setTransport("cli")}>CLI</Button>
       </div>
-      {transport === "sse" && (
+      <Input size="xs" className="font-mono" placeholder="Server name" value={name}
+        onChange={(e) => setName(e.target.value.replace(/[^a-z0-9_-]/gi, "").toLowerCase())} />
+      {transport === "sse" && (<>
         <Input size="xs" className="font-mono" placeholder="https://mcp.example.com/sse" value={url}
           onChange={(e) => setUrl(e.target.value)} />
-      )}
+        {headerRows.map((r, i) => (
+          <div key={i} className="flex items-center gap-1.5">
+            <Input size="xs" className="w-2/5 font-mono" placeholder="Header-Name" value={r.key}
+              onChange={(e) => updateHeader(i, "key", e.target.value)} />
+            <Input size="xs" className="flex-1 font-mono" placeholder="value" value={r.value}
+              onChange={(e) => updateHeader(i, "value", e.target.value)} />
+            {headerRows.length > 1 && (
+              <button className="text-muted-foreground hover:text-red-400"
+                onClick={() => setHeaderRows(headerRows.filter((_, j) => j !== i))}>
+                <Trash2 className="h-3 w-3" />
+              </button>
+            )}
+          </div>
+        ))}
+        <button className="self-start text-[10px] text-muted-foreground hover:text-foreground"
+          onClick={() => setHeaderRows([...headerRows, { key: "", value: "" }])}>+ header</button>
+      </>)}
       {transport === "stdio" && (
         <div className="flex gap-1.5">
           <Input size="xs" className="w-1/4 font-mono" placeholder="npx" value={command}

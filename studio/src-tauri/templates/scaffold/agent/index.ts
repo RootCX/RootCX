@@ -1,6 +1,5 @@
-import { createReactAgent } from "@langchain/langgraph/prebuilt";
 __LLM_IMPORT__
-import { DynamicStructuredTool } from "@langchain/core/tools";
+import { createAgent, tool, modelRetryMiddleware, modelCallLimitMiddleware, toolRetryMiddleware } from "langchain";
 import { createInterface } from "readline";
 import { z } from "zod";
 
@@ -34,10 +33,11 @@ async function invoke(m: any) {
         return;
     }
 
+    const maxTurns = m.config?.limits?.maxTurns ?? 50;
+
     const tools = (m.config._toolDescriptors ?? []).map((t: any) =>
-        new DynamicStructuredTool({
-            name: t.name, description: t.description, schema: toZod(t.inputSchema),
-            func: (args: any) => new Promise<string>((resolve) => {
+        tool(
+            (args: any) => new Promise<string>((resolve) => {
                 const id = crypto.randomUUID();
                 const timer = setTimeout(() => {
                     calls.delete(id);
@@ -46,22 +46,29 @@ async function invoke(m: any) {
                 calls.set(id, { resolve, timer });
                 write({ type: "agent_tool_call", invoke_id: m.invoke_id, call_id: id, tool_name: t.name, args });
             }),
-        })
+            { name: t.name, description: t.description, schema: toZod(t.inputSchema) },
+        )
     );
 
-    const agent = createReactAgent({
-        llm: __LLM_INIT__,
+    const agent = createAgent({
+        model: __LLM_INIT__,
         tools,
-        prompt: m.system_prompt,
+        systemPrompt: m.system_prompt,
+        middleware: [
+            modelRetryMiddleware({ maxRetries: 3, backoffFactor: 2, initialDelayMs: 1000 }),
+            modelCallLimitMiddleware({ runLimit: maxTurns }),
+            toolRetryMiddleware({ maxRetries: 3, onFailure: "continue" }),
+        ],
     });
 
     try {
         let response = "";
-        for await (const [chunk, metadata] of await agent.stream(
+        const stream = await agent.stream(
             { messages: [...(m.history ?? []), { role: "user", content: m.message }] },
-            { streamMode: "messages" as const },
-        )) {
-            if (metadata.langgraph_node !== "agent") continue;
+            { streamMode: "messages" as const, recursionLimit: maxTurns * 3 },
+        );
+        for await (const [chunk, metadata] of stream) {
+            if (metadata.langgraph_node !== "model_request") continue;
             const text = typeof chunk.content === "string" ? chunk.content : "";
             if (text) { response += text; write({ type: "agent_chunk", invoke_id: m.invoke_id, delta: text }); }
         }

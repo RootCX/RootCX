@@ -50,9 +50,14 @@ async fn build_config(client: &RuntimeClient) -> Result<ForgeConfig, String> {
     let ai = client.get_forge_config().await.map_err(|e| e.to_string())?;
     let env = client.get_platform_env().await.unwrap_or_default();
 
-    let provider_str = ai.get("model").and_then(|m| m.as_str()).unwrap_or("claude-sonnet-4-6");
+    let provider_str = ai.get("model").and_then(|m| m.as_str()).unwrap_or("anthropic/claude-sonnet-4-6");
     let (provider, model) = parse_provider_model(provider_str);
-    let api_key = env.get(provider.secret_key_name()).cloned();
+    let secret_key = match provider {
+        rootcx_types::ProviderType::Anthropic => "ANTHROPIC_API_KEY",
+        rootcx_types::ProviderType::OpenAI => "OPENAI_API_KEY",
+        rootcx_types::ProviderType::Bedrock => "AWS_BEARER_TOKEN_BEDROCK",
+    };
+    let api_key = env.get(secret_key).cloned();
 
     info!("forge: provider={provider:?} model={model} key={}", if api_key.is_some() { "ok" } else { "missing" });
 

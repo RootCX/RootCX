@@ -1,9 +1,9 @@
 pub mod auth;
-mod config;
 pub(crate) mod crud;
 mod deploy;
 mod introspection;
 mod jobs;
+pub mod llm_models;
 pub(crate) mod query_params;
 mod secrets;
 mod upload;
@@ -120,7 +120,6 @@ pub async fn verify_schema(
     Ok(Json(crate::schema_sync::verify_all(&pool, &manifest.app_id, &manifest.data_contract, &pk_types).await?))
 }
 
-pub use config::{get_ai_config, get_forge_config, set_ai_config};
 pub use crud::{bulk_create_records, create_record, delete_record, federated_query, get_record, list_records, query_records, update_record};
 pub use deploy::{deploy_backend, deploy_frontend, serve_frontend, serve_frontend_root};
 pub use jobs::{enqueue_job, get_job, list_jobs};

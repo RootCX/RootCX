@@ -10,7 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/logo";
 import { useProjectContext } from "@/components/layout/app-context";
 import { showAISetupDialog } from "@/components/ai-setup-dialog";
-import { aiConfigStore } from "@/lib/ai-models";
+import { llmStore } from "@/lib/ai-models";
 import { ArrowUp, Square, Plus, ChevronDown, ChevronRight, Check, X, Loader2, Terminal, Search, FileText, FolderOpen, Pencil, Globe, Eye } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Markdown, ChatScrollArea } from "@rootcx/ui";
@@ -304,7 +304,7 @@ export default function ForgePanel() {
 
   const submit = async () => {
     if (!input.trim() || streaming) return;
-    if (!aiConfigStore.getSnapshot()) { const ok = await showAISetupDialog(); if (!ok) return; }
+    if (!llmStore.getDefault()) { const ok = await showAISetupDialog(); if (!ok) return; }
     sendMessage(input.trim());
     setInput("");
   };

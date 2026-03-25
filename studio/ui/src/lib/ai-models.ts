@@ -1,6 +1,13 @@
-import { getAiConfig } from "@/core/api";
+import { listLlmModels } from "@/core/api";
 
-const DEFAULT_MODEL = "claude-sonnet-4-6";
+export interface LlmModel {
+  id: string;
+  name: string;
+  provider: string;
+  model: string;
+  config: any;
+  is_default: boolean;
+}
 
 export interface AIProvider {
   id: string;
@@ -26,48 +33,34 @@ export function envKeysForProvider(p: AIProvider, awsAuthMode?: AwsAuthMode): st
   return p.env;
 }
 
-export interface AiConfig {
-  provider: string;
-  model: string;
-  region?: string;
-}
-
 const DEFAULT_MODELS: Record<string, string> = {
-  anthropic: DEFAULT_MODEL,
-  openai: "o3",
-  bedrock: DEFAULT_MODEL,
+  anthropic: "claude-sonnet-4-6",
+  openai: "gpt-4.1",
+  bedrock: "us.anthropic.claude-sonnet-4-6",
 };
 
-export function defaultAiConfig(providerId: string): AiConfig {
-  return {
-    provider: providerId,
-    model: DEFAULT_MODELS[providerId] ?? DEFAULT_MODEL,
-    ...(providerId === "bedrock" ? { region: "us-east-1" } : {}),
-  };
+export function defaultModelForProvider(providerId: string): string {
+  return DEFAULT_MODELS[providerId] ?? "claude-sonnet-4-6";
 }
 
-// Reactive store — single source of truth from Core
-let current: AiConfig | null = null;
+// Reactive store — fetches from Core's llm-models API
+let models: LlmModel[] = [];
 let loaded = false;
 const listeners = new Set<() => void>();
 function emit() { listeners.forEach((fn) => fn()); }
 
-export const aiConfigStore = {
+export const llmStore = {
   subscribe(fn: () => void) { listeners.add(fn); return () => listeners.delete(fn); },
-  getSnapshot() { return current; },
+  getSnapshot() { return models; },
   isLoaded() { return loaded; },
+  getDefault() { return models.find((m) => m.is_default) ?? models[0] ?? null; },
   async refresh() {
     try {
-      current = await getAiConfig();
+      models = await listLlmModels();
       loaded = true;
     } catch {
-      // runtime not ready — don't update state
+      // runtime not ready
     }
     emit();
-  },
-
-  providerName() {
-    if (!current) return null;
-    return AI_PROVIDERS.find((p) => p.id === current!.provider)?.name ?? current.provider;
   },
 };

@@ -14,7 +14,7 @@ import { useViews } from "@/core/hooks";
 import { views as viewRegistry, executeCommand, workspace, layout } from "@/core/studio";
 import { CommandPaletteOverlay } from "@/extensions/command-palette/palette";
 import { showAISetupDialog } from "@/components/ai-setup-dialog";
-import { aiConfigStore } from "@/lib/ai-models";
+import { llmStore } from "@/lib/ai-models";
 import { useAuth } from "@/core/auth";
 import { useBoot } from "@/core/boot";
 import { Logo } from "@/components/logo";
@@ -61,10 +61,10 @@ function useAISetupPrompt() {
   useEffect(() => {
     const check = () => {
       if (prompted.current) return;
-      aiConfigStore.refresh().then(() => {
-        if (!aiConfigStore.isLoaded() || prompted.current) return;
+      llmStore.refresh().then(() => {
+        if (!llmStore.isLoaded() || prompted.current) return;
         prompted.current = true;
-        if (!aiConfigStore.getSnapshot()) showAISetupDialog();
+        if (!llmStore.getDefault()) showAISetupDialog();
       });
     };
     const unlisten = listen("runtime-booted", check);

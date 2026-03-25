@@ -15,9 +15,9 @@ fn llm_config(provider: &str) -> LlmConfig {
     match provider {
         "openai" => LlmConfig {
             import: r#"import { ChatOpenAI } from "@langchain/openai";"#,
-            init: r#"new ChatOpenAI({ apiKey: credentials.OPENAI_API_KEY, model: "gpt-4o" })"#,
+            init: r#"new ChatOpenAI({ apiKey: credentials.OPENAI_API_KEY, model: "gpt-4.1" })"#,
             dep_name: "@langchain/openai",
-            dep_version: "^0.4.0",
+            dep_version: "^0.5.0",
         },
         "bedrock" => LlmConfig {
             import: r#"import { ChatBedrockConverse } from "@langchain/aws";"#,
@@ -79,10 +79,10 @@ impl Layer for AgentLayer {
                 "private": true,
                 "type": "module",
                 "dependencies": {
-                    "@langchain/langgraph": "^0.2.0",
+                    "langchain": "^1.2.0",
+                    "@langchain/core": "^1.1.0",
                     llm.dep_name: llm.dep_version,
-                    "@langchain/core": "^0.3.0",
-                    "zod": "^3.23.0"
+                    "zod": "^3.25.0"
                 }
             })).await?;
 

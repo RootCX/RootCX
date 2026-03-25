@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useSyncExternalStore } from "react";
-import { Cable, Container, Database, FolderOpen, Hammer, KeyRound, Plug, Shield, LogOut, ServerOff, type LucideIcon } from "lucide-react";
+import { Cable, Container, Database, FolderOpen, Hammer, KeyRound, Plug, Shield, Sparkles, LogOut, ServerOff, type LucideIcon } from "lucide-react";
 import { useAuth, logout, disconnect } from "@/core/auth";
 import { cn } from "@/lib/utils";
 import { useLayout, type ZoneId, type LayoutState } from "./layout-store";
@@ -19,6 +19,7 @@ const BASE_NAV: NavItem[] = [
   { id: "integrations", icon: Plug, label: "Integrations", desc: "Connect external services", zone: "sidebar" },
   { id: "secrets", icon: KeyRound, label: "Platform Secrets", desc: "Manage encrypted env variables", zone: "sidebar" },
   { id: "mcp-servers", icon: Cable, label: "MCP Servers", desc: "Connect MCP tool servers", zone: "sidebar" },
+  { id: "llm-models", icon: Sparkles, label: "LLM Models", desc: "Configure language models", zone: "sidebar" },
 ];
 const WORKERS_NAV: NavItem = { id: "workers", icon: Container, label: "Workers", desc: "Manage app workers", zone: "sidebar" };
 
