@@ -36,6 +36,21 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
     .map_err(RuntimeError::Schema)?;
 
     sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rootcx_system.llm_models (
+            id          TEXT PRIMARY KEY,
+            name        TEXT NOT NULL,
+            provider    TEXT NOT NULL,
+            model       TEXT NOT NULL,
+            config      JSONB NOT NULL DEFAULT '{}',
+            is_default  BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(RuntimeError::Schema)?;
+
+    sqlx::query(
         "INSERT INTO rootcx_system.apps (id, name, version, status)
          VALUES ('core', 'Core', '0.0.0', 'system') ON CONFLICT (id) DO NOTHING",
     )

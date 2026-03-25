@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rootcx_types::{AiConfig, AppManifest, InstalledApp, OsStatus, SchemaVerification};
+use rootcx_types::{AppManifest, InstalledApp, OsStatus, SchemaVerification};
 use serde_json::Value as JsonValue;
 
 #[derive(Debug, thiserror::Error)]
@@ -164,20 +164,6 @@ impl RuntimeClient {
     pub async fn list_integrations(&self) -> Result<Vec<JsonValue>, ClientError> {
         let resp = self.authed(self.client.get(self.api("/integrations"))).send().await?;
         check_response(resp).await?.json().await.map_err(Into::into)
-    }
-
-    pub async fn get_ai_config(&self) -> Result<Option<AiConfig>, ClientError> {
-        let resp = self.authed(self.client.get(self.api("/config/ai"))).send().await?;
-        if resp.status().as_u16() == 404 {
-            return Ok(None);
-        }
-        Ok(Some(check_response(resp).await?.json().await?))
-    }
-
-    pub async fn set_ai_config(&self, config: &AiConfig) -> Result<(), ClientError> {
-        let resp = self.authed(self.client.put(self.api("/config/ai"))).json(config).send().await?;
-        check_response(resp).await?;
-        Ok(())
     }
 
     pub async fn get_forge_config(&self) -> Result<JsonValue, ClientError> {

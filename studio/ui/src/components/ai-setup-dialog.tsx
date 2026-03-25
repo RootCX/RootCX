@@ -8,12 +8,12 @@ import {
   AI_PROVIDERS,
   AWS_AUTH_MODES,
   envKeysForProvider,
-  defaultAiConfig,
-  aiConfigStore,
+  defaultModelForProvider,
+  llmStore,
   type AIProvider,
   type AwsAuthMode,
 } from "@/lib/ai-models";
-import { setSecret, saveAiConfig } from "@/core/api";
+import { setSecret, createLlmModel } from "@/core/api";
 
 type Step = "provider" | "key" | "saving";
 
@@ -41,7 +41,9 @@ export function AISetupDialogPortal() {
 }
 
 function AISetupWizard({ preselect, onDone }: { preselect?: string; onDone: (ok: boolean) => void }) {
-  const currentConfig = useSyncExternalStore(aiConfigStore.subscribe, aiConfigStore.getSnapshot);
+  const models = useSyncExternalStore(llmStore.subscribe, llmStore.getSnapshot);
+  const configuredProviders = new Set(models.map((m) => m.provider));
+
   const [step, setStep] = useState<Step>("provider");
   const [selected, setSelected] = useState<AIProvider | null>(null);
   const [secrets, setSecrets] = useState<Record<string, string>>({});
@@ -78,11 +80,19 @@ function AISetupWizard({ preselect, onDone }: { preselect?: string; onDone: (ok:
       setSecrets({});
 
       setSavingStatus("Saving configuration...");
-      await saveAiConfig(defaultAiConfig(selected.id));
+      const modelName = defaultModelForProvider(selected.id);
+      const isFirst = models.length === 0;
+      await createLlmModel({
+        id: selected.id,
+        name: selected.name,
+        provider: selected.id,
+        model: modelName,
+        is_default: isFirst,
+      });
 
       setSavingStatus("Starting AI engine...");
       await invoke("forge_reload_config").catch(() => {});
-      await aiConfigStore.refresh();
+      await llmStore.refresh();
       onDone(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -102,7 +112,7 @@ function AISetupWizard({ preselect, onDone }: { preselect?: string; onDone: (ok:
         <div className="px-5 py-4">
           {step === "provider" && (
             <>
-              <div className="mb-3 text-[13px] font-semibold text-foreground tracking-[-0.01em]">Configure AI Provider</div>
+              <div className="mb-3 text-[13px] font-semibold text-foreground tracking-[-0.01em]">Add LLM Provider</div>
               <div className="flex flex-col gap-1.5">
                 {AI_PROVIDERS.map((p) => (
                   <button
@@ -114,9 +124,9 @@ function AISetupWizard({ preselect, onDone }: { preselect?: string; onDone: (ok:
                     onClick={() => selectProvider(p)}
                   >
                     <span className="flex-1 text-sm font-medium text-foreground">{p.name}</span>
-                    {currentConfig?.provider === p.id && (
+                    {configuredProviders.has(p.id) && (
                       <span className="flex items-center gap-1 text-[10px] text-green-400">
-                        <Check className="h-3 w-3" /> active
+                        <Check className="h-3 w-3" /> configured
                       </span>
                     )}
                   </button>

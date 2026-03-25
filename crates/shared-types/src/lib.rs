@@ -177,38 +177,12 @@ pub struct SchemaVerification {
     pub changes: Vec<SchemaChange>,
 }
 
-pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderType {
     Anthropic,
     OpenAI,
     Bedrock,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AiConfig {
-    pub provider: ProviderType,
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
-}
-
-impl Default for AiConfig {
-    fn default() -> Self {
-        Self { provider: ProviderType::Anthropic, model: DEFAULT_MODEL.into(), region: None }
-    }
-}
-
-impl AiConfig {
-    pub fn forge_model_string(&self) -> String {
-        match self.provider {
-            ProviderType::Bedrock => format!("amazon-bedrock/anthropic.{}", self.model),
-            ProviderType::Anthropic => format!("anthropic/{}", self.model),
-            ProviderType::OpenAI => format!("openai/{}", self.model),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -330,12 +304,3 @@ pub struct ToolDef {
     pub input_schema: serde_json::Value,
 }
 
-impl ProviderType {
-    pub fn secret_key_name(&self) -> &'static str {
-        match self {
-            Self::Anthropic => "ANTHROPIC_API_KEY",
-            Self::OpenAI => "OPENAI_API_KEY",
-            Self::Bedrock => "AWS_BEARER_TOKEN_BEDROCK",
-        }
-    }
-}
