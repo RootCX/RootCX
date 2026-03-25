@@ -1,10 +1,14 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use serde_json::{json, Value as JsonValue};
 use sqlx::PgPool;
 use tracing::warn;
 
 use crate::api_error::ApiError;
+use crate::auth::AuthConfig;
+use crate::ipc::AgentInvokePayload;
+use crate::tools::ToolRegistry;
 use rootcx_types::AgentDefinition;
 
 pub(crate) async fn load_agent_json(app_dir: &Path) -> Option<AgentDefinition> {
@@ -86,4 +90,45 @@ pub(crate) async fn load_history(
     Ok(messages.into_iter().map(|(role, content)| {
         json!({"role": role, "content": content.unwrap_or_default()})
     }).collect())
+}
+
+/// Build a complete invoke payload for an agent. Shared by HTTP route and internal orchestrator.
+pub(crate) async fn build_invoke_payload(
+    pool: &PgPool,
+    app_id: &str,
+    message: String,
+    session_id: String,
+    history: Vec<JsonValue>,
+    data_dir: &Path,
+    auth_config: &Arc<AuthConfig>,
+    tool_registry: &ToolRegistry,
+) -> Result<AgentInvokePayload, String> {
+    let agent_config_json: JsonValue = sqlx::query_scalar(
+        "SELECT config FROM rootcx_system.agents WHERE app_id = $1",
+    )
+    .bind(app_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| format!("no agent for app '{app_id}'"))?;
+
+    let system_prompt = load_system_prompt(app_id, &agent_config_json, data_dir)
+        .await.map_err(|e| format!("{e:?}"))?;
+    let agent_config = build_agent_config(pool, app_id, &agent_config_json, tool_registry)
+        .await.map_err(|e| format!("{e:?}"))?;
+
+    let agent_uid = super::agent_user_id(app_id);
+    let agent_token = crate::auth::jwt::encode_access(auth_config, agent_uid, &format!("agent:{app_id}"))
+        .map_err(|e| e.to_string())?;
+
+    Ok(AgentInvokePayload {
+        invoke_id: uuid::Uuid::new_v4().to_string(),
+        session_id,
+        message,
+        system_prompt,
+        config: agent_config,
+        auth_token: agent_token,
+        history,
+        caller: None,
+    })
 }

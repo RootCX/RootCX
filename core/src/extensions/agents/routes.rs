@@ -8,15 +8,13 @@ use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 
-use super::agent_user_id;
 use super::approvals::{ApprovalReply, ApprovalResponse};
 use super::config;
 use super::persistence::PersistCtx;
 use super::streaming;
 use crate::api_error::ApiError;
-use crate::auth::jwt;
 use crate::auth::identity::Identity;
-use crate::ipc::{AgentInvokePayload, RpcCaller};
+use crate::ipc::RpcCaller;
 use crate::routes::{self, SharedRuntime};
 
 #[derive(Deserialize)]
@@ -122,30 +120,27 @@ pub async fn invoke_agent(
         .and_then(|m| m.get("enabled")).and_then(|e| e.as_bool()) == Some(true);
 
     let history = config::load_history(&pool, memory_enabled, &app_id, &session_id).await?;
-    let system_prompt = config::load_system_prompt(&app_id, &agent_config_json, &data_dir).await?;
-    let agent_config = config::build_agent_config(&pool, &app_id, &agent_config_json, &tool_registry).await?;
 
-    let agent_token = jwt::encode_access(&auth_cfg, agent_user_id(&app_id), &format!("agent:{app_id}"))
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut payload = config::build_invoke_payload(
+        &pool, &app_id, body.message.clone(), session_id.clone(), history,
+        &data_dir, &auth_cfg, &tool_registry,
+    ).await.map_err(ApiError::Internal)?;
+
+    // HTTP route adds caller identity + auth token (internal orchestrator doesn't)
+    let agent_token = payload.auth_token.clone();
+    payload.caller = Some(RpcCaller {
+        user_id: identity.user_id.to_string(),
+        email: identity.email.clone(),
+        auth_token: Some(agent_token),
+    });
 
     let persist_ctx = if memory_enabled {
         Some(PersistCtx {
             pool: pool.clone(), app_id: app_id.clone(),
             session_id: session_id.clone(), user_id: identity.user_id,
-            user_message: body.message.clone(),
+            user_message: body.message,
         })
     } else { None };
-
-    let payload = AgentInvokePayload {
-        invoke_id: uuid::Uuid::new_v4().to_string(),
-        session_id: session_id.clone(),
-        message: body.message,
-        system_prompt,
-        config: agent_config,
-        auth_token: agent_token.clone(),
-        history,
-        caller: Some(RpcCaller { user_id: identity.user_id.to_string(), email: identity.email.clone(), auth_token: Some(agent_token) }),
-    };
 
     let stream_rx = wm.agent_invoke(&app_id, payload).await?;
 
