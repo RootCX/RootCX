@@ -165,6 +165,7 @@ async fn supervisor_loop(
     let mut ipc_reader: Option<IpcReader> = None;
     let mut pending_rpcs = PendingRpcs::default();
     let mut pending_agent_streams: HashMap<String, mpsc::Sender<AgentEvent>> = HashMap::new();
+    let mut pending_agent_tokens: HashMap<String, String> = HashMap::new();
     let mut policy_evaluators: HashMap<String, Arc<TokioMutex<PolicyEvaluator>>> = HashMap::new();
     let pending_approvals = config.pending_approvals.clone();
     let mut crash_times: Vec<Instant> = Vec::new();
@@ -279,6 +280,7 @@ async fn supervisor_loop(
                                 Arc::new(TokioMutex::new(PolicyEvaluator::new(supervision))));
                         }
 
+                        pending_agent_tokens.insert(invoke_id.clone(), payload.auth_token.clone());
                         pending_agent_streams.insert(invoke_id.clone(), stream_tx);
                         if let Some(ref mut w) = ipc_writer {
                             if let Err(e) = w.send(&OutboundMessage::AgentInvoke(payload)).await {
@@ -342,12 +344,14 @@ async fn supervisor_loop(
                         }
                         InboundMessage::AgentDone { invoke_id, response, tokens } => {
                             policy_evaluators.remove(&invoke_id);
+                            pending_agent_tokens.remove(&invoke_id);
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Done { response, tokens }).await;
                             }
                         }
                         InboundMessage::AgentError { invoke_id, error } => {
                             policy_evaluators.remove(&invoke_id);
+                            pending_agent_tokens.remove(&invoke_id);
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Error { error }).await;
                             }
@@ -364,6 +368,8 @@ async fn supervisor_loop(
                             let tool = config.tool_registry.get(&tool_name);
                             let pool = config.pool.clone();
                             let aid = config.app_id.clone();
+                            let rt_url = config.runtime_url.clone();
+                            let agent_token = pending_agent_tokens.get(&invoke_id).cloned().unwrap_or_default();
                             let out_tx = outbound_tx.clone();
                             let evaluator = policy_evaluators.get(&invoke_id).cloned();
                             let approvals_ref = pending_approvals.clone();
@@ -436,7 +442,8 @@ async fn supervisor_loop(
 
                                 crate::tool_executor::execute(
                                     tool, tool_name, args, aid, agent_uid, permissions,
-                                    pool, out_tx, stream_tx, invoke_id, call_id,
+                                    pool, rt_url, agent_token,
+                                    out_tx, stream_tx, invoke_id, call_id,
                                 ).await;
                             });
                         }

@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod describe_app;
+pub mod invoke_agent;
 pub mod list_apps;
 pub mod list_integrations;
 pub mod mutate_data;
@@ -21,6 +22,8 @@ pub struct ToolContext {
     pub user_id: Uuid,
     pub permissions: Vec<String>,
     pub args: JsonValue,
+    pub runtime_url: String,
+    pub auth_token: String,
 }
 
 pub fn check_permission(permissions: &[String], required: &str) -> Result<(), String> {
