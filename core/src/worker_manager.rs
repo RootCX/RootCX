@@ -12,7 +12,7 @@ use tracing::{error, info, warn};
 use crate::RuntimeError;
 use crate::extensions::agents::approvals::PendingApprovals;
 use crate::extensions::logs::LogEntry;
-use crate::ipc::{AgentBootConfig, AgentInvokePayload, RpcCaller};
+use crate::ipc::{AgentBootConfig, AgentInvokePayload, LlmModelRef, RpcCaller};
 use crate::secrets::SecretManager;
 use crate::tools::{AgentDispatcher, ToolRegistry};
 use crate::worker::{self, AgentEvent, SupervisorHandle, WorkerConfig, WorkerStatus};
@@ -199,8 +199,12 @@ struct SubAgentDispatch {
 
 #[async_trait]
 impl AgentDispatcher for SubAgentDispatch {
-    async fn dispatch(&self, _pool: &PgPool, caller: &str, target: &str, message: &str) -> Result<String, String> {
+    async fn dispatch(&self, pool: &PgPool, caller: &str, target: &str, message: &str) -> Result<String, String> {
         if target == caller { return Err("cannot invoke self".into()); }
+
+        let llm = crate::routes::llm_models::fetch_default_llm(pool).await
+            .map_err(|e| e.to_string())?
+            .map(|(provider, model)| LlmModelRef { provider, model });
 
         let payload = AgentInvokePayload {
             invoke_id: uuid::Uuid::new_v4().to_string(),
@@ -208,6 +212,7 @@ impl AgentDispatcher for SubAgentDispatch {
             message: message.to_string(),
             history: vec![],
             is_sub_invoke: true,
+            llm,
         };
 
         let mut rx = self.wm.agent_invoke(target, payload).await.map_err(|e| e.to_string())?;

@@ -33,6 +33,12 @@ pub struct AgentBootConfig {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct LlmModelRef {
+    pub provider: String,
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct AgentInvokePayload {
     pub invoke_id: String,
     pub session_id: String,
@@ -40,6 +46,8 @@ pub struct AgentInvokePayload {
     pub history: Vec<JsonValue>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_sub_invoke: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm: Option<LlmModelRef>,
 }
 
 #[derive(Debug, Clone, Serialize)]
