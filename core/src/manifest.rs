@@ -79,11 +79,12 @@ pub async fn uninstall_app(pool: &PgPool, app_id: &str) -> Result<(), RuntimeErr
     let drop_schema = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(app_id));
     sqlx::query(&drop_schema).execute(pool).await.map_err(RuntimeError::Schema)?;
 
+    sqlx::query("DELETE FROM rootcx_system.secrets WHERE app_id = $1")
+        .bind(app_id).execute(pool).await.map_err(RuntimeError::Schema)?;
+    sqlx::query("DELETE FROM rootcx_system.jobs WHERE app_id = $1")
+        .bind(app_id).execute(pool).await.map_err(RuntimeError::Schema)?;
     sqlx::query("DELETE FROM rootcx_system.apps WHERE id = $1")
-        .bind(app_id)
-        .execute(pool)
-        .await
-        .map_err(RuntimeError::Schema)?;
+        .bind(app_id).execute(pool).await.map_err(RuntimeError::Schema)?;
 
     info!(app = %app_id, "app uninstalled");
     Ok(())
