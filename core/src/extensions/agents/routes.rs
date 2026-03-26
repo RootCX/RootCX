@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
@@ -141,17 +141,30 @@ pub async fn invoke_agent(
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
+#[derive(Deserialize)]
+pub struct PaginationParams {
+    #[serde(default = "default_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+}
+fn default_limit() -> i64 { 100 }
+
 pub async fn list_sessions(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
+    Query(p): Query<PaginationParams>,
 ) -> Result<Json<Vec<SessionRow>>, ApiError> {
     let pool = routes::pool(&rt).await?;
+    let limit = p.limit.clamp(1, 1000);
+    let offset = p.offset.max(0);
     let rows = sqlx::query_as::<_, SessionRow>(
         "SELECT id::text, messages, created_at::text, updated_at::text,
                 title, status, total_tokens, turn_count
-         FROM rootcx_system.agent_sessions WHERE app_id = $1 ORDER BY updated_at DESC",
-    ).bind(&app_id).fetch_all(&pool).await?;
+         FROM rootcx_system.agent_sessions WHERE app_id = $1
+         ORDER BY updated_at DESC LIMIT $2 OFFSET $3",
+    ).bind(&app_id).bind(limit).bind(offset).fetch_all(&pool).await?;
     Ok(Json(rows))
 }
 
