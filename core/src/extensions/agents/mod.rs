@@ -114,6 +114,7 @@ impl RuntimeExtension for AgentExtension {
     fn routes(&self) -> Option<Router<SharedRuntime>> {
         Some(
             Router::new()
+                .route("/api/v1/agents", get(routes::list_agents))
                 .route("/api/v1/apps/{app_id}/agent", get(routes::get_agent))
                 .route("/api/v1/apps/{app_id}/agent/invoke", post(routes::invoke_agent))
                 .route("/api/v1/apps/{app_id}/agent/sessions", get(routes::list_sessions))
