@@ -5,7 +5,7 @@ use axum::extract::{Path, State};
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 
-use super::{SharedRuntime, pool_and_secrets};
+use super::{SharedRuntime, pool_and_secrets, wm};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::secrets::SecretManager;
@@ -80,7 +80,8 @@ pub async fn set_platform_secret(
     validate_key_name(&body.key)?;
     let (pool, sm) = pool_and_secrets(&rt).await?;
     sm.set(&pool, PLATFORM_SCOPE, &body.key, &body.value).await?;
-    Ok(Json(json!({ "message": format!("platform secret '{}' set", body.key) })))
+    let restarted = restart_workers(&rt).await;
+    Ok(Json(json!({ "message": format!("platform secret '{}' set", body.key), "workers_restarted": restarted })))
 }
 
 pub async fn delete_platform_secret(
@@ -91,7 +92,8 @@ pub async fn delete_platform_secret(
     reject_system_user(&identity, &rt).await?;
     let (pool, sm) = pool_and_secrets(&rt).await?;
     if sm.delete(&pool, PLATFORM_SCOPE, &key_name).await? {
-        Ok(Json(json!({ "message": format!("platform secret '{key_name}' deleted") })))
+        let restarted = restart_workers(&rt).await;
+        Ok(Json(json!({ "message": format!("platform secret '{key_name}' deleted"), "workers_restarted": restarted })))
     } else {
         Err(ApiError::NotFound(format!("platform secret '{key_name}' not found")))
     }
@@ -104,6 +106,12 @@ pub async fn list_platform_secrets(
     reject_system_user(&identity, &rt).await?;
     let (pool, _) = pool_and_secrets(&rt).await?;
     Ok(Json(SecretManager::list_keys(&pool, PLATFORM_SCOPE).await?))
+}
+
+async fn restart_workers(rt: &SharedRuntime) -> usize {
+    let Ok(w) = wm(rt).await else { return 0 };
+    let Ok((pool, sm)) = pool_and_secrets(rt).await else { return 0 };
+    w.restart_all(&pool, &sm).await
 }
 
 pub async fn get_platform_env(

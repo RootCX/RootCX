@@ -707,6 +707,23 @@ async fn platform_secrets_invalid_key() {
     rt.shutdown().await;
 }
 
+#[tokio::test]
+async fn platform_secrets_change_triggers_worker_restart() {
+    let rt = TestRuntime::boot().await;
+
+    // set a platform secret — response should include workers_restarted
+    let (s, body) = rt.post_json("/api/v1/platform/secrets", &json!({"key":"LLM_KEY","value":"val"})).await;
+    assert_eq!(s, 200);
+    assert!(body.get("workers_restarted").is_some(), "set: missing workers_restarted: {body}");
+
+    // delete a platform secret — response should also include workers_restarted
+    let (s, body) = rt.delete_json("/api/v1/platform/secrets/LLM_KEY").await;
+    assert_eq!(s, 200);
+    assert!(body.get("workers_restarted").is_some(), "delete: missing workers_restarted: {body}");
+
+    rt.shutdown().await;
+}
+
 // ── AI Config ──
 
 #[tokio::test]
