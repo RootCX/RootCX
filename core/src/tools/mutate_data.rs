@@ -18,6 +18,7 @@ impl Tool for MutateDataTool {
                 "type": "object",
                 "properties": {
                     "entity": { "type": "string", "description": "The collection/entity name" },
+                    "app": { "type": "string", "description": "Target app ID for cross-app writes" },
                     "action": { "type": "string", "enum": ["create", "update", "delete", "bulk_create"], "description": "The mutation action" },
                     "data": { "description": "A record object (create/update) or array of record objects (bulk_create, max 1000)" },
                     "id": { "type": "string", "description": "The record UUID (required for update/delete)" }
@@ -32,17 +33,18 @@ impl Tool for MutateDataTool {
     async fn execute(&self, ctx: &ToolContext) -> Result<JsonValue, String> {
         let entity = str_arg(&ctx.args, "entity")?;
         let action = str_arg(&ctx.args, "action")?;
+        let app = ctx.args.get("app").and_then(|v| v.as_str()).unwrap_or(&ctx.app_id);
 
         let perm_action = if action == "bulk_create" { "create" } else { action };
         check_permission(&ctx.permissions, &format!("{entity}.{perm_action}"))?;
 
-        let tbl = table(&ctx.app_id, entity);
+        let tbl = table(app, entity);
 
         match action {
             "create" => {
                 let obj = ctx.args.get("data").and_then(|v| v.as_object())
                     .ok_or("missing or invalid 'data' object")?;
-                let types = field_type_map(&ctx.pool, &ctx.app_id, entity).await.map_err(|e| e.to_string())?;
+                let types = field_type_map(&ctx.pool, app, entity).await.map_err(|e| e.to_string())?;
 
                 let cols: Vec<String> = obj.keys().map(|k| quote_ident(k)).collect();
                 let phs: Vec<String> = (1..=obj.len()).map(|i| format!("${i}")).collect();
@@ -61,7 +63,7 @@ impl Tool for MutateDataTool {
                 let uuid: sqlx::types::Uuid = id.parse().map_err(|_| format!("invalid UUID: '{id}'"))?;
                 let obj = ctx.args.get("data").and_then(|v| v.as_object())
                     .ok_or("missing or invalid 'data' object")?;
-                let types = field_type_map(&ctx.pool, &ctx.app_id, entity).await.map_err(|e| e.to_string())?;
+                let types = field_type_map(&ctx.pool, app, entity).await.map_err(|e| e.to_string())?;
 
                 let sets: Vec<String> = obj.keys().enumerate()
                     .map(|(i, k)| format!("{} = ${}", quote_ident(k), i + 1))
@@ -91,7 +93,7 @@ impl Tool for MutateDataTool {
                 let objects: Vec<&serde_json::Map<String, JsonValue>> = arr.iter()
                     .map(|v| v.as_object().ok_or("each item in 'data' must be an object"))
                     .collect::<Result<_, _>>()?;
-                let types = field_type_map(&ctx.pool, &ctx.app_id, entity).await.map_err(|e| e.to_string())?;
+                let types = field_type_map(&ctx.pool, app, entity).await.map_err(|e| e.to_string())?;
                 let rows = bulk_insert(&ctx.pool, &tbl, &types, &objects).await.map_err(|e| format!("{e:?}"))?;
                 Ok(json!(rows))
             }
