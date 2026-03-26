@@ -154,6 +154,17 @@ impl WorkerManager {
         }
     }
 
+    pub async fn restart_all(&self, pool: &PgPool, secrets: &SecretManager) -> usize {
+        let ids: Vec<String> = self.workers.read().await.keys().cloned().collect();
+        let count = ids.len();
+        for id in &ids {
+            if let Err(e) = self.stop_app(id).await { error!(app_id = %id, "restart stop: {e}"); }
+            if let Err(e) = self.start_app(pool, secrets, id).await { error!(app_id = %id, "restart start: {e}"); }
+        }
+        info!(count, "workers restarted (platform secrets changed)");
+        count
+    }
+
     pub async fn stop_all(&self) {
         let ids: Vec<String> = self.workers.read().await.keys().cloned().collect();
         let futs = ids.iter().map(|id| async move { if let Err(e) = self.stop_app(id).await { error!(app_id = %id, "stop error: {e}"); } });

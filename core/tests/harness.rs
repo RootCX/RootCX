@@ -93,6 +93,12 @@ impl TestRuntime {
         self.authed(self.client.delete(self.url(path))).send().await.unwrap().status()
     }
 
+    pub async fn delete_json(&self, path: &str) -> (StatusCode, Value) {
+        let r = self.authed(self.client.delete(self.url(path))).send().await.unwrap();
+        let s = r.status();
+        (s, r.json().await.unwrap_or(Value::Null))
+    }
+
     pub async fn upload(&self, path: &str, name: &str, mime: &str, data: &[u8]) -> (StatusCode, Value) {
         let part = multipart::Part::bytes(data.to_vec()).file_name(name.to_string()).mime_str(mime).unwrap();
         let form = multipart::Form::new().part("file", part);
