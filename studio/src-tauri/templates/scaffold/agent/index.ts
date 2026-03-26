@@ -1,18 +1,20 @@
 __LLM_IMPORT__
 import { createAgent, tool, modelRetryMiddleware, modelCallLimitMiddleware, toolRetryMiddleware } from "langchain";
 import { createInterface } from "readline";
+import { readFileSync } from "fs";
 import { z } from "zod";
 
 const TOOL_TIMEOUT_MS = 60_000;
 const write = (m: any) => process.stdout.write(JSON.stringify(m) + "\n");
 const rl = createInterface({ input: process.stdin });
 const calls = new Map<string, { resolve: (v: string) => void; timer: ReturnType<typeof setTimeout> }>();
-let credentials: Record<string, string> = {};
+
+let agent: any = null;
 
 rl.on("line", (l) => {
     let m: any;
     try { m = JSON.parse(l); } catch { return; }
-    if (m.type === "discover") { credentials = m.credentials ?? {}; return; }
+    if (m.type === "discover") { boot(m); return; }
     if (m.type === "agent_tool_result") {
         const pending = calls.get(m.call_id);
         if (pending) {
@@ -27,45 +29,56 @@ rl.on("line", (l) => {
 
 write({ type: "discover", capabilities: ["agent"] });
 
-async function invoke(m: any) {
-    if (!m.invoke_id || !m.config || !m.message) {
-        write({ type: "agent_error", invoke_id: m.invoke_id ?? "", error: "missing required fields" });
-        return;
-    }
+function boot(m: any) {
+    const cfg = m.agent_config;
+    if (!cfg) return;
+    const credentials = m.credentials ?? {};
+    for (const [k, v] of Object.entries(credentials)) process.env[k] = v as string;
 
-    const maxTurns = m.config?.limits?.maxTurns ?? 50;
+    let systemPrompt = "";
+    try { systemPrompt = readFileSync("./agent/system.md", "utf-8"); } catch {}
 
-    const tools = (m.config._toolDescriptors ?? []).map((t: any) =>
+    const tools = (cfg.tool_descriptors ?? []).map((t: any) =>
         tool(
-            (args: any) => new Promise<string>((resolve) => {
+            (args: any, config: any) => new Promise<string>((resolve) => {
+                const invokeId = config?.configurable?.invokeId ?? "";
                 const id = crypto.randomUUID();
                 const timer = setTimeout(() => {
                     calls.delete(id);
                     resolve(JSON.stringify({ error: "tool call timed out" }));
                 }, TOOL_TIMEOUT_MS);
                 calls.set(id, { resolve, timer });
-                write({ type: "agent_tool_call", invoke_id: m.invoke_id, call_id: id, tool_name: t.name, args });
+                write({ type: "agent_tool_call", invoke_id: invokeId, call_id: id, tool_name: t.name, args });
             }),
             { name: t.name, description: t.description, schema: toZod(t.inputSchema) },
         )
     );
 
-    const agent = createAgent({
+    const maxTurns = cfg.max_turns ?? 50;
+
+    agent = createAgent({
         model: __LLM_INIT__,
         tools,
-        systemPrompt: m.system_prompt,
+        systemPrompt,
         middleware: [
             modelRetryMiddleware({ maxRetries: 3, backoffFactor: 2, initialDelayMs: 1000 }),
             modelCallLimitMiddleware({ runLimit: maxTurns }),
             toolRetryMiddleware({ maxRetries: 3, onFailure: "continue" }),
         ],
     });
+}
+
+async function invoke(m: any) {
+    if (!agent || !m.invoke_id || !m.message) {
+        write({ type: "agent_error", invoke_id: m.invoke_id ?? "", error: "agent not ready or missing fields" });
+        return;
+    }
 
     try {
         let response = "";
         const stream = await agent.stream(
             { messages: [...(m.history ?? []), { role: "user", content: m.message }] },
-            { streamMode: "messages" as const, recursionLimit: maxTurns * 3 },
+            { streamMode: "messages" as const, recursionLimit: 150, configurable: { invokeId: m.invoke_id } },
         );
         for await (const [chunk, metadata] of stream) {
             if (metadata.langgraph_node !== "model_request") continue;

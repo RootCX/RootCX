@@ -51,7 +51,7 @@ pub async fn execute_tool(
     let (_, permissions) = crate::extensions::rbac::policy::resolve_permissions(&pool, &body.app_id, identity.user_id).await?;
     let result = tool.execute(&ToolContext {
         pool, app_id: body.app_id, user_id: identity.user_id, permissions, args: body.args,
-        runtime_url: String::new(), auth_token: String::new(),
+        agent_dispatch: None,
     }).await.map_err(ApiError::Internal)?;
     Ok(Json(result))
 }

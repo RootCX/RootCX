@@ -14,7 +14,7 @@ use super::persistence::PersistCtx;
 use super::streaming;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::ipc::RpcCaller;
+use crate::ipc::AgentInvokePayload;
 use crate::routes::{self, SharedRuntime};
 
 #[derive(Deserialize)]
@@ -98,21 +98,14 @@ pub async fn invoke_agent(
     Path(app_id): Path<String>,
     Json(body): Json<InvokeRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let (pool, wm, data_dir, auth_cfg, tool_registry) = {
+    let (pool, wm) = {
         let g = rt.lock().await;
-        (
-            g.pool().cloned().ok_or(ApiError::NotReady)?,
-            g.worker_manager().cloned().ok_or(ApiError::NotReady)?,
-            g.data_dir().to_path_buf(),
-            g.auth_config().clone(),
-            g.tool_registry().clone(),
-        )
+        (g.pool().cloned().ok_or(ApiError::NotReady)?, g.worker_manager().cloned().ok_or(ApiError::NotReady)?)
     };
 
     let agent_config_json: JsonValue = sqlx::query_scalar(
         "SELECT config FROM rootcx_system.agents WHERE app_id = $1",
-    )
-    .bind(&app_id).fetch_optional(&pool).await?
+    ).bind(&app_id).fetch_optional(&pool).await?
     .ok_or_else(|| ApiError::NotFound(format!("no agent for app '{app_id}'")))?;
 
     let session_id = body.session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -121,18 +114,13 @@ pub async fn invoke_agent(
 
     let history = config::load_history(&pool, memory_enabled, &app_id, &session_id).await?;
 
-    let mut payload = config::build_invoke_payload(
-        &pool, &app_id, body.message.clone(), session_id.clone(), history,
-        &data_dir, &auth_cfg, &tool_registry,
-    ).await.map_err(ApiError::Internal)?;
-
-    // HTTP route adds caller identity + auth token (internal orchestrator doesn't)
-    let agent_token = payload.auth_token.clone();
-    payload.caller = Some(RpcCaller {
-        user_id: identity.user_id.to_string(),
-        email: identity.email.clone(),
-        auth_token: Some(agent_token),
-    });
+    let payload = AgentInvokePayload {
+        invoke_id: uuid::Uuid::new_v4().to_string(),
+        session_id: session_id.clone(),
+        message: body.message.clone(),
+        history,
+        is_sub_invoke: false,
+    };
 
     let persist_ctx = if memory_enabled {
         Some(PersistCtx {

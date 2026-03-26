@@ -27,15 +27,19 @@ pub struct RpcCaller {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct AgentBootConfig {
+    pub tool_descriptors: Vec<rootcx_types::ToolDescriptor>,
+    pub max_turns: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct AgentInvokePayload {
     pub invoke_id: String,
     pub session_id: String,
     pub message: String,
-    pub system_prompt: String,
-    pub config: JsonValue,
-    pub auth_token: String,
     pub history: Vec<JsonValue>,
-    pub caller: Option<RpcCaller>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_sub_invoke: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,6 +51,8 @@ pub enum OutboundMessage {
         database_url: String,
         #[serde(skip_serializing_if = "HashMap::is_empty")]
         credentials: HashMap<String, String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        agent_config: Option<AgentBootConfig>,
     },
     Rpc { id: String, method: String, params: JsonValue, caller: Option<RpcCaller> },
     Job { id: String, payload: JsonValue, #[serde(skip_serializing_if = "Option::is_none")] caller: Option<RpcCaller> },
@@ -215,7 +221,7 @@ mod tests {
     #[test]
     fn outbound_messages_carry_type_tag() {
         let cases: Vec<(OutboundMessage, &str)> = vec![
-            (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), database_url: "postgres://localhost:5480/postgres".into(), credentials: HashMap::new() }, "discover"),
+            (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), database_url: "postgres://localhost:5480/postgres".into(), credentials: HashMap::new(), agent_config: None }, "discover"),
             (OutboundMessage::Rpc { id: "r1".into(), method: "echo".into(), params: json!({}), caller: None }, "rpc"),
             (OutboundMessage::Job { id: "j1".into(), payload: json!({}), caller: None }, "job"),
             (OutboundMessage::CollectionOpResult { id: "c1".into(), result: Some(json!({})), error: None }, "collection_op_result"),
