@@ -21,7 +21,7 @@ use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::secrets::SecretManager;
 use crate::worker_manager::WorkerManager;
-use rootcx_types::{AppManifest, InstalledApp, OsStatus, SchemaVerification};
+use rootcx_types::{AppManifest, AppType, InstalledApp, OsStatus, SchemaVerification};
 
 pub type SharedRuntime = Arc<Mutex<Runtime>>;
 
@@ -67,34 +67,52 @@ pub async fn install_app(
 pub async fn list_apps(
     _identity: Identity,
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<InstalledApp>>, ApiError> {
     let (pool, data_dir) = {
         let g = rt.lock().await;
         (g.pool().cloned().ok_or(ApiError::NotReady)?, g.data_dir().to_path_buf())
     };
-    let rows = sqlx::query_as::<_, (String, String, String, String, Option<sqlx::types::JsonValue>)>(
-        "SELECT id, name, version, status, manifest FROM rootcx_system.apps WHERE status != 'system' ORDER BY name",
+
+    let type_filter = params.get("type").and_then(|t| match t.as_str() {
+        "app" => Some(AppType::App),
+        "agent" => Some(AppType::Agent),
+        "integration" => Some(AppType::Integration),
+        _ => None,
+    });
+
+    let rows = sqlx::query_as::<_, (String, String, String, String, Option<sqlx::types::JsonValue>, bool)>(
+        "SELECT a.id, a.name, a.version, a.status, a.manifest,
+                EXISTS(SELECT 1 FROM rootcx_system.agents ag WHERE ag.app_id = a.id) AS is_agent
+         FROM rootcx_system.apps a
+         WHERE a.status != 'system'
+         ORDER BY a.name",
     )
     .fetch_all(&pool)
     .await?;
 
     let frontends = deploy::list_frontends(&data_dir);
 
-    Ok(Json(
-        rows.into_iter()
-            .map(|(id, name, version, status, manifest)| {
-                let entities = manifest
-                    .and_then(|m| {
-                        m.get("dataContract")?
-                            .as_array()
-                            .map(|a| a.iter().filter_map(|e| e.get("entityName")?.as_str().map(String::from)).collect())
-                    })
-                    .unwrap_or_default();
-                let has_frontend = frontends.contains(&id);
-                InstalledApp { id, name, version, status, entities, has_frontend }
-            })
-            .collect(),
-    ))
+    Ok(Json(rows.into_iter()
+        .filter_map(|(id, name, version, status, manifest, is_agent)| {
+            let app_type = if is_agent {
+                AppType::Agent
+            } else if manifest.as_ref().and_then(|m| m.get("type")).and_then(|t| t.as_str()) == Some("integration") {
+                AppType::Integration
+            } else {
+                AppType::App
+            };
+
+            if type_filter.is_some_and(|f| f != app_type) { return None; }
+
+            let entities = manifest
+                .and_then(|m| m.get("dataContract")?.as_array()
+                    .map(|a| a.iter().filter_map(|e| e.get("entityName")?.as_str().map(String::from)).collect()))
+                .unwrap_or_default();
+            let has_frontend = frontends.contains(&id);
+            Some(InstalledApp { id, name, version, status, app_type, entities, has_frontend })
+        })
+        .collect()))
 }
 
 pub async fn uninstall_app(

@@ -25,12 +25,6 @@ pub struct InvokeRequest {
 }
 
 #[derive(Serialize, sqlx::FromRow)]
-pub(crate) struct AgentSummary {
-    id: String,
-    name: String,
-}
-
-#[derive(Serialize, sqlx::FromRow)]
 pub(crate) struct AgentRow {
     app_id: String,
     name: String,
@@ -82,23 +76,6 @@ pub(crate) struct SessionEventEntry {
     event_type: String,
     #[serde(flatten)]
     data: JsonValue,
-}
-
-pub async fn list_agents(
-    _identity: Identity,
-    State(rt): State<SharedRuntime>,
-) -> Result<Json<Vec<AgentSummary>>, ApiError> {
-    let pool = routes::pool(&rt).await?;
-    let rows = sqlx::query_as::<_, AgentSummary>(
-        "SELECT a.app_id AS id, a.name
-         FROM rootcx_system.agents a
-         JOIN rootcx_system.apps ap ON ap.id = a.app_id
-         WHERE ap.status != 'system'
-         ORDER BY a.name",
-    )
-    .fetch_all(&pool)
-    .await?;
-    Ok(Json(rows))
 }
 
 pub async fn get_agent(

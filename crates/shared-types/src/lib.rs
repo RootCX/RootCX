@@ -53,6 +53,7 @@ pub enum AppType {
     #[default]
     App,
     Integration,
+    Agent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +143,8 @@ pub struct InstalledApp {
     pub name: String,
     pub version: String,
     pub status: String,
+    #[serde(rename = "type", default)]
+    pub app_type: AppType,
     pub entities: Vec<String>,
     #[serde(default)]
     pub has_frontend: bool,
