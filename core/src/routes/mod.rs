@@ -102,11 +102,21 @@ pub async fn uninstall_app(
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
     axum::extract::Path(app_id): axum::extract::Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    let (pool, data_dir) = {
+        let g = rt.lock().await;
+        (g.pool().cloned().ok_or(ApiError::NotReady)?, g.data_dir().to_path_buf())
+    };
     if let Ok(w) = wm(&rt).await {
         let _ = w.stop_app(&app_id).await;
     }
-    let pool = pool(&rt).await?;
     crate::manifest::uninstall_app(&pool, &app_id).await?;
+    for sub in ["apps", "frontends"] {
+        let dir = data_dir.join(sub).join(&app_id);
+        if dir.exists() {
+            tokio::fs::remove_dir_all(&dir).await
+                .map_err(|e| ApiError::Internal(format!("rm {}: {e}", dir.display())))?;
+        }
+    }
     Ok(Json(json!({ "message": format!("app '{}' uninstalled", app_id) })))
 }
 

@@ -123,6 +123,35 @@ async fn uninstall_app() {
 }
 
 #[tokio::test]
+async fn uninstall_cleans_db_and_filesystem() {
+    let rt = TestRuntime::boot().await;
+    rt.install("cleanup", "contacts").await;
+
+    rt.create("cleanup", "contacts", &json!({"first_name":"A","last_name":"B"})).await;
+    rt.post_json("/api/v1/apps/cleanup/secrets", &json!({"key":"SK","value":"sv"})).await;
+    rt.post_json("/api/v1/apps/cleanup/jobs", &json!({"payload":{"x":1}})).await;
+
+    let archive = make_tar_gz(&[("index.ts", b"process.stdin.resume();")]);
+    let (s, _) = rt.deploy("cleanup", &archive).await;
+    assert_eq!(s, 200);
+
+    assert_eq!(rt.delete("/api/v1/apps/cleanup").await, 200);
+
+    // secrets and jobs rows deleted (new DB cleanup)
+    let (_, keys) = rt.get_json("/api/v1/apps/cleanup/secrets").await;
+    assert!(keys.as_array().map_or(true, |a| a.is_empty()), "secrets should be gone: {keys}");
+    let (_, jobs) = rt.get_json("/api/v1/apps/cleanup/jobs").await;
+    assert!(jobs.as_array().map_or(true, |a| a.is_empty()), "jobs should be gone: {jobs}");
+
+    // reinstall + deploy works (filesystem was cleaned)
+    rt.install("cleanup", "contacts").await;
+    let (s, _) = rt.deploy("cleanup", &make_tar_gz(&[("index.ts", b"process.stdin.resume();")])).await;
+    assert_eq!(s, 200, "reinstall after full uninstall should succeed");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
 async fn crud_create_list() {
     let rt = TestRuntime::boot().await;
     rt.install("crud", "contacts").await;
