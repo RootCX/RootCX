@@ -32,7 +32,7 @@ pub(crate) async fn execute(
     let start = Instant::now();
     let (result, err) = match tool {
         Some(t) => {
-            let ctx = ToolContext { pool, app_id, user_id, permissions, args, agent_dispatch };
+            let ctx = ToolContext { pool, app_id, user_id, permissions, args, agent_dispatch, stream_tx: stream_tx.clone() };
             match t.execute(&ctx).await {
                 Ok(v) => (Some(v), None),
                 Err(e) => (None, Some(e)),

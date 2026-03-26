@@ -18,7 +18,10 @@ use rootcx_types::ToolDescriptor;
 
 #[async_trait]
 pub trait AgentDispatcher: Send + Sync {
-    async fn dispatch(&self, pool: &PgPool, caller: &str, target: &str, message: &str) -> Result<String, String>;
+    async fn dispatch(
+        &self, pool: &PgPool, caller: &str, target: &str, message: &str,
+        parent_tx: Option<tokio::sync::mpsc::Sender<crate::worker::AgentEvent>>,
+    ) -> Result<String, String>;
 }
 
 pub struct ToolContext {
@@ -28,6 +31,7 @@ pub struct ToolContext {
     pub permissions: Vec<String>,
     pub args: JsonValue,
     pub agent_dispatch: Option<Arc<dyn AgentDispatcher>>,
+    pub stream_tx: Option<tokio::sync::mpsc::Sender<crate::worker::AgentEvent>>,
 }
 
 pub fn check_permission(permissions: &[String], required: &str) -> Result<(), String> {
