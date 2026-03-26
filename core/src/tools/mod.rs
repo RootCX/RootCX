@@ -16,14 +16,18 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use rootcx_types::ToolDescriptor;
 
+#[async_trait]
+pub trait AgentDispatcher: Send + Sync {
+    async fn dispatch(&self, pool: &PgPool, caller: &str, target: &str, message: &str) -> Result<String, String>;
+}
+
 pub struct ToolContext {
     pub pool: PgPool,
     pub app_id: String,
     pub user_id: Uuid,
     pub permissions: Vec<String>,
     pub args: JsonValue,
-    pub runtime_url: String,
-    pub auth_token: String,
+    pub agent_dispatch: Option<Arc<dyn AgentDispatcher>>,
 }
 
 pub fn check_permission(permissions: &[String], required: &str) -> Result<(), String> {
