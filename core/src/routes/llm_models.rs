@@ -101,6 +101,13 @@ pub async fn set_default_llm_model(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn fetch_default_llm(pool: &sqlx::PgPool) -> Result<Option<(String, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT provider, model FROM rootcx_system.llm_models ORDER BY is_default DESC, created_at ASC LIMIT 1",
+    )
+    .fetch_optional(pool).await
+}
+
 pub async fn get_forge_model(
     _identity: Identity,
     State(rt): State<SharedRuntime>,

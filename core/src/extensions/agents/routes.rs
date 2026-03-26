@@ -14,8 +14,8 @@ use super::persistence::PersistCtx;
 use super::streaming;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::ipc::AgentInvokePayload;
-use crate::routes::{self, SharedRuntime};
+use crate::ipc::{AgentInvokePayload, LlmModelRef};
+use crate::routes::{self, SharedRuntime, llm_models::fetch_default_llm};
 
 #[derive(Deserialize)]
 pub struct InvokeRequest {
@@ -114,12 +114,17 @@ pub async fn invoke_agent(
 
     let history = config::load_history(&pool, memory_enabled, &app_id, &session_id).await?;
 
+    let llm = fetch_default_llm(&pool).await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map(|(provider, model)| LlmModelRef { provider, model });
+
     let payload = AgentInvokePayload {
         invoke_id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.clone(),
         message: body.message.clone(),
         history,
         is_sub_invoke: false,
+        llm,
     };
 
     let persist_ctx = if memory_enabled {
