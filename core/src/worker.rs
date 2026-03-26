@@ -37,6 +37,7 @@ pub enum AgentEvent {
     ToolCallCompleted { call_id: String, tool_name: String, output: Option<JsonValue>, error: Option<String>, duration_ms: u64 },
     ApprovalRequired { approval_id: String, tool_name: String, args: JsonValue, reason: String },
     SessionCompacted { summary: String },
+    SubAgentChunk { app_id: String, delta: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

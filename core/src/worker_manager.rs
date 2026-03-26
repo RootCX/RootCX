@@ -199,7 +199,10 @@ struct SubAgentDispatch {
 
 #[async_trait]
 impl AgentDispatcher for SubAgentDispatch {
-    async fn dispatch(&self, pool: &PgPool, caller: &str, target: &str, message: &str) -> Result<String, String> {
+    async fn dispatch(
+        &self, pool: &PgPool, caller: &str, target: &str, message: &str,
+        parent_tx: Option<mpsc::Sender<AgentEvent>>,
+    ) -> Result<String, String> {
         if target == caller { return Err("cannot invoke self".into()); }
 
         let llm = crate::routes::llm_models::fetch_default_llm(pool).await
@@ -215,13 +218,19 @@ impl AgentDispatcher for SubAgentDispatch {
             llm,
         };
 
+        let app_id = target.to_string();
         let mut rx = self.wm.agent_invoke(target, payload).await.map_err(|e| e.to_string())?;
         let mut response = String::new();
         while let Some(event) = rx.recv().await {
             match event {
                 AgentEvent::Done { response: r, .. } => return Ok(r),
                 AgentEvent::Error { error } => return Err(error),
-                AgentEvent::Chunk { delta } => response.push_str(&delta),
+                AgentEvent::Chunk { delta } => {
+                    response.push_str(&delta);
+                    if let Some(ref tx) = parent_tx {
+                        let _ = tx.send(AgentEvent::SubAgentChunk { app_id: app_id.clone(), delta }).await;
+                    }
+                }
                 _ => {}
             }
         }

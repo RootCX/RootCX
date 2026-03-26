@@ -69,6 +69,11 @@ pub(crate) fn build_sse_stream(
                             .data(json!({"summary": summary, "session_id": &*sid}).to_string());
                         Some((Ok(event), (rx, ctx)))
                     }
+                    Some(AgentEvent::SubAgentChunk { app_id, delta }) => {
+                        let event = Event::default().event("sub_agent_chunk")
+                            .data(json!({"app_id": app_id, "delta": delta}).to_string());
+                        Some((Ok(event), (rx, ctx)))
+                    }
                     None => None,
                 }
             }

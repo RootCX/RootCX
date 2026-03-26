@@ -27,7 +27,7 @@ impl Tool for InvokeAgentTool {
         let target = str_arg(&ctx.args, "app_id")?;
         let message = str_arg(&ctx.args, "message")?;
         let dispatch = ctx.agent_dispatch.as_ref().ok_or("sub-agent dispatch unavailable")?;
-        let response = dispatch.dispatch(&ctx.pool, &ctx.app_id, target, message).await?;
+        let response = dispatch.dispatch(&ctx.pool, &ctx.app_id, target, message, ctx.stream_tx.clone()).await?;
         Ok(json!({ "agent": target, "response": response }))
     }
 }
