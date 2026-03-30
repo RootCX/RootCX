@@ -11,10 +11,11 @@ use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 use tracing::{error, info};
 
-use super::types::ChannelBinding;
+use super::types::{ChannelBinding, ChannelProvider, InboundEvent};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::extensions::agents::{self, config as agent_config, persistence};
+use crate::extensions::agents::approvals::ApprovalResponse;
 use crate::ipc::{AgentInvokePayload, LlmModelRef};
 use crate::routes::{self, SharedRuntime, llm_models::fetch_default_llm};
 use crate::worker_manager::WorkerManager;
@@ -189,29 +190,31 @@ pub async fn webhook(
 
     let provider = super::provider(&provider_name)
         .ok_or_else(|| ApiError::BadRequest(format!("unknown provider: {provider_name}")))?;
-    let inbound = provider.parse_webhook(&config, body, &headers).await
+    let event = provider.parse_webhook(&config, body, &headers).await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
-    if let Some(reply) = handle_command(&pool, &channel_id, &inbound.chat_id, &inbound.text).await {
-        let _ = provider.send_response(&config, &inbound.chat_id, &reply).await;
-        return Ok(Json(json!({ "ok": true })));
-    }
+    match event {
+        InboundEvent::Callback { chat_id, callback_id, data } => {
+            handle_callback(&rt, &config, provider.as_ref(), &chat_id, &callback_id, &data).await;
+        }
+        InboundEvent::Message { chat_id, text } => {
+            if let Some(reply) = handle_command(&pool, &channel_id, &chat_id, &text).await {
+                let _ = provider.send_response(&config, &chat_id, &reply).await;
+                return Ok(Json(json!({ "ok": true })));
+            }
 
-    // Only debounce when the message hits the provider's char limit (likely split)
-    let needs_debounce = provider.debounce_ms()
-        .filter(|_| inbound.text.len() >= 4096);
-
-    if let Some(ms) = needs_debounce {
-        debounce_and_invoke(rt, channel_id, provider_name, config, inbound.chat_id, inbound.text, ms);
-    } else {
-        // Flush any pending debounce buffer then dispatch with this message appended
-        flush_and_invoke(rt, channel_id, provider_name, config, inbound.chat_id, inbound.text);
+            let needs_debounce = provider.debounce_ms().filter(|_| text.len() >= 4096);
+            if let Some(ms) = needs_debounce {
+                debounce_and_invoke(rt, channel_id, provider_name, config, chat_id, text, ms);
+            } else {
+                flush_and_invoke(rt, channel_id, provider_name, config, chat_id, text);
+            }
+        }
     }
 
     Ok(Json(json!({ "ok": true })))
 }
 
-/// Buffer messages per (channel, chat) and invoke after `ms` of silence.
 fn debounce_and_invoke(
     rt: SharedRuntime, channel_id: String, provider_name: String,
     config: JsonValue, chat_id: String, text: String, ms: u64,
@@ -246,7 +249,6 @@ fn debounce_and_invoke(
     });
 }
 
-/// Message < 4096: likely final or standalone. Flush any pending buffer and invoke.
 fn flush_and_invoke(
     rt: SharedRuntime, channel_id: String, provider_name: String,
     config: JsonValue, chat_id: String, text: String,
@@ -318,6 +320,9 @@ async fn do_invoke(
         match event {
             crate::worker::AgentEvent::Chunk { delta } => response.push_str(&delta),
             crate::worker::AgentEvent::Done { response: r, tokens: t } => { response = r; tokens = t; break; }
+            crate::worker::AgentEvent::ApprovalRequired { approval_id, tool_name, args, .. } => {
+                let _ = provider.send_approval(config, chat_id, &approval_id, &tool_name, &args).await;
+            }
             crate::worker::AgentEvent::Error { error: e } => {
                 if let Some(h) = &typing { h.abort(); }
                 error!(channel_id, chat_id, "agent error: {e}");
@@ -367,6 +372,27 @@ async fn get_or_create_session(
     ).bind(channel_id).bind(chat_id).bind(app_id).bind(&session_id)
     .execute(pool).await?;
     Ok(session_id)
+}
+
+async fn handle_callback(
+    rt: &SharedRuntime, config: &JsonValue, provider: &dyn ChannelProvider,
+    chat_id: &str, callback_id: &str, data: &str,
+) {
+    let (action, approval_id) = data.split_once(':').unwrap_or(("", ""));
+    let approvals = rt.pending_approvals().clone();
+
+    let (response, ack) = match action {
+        "approve" => (ApprovalResponse::Approved, "Approved"),
+        "deny" => (ApprovalResponse::Rejected { reason: "rejected via chat".into() }, "Denied"),
+        _ => { let _ = provider.answer_callback(config, callback_id, "Unknown action").await; return; }
+    };
+
+    let replied = approvals.reply(approval_id, response).await;
+    let msg = if replied { ack } else { "Expired or already handled" };
+    let _ = provider.answer_callback(config, callback_id, msg).await;
+    if replied {
+        let _ = provider.send_response(config, chat_id, &format!("_{ack}_")).await;
+    }
 }
 
 async fn handle_command(pool: &sqlx::PgPool, channel_id: &str, chat_id: &str, text: &str) -> Option<String> {
