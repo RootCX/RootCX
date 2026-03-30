@@ -267,6 +267,11 @@ impl AgentDispatcher for SubAgentDispatch {
                         let _ = tx.send(AgentEvent::SubAgentChunk { app_id: app_id.clone(), delta }).await;
                     }
                 }
+                AgentEvent::ApprovalRequired { .. } => {
+                    if let Some(ref tx) = parent_tx {
+                        let _ = tx.send(event).await;
+                    }
+                }
                 _ => {}
             }
         }
