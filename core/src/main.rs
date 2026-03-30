@@ -6,11 +6,9 @@ use std::sync::Arc;
 
 use rootcx_core::{Runtime, server};
 use rootcx_platform::service::ServiceConfig;
-use rootcx_postgres_mgmt::{PostgresManager, data_base_dir};
 use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
-const PG_PORT:  u16 = 5480;
 const API_PORT: u16 = rootcx_platform::DEFAULT_API_PORT;
 
 pub(crate) const SVC_NAME:  &str = "rootcx-core";
@@ -26,19 +24,6 @@ fn home() -> PathBuf {
 fn resources() -> PathBuf {
     rootcx_platform::dirs::resources_dir(env!("CARGO_MANIFEST_DIR"))
         .unwrap_or_else(|e| die(e))
-}
-
-fn resolve_pg() -> PathBuf {
-    let res = resources();
-    std::fs::read_dir(&res)
-        .unwrap_or_else(|e| die(format!("resources {}: {e}", res.display())))
-        .flatten()
-        .find_map(|e| {
-            let p = e.path();
-            (p.is_dir() && rootcx_platform::bin::binary_path(&p.join("bin"), "pg_ctl").exists())
-                .then_some(p)
-        })
-        .unwrap_or_else(|| die(format!("no PostgreSQL bundle in {}", res.display())))
 }
 
 fn resolve_bun() -> PathBuf {
@@ -73,7 +58,7 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("install") => {
-            install::run(home(), resolve_pg(), resolve_bun(), args.iter().any(|a| a == "--service"));
+            install::run(home(), resolve_bun(), args.iter().any(|a| a == "--service"));
             return;
         }
         Some("service") => {
@@ -106,26 +91,10 @@ async fn main() {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
-    let data_dir = data_base_dir().unwrap_or_else(|e| die(e));
-
-    let (database_url, embedded_pg, res_dir, bun_bin) = match std::env::var("DATABASE_URL") {
-        Ok(url) => {
-            let res = std::env::var("ROOTCX_RESOURCES").map(PathBuf::from)
-                .unwrap_or_else(|_| data_dir.clone());
-            let bun = std::env::var("BUN_PATH").map(PathBuf::from)
-                .unwrap_or_else(|_| rootcx_platform::bin::binary_path(&res, "bun"));
-            (url, None, res, bun)
-        }
-        Err(_) => {
-            let pg_root = resolve_pg();
-            let mgr = PostgresManager::new(pg_root.join("bin"), data_dir.join("data/pg"), PG_PORT)
-                .with_lib_dir(pg_root.join("lib"));
-            mgr.init_db().await.unwrap_or_else(|e| die(e));
-            mgr.start().await.unwrap_or_else(|e| die(e));
-            let url = mgr.connection_url("postgres");
-            (url, Some(mgr), resources(), resolve_bun())
-        }
-    };
+    let data_dir = rootcx_platform::dirs::data_dir().unwrap_or_else(|e| die(e));
+    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| die("DATABASE_URL is required"));
+    let res_dir = std::env::var("ROOTCX_RESOURCES").map(PathBuf::from).unwrap_or_else(|_| resources());
+    let bun_bin = std::env::var("BUN_PATH").map(PathBuf::from).unwrap_or_else(|_| resolve_bun());
 
     let rt = Arc::new(Mutex::new(Runtime::new(database_url, data_dir, res_dir, bun_bin)));
     rt.lock().await.boot(API_PORT).await.unwrap_or_else(|e| {
@@ -134,20 +103,17 @@ async fn main() {
 
     if daemon { let _ = std::fs::write(&pid_file, std::process::id().to_string()); }
 
-    let embedded_pg = Arc::new(Mutex::new(embedded_pg));
-    let (rt2, pf2, pg2) = (Arc::clone(&rt), pid_file.clone(), Arc::clone(&embedded_pg));
+    let (rt2, pf2) = (Arc::clone(&rt), pid_file.clone());
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         if daemon { let _ = std::fs::remove_file(&pf2); }
         rt2.lock().await.shutdown().await.ok();
-        if let Some(ref mgr) = *pg2.lock().await { mgr.stop().await.ok(); }
         std::process::exit(0);
     });
 
     if let Err(e) = server::serve(rt, API_PORT).await {
         tracing::error!("server: {e}");
         if daemon { let _ = std::fs::remove_file(&pid_file); }
-        if let Some(ref mgr) = *embedded_pg.lock().await { mgr.stop().await.ok(); }
         std::process::exit(1);
     }
 }

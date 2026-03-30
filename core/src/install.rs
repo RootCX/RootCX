@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use rootcx_platform::service::{ServiceConfig, ServiceStatus};
 use super::{die, SVC_NAME, SVC_LABEL, SVC_DESC};
 
-pub fn run(home: PathBuf, pg_root: PathBuf, bun_bin: PathBuf, with_service: bool) {
+pub fn run(home: PathBuf, bun_bin: PathBuf, with_service: bool) {
     let [bin_dir, res_dir, log_dir] = ["bin", "resources", "logs"].map(|d| home.join(d));
     for d in [&bin_dir, &res_dir, &log_dir] {
         std::fs::create_dir_all(d).unwrap_or_else(|e| die(format!("mkdir {}: {e}", d.display())));
@@ -12,10 +12,6 @@ pub fn run(home: PathBuf, pg_root: PathBuf, bun_bin: PathBuf, with_service: bool
     let daemon   = rootcx_platform::bin::binary_path(&bin_dir, SVC_NAME);
     std::fs::copy(&self_exe, &daemon).unwrap_or_else(|e| die(format!("copy daemon: {e}")));
     let _ = rootcx_platform::fs::set_executable(&daemon);
-
-    let pg_dest = res_dir.join(pg_root.file_name().unwrap_or("postgresql".as_ref()));
-    if pg_dest.exists() { let _ = std::fs::remove_dir_all(&pg_dest); }
-    rootcx_platform::fs::copy_dir(&pg_root, &pg_dest).unwrap_or_else(|e| die(e));
 
     let bun_dest = rootcx_platform::bin::binary_path(&res_dir, "bun");
     std::fs::copy(&bun_bin, &bun_dest).unwrap_or_else(|e| die(format!("copy bun: {e}")));

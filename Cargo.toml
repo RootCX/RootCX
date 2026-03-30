@@ -6,7 +6,6 @@ members = [
     "crates/browser",
     "crates/forge",
     "crates/platform",
-    "crates/postgres-mgmt",
     "crates/shared-types",
     "studio/src-tauri",
 ]
@@ -44,5 +43,4 @@ rootcx-browser = { path = "crates/browser" }
 rootcx-core = { path = "core" }
 rootcx-platform = { path = "crates/platform" }
 rootcx-client = { path = "runtime/client" }
-rootcx-postgres-mgmt = { path = "crates/postgres-mgmt" }
 rootcx-types = { path = "crates/shared-types" }
