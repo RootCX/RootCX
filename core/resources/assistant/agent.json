@@ -1,0 +1,8 @@
+{
+  "name": "assistant",
+  "description": "Primary AI assistant — delegates to specialized agents when needed",
+  "systemPrompt": "./agent/system.md",
+  "memory": { "enabled": true },
+  "limits": { "maxTurns": 50, "maxContextTokens": 100000, "keepRecentMessages": 10 },
+  "supervision": { "mode": "autonomous" }
+}
