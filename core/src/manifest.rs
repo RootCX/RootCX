@@ -81,8 +81,10 @@ pub async fn uninstall_app(pool: &PgPool, app_id: &str) -> Result<(), RuntimeErr
 
     sqlx::query("DELETE FROM rootcx_system.secrets WHERE app_id = $1")
         .bind(app_id).execute(pool).await.map_err(RuntimeError::Schema)?;
-    sqlx::query("DELETE FROM rootcx_system.jobs WHERE app_id = $1")
-        .bind(app_id).execute(pool).await.map_err(RuntimeError::Schema)?;
+    tokio::try_join!(
+        sqlx::query("DELETE FROM pgmq.q_jobs WHERE message->>'app_id' = $1").bind(app_id).execute(pool),
+        sqlx::query("DELETE FROM pgmq.a_jobs WHERE message->>'app_id' = $1").bind(app_id).execute(pool),
+    ).map_err(RuntimeError::Schema)?;
     sqlx::query("DELETE FROM rootcx_system.apps WHERE id = $1")
         .bind(app_id).execute(pool).await.map_err(RuntimeError::Schema)?;
 

@@ -1,144 +1,95 @@
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use tracing::info;
-use uuid::Uuid;
 
 use crate::RuntimeError;
 
-type JobRow = (Uuid, String, String, Option<JsonValue>, Option<JsonValue>, Option<String>, i32, Option<Uuid>);
-
-const COLS: &str = "id, app_id, status, payload, result, error, attempts, user_id";
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Job {
-    pub id: Uuid,
-    pub app_id: String,
-    pub status: String,
-    pub payload: Option<JsonValue>,
-    pub result: Option<JsonValue>,
-    pub error: Option<String>,
-    pub attempts: i32,
-    pub user_id: Option<Uuid>,
-}
-
-impl From<JobRow> for Job {
-    fn from((id, app_id, status, payload, result, error, attempts, user_id): JobRow) -> Self {
-        Self { id, app_id, status, payload, result, error, attempts, user_id }
-    }
-}
+const QUEUE: &str = "jobs";
+const VT_SECS: i32 = 120;
 
 fn err(e: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::Job(e.to_string())
 }
 
-pub async fn bootstrap_jobs_schema(pool: &PgPool) -> Result<(), RuntimeError> {
-    for sql in [
-        "CREATE TABLE IF NOT EXISTS rootcx_system.jobs (
-            id UUID PRIMARY KEY, app_id TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending', payload JSONB, result JSONB, error TEXT,
-            attempts INT NOT NULL DEFAULT 0, run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            user_id UUID,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        )",
-        "ALTER TABLE rootcx_system.jobs ADD COLUMN IF NOT EXISTS user_id UUID",
-        "CREATE INDEX IF NOT EXISTS idx_jobs_pending ON rootcx_system.jobs (run_at) WHERE status = 'pending'",
-        "CREATE INDEX IF NOT EXISTS idx_jobs_app ON rootcx_system.jobs (app_id, status)",
-    ] {
-        sqlx::query(sql).execute(pool).await.map_err(RuntimeError::Schema)?;
-    }
-    info!("jobs schema ready");
+pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
+    sqlx::query("CREATE EXTENSION IF NOT EXISTS pgmq").execute(pool).await.map_err(err)?;
+    sqlx::query(&format!("SELECT pgmq.create('{QUEUE}')"))
+        .execute(pool).await.map_err(err)?;
+    info!("pgmq jobs queue ready");
     Ok(())
 }
 
-pub async fn enqueue(
-    pool: &PgPool,
-    app_id: &str,
-    payload: JsonValue,
-    run_at: Option<chrono::DateTime<chrono::Utc>>,
-    user_id: Option<Uuid>,
-) -> Result<Uuid, RuntimeError> {
-    let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO rootcx_system.jobs (id, app_id, payload, run_at, user_id) VALUES ($1, $2, $3, $4, $5)")
-        .bind(id)
-        .bind(app_id)
-        .bind(&payload)
-        .bind(run_at.unwrap_or_else(chrono::Utc::now))
-        .bind(user_id)
-        .execute(pool)
-        .await
-        .map_err(err)?;
-    info!(job_id = %id, app_id, "job enqueued");
-    Ok(id)
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct JobMessage {
+    pub app_id: String,
+    pub payload: JsonValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<uuid::Uuid>,
 }
 
-pub async fn claim_next(pool: &PgPool) -> Result<Option<Job>, RuntimeError> {
-    sqlx::query_as::<_, JobRow>(&format!(
-        "UPDATE rootcx_system.jobs SET status = 'running', attempts = attempts + 1, updated_at = now()
-         WHERE id = (
-             SELECT id FROM rootcx_system.jobs
-             WHERE status = 'pending' AND run_at <= now()
-             ORDER BY run_at FOR UPDATE SKIP LOCKED LIMIT 1
-         ) RETURNING {COLS}"
-    ))
-    .fetch_optional(pool)
-    .await
-    .map_err(err)
-    .map(|opt| opt.map(Job::from))
+#[derive(Debug, serde::Serialize)]
+pub struct Job {
+    pub msg_id: i64,
+    pub app_id: String,
+    pub payload: JsonValue,
+    pub user_id: Option<uuid::Uuid>,
+    pub read_ct: i32,
+    pub enqueued_at: String,
 }
 
-pub async fn complete(pool: &PgPool, job_id: Uuid, result: JsonValue) -> Result<(), RuntimeError> {
-    sqlx::query("UPDATE rootcx_system.jobs SET status = 'completed', result = $2, updated_at = now() WHERE id = $1")
-        .bind(job_id)
-        .bind(&result)
-        .execute(pool)
-        .await
-        .map_err(err)?;
-    Ok(())
+pub async fn enqueue(pool: &PgPool, app_id: &str, payload: JsonValue, user_id: Option<uuid::Uuid>) -> Result<i64, RuntimeError> {
+    let msg = serde_json::to_value(JobMessage {
+        app_id: app_id.to_string(), payload, user_id,
+    }).map_err(err)?;
+    let (msg_id,): (i64,) = sqlx::query_as(&format!("SELECT pgmq.send('{QUEUE}', $1)"))
+        .bind(&msg).fetch_one(pool).await.map_err(err)?;
+    info!(msg_id, app_id, "job enqueued");
+    Ok(msg_id)
 }
 
-pub async fn fail(pool: &PgPool, job_id: Uuid, error: &str) -> Result<(), RuntimeError> {
-    sqlx::query("UPDATE rootcx_system.jobs SET status = 'failed', error = $2, updated_at = now() WHERE id = $1")
-        .bind(job_id)
-        .bind(error)
-        .execute(pool)
-        .await
-        .map_err(err)?;
-    Ok(())
-}
+pub async fn read_next(pool: &PgPool) -> Result<Option<(i64, JobMessage)>, RuntimeError> {
+    let row: Option<(i64, JsonValue)> = sqlx::query_as(
+        &format!("SELECT msg_id, message FROM pgmq.read('{QUEUE}', {VT_SECS}, 1)")
+    ).fetch_optional(pool).await.map_err(err)?;
 
-pub async fn get(pool: &PgPool, job_id: Uuid) -> Result<Option<Job>, RuntimeError> {
-    sqlx::query_as::<_, JobRow>(&format!("SELECT {COLS} FROM rootcx_system.jobs WHERE id = $1"))
-        .bind(job_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(err)
-        .map(|opt| opt.map(Job::from))
-}
-
-pub async fn list_for_app(
-    pool: &PgPool,
-    app_id: &str,
-    status_filter: Option<&str>,
-    limit: i64,
-) -> Result<Vec<Job>, RuntimeError> {
-    let base = format!("SELECT {COLS} FROM rootcx_system.jobs WHERE app_id = $1");
-    let rows: Vec<JobRow> = match status_filter {
-        Some(s) => {
-            sqlx::query_as(&format!("{base} AND status = $2 ORDER BY created_at DESC LIMIT $3"))
-                .bind(app_id)
-                .bind(s)
-                .bind(limit)
-                .fetch_all(pool)
-                .await
+    match row {
+        Some((msg_id, message)) => {
+            let job_msg: JobMessage = serde_json::from_value(message).map_err(err)?;
+            Ok(Some((msg_id, job_msg)))
         }
-        None => {
-            sqlx::query_as(&format!("{base} ORDER BY created_at DESC LIMIT $2"))
-                .bind(app_id)
-                .bind(limit)
-                .fetch_all(pool)
-                .await
-        }
+        None => Ok(None),
     }
-    .map_err(err)?;
-    Ok(rows.into_iter().map(Job::from).collect())
+}
+
+pub async fn complete(pool: &PgPool, msg_id: i64) -> Result<(), RuntimeError> {
+    sqlx::query(&format!("SELECT pgmq.archive('{QUEUE}', $1)"))
+        .bind(msg_id).execute(pool).await.map_err(err)?;
+    Ok(())
+}
+
+pub async fn fail(pool: &PgPool, msg_id: i64) -> Result<(), RuntimeError> {
+    sqlx::query(&format!("SELECT pgmq.delete('{QUEUE}', $1)"))
+        .bind(msg_id).execute(pool).await.map_err(err)?;
+    Ok(())
+}
+
+async fn list_from(pool: &PgPool, table: &str, ts_col: &str, app_id: &str, limit: i64) -> Result<Vec<Job>, RuntimeError> {
+    let sql = format!(
+        "SELECT msg_id, read_ct, {ts_col}::text, message FROM pgmq.{table} WHERE message->>'app_id' = $1 ORDER BY msg_id DESC LIMIT $2"
+    );
+    let rows: Vec<(i64, i32, String, JsonValue)> = sqlx::query_as(&sql)
+        .bind(app_id).bind(limit).fetch_all(pool).await.map_err(err)?;
+
+    Ok(rows.into_iter().filter_map(|(msg_id, read_ct, enqueued_at, message)| {
+        let m: JobMessage = serde_json::from_value(message).ok()?;
+        Some(Job { msg_id, app_id: m.app_id, payload: m.payload, user_id: m.user_id, read_ct, enqueued_at })
+    }).collect())
+}
+
+pub async fn list_for_app(pool: &PgPool, app_id: &str, limit: i64) -> Result<Vec<Job>, RuntimeError> {
+    list_from(pool, &format!("q_{QUEUE}"), "enqueued_at", app_id, limit).await
+}
+
+pub async fn list_archived(pool: &PgPool, app_id: &str, limit: i64) -> Result<Vec<Job>, RuntimeError> {
+    list_from(pool, &format!("a_{QUEUE}"), "archived_at", app_id, limit).await
 }

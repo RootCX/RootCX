@@ -1,10 +1,5 @@
-use rootcx_postgres_mgmt::PgError;
-
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
-    #[error("postgres management error: {0}")]
-    Postgres(#[from] PgError),
-
     #[error("database connection error: {0}")]
     Database(sqlx::Error),
 

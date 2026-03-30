@@ -25,7 +25,6 @@ use std::sync::Arc;
 
 use auth::AuthConfig;
 use extensions::{RuntimeExtension, builtin_extensions};
-use rootcx_postgres_mgmt::PostgresManager;
 use rootcx_types::{ForgeStatus, OsStatus, PostgresStatus, RuntimeStatus, ServiceState};
 use mcp::McpManager;
 use scheduler::SchedulerHandle;
@@ -39,8 +38,7 @@ use worker_manager::WorkerManager;
 const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct Runtime {
-    pg: PostgresManager,
-    external_db: bool,
+    database_url: String,
     pool: Option<PgPool>,
     extensions: Vec<Box<dyn RuntimeExtension>>,
     auth_config: Arc<auth::AuthConfig>,
@@ -56,7 +54,7 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    pub fn new(pg: PostgresManager, data_dir: PathBuf, resources_dir: PathBuf, bun_bin: PathBuf) -> Self {
+    pub fn new(database_url: String, data_dir: PathBuf, resources_dir: PathBuf, bun_bin: PathBuf) -> Self {
         let auth_config = AuthConfig::load(&data_dir).expect("failed to load auth config");
 
         let extensions = builtin_extensions(Arc::clone(&auth_config));
@@ -72,8 +70,7 @@ impl Runtime {
         let mcp_manager = Arc::new(McpManager::new(Arc::clone(&tool_registry), bun_bin.clone()));
 
         Self {
-            pg,
-            external_db: std::env::var("DATABASE_URL").is_ok(),
+            database_url,
             pool: None,
             extensions,
             auth_config,
@@ -92,18 +89,7 @@ impl Runtime {
     pub async fn boot(&mut self, api_port: u16) -> Result<(), RuntimeError> {
         info!("runtime boot sequence starting");
 
-        let db_url = if self.external_db {
-            let url = std::env::var("DATABASE_URL").unwrap();
-            info!("using external database");
-            url
-        } else {
-            self.pg.init_db().await.map_err(RuntimeError::Postgres)?;
-            self.pg.start().await.map_err(RuntimeError::Postgres)?;
-            info!("connecting to embedded postgres on port {}", self.pg.port());
-            self.pg.connection_url("postgres")
-        };
-
-        let pool = PgPool::connect(&db_url).await.map_err(RuntimeError::Database)?;
+        let pool = PgPool::connect(&self.database_url).await.map_err(RuntimeError::Database)?;
         schema::bootstrap(&pool).await?;
         sqlx::migrate!("./migrations").run(&pool).await.map_err(|e| RuntimeError::Schema(e.into()))?;
 
@@ -117,7 +103,7 @@ impl Runtime {
         std::fs::create_dir_all(&apps_dir).map_err(|e| RuntimeError::Worker(format!("create apps dir: {e}")))?;
         let runtime_url = format!("http://127.0.0.1:{api_port}");
         let wm = Arc::new(WorkerManager::new(
-            apps_dir, runtime_url, db_url, self.bun_bin.clone(),
+            apps_dir, runtime_url, self.database_url.clone(), self.bun_bin.clone(),
             Arc::clone(&self.tool_registry), self.pending_approvals.clone(),
         ));
         wm.init_self_ref();
@@ -146,19 +132,14 @@ impl Runtime {
             s.cancel.cancel();
         }
         self.scheduler = None;
-
         if let Some(pool) = self.pool.take() {
             pool.close().await;
-        }
-        if !self.external_db {
-            self.pg.stop().await.map_err(RuntimeError::Postgres)?;
         }
         info!("runtime shutdown complete");
         Ok(())
     }
 
     pub async fn status(&self) -> OsStatus {
-        let pg_up = if self.external_db { self.pool.is_some() } else { self.pg.is_running().await };
         let online = ServiceState::Online;
         let offline = ServiceState::Offline;
 
@@ -168,9 +149,9 @@ impl Runtime {
                 state: if self.pool.is_some() { online } else { offline },
             },
             postgres: PostgresStatus {
-                state: if pg_up { online } else { offline },
-                port: (!self.external_db && pg_up).then(|| self.pg.port()),
-                data_dir: (!self.external_db).then(|| self.pg.data_dir().display().to_string()),
+                state: if self.pool.is_some() { online } else { offline },
+                port: None,
+                data_dir: None,
             },
             forge: ForgeStatus { state: offline, port: None },
         }

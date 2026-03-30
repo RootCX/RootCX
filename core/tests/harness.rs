@@ -1,39 +1,51 @@
 use std::net::TcpListener;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use reqwest::{Client, Method, StatusCode, multipart};
 use rootcx_core::{Runtime, server};
-use rootcx_postgres_mgmt::PostgresManager;
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use testcontainers::{ContainerAsync, GenericImage, ImageExt, runners::AsyncRunner};
+use testcontainers::core::{IntoContainerPort, WaitFor};
 use tokio::sync::Mutex;
+
+const PG_IMAGE: &str = "rootcx-postgres";
+const PG_TAG: &str = "17";
 
 pub struct TestRuntime {
     base_url: String,
-    pub pg_port: u16,
     pub client: Client,
     runtime: Arc<Mutex<Runtime>>,
     token: String,
     _tmp: TempDir,
+    _container: ContainerAsync<GenericImage>,
 }
 
 impl TestRuntime {
     pub async fn boot() -> Self {
         let resources = rootcx_platform::dirs::resources_dir(env!("CARGO_MANIFEST_DIR"))
             .expect("resources dir not found");
-        let pg_root = find_pg_root(&resources).expect("bundled PostgreSQL not found");
         let bun_bin = rootcx_platform::bin::binary_path(&resources, "bun");
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path().to_path_buf();
-        let pg_port = free_port();
         let api_port = free_port();
 
-        let pg = PostgresManager::new(pg_root.join("bin"), data_dir.join("data/pg"), pg_port)
-            .with_lib_dir(pg_root.join("lib"));
+        let container = GenericImage::new(PG_IMAGE, PG_TAG)
+            .with_exposed_port(5432_u16.tcp())
+            .with_wait_for(WaitFor::message_on_stderr("database system is ready to accept connections"))
+            .with_env_var("POSTGRES_USER", "postgres")
+            .with_env_var("POSTGRES_PASSWORD", "postgres")
+            .with_env_var("POSTGRES_DB", "postgres")
+            .start()
+            .await
+            .expect("failed to start postgres container");
+
+        let pg_port = container.get_host_port_ipv4(5432).await.unwrap();
+        let db_url = format!("postgresql://postgres:postgres@127.0.0.1:{pg_port}/postgres");
+
         let resources_dir = data_dir.join("resources");
         std::fs::create_dir_all(&resources_dir).unwrap();
-        let runtime = Arc::new(Mutex::new(Runtime::new(pg, data_dir, resources_dir, bun_bin)));
+        let runtime = Arc::new(Mutex::new(Runtime::new(db_url, data_dir, resources_dir, bun_bin)));
         runtime.lock().await.boot(api_port).await.expect("boot failed");
 
         let rt = Arc::clone(&runtime);
@@ -53,7 +65,7 @@ impl TestRuntime {
         let body: Value = res.json().await.unwrap();
         let token = body["accessToken"].as_str().unwrap().to_string();
 
-        Self { base_url, pg_port, client, runtime, token, _tmp: tmp }
+        Self { base_url, client, runtime, token, _tmp: tmp, _container: container }
     }
 
     pub fn url(&self, path: &str) -> String {
@@ -107,7 +119,6 @@ impl TestRuntime {
         (s, r.json().await.unwrap_or(Value::Null))
     }
 
-    // Unauthed variants for auth boundary tests
     pub async fn get_unauthed(&self, path: &str) -> StatusCode {
         self.client.get(self.url(path)).send().await.unwrap().status()
     }
@@ -159,11 +170,4 @@ impl TestRuntime {
 
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
-}
-
-fn find_pg_root(dir: &std::path::Path) -> Option<PathBuf> {
-    std::fs::read_dir(dir).ok()?.flatten().find_map(|e| {
-        let p = e.path();
-        (p.is_dir() && rootcx_platform::bin::binary_path(&p.join("bin"), "pg_ctl").exists()).then_some(p)
-    })
 }

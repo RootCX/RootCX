@@ -59,7 +59,7 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
     .map_err(RuntimeError::Schema)?;
 
     crate::secrets::bootstrap_secrets_schema(pool).await?;
-    crate::jobs::bootstrap_jobs_schema(pool).await?;
+    crate::jobs::bootstrap(pool).await?;
 
     info!("rootcx_system schema ready");
     Ok(())

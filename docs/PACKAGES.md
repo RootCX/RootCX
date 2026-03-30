@@ -97,7 +97,6 @@ Never published. Distributed as binaries or embedded in Studio.
 | `rootcx-core`          | `core/`                 | The daemon itself — REST API, PG, supervisor. Distributed as binary. |
 | `rootcx-studio`        | `studio/src-tauri/`     | Desktop IDE (Tauri 2)                                                |
 | `rootcx-forge`         | `crates/forge/`         | Agentic AI engine embedded in Studio                                 |
-| `rootcx-postgres-mgmt` | `crates/postgres-mgmt/` | Embedded PostgreSQL lifecycle                                        |
 | `rootcx-browser`       | `crates/browser/`       | Chromium automation                                                  |
 
 ## Where scaffolded apps reference packages

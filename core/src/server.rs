@@ -37,7 +37,6 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .route("/api/v1/platform/secrets/env", get(routes::get_platform_env))
         .route("/api/v1/platform/secrets/{key_name}", delete(routes::delete_platform_secret))
         .route("/api/v1/apps/{app_id}/jobs", get(routes::list_jobs).post(routes::enqueue_job))
-        .route("/api/v1/apps/{app_id}/jobs/{job_id}", get(routes::get_job))
         .route("/api/v1/apps/{app_id}/upload", post(routes::upload_file).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)))
         .route(
             "/api/v1/apps/{app_id}/deploy",

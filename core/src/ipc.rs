@@ -97,8 +97,6 @@ pub enum InboundMessage {
     JobResult {
         id: String,
         #[serde(default)]
-        result: Option<JsonValue>,
-        #[serde(default)]
         error: Option<String>,
     },
     Log {
@@ -276,10 +274,9 @@ mod tests {
 
     #[test]
     fn inbound_job_result_success() {
-        let msg: InboundMessage = serde_json::from_str(r#"{"type":"job_result","id":"j1","result":"done"}"#).unwrap();
-        let InboundMessage::JobResult { id, result, error } = msg else { panic!("expected JobResult") };
+        let msg: InboundMessage = serde_json::from_str(r#"{"type":"job_result","id":"j1"}"#).unwrap();
+        let InboundMessage::JobResult { id, error } = msg else { panic!("expected JobResult") };
         assert_eq!(id, "j1");
-        assert_eq!(result, Some(json!("done")));
         assert_eq!(error, None);
     }
 

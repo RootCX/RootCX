@@ -83,7 +83,6 @@ async fn status_returns_online() {
     let (_, body) = rt.get_json("/api/v1/status").await;
     assert_eq!(body["runtime"]["state"], "online");
     assert_eq!(body["postgres"]["state"], "online");
-    assert_eq!(body["postgres"]["port"], rt.pg_port);
     rt.shutdown().await;
 }
 
@@ -281,28 +280,21 @@ async fn secrets_missing_fields() {
 }
 
 #[tokio::test]
-async fn jobs_enqueue_and_get() {
+async fn jobs_enqueue_and_list() {
     let rt = TestRuntime::boot().await;
     rt.install("job", "items").await;
 
     let (s, body) = rt.post_json("/api/v1/apps/job/jobs", &json!({"payload":{"task":"csv"}})).await;
     assert_eq!(s, 201);
-    let job_id = body["job_id"].as_str().unwrap();
+    assert!(body["msg_id"].as_i64().is_some());
 
-    let (_, job) = rt.get_json(&format!("/api/v1/apps/job/jobs/{job_id}")).await;
-    assert_eq!(job["app_id"], "job");
-    let status = job["status"].as_str().unwrap();
-    match status {
-        "pending" | "running" => {}
-        "failed" => {
-            assert!(
-                job["error"].as_str().unwrap().contains("no worker"),
-                "unexpected failure reason: {:?}",
-                job["error"]
-            );
-        }
-        other => panic!("unexpected job status: {other}"),
-    }
+    let (_, jobs) = rt.get_json("/api/v1/apps/job/jobs").await;
+    let arr = jobs.as_array().unwrap();
+    assert!(!arr.is_empty() || {
+        // job may have been consumed already — check archive
+        let (_, archived) = rt.get_json("/api/v1/apps/job/jobs?archived=true").await;
+        !archived.as_array().unwrap().is_empty()
+    });
     rt.shutdown().await;
 }
 
@@ -311,11 +303,10 @@ async fn jobs_list() {
     let rt = TestRuntime::boot().await;
     rt.install("jl", "items").await;
     for i in 0..3 {
-        rt.post_json("/api/v1/apps/jl/jobs", &json!({"payload":{"i":i}})).await;
+        let (s, body) = rt.post_json("/api/v1/apps/jl/jobs", &json!({"payload":{"i":i}})).await;
+        assert_eq!(s, 201);
+        assert!(body["msg_id"].as_i64().is_some());
     }
-
-    let (_, body) = rt.get_json("/api/v1/apps/jl/jobs").await;
-    assert_eq!(body.as_array().unwrap().len(), 3);
     rt.shutdown().await;
 }
 
@@ -388,43 +379,24 @@ async fn audit_trail() {
 }
 
 #[tokio::test]
-async fn job_list_with_status_filter() {
+async fn job_list_archived() {
     let rt = TestRuntime::boot().await;
     rt.install("jfilt", "items").await;
 
     rt.post_json("/api/v1/apps/jfilt/jobs", &json!({"payload":{"x":1}})).await;
 
+    // Wait for scheduler to consume and archive/delete the job
     for _ in 0..30 {
-        let (s, body) = rt.get_json("/api/v1/apps/jfilt/jobs?status=failed").await;
-        if s == 200 && body.as_array().map_or(false, |a| !a.is_empty()) {
-            let jobs = body.as_array().unwrap();
-            assert!(jobs.iter().all(|j| j["status"] == "failed"));
+        let (_, pending) = rt.get_json("/api/v1/apps/jfilt/jobs").await;
+        if pending.as_array().unwrap().is_empty() {
             rt.shutdown().await;
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    panic!("job did not reach 'failed' status within timeout");
+    panic!("job was not consumed within timeout");
 }
 
-#[tokio::test]
-async fn job_not_found() {
-    let rt = TestRuntime::boot().await;
-    rt.install("jnf", "items").await;
-    let (s, _) = rt.get_json("/api/v1/apps/jnf/jobs/00000000-0000-0000-0000-000000000000").await;
-    assert_eq!(s, 404);
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn job_invalid_uuid() {
-    let rt = TestRuntime::boot().await;
-    rt.install("juu", "items").await;
-    let (s, body) = rt.get_json("/api/v1/apps/juu/jobs/not-a-uuid").await;
-    assert_eq!(s, 400);
-    assert!(body["error"].as_str().unwrap().contains("invalid UUID"));
-    rt.shutdown().await;
-}
 
 #[tokio::test]
 async fn crud_create_with_null_fields() {
