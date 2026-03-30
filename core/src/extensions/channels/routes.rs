@@ -192,6 +192,11 @@ pub async fn webhook(
     let inbound = provider.parse_webhook(&config, body, &headers).await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
+    if let Some(reply) = handle_command(&pool, &channel_id, &inbound.chat_id, &inbound.text).await {
+        let _ = provider.send_response(&config, &inbound.chat_id, &reply).await;
+        return Ok(Json(json!({ "ok": true })));
+    }
+
     // Only debounce when the message hits the provider's char limit (likely split)
     let needs_debounce = provider.debounce_ms()
         .filter(|_| inbound.text.len() >= 4096);
@@ -362,6 +367,21 @@ async fn get_or_create_session(
     ).bind(channel_id).bind(chat_id).bind(app_id).bind(&session_id)
     .execute(pool).await?;
     Ok(session_id)
+}
+
+async fn handle_command(pool: &sqlx::PgPool, channel_id: &str, chat_id: &str, text: &str) -> Option<String> {
+    let cmd = text.split_whitespace().next()?.split('@').next()?;
+    match cmd {
+        "/newsession" => {
+            let _ = sqlx::query(
+                "DELETE FROM rootcx_system.channel_sessions
+                 WHERE channel_id = $1::uuid AND external_chat_id = $2",
+            ).bind(channel_id).bind(chat_id).execute(pool).await;
+            Some("New session started.".into())
+        }
+        "/start" => Some("Send me a message.".into()),
+        _ => None,
+    }
 }
 
 fn resolve_public_url(body_url: Option<String>) -> Result<String, ApiError> {

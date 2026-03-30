@@ -88,6 +88,13 @@ impl ChannelProvider for TelegramProvider {
             let body = resp.text().await.unwrap_or_default();
             return Err(ChannelError::Provider(format!("setWebhook failed: {body}")));
         }
+
+        let _ = self.http
+            .post(Self::bot_url(Self::token(config)?, "setMyCommands"))
+            .json(&json!({ "commands": [
+                { "command": "newsession", "description": "Start a new conversation" },
+            ]})).send().await;
+
         Ok(())
     }
 
