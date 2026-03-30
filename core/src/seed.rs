@@ -10,11 +10,12 @@ use crate::secrets::SecretManager;
 use crate::worker_manager::WorkerManager;
 
 const APP_ID: &str = "assistant";
+const RELEASE_URL: &str = "https://github.com/RootCX/ai-agent-base/releases/latest/download/backend.tar.gz";
 
-/// Install the bundled assistant using the standard deploy flow.
-/// Skips if already installed.
+fn w(msg: impl std::fmt::Display) -> RuntimeError { RuntimeError::Worker(msg.to_string()) }
+
 pub async fn seed_assistant(
-    pool: &PgPool, data_dir: &Path, resources_dir: &Path, bun_bin: &Path,
+    pool: &PgPool, data_dir: &Path, bun_bin: &Path,
     wm: &WorkerManager, secrets: &SecretManager,
 ) -> Result<(), RuntimeError> {
     let exists: bool = sqlx::query_scalar(
@@ -22,26 +23,27 @@ pub async fn seed_assistant(
     ).bind(APP_ID).fetch_one(pool).await.map_err(RuntimeError::Schema)?;
     if exists { return Ok(()); }
 
-    let src = resources_dir.join("assistant");
-    if !src.exists() {
-        tracing::warn!("assistant template not found at {}, skipping", src.display());
-        return Ok(());
-    }
-
-    info!("seeding built-in assistant agent");
+    info!("seeding assistant from {RELEASE_URL}");
     let app_dir = data_dir.join("apps").join(APP_ID);
-    copy_recursive(&src, &app_dir)?;
+    std::fs::create_dir_all(&app_dir).map_err(w)?;
+
+    let bytes = reqwest::get(RELEASE_URL).await.map_err(w)?
+        .error_for_status().map_err(w)?
+        .bytes().await.map_err(w)?;
+
+    let dest = app_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        tar::Archive::new(flate2::read::GzDecoder::new(&bytes[..]))
+            .unpack(&dest).map_err(w)
+    }).await.map_err(w)??;
 
     if app_dir.join("package.json").exists() {
         let out = tokio::process::Command::new(bun_bin)
             .arg("install").current_dir(&app_dir)
             .stdout(Stdio::piped()).stderr(Stdio::piped())
-            .output().await
-            .map_err(|e| RuntimeError::Worker(format!("bun install: {e}")))?;
+            .output().await.map_err(w)?;
         if !out.status.success() {
-            return Err(RuntimeError::Worker(format!(
-                "bun install failed: {}", String::from_utf8_lossy(&out.stderr)
-            )));
+            return Err(w(format!("bun install: {}", String::from_utf8_lossy(&out.stderr))));
         }
     }
 
@@ -57,21 +59,6 @@ pub async fn seed_assistant(
     }
 
     wm.start_app(pool, secrets, APP_ID).await?;
-    info!("assistant agent seeded and started");
-    Ok(())
-}
-
-fn copy_recursive(src: &Path, dest: &Path) -> Result<(), RuntimeError> {
-    let e = |e: std::io::Error| RuntimeError::Worker(format!("copy: {e}"));
-    std::fs::create_dir_all(dest).map_err(e)?;
-    for entry in std::fs::read_dir(src).map_err(e)? {
-        let entry = entry.map_err(e)?;
-        let target = dest.join(entry.file_name());
-        if entry.file_type().map_err(e)?.is_dir() {
-            copy_recursive(&entry.path(), &target)?;
-        } else {
-            std::fs::copy(entry.path(), target).map_err(e)?;
-        }
-    }
+    info!("assistant agent seeded");
     Ok(())
 }
