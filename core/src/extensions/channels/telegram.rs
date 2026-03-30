@@ -22,6 +22,15 @@ impl TelegramProvider {
         config["bot_token"].as_str()
             .ok_or_else(|| ChannelError::Provider("missing bot_token".into()))
     }
+
+    async fn sync_commands(&self, config: &JsonValue) {
+        let Ok(token) = Self::token(config) else { return };
+        let _ = self.http
+            .post(Self::bot_url(token, "setMyCommands"))
+            .json(&json!({ "commands": [
+                { "command": "newsession", "description": "Start a new conversation" },
+            ]})).send().await;
+    }
 }
 
 #[derive(Deserialize)]
@@ -89,12 +98,7 @@ impl ChannelProvider for TelegramProvider {
             return Err(ChannelError::Provider(format!("setWebhook failed: {body}")));
         }
 
-        let _ = self.http
-            .post(Self::bot_url(Self::token(config)?, "setMyCommands"))
-            .json(&json!({ "commands": [
-                { "command": "newsession", "description": "Start a new conversation" },
-            ]})).send().await;
-
+        self.sync_commands(config).await;
         Ok(())
     }
 
@@ -104,6 +108,8 @@ impl ChannelProvider for TelegramProvider {
             .send().await;
         Ok(())
     }
+
+    async fn on_activate_boot(&self, config: &JsonValue) { self.sync_commands(config).await; }
 
     fn debounce_ms(&self) -> Option<u64> { Some(2000) }
 
