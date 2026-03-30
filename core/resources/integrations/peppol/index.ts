@@ -230,8 +230,14 @@ function generateInvoiceXml(params: InvoiceParams): string {
   const supplierVat = formatVat(supplier.vatNumber, supplier.countryCode);
   const customerVat = formatVat(customer.vatNumber, customer.countryCode);
   const resolveTaxCategory = (cat: string | undefined, pct: number) => cat || (pct === 0 ? "E" : "S");
-  const taxCategory = resolveTaxCategory(lines[0]?.taxCategory, lines[0]?.taxPercent ?? 21);
-  const taxPercent = lines[0]?.taxPercent ?? 21;
+
+  // Group lines by tax category + rate for TaxSubtotal breakdown
+  const taxGroups = lines.reduce((m, l) => {
+    const cat = resolveTaxCategory(l.taxCategory, l.taxPercent), pct = l.taxPercent ?? 21, key = `${cat}:${pct}`;
+    const g = m.get(key) || { category: cat, percent: pct, taxableAmount: 0 };
+    g.taxableAmount += l.lineAmount;
+    return m.set(key, g);
+  }, new Map<string, { category: string; percent: number; taxableAmount: number }>());
 
   const invoiceLines = lines.map((l) => `
     <cac:InvoiceLine>
@@ -332,18 +338,21 @@ function generateInvoiceXml(params: InvoiceParams): string {
         </cac:Party>
     </cac:AccountingCustomerParty>${paymentMeansEl}
     <cac:TaxTotal>
-        <cbc:TaxAmount currencyID="${currency}">${taxTotal.toFixed(2)}</cbc:TaxAmount>
+        <cbc:TaxAmount currencyID="${currency}">${taxTotal.toFixed(2)}</cbc:TaxAmount>${Array.from(taxGroups.values()).map(g => {
+      const groupTax = Math.round(g.taxableAmount * g.percent) / 100;
+      return `
         <cac:TaxSubtotal>
-            <cbc:TaxableAmount currencyID="${currency}">${taxableAmount.toFixed(2)}</cbc:TaxableAmount>
-            <cbc:TaxAmount currencyID="${currency}">${taxTotal.toFixed(2)}</cbc:TaxAmount>
+            <cbc:TaxableAmount currencyID="${currency}">${g.taxableAmount.toFixed(2)}</cbc:TaxableAmount>
+            <cbc:TaxAmount currencyID="${currency}">${groupTax.toFixed(2)}</cbc:TaxAmount>
             <cac:TaxCategory>
-                <cbc:ID>${taxCategory}</cbc:ID>
-                <cbc:Percent>${taxPercent}</cbc:Percent>${taxCategory === "E" ? `
+                <cbc:ID>${g.category}</cbc:ID>
+                <cbc:Percent>${g.percent}</cbc:Percent>${g.category === "E" ? `
                 <cbc:TaxExemptionReasonCode>vatex-eu-132</cbc:TaxExemptionReasonCode>
                 <cbc:TaxExemptionReason>Exempt</cbc:TaxExemptionReason>` : ""}
                 <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme>
             </cac:TaxCategory>
-        </cac:TaxSubtotal>
+        </cac:TaxSubtotal>`;
+    }).join("")}
     </cac:TaxTotal>
     <cac:LegalMonetaryTotal>
         <cbc:LineExtensionAmount currencyID="${currency}">${taxableAmount.toFixed(2)}</cbc:LineExtensionAmount>
