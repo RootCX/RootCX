@@ -62,15 +62,14 @@ pub(crate) async fn persist_tool_call_end(
     Ok(())
 }
 
-pub(crate) async fn persist_session(
-    pctx: &PersistCtx, assistant_response: &str, tokens: Option<u64>,
+/// Mark session complete: persist assistant message + bump turn_count
+pub(crate) async fn finalize_session(
+    pool: &PgPool, session_id: &str, user_message: &str,
+    assistant_response: &str, tokens: Option<u64>,
 ) -> Result<(), sqlx::Error> {
-    ensure_session(&pctx.pool, &pctx.session_id, &pctx.app_id, pctx.user_id).await?;
-    persist_message(&pctx.pool, &pctx.session_id, "user", &pctx.user_message, None, false).await?;
-    persist_message(&pctx.pool, &pctx.session_id, "assistant", assistant_response, tokens.map(|t| t as i32), false).await?;
-
-    let new_messages = json!([
-        {"role": "user", "content": pctx.user_message},
+    persist_message(pool, session_id, "assistant", assistant_response, tokens.map(|t| t as i32), false).await?;
+    let msgs = json!([
+        {"role": "user", "content": user_message},
         {"role": "assistant", "content": assistant_response}
     ]);
     sqlx::query(
@@ -81,7 +80,15 @@ pub(crate) async fn persist_session(
             updated_at = now()
          WHERE id = $1::uuid",
     )
-    .bind(&pctx.session_id).bind(&new_messages).bind(tokens.unwrap_or(0) as i64)
-    .execute(&pctx.pool).await?;
+    .bind(session_id).bind(&msgs).bind(tokens.unwrap_or(0) as i64)
+    .execute(pool).await?;
     Ok(())
+}
+
+pub(crate) async fn persist_session(
+    pctx: &PersistCtx, assistant_response: &str, tokens: Option<u64>,
+) -> Result<(), sqlx::Error> {
+    ensure_session(&pctx.pool, &pctx.session_id, &pctx.app_id, pctx.user_id).await?;
+    persist_message(&pctx.pool, &pctx.session_id, "user", &pctx.user_message, None, false).await?;
+    finalize_session(&pctx.pool, &pctx.session_id, &pctx.user_message, assistant_response, tokens).await
 }

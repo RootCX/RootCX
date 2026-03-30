@@ -79,7 +79,7 @@ pub async fn register(
         return Err(ApiError::BadRequest("password must be at least 6 characters".into()));
     }
 
-    let pool = super::pool(&rt).await?;
+    let pool = super::pool(&rt);
     let pw_hash = password::hash(&req.password)?;
 
     let row: UserRow = sqlx::query_as(
@@ -121,7 +121,7 @@ pub async fn login(
     axum::Extension(auth_config): axum::Extension<Arc<AuthConfig>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
-    let pool = super::pool(&rt).await?;
+    let pool = super::pool(&rt);
 
     let row: Option<(Uuid, String, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>)> =
         sqlx::query_as(
@@ -170,7 +170,7 @@ pub async fn refresh(
     Json(req): Json<RefreshRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (user_id, session_id) = decode_refresh(&auth_config, &req.refresh_token)?;
-    let pool = super::pool(&rt).await?;
+    let pool = super::pool(&rt);
 
     let valid: Option<(Uuid,)> =
         sqlx::query_as("SELECT user_id FROM rootcx_system.sessions WHERE id = $1 AND user_id = $2 AND expires_at > now()")
@@ -203,7 +203,7 @@ pub async fn logout(
     Json(req): Json<RefreshRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (_user_id, session_id) = decode_refresh(&auth_config, &req.refresh_token)?;
-    let pool = super::pool(&rt).await?;
+    let pool = super::pool(&rt);
 
     sqlx::query("DELETE FROM rootcx_system.sessions WHERE id = $1").bind(session_id).execute(&pool).await?;
 
@@ -211,7 +211,7 @@ pub async fn logout(
 }
 
 pub async fn auth_mode(State(rt): State<SharedRuntime>) -> Result<Json<JsonValue>, ApiError> {
-    let pool = super::pool(&rt).await?;
+    let pool = super::pool(&rt);
     let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM rootcx_system.users WHERE is_system = false")
         .fetch_one(&pool)
         .await?;
@@ -222,7 +222,7 @@ pub async fn list_users(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<AuthUserResponse>>, ApiError> {
-    let pool = super::pool(&rt).await?;
+    let pool = super::pool(&rt);
     let rows: Vec<UserRow> = sqlx::query_as(
         "SELECT id, email, display_name, created_at
          FROM rootcx_system.users WHERE is_system = false ORDER BY email",
@@ -233,7 +233,7 @@ pub async fn list_users(
 }
 
 pub async fn me(State(rt): State<SharedRuntime>, identity: Identity) -> Result<Json<AuthUserResponse>, ApiError> {
-    let pool = super::pool(&rt).await?;
+    let pool = super::pool(&rt);
 
     let row: UserRow = sqlx::query_as(
         "SELECT id, email, display_name, created_at

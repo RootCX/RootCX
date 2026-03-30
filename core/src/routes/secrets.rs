@@ -22,7 +22,7 @@ pub async fn set_secret(
     Path(app_id): Path<String>,
     Json(body): Json<SetSecretBody>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, sm) = pool_and_secrets(&rt).await?;
+    let (pool, sm) = pool_and_secrets(&rt);
     sm.set(&pool, &app_id, &body.key, &body.value).await?;
     Ok(Json(json!({ "message": format!("secret '{}' set", body.key) })))
 }
@@ -32,7 +32,7 @@ pub async fn delete_secret(
     State(rt): State<SharedRuntime>,
     Path((app_id, key)): Path<(String, String)>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, sm) = pool_and_secrets(&rt).await?;
+    let (pool, sm) = pool_and_secrets(&rt);
     if sm.delete(&pool, &app_id, &key).await? {
         Ok(Json(json!({ "message": format!("secret '{key}' deleted") })))
     } else {
@@ -45,7 +45,7 @@ pub async fn list_secrets(
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<String>>, ApiError> {
-    let (pool, _) = pool_and_secrets(&rt).await?;
+    let (pool, _) = pool_and_secrets(&rt);
     Ok(Json(SecretManager::list_keys(&pool, &app_id).await?))
 }
 
@@ -59,7 +59,7 @@ fn validate_key_name(key: &str) -> Result<(), ApiError> {
 }
 
 async fn reject_system_user(identity: &Identity, rt: &SharedRuntime) -> Result<(), ApiError> {
-    let pool = super::pool(rt).await?;
+    let pool = super::pool(rt);
     let is_system: bool = sqlx::query_scalar("SELECT is_system FROM rootcx_system.users WHERE id = $1")
         .bind(identity.user_id)
         .fetch_optional(&pool)
@@ -78,7 +78,7 @@ pub async fn set_platform_secret(
 ) -> Result<Json<JsonValue>, ApiError> {
     reject_system_user(&identity, &rt).await?;
     validate_key_name(&body.key)?;
-    let (pool, sm) = pool_and_secrets(&rt).await?;
+    let (pool, sm) = pool_and_secrets(&rt);
     sm.set(&pool, PLATFORM_SCOPE, &body.key, &body.value).await?;
     let restarted = restart_workers(&rt).await;
     Ok(Json(json!({ "message": format!("platform secret '{}' set", body.key), "workers_restarted": restarted })))
@@ -90,7 +90,7 @@ pub async fn delete_platform_secret(
     Path(key_name): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
     reject_system_user(&identity, &rt).await?;
-    let (pool, sm) = pool_and_secrets(&rt).await?;
+    let (pool, sm) = pool_and_secrets(&rt);
     if sm.delete(&pool, PLATFORM_SCOPE, &key_name).await? {
         let restarted = restart_workers(&rt).await;
         Ok(Json(json!({ "message": format!("platform secret '{key_name}' deleted"), "workers_restarted": restarted })))
@@ -104,13 +104,13 @@ pub async fn list_platform_secrets(
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<String>>, ApiError> {
     reject_system_user(&identity, &rt).await?;
-    let (pool, _) = pool_and_secrets(&rt).await?;
+    let (pool, _) = pool_and_secrets(&rt);
     Ok(Json(SecretManager::list_keys(&pool, PLATFORM_SCOPE).await?))
 }
 
 async fn restart_workers(rt: &SharedRuntime) -> usize {
-    let Ok(w) = wm(rt).await else { return 0 };
-    let Ok((pool, sm)) = pool_and_secrets(rt).await else { return 0 };
+    let w = wm(rt);
+    let (pool, sm) = pool_and_secrets(rt);
     w.restart_all(&pool, &sm).await
 }
 
@@ -118,7 +118,7 @@ pub async fn get_platform_env(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<HashMap<String, String>>, ApiError> {
-    let (pool, sm) = pool_and_secrets(&rt).await?;
+    let (pool, sm) = pool_and_secrets(&rt);
     let env: HashMap<String, String> = sm.get_all_for_app(&pool, PLATFORM_SCOPE).await?.into_iter().collect();
     Ok(Json(env))
 }

@@ -14,28 +14,26 @@ use std::sync::Arc;
 use axum::Json;
 use serde_json::{Value as JsonValue, json};
 use sqlx::PgPool;
-use tokio::sync::Mutex;
 
-use crate::Runtime;
+use crate::ReadyRuntime;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::secrets::SecretManager;
 use crate::worker_manager::WorkerManager;
 use rootcx_types::{AppManifest, AppType, InstalledApp, OsStatus, SchemaVerification};
 
-pub type SharedRuntime = Arc<Mutex<Runtime>>;
+pub type SharedRuntime = Arc<ReadyRuntime>;
 
-pub(crate) async fn pool(rt: &SharedRuntime) -> Result<PgPool, ApiError> {
-    rt.lock().await.pool().cloned().ok_or(ApiError::NotReady)
+pub(crate) fn pool(rt: &SharedRuntime) -> PgPool {
+    rt.pool().clone()
 }
 
-pub(crate) async fn wm(rt: &SharedRuntime) -> Result<Arc<WorkerManager>, ApiError> {
-    rt.lock().await.worker_manager().cloned().ok_or(ApiError::NotReady)
+pub(crate) fn wm(rt: &SharedRuntime) -> Arc<WorkerManager> {
+    rt.worker_manager().clone()
 }
 
-pub(crate) async fn pool_and_secrets(rt: &SharedRuntime) -> Result<(PgPool, Arc<SecretManager>), ApiError> {
-    let g = rt.lock().await;
-    Ok((g.pool().cloned().ok_or(ApiError::NotReady)?, g.secret_manager().cloned().ok_or(ApiError::NotReady)?))
+pub(crate) fn pool_and_secrets(rt: &SharedRuntime) -> (PgPool, Arc<SecretManager>) {
+    (rt.pool().clone(), rt.secret_manager().clone())
 }
 
 fn parse_uuid(id: &str) -> Result<sqlx::types::Uuid, ApiError> {
@@ -50,7 +48,7 @@ pub async fn get_status(
     _identity: Identity,
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
 ) -> Result<Json<OsStatus>, ApiError> {
-    Ok(Json(rt.lock().await.status().await))
+    Ok(Json(rt.status()))
 }
 
 pub async fn install_app(
@@ -58,9 +56,8 @@ pub async fn install_app(
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
     Json(manifest): Json<AppManifest>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let g = rt.lock().await;
-    let pool = g.pool().cloned().ok_or(ApiError::NotReady)?;
-    crate::manifest::install_app(&pool, &manifest, g.extensions(), identity.user_id).await?;
+    let pool = pool(&rt);
+    crate::manifest::install_app(&pool, &manifest, rt.extensions(), identity.user_id).await?;
     Ok(Json(json!({ "message": format!("app '{}' installed", manifest.app_id) })))
 }
 
@@ -69,10 +66,8 @@ pub async fn list_apps(
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<Vec<InstalledApp>>, ApiError> {
-    let (pool, data_dir) = {
-        let g = rt.lock().await;
-        (g.pool().cloned().ok_or(ApiError::NotReady)?, g.data_dir().to_path_buf())
-    };
+    let pool = pool(&rt);
+    let data_dir = rt.data_dir().to_path_buf();
 
     let type_filter = params.get("type").and_then(|t| match t.as_str() {
         "app" => Some(AppType::App),
@@ -120,13 +115,9 @@ pub async fn uninstall_app(
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
     axum::extract::Path(app_id): axum::extract::Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, data_dir) = {
-        let g = rt.lock().await;
-        (g.pool().cloned().ok_or(ApiError::NotReady)?, g.data_dir().to_path_buf())
-    };
-    if let Ok(w) = wm(&rt).await {
-        let _ = w.stop_app(&app_id).await;
-    }
+    let pool = pool(&rt);
+    let data_dir = rt.data_dir().to_path_buf();
+    let _ = wm(&rt).stop_app(&app_id).await;
     crate::manifest::uninstall_app(&pool, &app_id).await?;
     for sub in ["apps", "frontends"] {
         let dir = data_dir.join(sub).join(&app_id);
@@ -143,7 +134,7 @@ pub async fn verify_schema(
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
     Json(manifest): Json<AppManifest>,
 ) -> Result<Json<SchemaVerification>, ApiError> {
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
     let pk_types = crate::manifest::build_pk_type_map(&manifest.data_contract);
     Ok(Json(crate::schema_sync::verify_all(&pool, &manifest.app_id, &manifest.data_contract, &pk_types).await?))
 }

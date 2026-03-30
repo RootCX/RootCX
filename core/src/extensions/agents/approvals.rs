@@ -72,6 +72,11 @@ impl PendingApprovals {
         }
     }
 
+    pub async fn belongs_to_app(&self, approval_id: &str, app_id: &str) -> bool {
+        self.pending.lock().await.get(approval_id)
+            .is_some_and(|e| e.request.app_id == app_id)
+    }
+
     pub async fn list(&self, app_id: &str) -> Vec<ApprovalRequest> {
         self.pending.lock().await.values()
             .filter(|e| e.request.app_id == app_id)

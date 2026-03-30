@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use rootcx_core::{Runtime, server};
 use rootcx_platform::service::ServiceConfig;
-use tokio::sync::Mutex;
 use tracing_subscriber::EnvFilter;
 
 const API_PORT: u16 = rootcx_platform::DEFAULT_API_PORT;
@@ -96,10 +95,11 @@ async fn main() {
     let res_dir = std::env::var("ROOTCX_RESOURCES").map(PathBuf::from).unwrap_or_else(|_| resources());
     let bun_bin = std::env::var("BUN_PATH").map(PathBuf::from).unwrap_or_else(|_| resolve_bun());
 
-    let rt = Arc::new(Mutex::new(Runtime::new(database_url, data_dir, res_dir, bun_bin)));
-    rt.lock().await.boot(API_PORT).await.unwrap_or_else(|e| {
-        tracing::error!("boot: {e}"); std::process::exit(1);
-    });
+    let rt = Runtime::new(database_url, data_dir, res_dir, bun_bin)
+        .boot(API_PORT).await.unwrap_or_else(|e| {
+            tracing::error!("boot: {e}"); std::process::exit(1);
+        });
+    let rt = Arc::new(rt);
 
     if daemon { let _ = std::fs::write(&pid_file, std::process::id().to_string()); }
 
@@ -107,7 +107,7 @@ async fn main() {
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         if daemon { let _ = std::fs::remove_file(&pf2); }
-        rt2.lock().await.shutdown().await.ok();
+        rt2.shutdown().await;
         std::process::exit(0);
     });
 

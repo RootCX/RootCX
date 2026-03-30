@@ -19,7 +19,7 @@ pub async fn upload_file(
     Path(app_id): Path<String>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
-    let data_dir = rt.lock().await.data_dir().to_path_buf();
+    let data_dir = rt.data_dir().to_path_buf();
     let uploads_dir = data_dir.join("uploads").join(&app_id);
     tokio::fs::create_dir_all(&uploads_dir).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 

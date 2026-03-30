@@ -285,7 +285,7 @@ pub async fn list_records(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<JsonValue>>, ApiError> {
     validate_app_id(&app_id)?;
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
     require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.read")).await?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
@@ -393,7 +393,7 @@ pub async fn query_records(
     Json(body): Json<QueryRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
     require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.read")).await?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
@@ -436,7 +436,7 @@ pub async fn create_record(
     Json(body): Json<JsonValue>,
 ) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
     validate_app_id(&app_id)?;
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
     require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.create")).await?;
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
@@ -529,7 +529,7 @@ pub async fn bulk_create_records(
     Json(body): Json<JsonValue>,
 ) -> Result<(StatusCode, Json<Vec<JsonValue>>), ApiError> {
     validate_app_id(&app_id)?;
-    let db = pool(&rt).await?;
+    let db = pool(&rt);
     require_perm(&db, &app_id, identity.user_id, &format!("{entity}.create")).await?;
     let records = body.as_array()
         .ok_or_else(|| ApiError::BadRequest("body must be a JSON array".into()))?;
@@ -557,7 +557,7 @@ pub async fn get_record(
     identity: Identity,
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
-    let (uuid, pool) = (parse_uuid(&id)?, pool(&rt).await?);
+    let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
     require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.read")).await?;
     let tbl = table(&app_id, &entity);
     let q = format!("SELECT to_jsonb(t.*) AS row FROM {tbl} t WHERE t.id = $1");
@@ -576,7 +576,7 @@ pub async fn update_record(
     Json(body): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
-    let (uuid, pool) = (parse_uuid(&id)?, pool(&rt).await?);
+    let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
     require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.update")).await?;
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
@@ -607,7 +607,7 @@ pub async fn delete_record(
     identity: Identity,
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
-    let (uuid, pool) = (parse_uuid(&id)?, pool(&rt).await?);
+    let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
     require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.delete")).await?;
     let tbl = table(&app_id, &entity);
     let q = format!("DELETE FROM {tbl} WHERE id = $1");
@@ -624,7 +624,7 @@ pub async fn federated_query(
     identity: Identity,
     Json(body): Json<QueryRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
     let targets = find_entities_by_identity(&pool, &identity_kind, None)
         .await.map_err(|e| ApiError::Internal(e.to_string()))?;
 

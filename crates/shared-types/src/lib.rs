@@ -95,6 +95,17 @@ pub struct AppManifest {
     /// Free-form usage instructions surfaced to AI via list_integrations tool
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// Trigger: auto-invoke this agent on entity events
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<TriggerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerConfig {
+    pub app_id: String,
+    pub entity: String,
+    pub on: Vec<String>,
 }
 
 fn default_version() -> String {

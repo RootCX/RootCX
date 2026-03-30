@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::process::Stdio;
 
 use axum::Json;
@@ -10,15 +9,11 @@ use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::routes::SharedRuntime;
 
-async fn catalog_dir(rt: &SharedRuntime) -> Result<PathBuf, ApiError> {
-    Ok(rt.lock().await.resources_dir().join("integrations"))
-}
-
 pub async fn list_catalog(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<JsonValue>>, ApiError> {
-    let dir = catalog_dir(&rt).await?;
+    let dir = rt.resources_dir().join("integrations");
     if !dir.exists() {
         return Ok(Json(vec![]));
     }
@@ -62,17 +57,12 @@ pub async fn deploy_from_catalog(
     State(rt): State<SharedRuntime>,
     Path(id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (catalog_path, app_dir, bun_bin, pool, secrets, wm) = {
-        let g = rt.lock().await;
-        (
-            g.resources_dir().join("integrations").join(&id),
-            g.data_dir().join("apps").join(&id),
-            g.bun_bin().to_path_buf(),
-            g.pool().cloned().ok_or(ApiError::NotReady)?,
-            g.secret_manager().cloned().ok_or(ApiError::NotReady)?,
-            g.worker_manager().cloned().ok_or(ApiError::NotReady)?,
-        )
-    };
+    let catalog_path = rt.resources_dir().join("integrations").join(&id);
+    let app_dir = rt.data_dir().join("apps").join(&id);
+    let bun_bin = rt.bun_bin().to_path_buf();
+    let pool = rt.pool().clone();
+    let secrets = rt.secret_manager().clone();
+    let wm = rt.worker_manager().clone();
 
     if !catalog_path.exists() {
         return Err(ApiError::NotFound(format!("integration '{id}' not in catalog")));
@@ -84,11 +74,7 @@ pub async fn deploy_from_catalog(
     let manifest: rootcx_types::AppManifest = serde_json::from_str(&manifest_raw)
         .map_err(|e| ApiError::Internal(format!("parse manifest: {e}")))?;
 
-    // Brief re-lock: install_app needs &[Box<dyn RuntimeExtension>] which borrows Runtime
-    {
-        let g = rt.lock().await;
-        crate::manifest::install_app(&pool, &manifest, g.extensions(), identity.user_id).await?;
-    }
+    crate::manifest::install_app(&pool, &manifest, rt.extensions(), identity.user_id).await?;
 
     if app_dir.exists() {
         tokio::fs::remove_dir_all(&app_dir).await.map_err(|e| ApiError::Internal(format!("clear: {e}")))?;
@@ -121,14 +107,10 @@ pub async fn undeploy(
     State(rt): State<SharedRuntime>,
     Path(id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (app_dir, pool, secrets, wm) = {
-        let g = rt.lock().await;
-        let app_dir = g.data_dir().join("apps").join(&id);
-        let pool = g.pool().cloned().ok_or(ApiError::NotReady)?;
-        let secrets = g.secret_manager().cloned().ok_or(ApiError::NotReady)?;
-        let wm = g.worker_manager().cloned().ok_or(ApiError::NotReady)?;
-        (app_dir, pool, secrets, wm)
-    };
+    let app_dir = rt.data_dir().join("apps").join(&id);
+    let pool = rt.pool().clone();
+    let secrets = rt.secret_manager().clone();
+    let wm = rt.worker_manager().clone();
 
     let _ = wm.stop_app(&id).await;
 

@@ -85,7 +85,7 @@ pub(crate) async fn list_roles(
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<RoleResponse>>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
     let rows: Vec<(String, Option<String>, Vec<String>, Vec<String>)> = sqlx::query_as(
         "SELECT name, description, inherits, permissions FROM rootcx_system.rbac_roles WHERE app_id = $1 ORDER BY name",
     ).bind(&app_id).fetch_all(&pool).await?;
@@ -98,7 +98,7 @@ pub(crate) async fn create_role(
     identity: Identity,
     Json(body): Json<CreateRoleRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
     require_admin(&pool, &app_id, identity.user_id).await?;
 
     if body.name.is_empty() { return Err(ApiError::BadRequest("role name must not be empty".into())); }
@@ -130,7 +130,7 @@ pub(crate) async fn update_role(
     identity: Identity,
     Json(body): Json<UpdateRoleRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
     require_admin(&pool, &app_id, identity.user_id).await?;
 
     if role_name == "admin" && (body.permissions.is_some() || body.inherits.is_some()) {
@@ -174,7 +174,7 @@ pub(crate) async fn delete_role(
     Path((app_id, role_name)): Path<(String, String)>,
     identity: Identity,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
     require_admin(&pool, &app_id, identity.user_id).await?;
     if role_name == "admin" { return Err(ApiError::BadRequest("cannot delete built-in admin role".into())); }
 
@@ -192,7 +192,7 @@ pub(crate) async fn list_assignments(
     Path(app_id): Path<String>,
     identity: Identity,
 ) -> Result<Json<Vec<AssignmentResponse>>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
     require_admin(&pool, &app_id, identity.user_id).await?;
     let rows: Vec<(Uuid, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "SELECT user_id, role, assigned_at FROM rootcx_system.rbac_assignments WHERE app_id = $1 ORDER BY assigned_at DESC",
@@ -206,7 +206,7 @@ pub(crate) async fn assign_role(
     identity: Identity,
     Json(body): Json<RoleAssignment>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
     require_admin(&pool, &app_id, identity.user_id).await?;
 
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_roles WHERE app_id = $1 AND name = $2)")
@@ -224,7 +224,7 @@ pub(crate) async fn revoke_role(
     identity: Identity,
     Json(body): Json<RoleAssignment>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
     require_admin(&pool, &app_id, identity.user_id).await?;
 
     let mut tx = pool.begin().await?;
@@ -250,7 +250,7 @@ pub(crate) async fn my_permissions(
     Path(app_id): Path<String>,
     identity: Identity,
 ) -> Result<Json<EffectivePermissions>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
     let (roles, permissions) = resolve_permissions(&pool, &app_id, identity.user_id).await?;
     Ok(Json(EffectivePermissions { roles, permissions }))
 }
@@ -260,7 +260,7 @@ pub(crate) async fn user_permissions(
     Path((app_id, target)): Path<(String, Uuid)>,
     identity: Identity,
 ) -> Result<Json<EffectivePermissions>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
     if identity.user_id != target { require_admin(&pool, &app_id, identity.user_id).await?; }
     let (roles, permissions) = resolve_permissions(&pool, &app_id, target).await?;
     Ok(Json(EffectivePermissions { roles, permissions }))
@@ -270,7 +270,7 @@ pub(crate) async fn list_available_permissions(
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<PermissionDeclarationResponse>>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
     // App permissions + global tool permissions (stored under 'core')
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT key, description FROM rootcx_system.rbac_permissions

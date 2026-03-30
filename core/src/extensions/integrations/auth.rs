@@ -63,8 +63,8 @@ pub async fn start(
     Path((app_id, integration_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, secrets) = crate::routes::pool_and_secrets(&rt).await?;
-    let wm = crate::routes::wm(&rt).await?;
+    let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
+    let wm = crate::routes::wm(&rt);
     let config = super::routes::resolve_config(&pool, &secrets, &integration_id).await?;
 
     let nonce = Uuid::new_v4().to_string();
@@ -96,8 +96,8 @@ pub async fn callback(
         map.remove(extract_nonce(state))
     }.ok_or_else(|| ApiError::BadRequest("invalid or expired auth state".into()))?;
 
-    let (pool, secrets) = crate::routes::pool_and_secrets(&rt).await?;
-    let wm = crate::routes::wm(&rt).await?;
+    let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
+    let wm = crate::routes::wm(&rt);
     let config = super::routes::resolve_config(&pool, &secrets, &pending.integration_id).await?;
 
     let result = wm.rpc(
@@ -122,7 +122,7 @@ pub async fn status(
     identity: Identity, State(rt): State<SharedRuntime>,
     Path((app_id, integration_id)): Path<(String, String)>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, secrets) = crate::routes::pool_and_secrets(&rt).await?;
+    let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
     let connected = secrets.get(&pool, &app_id, &iuc_key(&integration_id, &identity.user_id.to_string())).await
         .map_err(|e| ApiError::Internal(e.to_string()))?.is_some();
     Ok(Json(json!({ "connected": connected })))
@@ -134,7 +134,7 @@ pub async fn submit_credentials(
     Json(body): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let creds = body.get("credentials").ok_or_else(|| ApiError::BadRequest("missing credentials".into()))?;
-    let (pool, secrets) = crate::routes::pool_and_secrets(&rt).await?;
+    let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
     secrets.set(&pool, &app_id, &iuc_key(&integration_id, &identity.user_id.to_string()), &creds.to_string()).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({ "message": "credentials stored" })))
@@ -144,7 +144,7 @@ pub async fn disconnect(
     identity: Identity, State(rt): State<SharedRuntime>,
     Path((app_id, integration_id)): Path<(String, String)>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, secrets) = crate::routes::pool_and_secrets(&rt).await?;
+    let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
     let _ = secrets.delete(&pool, &app_id, &iuc_key(&integration_id, &identity.user_id.to_string())).await;
     Ok(Json(json!({ "message": "disconnected" })))
 }

@@ -14,9 +14,9 @@ pub async fn start_worker(
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (p, secrets) = pool_and_secrets(&rt).await?;
+    let (p, secrets) = pool_and_secrets(&rt);
     require_admin(&p, "core", identity.user_id).await?;
-    let w = wm(&rt).await?;
+    let w = wm(&rt);
     w.start_app(&p, &secrets, &app_id).await?;
     Ok(Json(json!({ "message": format!("worker '{}' started", app_id) })))
 }
@@ -26,9 +26,9 @@ pub async fn stop_worker(
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let p = pool(&rt).await?;
+    let p = pool(&rt);
     require_admin(&p, "core", identity.user_id).await?;
-    wm(&rt).await?.stop_app(&app_id).await?;
+    wm(&rt).stop_app(&app_id).await?;
     Ok(Json(json!({ "message": format!("worker '{}' stopped", app_id) })))
 }
 
@@ -37,7 +37,7 @@ pub async fn worker_status(
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let s = wm(&rt).await?.worker_status(&app_id).await?;
+    let s = wm(&rt).worker_status(&app_id).await?;
     Ok(Json(json!({ "app_id": app_id, "status": s })))
 }
 
@@ -45,9 +45,9 @@ pub async fn all_worker_statuses(
     identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let p = pool(&rt).await?;
+    let p = pool(&rt);
     require_admin(&p, "core", identity.user_id).await?;
-    Ok(Json(json!({ "workers": wm(&rt).await?.all_statuses().await })))
+    Ok(Json(json!({ "workers": wm(&rt).all_statuses().await })))
 }
 
 pub async fn rpc_proxy(
@@ -75,5 +75,5 @@ pub async fn rpc_proxy(
         .and_then(|h| h.strip_prefix("Bearer ").map(String::from));
     let caller = Some(RpcCaller { user_id: identity.user_id.to_string(), email: identity.email, auth_token: raw_token });
 
-    Ok(Json(wm(&rt).await?.rpc(&app_id, id, method, params, caller).await?))
+    Ok(Json(wm(&rt).rpc(&app_id, id, method, params, caller).await?))
 }

@@ -15,13 +15,14 @@ use crate::extensions::logs::LogEntry;
 use crate::ipc::{AgentBootConfig, AgentInvokePayload, LlmModelRef, RpcCaller};
 use crate::secrets::SecretManager;
 use crate::tools::{AgentDispatcher, ToolRegistry};
-use crate::worker::{self, AgentEvent, SupervisorHandle, WorkerConfig, WorkerStatus};
+use crate::worker::{self, AgentEvent, FleetEvent, SupervisorHandle, WorkerConfig, WorkerStatus};
 
 const BACKEND_PRELUDE: &str = include_str!("backend_prelude.js");
 
 pub struct WorkerManager {
     workers: Arc<RwLock<HashMap<String, SupervisorHandle>>>,
     dispatch: OnceLock<Arc<dyn AgentDispatcher>>,
+    fleet_tx: broadcast::Sender<FleetEvent>,
     apps_dir: PathBuf,
     prelude_path: PathBuf,
     runtime_url: String,
@@ -38,9 +39,11 @@ impl WorkerManager {
     ) -> Self {
         let prelude_path = apps_dir.join(".prelude.js");
         std::fs::write(&prelude_path, BACKEND_PRELUDE).expect("write backend prelude");
+        let (fleet_tx, _) = broadcast::channel(512);
         Self {
             workers: Arc::new(RwLock::new(HashMap::new())),
             dispatch: OnceLock::new(),
+            fleet_tx,
             apps_dir, prelude_path, runtime_url, database_url, bun_bin,
             tool_registry, pending_approvals,
         }
@@ -180,7 +183,29 @@ impl WorkerManager {
     pub async fn agent_invoke(
         &self, app_id: &str, payload: AgentInvokePayload,
     ) -> Result<mpsc::Receiver<AgentEvent>, RuntimeError> {
-        self.get_handle(app_id).await?.agent_invoke(payload).await
+        let session_id = payload.session_id.clone();
+        let mut inner_rx = self.get_handle(app_id).await?.agent_invoke(payload).await?;
+
+        // Fan out events to fleet broadcast for real-time monitoring
+        let (outer_tx, outer_rx) = mpsc::channel(64);
+        let fleet_tx = self.fleet_tx.clone();
+        let app_id = app_id.to_string();
+        tokio::spawn(async move {
+            while let Some(event) = inner_rx.recv().await {
+                let _ = fleet_tx.send(FleetEvent {
+                    app_id: app_id.clone(),
+                    session_id: session_id.clone(),
+                    event: event.clone(),
+                });
+                if outer_tx.send(event).await.is_err() { break; }
+            }
+        });
+
+        Ok(outer_rx)
+    }
+
+    pub fn subscribe_fleet(&self) -> broadcast::Receiver<FleetEvent> {
+        self.fleet_tx.subscribe()
     }
 
     pub async fn dispatch_job(&self, app_id: &str, job_id: String, payload: JsonValue, caller: Option<RpcCaller>) -> Result<(), RuntimeError> {
