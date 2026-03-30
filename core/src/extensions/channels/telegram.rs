@@ -84,10 +84,8 @@ impl ChannelProvider for TelegramProvider {
             });
         }
 
-        let msg = update.message
-            .ok_or_else(|| ChannelError::InvalidWebhook("no message or callback".into()))?;
-        let text = msg.text
-            .ok_or_else(|| ChannelError::InvalidWebhook("no text".into()))?;
+        let Some(msg) = update.message else { return Ok(InboundEvent::Ignored) };
+        let Some(text) = msg.text else { return Ok(InboundEvent::Ignored) };
         Ok(InboundEvent::Message { chat_id: msg.chat.id.to_string(), text })
     }
 
