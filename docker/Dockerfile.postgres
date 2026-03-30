@@ -1,0 +1,8 @@
+FROM postgres:17
+
+# Install pgmq extension (https://github.com/tembo-io/pgmq)
+RUN apt-get update -q \
+    && apt-get install -yq --no-install-recommends curl ca-certificates \
+    && curl -fsSL https://packagecloud.io/install/repositories/tembo/pgmq/script.deb.sh | bash \
+    && apt-get install -yq --no-install-recommends postgresql-17-pgmq \
+    && rm -rf /var/lib/apt/lists/*

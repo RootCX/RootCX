@@ -33,7 +33,7 @@ endif
 
 DIST := target/dist
 
-.PHONY: release dev deps \
+.PHONY: test-image release dev deps \
         deps-mac-arm deps-mac-x86 deps-linux deps-linux-arm deps-win \
         require-mac require-linux require-win \
         build-frontend \
@@ -54,6 +54,11 @@ else ifneq ($(findstring windows,$(HOST)),)
 else
 	$(error Unsupported host: $(HOST))
 endif
+
+# ── Test infrastructure ───────────────────────────────────────────────────────
+
+test-image:
+	docker compose build postgres
 
 # ── Development ───────────────────────────────────────────────────────────────
 

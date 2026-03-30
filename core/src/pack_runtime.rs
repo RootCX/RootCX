@@ -38,7 +38,7 @@ pub fn run(core_binary: PathBuf, resources_dir: PathBuf) {
 <installer-gui-script minSpecVersion="2">
     <title>RootCX Runtime {version}</title>
     <welcome language="en" mime-type="text/plain"><![CDATA[RootCX Runtime v{version}
-Installs core runtime, PostgreSQL, and Bun. Starts automatically on login.]]></welcome>
+Installs core runtime and Bun. Starts automatically on login.]]></welcome>
     <options customize="never" require-scripts="false" />
     <choices-outline><line choice="default" /></choices-outline>
     <choice id="default" title="RootCX Runtime"><pkg-ref id="{PKG_ID}" /></choice>

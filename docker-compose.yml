@@ -1,5 +1,8 @@
 services:
   postgres:
+    build:
+      context: docker
+      dockerfile: Dockerfile.postgres
     image: rootcx-postgres:17
     environment:
       POSTGRES_USER: postgres

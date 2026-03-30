@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# Download platform-specific runtime dependencies (PostgreSQL + Bun) into core/resources/.
+# Download platform-specific runtime dependencies (Bun) into core/resources/.
 #
 # Usage: scripts/fetch-deps.sh [TARGET]
 # TARGET defaults to the current host triple.
 #
-# Override versions via env:
-#   ROOTCX_PG_VERSION   (default: 18.2.0)
+# Override version via env:
 #   ROOTCX_BUN_VERSION  (default: 1.3.10)
 
 set -euo pipefail
 
 TARGET="${1:-$(rustc -vV 2>/dev/null | awk '/^host:/{print $2}')}"
-PG_VERSION="${ROOTCX_PG_VERSION:-18.2.0}"
 BUN_VERSION="${ROOTCX_BUN_VERSION:-1.3.10}"
 
 RESOURCES="$(dirname "$0")/../core/resources"
@@ -29,28 +27,8 @@ fetch() {
     fi
 }
 
-# ── PostgreSQL ────────────────────────────────────────────────────────────────
-# Source: https://github.com/theseus-rs/postgresql-binaries
-
-fetch_postgres() {
-    local dir="$RESOURCES/postgresql-${PG_VERSION}-${TARGET}"
-    if [[ -d "$dir" ]] && [[ -f "$dir/bin/pg_ctl" || -f "$dir/bin/pg_ctl.exe" ]]; then
-        log "PostgreSQL ${PG_VERSION} for ${TARGET} already present — skipping."; return
-    fi
-    local archive="postgresql-${PG_VERSION}-${TARGET}.tar.gz"
-    local url="https://github.com/theseus-rs/postgresql-binaries/releases/download/${PG_VERSION}/${archive}"
-    local tmp; tmp=$(mktemp -d); trap 'rm -rf "$tmp"' RETURN
-    log "Downloading PostgreSQL ${PG_VERSION} for ${TARGET} …"
-    fetch "$url" "$tmp/$archive"
-    log "Extracting …"
-    tar -xzf "$tmp/$archive" -C "$RESOURCES"
-    [[ -d "$dir" ]] || die "extraction failed — expected $dir"
-    log "PostgreSQL ready at $dir"
-}
-
 # ── Bun ───────────────────────────────────────────────────────────────────────
 # Source: https://github.com/oven-sh/bun/releases
-# Release asset naming: bun-{platform}-{arch}.zip
 
 fetch_bun() {
     local bun_target is_windows=false
@@ -84,6 +62,5 @@ fetch_bun() {
 }
 
 log "Fetching dependencies for target: $TARGET"
-fetch_postgres
 fetch_bun
 log "All dependencies ready in $RESOURCES"
