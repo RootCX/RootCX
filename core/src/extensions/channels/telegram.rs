@@ -97,4 +97,6 @@ impl ChannelProvider for TelegramProvider {
             .send().await;
         Ok(())
     }
+
+    fn debounce_ms(&self) -> Option<u64> { Some(2000) }
 }

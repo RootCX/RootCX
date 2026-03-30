@@ -1,9 +1,14 @@
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock};
+
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
+use tokio::sync::Mutex;
+use tokio::task::AbortHandle;
 use tracing::{error, info};
 
 use super::types::ChannelBinding;
@@ -12,6 +17,7 @@ use crate::auth::identity::Identity;
 use crate::extensions::agents::{self, config as agent_config, persistence};
 use crate::ipc::{AgentInvokePayload, LlmModelRef};
 use crate::routes::{self, SharedRuntime, llm_models::fetch_default_llm};
+use crate::worker_manager::WorkerManager;
 
 #[derive(Deserialize)]
 pub struct CreateChannel {
@@ -159,13 +165,20 @@ pub async fn list_bindings(
     ).bind(&channel_id).fetch_all(&routes::pool(&rt)).await?))
 }
 
+struct DebounceEntry {
+    texts: Vec<String>,
+    abort: Option<AbortHandle>,
+}
+
+static DEBOUNCE: LazyLock<Mutex<HashMap<(String, String), DebounceEntry>>> =
+    LazyLock::new(Default::default);
+
 pub async fn webhook(
     State(rt): State<SharedRuntime>,
     Path((provider_name, channel_id)): Path<(String, String)>,
     headers: HeaderMap, body: Bytes,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = rt.pool().clone();
-    let wm = rt.worker_manager().clone();
 
     let (config, status): (JsonValue, String) = sqlx::query_as(
         "SELECT config, status FROM rootcx_system.channels WHERE id = $1::uuid AND provider = $2",
@@ -179,59 +192,146 @@ pub async fn webhook(
     let inbound = provider.parse_webhook(&config, body, &headers).await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
-    let app_id = resolve_agent(&pool, &channel_id).await?;
-    let session_id = get_or_create_session(&pool, &channel_id, &inbound.chat_id, &app_id).await?;
+    // Only debounce when the message hits the provider's char limit (likely split)
+    let needs_debounce = provider.debounce_ms()
+        .filter(|_| inbound.text.len() >= 4096);
+
+    if let Some(ms) = needs_debounce {
+        debounce_and_invoke(rt, channel_id, provider_name, config, inbound.chat_id, inbound.text, ms);
+    } else {
+        // Flush any pending debounce buffer then dispatch with this message appended
+        flush_and_invoke(rt, channel_id, provider_name, config, inbound.chat_id, inbound.text);
+    }
+
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Buffer messages per (channel, chat) and invoke after `ms` of silence.
+fn debounce_and_invoke(
+    rt: SharedRuntime, channel_id: String, provider_name: String,
+    config: JsonValue, chat_id: String, text: String, ms: u64,
+) {
+    let key = (channel_id.clone(), chat_id.clone());
+
+    tokio::spawn(async move {
+        let mut map = DEBOUNCE.lock().await;
+        if let Some(entry) = map.get_mut(&key) {
+            if let Some(h) = entry.abort.take() { h.abort(); }
+            entry.texts.push(text);
+        } else {
+            map.insert(key.clone(), DebounceEntry { texts: vec![text], abort: None });
+        }
+
+        let timer_key = key.clone();
+        let timer_rt = rt.clone();
+        let timer_prov = provider_name.clone();
+        let timer_cfg = config.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+            let combined = {
+                let mut map = DEBOUNCE.lock().await;
+                map.remove(&timer_key).map(|e| e.texts.join("\n")).unwrap_or_default()
+            };
+            if !combined.is_empty() {
+                dispatch_invoke(timer_rt, timer_key.0, timer_cfg, timer_prov, timer_key.1, combined);
+            }
+        });
+
+        map.get_mut(&key).unwrap().abort = Some(handle.abort_handle());
+    });
+}
+
+/// Message < 4096: likely final or standalone. Flush any pending buffer and invoke.
+fn flush_and_invoke(
+    rt: SharedRuntime, channel_id: String, provider_name: String,
+    config: JsonValue, chat_id: String, text: String,
+) {
+    let key = (channel_id.clone(), chat_id.clone());
+    tokio::spawn(async move {
+        let prefix = {
+            let mut map = DEBOUNCE.lock().await;
+            if let Some(entry) = map.remove(&key) {
+                if let Some(h) = entry.abort { h.abort(); }
+                Some(entry.texts.join("\n"))
+            } else {
+                None
+            }
+        };
+        let combined = match prefix {
+            Some(mut p) => { p.push('\n'); p.push_str(&text); p }
+            None => text,
+        };
+        dispatch_invoke(rt, channel_id, config, provider_name, chat_id, combined);
+    });
+}
+
+fn dispatch_invoke(
+    rt: SharedRuntime, channel_id: String, config: JsonValue,
+    provider_name: String, chat_id: String, text: String,
+) {
+    let pool = rt.pool().clone();
+    let wm = rt.worker_manager().clone();
+
+    tokio::spawn(async move {
+        if let Err(e) = do_invoke(&pool, &wm, &channel_id, &config, &provider_name, &chat_id, &text).await {
+            error!(channel_id, chat_id, "invoke failed: {e}");
+        }
+    });
+}
+
+async fn do_invoke(
+    pool: &sqlx::PgPool, wm: &Arc<WorkerManager>,
+    channel_id: &str, config: &JsonValue, provider_name: &str,
+    chat_id: &str, text: &str,
+) -> Result<(), String> {
+    fn e(e: impl std::fmt::Debug) -> String { format!("{e:?}") }
+    let app_id = resolve_agent(pool, channel_id).await.map_err(&e)?;
+    let session_id = get_or_create_session(pool, channel_id, chat_id, &app_id).await.map_err(&e)?;
 
     let agent_cfg: JsonValue = sqlx::query_scalar(
         "SELECT config FROM rootcx_system.agents WHERE app_id = $1",
-    ).bind(&app_id).fetch_one(&pool).await?;
-    let memory = agent_cfg.pointer("/memory/enabled").and_then(|v| v.as_bool()) == Some(true);
-    let history = agent_config::load_history(&pool, memory, &app_id, &session_id).await?;
-    let llm = fetch_default_llm(&pool).await
-        .map_err(|e| ApiError::Internal(e.to_string()))?
+    ).bind(&app_id).fetch_one(pool).await.map_err(&e)?;
+    let memory = agent_cfg.pointer("/memory/enabled").and_then(serde_json::Value::as_bool) == Some(true);
+    let history = agent_config::load_history(pool, memory, &app_id, &session_id).await.map_err(&e)?;
+    let llm = fetch_default_llm(pool).await.map_err(&e)?
         .map(|(p, m)| LlmModelRef { provider: p, model: m });
 
     let payload = AgentInvokePayload {
         invoke_id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.clone(),
-        message: inbound.text.clone(),
+        message: text.to_string(),
         history, is_sub_invoke: false, llm,
     };
 
-    let mut rx = wm.agent_invoke(&app_id, payload).await?;
-    let user_message = inbound.text;
-    let chat_id = inbound.chat_id;
+    let mut rx = wm.agent_invoke(&app_id, payload).await.map_err(&e)?;
+    let provider = super::provider(provider_name).unwrap();
 
-    tokio::spawn(async move {
-        let mut response = String::new();
-        let mut tokens = None;
-
-        while let Some(event) = rx.recv().await {
-            match event {
-                crate::worker::AgentEvent::Chunk { delta } => response.push_str(&delta),
-                crate::worker::AgentEvent::Done { response: r, tokens: t } => { response = r; tokens = t; break; }
-                crate::worker::AgentEvent::Error { error } => {
-                    error!(channel_id, chat_id, "agent error: {error}");
-                    let _ = provider.send_response(&config, &chat_id, &format!("Error: {error}")).await;
-                    return;
-                }
-                _ => {}
+    let mut response = String::new();
+    let mut tokens = None;
+    while let Some(event) = rx.recv().await {
+        match event {
+            crate::worker::AgentEvent::Chunk { delta } => response.push_str(&delta),
+            crate::worker::AgentEvent::Done { response: r, tokens: t } => { response = r; tokens = t; break; }
+            crate::worker::AgentEvent::Error { error: e } => {
+                error!(channel_id, chat_id, "agent error: {e}");
+                let _ = provider.send_response(config, chat_id, &format!("Error: {e}")).await;
+                return Ok(());
             }
+            _ => {}
         }
-        if response.is_empty() { return; }
+    }
+    if response.is_empty() { return Ok(()); }
 
-        if memory {
-            let uid = agents::agent_user_id(&app_id);
-            let _ = persistence::ensure_session(&pool, &session_id, &app_id, uid).await;
-            let _ = persistence::persist_message(&pool, &session_id, "user", &user_message, None, false).await;
-            let _ = persistence::finalize_session(&pool, &session_id, &user_message, &response, tokens).await;
-        }
-        if let Err(e) = provider.send_response(&config, &chat_id, &response).await {
-            error!(channel_id, chat_id, "send response failed: {e}");
-        }
-    });
-
-    Ok(Json(json!({ "ok": true })))
+    if memory {
+        let uid = agents::agent_user_id(&app_id);
+        let _ = persistence::ensure_session(pool, &session_id, &app_id, uid).await;
+        let _ = persistence::persist_message(pool, &session_id, "user", text, None, false).await;
+        let _ = persistence::finalize_session(pool, &session_id, text, &response, tokens).await;
+    }
+    if let Err(e) = provider.send_response(config, chat_id, &response).await {
+        error!(channel_id, chat_id, "send response failed: {e}");
+    }
+    Ok(())
 }
 
 async fn resolve_agent(pool: &sqlx::PgPool, channel_id: &str) -> Result<String, ApiError> {
