@@ -99,4 +99,18 @@ impl ChannelProvider for TelegramProvider {
     }
 
     fn debounce_ms(&self) -> Option<u64> { Some(2000) }
+
+    fn start_typing(&self, config: &JsonValue, chat_id: &str) -> Option<tokio::task::AbortHandle> {
+        let url = Self::bot_url(Self::token(config).ok()?, "sendChatAction");
+        let body = json!({ "chat_id": chat_id, "action": "typing" });
+        let http = self.http.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let _ = http.post(&url).json(&body).send().await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(4)).await;
+            }
+        });
+        Some(handle.abort_handle())
+    }
 }

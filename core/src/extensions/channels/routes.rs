@@ -305,6 +305,7 @@ async fn do_invoke(
 
     let mut rx = wm.agent_invoke(&app_id, payload).await.map_err(&e)?;
     let provider = super::provider(provider_name).unwrap();
+    let typing = provider.start_typing(config, chat_id);
 
     let mut response = String::new();
     let mut tokens = None;
@@ -313,6 +314,7 @@ async fn do_invoke(
             crate::worker::AgentEvent::Chunk { delta } => response.push_str(&delta),
             crate::worker::AgentEvent::Done { response: r, tokens: t } => { response = r; tokens = t; break; }
             crate::worker::AgentEvent::Error { error: e } => {
+                if let Some(h) = &typing { h.abort(); }
                 error!(channel_id, chat_id, "agent error: {e}");
                 let _ = provider.send_response(config, chat_id, &format!("Error: {e}")).await;
                 return Ok(());
@@ -320,6 +322,7 @@ async fn do_invoke(
             _ => {}
         }
     }
+    if let Some(h) = typing { h.abort(); }
     if response.is_empty() { return Ok(()); }
 
     if memory {
