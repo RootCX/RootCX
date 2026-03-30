@@ -1,6 +1,7 @@
 pub mod agents;
 mod audit;
 pub mod auth;
+pub mod channels;
 pub mod hooks;
 pub mod integrations;
 pub mod logs;
@@ -55,5 +56,6 @@ pub fn builtin_extensions(auth_config: Arc<AuthConfig>) -> Vec<Box<dyn RuntimeEx
         Box::new(agents::AgentExtension),
         Box::new(integrations::IntegrationsExtension),
         Box::new(mcp::McpExtension),
+        Box::new(channels::ChannelExtension),
     ]
 }

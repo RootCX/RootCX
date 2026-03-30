@@ -24,8 +24,8 @@ export const AI_PROVIDERS: AIProvider[] = [
 export type AwsAuthMode = "iam" | "apikey";
 
 export const AWS_AUTH_MODES: Record<AwsAuthMode, { label: string; env: string[] }> = {
-  apikey: { label: "API Key", env: ["AWS_BEARER_TOKEN_BEDROCK"] },
-  iam: { label: "IAM Credentials", env: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"] },
+  apikey: { label: "API Key", env: ["AWS_BEARER_TOKEN_BEDROCK", "AWS_DEFAULT_REGION"] },
+  iam: { label: "IAM Credentials", env: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION"] },
 };
 
 export function envKeysForProvider(p: AIProvider, awsAuthMode?: AwsAuthMode): string[] {
