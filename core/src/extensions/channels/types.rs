@@ -14,6 +14,7 @@ pub struct ChannelBinding {
 pub enum InboundEvent {
     Message { chat_id: String, text: String },
     Callback { chat_id: String, callback_id: String, data: String },
+    Ignored,
 }
 
 #[derive(Debug, thiserror::Error)]

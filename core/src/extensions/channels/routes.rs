@@ -194,6 +194,7 @@ pub async fn webhook(
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
     match event {
+        InboundEvent::Ignored => {}
         InboundEvent::Callback { chat_id, callback_id, data } => {
             handle_callback(&rt, &config, provider.as_ref(), &chat_id, &callback_id, &data).await;
         }
