@@ -39,4 +39,9 @@ pub trait ChannelProvider: Send + Sync {
     ) -> Result<(), ChannelError>;
 
     async fn unregister_webhook(&self, config: &JsonValue) -> Result<(), ChannelError>;
+
+    /// Providers that split long messages (e.g. Telegram at 4096 chars) return a
+    /// debounce window. The webhook handler buffers messages per chat_id and
+    /// concatenates them before invoking the agent.
+    fn debounce_ms(&self) -> Option<u64> { None }
 }
