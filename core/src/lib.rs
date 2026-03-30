@@ -12,6 +12,7 @@ mod scheduler;
 mod schema;
 mod schema_sync;
 mod secrets;
+mod seed;
 pub mod server;
 pub mod tools;
 mod tool_executor;
@@ -93,6 +94,8 @@ impl Runtime {
 
         let apps_dir = self.data_dir.join("apps");
         std::fs::create_dir_all(&apps_dir).map_err(|e| RuntimeError::Worker(format!("create apps dir: {e}")))?;
+
+        seed::seed_assistant(&pool, &self.data_dir, &self.resources_dir, &self.bun_bin).await?;
         let runtime_url = format!("http://127.0.0.1:{api_port}");
         let wm = Arc::new(WorkerManager::new(
             apps_dir, runtime_url, self.database_url.clone(), self.bun_bin.clone(),
