@@ -49,6 +49,14 @@ impl RuntimeExtension for ChannelExtension {
         ] {
             sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
         }
+
+        let rows: Vec<(String, serde_json::Value)> = sqlx::query_as(
+            "SELECT provider, config FROM rootcx_system.channels WHERE status = 'active'",
+        ).fetch_all(pool).await.unwrap_or_default();
+        for (prov, cfg) in rows {
+            if let Some(p) = provider(&prov) { p.on_activate_boot(&cfg).await; }
+        }
+
         Ok(())
     }
 
