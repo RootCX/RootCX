@@ -50,7 +50,7 @@ pub async fn list_integrations(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<JsonValue>>, ApiError> {
-    let (pool, secrets) = routes::pool_and_secrets(&rt).await?;
+    let (pool, secrets) = routes::pool_and_secrets(&rt);
     let mut items = query_installed_integrations(&pool).await?;
     for item in &mut items {
         let map = platform_secret_map(item);
@@ -65,7 +65,7 @@ pub async fn list_bindings(
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<JsonValue>>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
     let rows: Vec<(String, bool, Option<String>, String)> = sqlx::query_as(
         "SELECT integration_id, enabled, webhook_token, created_at::text
          FROM rootcx_system.integration_bindings WHERE consumer_app_id = $1",
@@ -91,7 +91,7 @@ pub async fn bind(
     Path(app_id): Path<String>,
     Json(body): Json<BindRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, secrets) = routes::pool_and_secrets(&rt).await?;
+    let (pool, secrets) = routes::pool_and_secrets(&rt);
 
     let consumer_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM rootcx_system.apps WHERE id = $1)",
@@ -130,7 +130,7 @@ pub async fn bind(
 
     sync_integration_permissions(&pool, &app_id, &body.integration_id, &manifest).await?;
 
-    let wm = routes::wm(&rt).await?;
+    let wm = routes::wm(&rt);
     let secret_map = platform_secret_map(&manifest);
     let config = fetch_config(&pool, &secrets, &secret_map).await?;
     if let Ok(result) = wm
@@ -158,7 +158,7 @@ pub async fn save_platform_config(
     Path(integration_id): Path<String>,
     Json(config): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, secrets) = routes::pool_and_secrets(&rt).await?;
+    let (pool, secrets) = routes::pool_and_secrets(&rt);
     let manifest = get_integration_manifest(&pool, &integration_id).await?;
     save_config_secrets(&pool, &secrets, &platform_secret_map(&manifest), &config).await?;
     Ok(Json(json!({ "message": "config saved" })))
@@ -169,7 +169,7 @@ pub async fn unbind(
     State(rt): State<SharedRuntime>,
     Path((app_id, integration_id)): Path<(String, String)>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
 
     sqlx::query(
         "DELETE FROM rootcx_system.integration_bindings
@@ -199,8 +199,8 @@ pub async fn execute_action(
     Path((app_id, integration_id, action_id)): Path<(String, String, String)>,
     Json(input): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, secrets) = routes::pool_and_secrets(&rt).await?;
-    let wm = routes::wm(&rt).await?;
+    let (pool, secrets) = routes::pool_and_secrets(&rt);
+    let wm = routes::wm(&rt);
 
     let perm = format!("integration.{integration_id}.{action_id}");
     let (_, perms) = resolve_permissions(&pool, &app_id, identity.user_id).await?;
@@ -251,8 +251,8 @@ pub async fn webhook_ingress(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, secrets) = routes::pool_and_secrets(&rt).await?;
-    let wm = routes::wm(&rt).await?;
+    let (pool, secrets) = routes::pool_and_secrets(&rt);
+    let wm = routes::wm(&rt);
 
     let (consumer_app_id, integration_id): (String, String) = sqlx::query_as(
         "SELECT consumer_app_id, integration_id FROM rootcx_system.integration_bindings

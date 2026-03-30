@@ -1,6 +1,7 @@
 pub mod agents;
 mod audit;
 pub mod auth;
+pub mod hooks;
 pub mod integrations;
 pub mod logs;
 pub mod mcp;
@@ -47,6 +48,7 @@ pub trait RuntimeExtension: Send + Sync {
 pub fn builtin_extensions(auth_config: Arc<AuthConfig>) -> Vec<Box<dyn RuntimeExtension>> {
     vec![
         Box::new(audit::AuditExtension),
+        Box::new(hooks::HooksExtension),
         Box::new(logs::LogsExtension),
         Box::new(auth::AuthExtension { config: auth_config }),
         Box::new(rbac::RbacExtension),

@@ -27,8 +27,18 @@ fn dead() -> RuntimeError {
     RuntimeError::Worker("supervisor actor dead".into())
 }
 
+/// Fleet-wide event envelope for SSE fan-out.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FleetEvent {
+    pub app_id: String,
+    pub session_id: String,
+    #[serde(flatten)]
+    pub event: AgentEvent,
+}
+
 /// Events streamed from an agent worker back to the invoke route.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(tag = "_event", rename_all = "snake_case")]
 pub enum AgentEvent {
     Chunk { delta: String },
     Done { response: String, tokens: Option<u64> },

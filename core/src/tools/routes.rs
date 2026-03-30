@@ -18,8 +18,7 @@ pub async fn list_tools(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<ToolSummary>>, ApiError> {
-    let g = rt.lock().await;
-    let tools = g.tool_registry()
+    let tools = rt.tool_registry()
         .all_summaries()
         .into_iter()
         .map(|(name, description)| ToolSummary { name, description })
@@ -40,13 +39,9 @@ pub async fn execute_tool(
     Path(tool_name): Path<String>,
     Json(body): Json<ExecuteToolRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (tool, pool) = {
-        let g = rt.lock().await;
-        let tool = g.tool_registry().get(&tool_name)
-            .ok_or_else(|| ApiError::NotFound(format!("unknown tool: '{tool_name}'")))?;
-        let pool = g.pool().cloned().ok_or(ApiError::NotReady)?;
-        (tool, pool)
-    };
+    let tool = rt.tool_registry().get(&tool_name)
+        .ok_or_else(|| ApiError::NotFound(format!("unknown tool: '{tool_name}'")))?;
+    let pool = rt.pool().clone();
 
     let (_, permissions) = crate::extensions::rbac::policy::resolve_permissions(&pool, &body.app_id, identity.user_id).await?;
     let result = tool.execute(&ToolContext {

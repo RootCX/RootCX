@@ -143,7 +143,7 @@ async fn list_audit_events(
     State(rt): State<SharedRuntime>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<JsonValue>>, crate::api_error::ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
     let q = query_params::parse(&params, AUDIT_COLS, AUDIT_ALIASES, 100, "id");
     let wc = q.where_clause();
 

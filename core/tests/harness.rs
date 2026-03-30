@@ -2,12 +2,11 @@ use std::net::TcpListener;
 use std::sync::Arc;
 
 use reqwest::{Client, Method, StatusCode, multipart};
-use rootcx_core::{Runtime, server};
+use rootcx_core::{ReadyRuntime, Runtime, server};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt, runners::AsyncRunner};
 use testcontainers::core::{IntoContainerPort, WaitFor};
-use tokio::sync::Mutex;
 
 const PG_IMAGE: &str = "rootcx-postgres";
 const PG_TAG: &str = "17";
@@ -15,7 +14,7 @@ const PG_TAG: &str = "17";
 pub struct TestRuntime {
     base_url: String,
     pub client: Client,
-    runtime: Arc<Mutex<Runtime>>,
+    runtime: Arc<ReadyRuntime>,
     token: String,
     _tmp: TempDir,
     _container: ContainerAsync<GenericImage>,
@@ -45,9 +44,10 @@ impl TestRuntime {
 
         let resources_dir = data_dir.join("resources");
         std::fs::create_dir_all(&resources_dir).unwrap();
-        let runtime = Arc::new(Mutex::new(Runtime::new(db_url, data_dir, resources_dir, bun_bin)));
-        runtime.lock().await.boot(api_port).await.expect("boot failed");
-
+        let runtime = Arc::new(
+            Runtime::new(db_url, data_dir, resources_dir, bun_bin)
+                .boot(api_port).await.expect("boot failed")
+        );
         let rt = Arc::clone(&runtime);
         tokio::spawn(async move { server::serve(rt, api_port).await.ok(); });
 
@@ -164,7 +164,7 @@ impl TestRuntime {
     }
 
     pub async fn shutdown(self) {
-        self.runtime.lock().await.shutdown().await.expect("shutdown failed");
+        self.runtime.shutdown().await;
     }
 }
 

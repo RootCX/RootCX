@@ -120,7 +120,8 @@ impl RuntimeExtension for AgentExtension {
                 .route("/api/v1/apps/{app_id}/agent/sessions/{session_id}", get(routes::get_session))
                 .route("/api/v1/apps/{app_id}/agent/sessions/{session_id}/events", get(routes::get_session_events))
                 .route("/api/v1/apps/{app_id}/agent/approvals", get(routes::list_approvals))
-                .route("/api/v1/apps/{app_id}/agent/approvals/{approval_id}", post(routes::reply_approval)),
+                .route("/api/v1/apps/{app_id}/agent/approvals/{approval_id}", post(routes::reply_approval))
+                .route("/api/v1/agents/stream", get(routes::fleet_stream)),
         )
     }
 }

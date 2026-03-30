@@ -96,7 +96,7 @@ async fn list_servers(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<JsonValue>>, ApiError> {
-    let pool = crate::routes::pool(&rt).await?;
+    let pool = crate::routes::pool(&rt);
     let rows: Vec<(String, JsonValue, String)> = sqlx::query_as(
         "SELECT name, config, status FROM rootcx_system.mcp_servers ORDER BY name"
     ).fetch_all(&pool).await?;
@@ -111,7 +111,7 @@ async fn get_server(
     State(rt): State<SharedRuntime>,
     Path(name): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = crate::routes::pool(&rt).await?;
+    let pool = crate::routes::pool(&rt);
     let (name, config, status): (String, JsonValue, String) = sqlx::query_as(
         "SELECT name, config, status FROM rootcx_system.mcp_servers WHERE name = $1"
     ).bind(&name).fetch_optional(&pool).await?
@@ -133,7 +133,7 @@ async fn register_server(
     State(rt): State<SharedRuntime>,
     Json(body): Json<RegisterRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, secrets) = crate::routes::pool_and_secrets(&rt).await?;
+    let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
     let name = &body.config.name;
     let config_val = serde_json::to_value(&body.config).map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -143,7 +143,7 @@ async fn register_server(
     ).bind(name).bind(&config_val).execute(&pool).await?;
 
     if body.auto_start {
-        let mcp = rt.lock().await.mcp_manager().clone();
+        let mcp = rt.mcp_manager().clone();
         let env = mcp_env(&pool, &secrets).await;
         match mcp.start_server(&body.config, &env).await {
             Ok(tools) => {
@@ -166,8 +166,8 @@ async fn remove_server(
     State(rt): State<SharedRuntime>,
     Path(name): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = crate::routes::pool(&rt).await?;
-    let mcp = rt.lock().await.mcp_manager().clone();
+    let pool = crate::routes::pool(&rt);
+    let mcp = rt.mcp_manager().clone();
     mcp.stop_server(&name).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     sync_tools(&pool, &mcp).await;
     sqlx::query("DELETE FROM rootcx_system.mcp_servers WHERE name = $1")
@@ -180,8 +180,8 @@ async fn start_server(
     State(rt): State<SharedRuntime>,
     Path(name): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, secrets) = crate::routes::pool_and_secrets(&rt).await?;
-    let mcp = rt.lock().await.mcp_manager().clone();
+    let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
+    let mcp = rt.mcp_manager().clone();
 
     if mcp.is_running(&name).await {
         return Ok(Json(server_json(&name, "running")));
@@ -207,8 +207,8 @@ async fn stop_server(
     State(rt): State<SharedRuntime>,
     Path(name): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = crate::routes::pool(&rt).await?;
-    let mcp = rt.lock().await.mcp_manager().clone();
+    let pool = crate::routes::pool(&rt);
+    let mcp = rt.mcp_manager().clone();
     mcp.stop_server(&name).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     set_status(&pool, &name, "stopped").await;
     sync_tools(&pool, &mcp).await;

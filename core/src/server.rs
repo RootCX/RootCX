@@ -55,15 +55,12 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .route("/api/v1/tools", get(crate::tools::routes::list_tools))
         .route("/api/v1/tools/{tool_name}/execute", post(crate::tools::routes::execute_tool));
 
-    let auth_config = {
-        let rt = runtime.lock().await;
-        for ext in rt.extensions() {
-            if let Some(ext_router) = ext.routes() {
-                router = router.merge(ext_router);
-            }
+    for ext in runtime.extensions() {
+        if let Some(ext_router) = ext.routes() {
+            router = router.merge(ext_router);
         }
-        rt.auth_config().clone()
-    };
+    }
+    let auth_config = runtime.auth_config().clone();
 
     let cors = CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(|origin, _| {

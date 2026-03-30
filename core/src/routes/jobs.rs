@@ -15,12 +15,10 @@ pub async fn enqueue_job(
     Path(app_id): Path<String>,
     Json(body): Json<JsonValue>,
 ) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
     let payload = body.get("payload").cloned().unwrap_or(json!({}));
     let msg_id = crate::jobs::enqueue(&pool, &app_id, payload, Some(identity.user_id)).await?;
-    if let Some(w) = rt.lock().await.scheduler_wake() {
-        w.notify_one();
-    }
+    rt.scheduler_wake().notify_one();
     Ok((StatusCode::CREATED, Json(json!({ "msg_id": msg_id }))))
 }
 
@@ -30,7 +28,7 @@ pub async fn list_jobs(
     Path(app_id): Path<String>,
     Query(p): Query<HashMap<String, String>>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
     let limit: i64 = p.get("limit").and_then(|v| v.parse().ok()).unwrap_or(100).min(1000);
     let archived = p.get("archived").map(|v| v == "true").unwrap_or(false);
     let jobs = if archived {

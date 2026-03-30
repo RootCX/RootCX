@@ -62,7 +62,7 @@ async fn subscribe_worker_logs(
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let rx = routes::wm(&rt).await?.subscribe_logs(&app_id).await?;
+    let rx = routes::wm(&rt).subscribe_logs(&app_id).await?;
 
     let stream = futures::stream::unfold(rx, |mut rx| async move {
         match rx.recv().await {

@@ -31,7 +31,7 @@ pub async fn list_llm_models(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<LlmModel>>, ApiError> {
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
     let rows: Vec<LlmModel> = sqlx::query_as(
         "SELECT id, name, provider, model, config, is_default FROM rootcx_system.llm_models ORDER BY created_at",
     )
@@ -44,7 +44,7 @@ pub async fn create_llm_model(
     State(rt): State<SharedRuntime>,
     Json(input): Json<LlmModel>,
 ) -> Result<(StatusCode, Json<LlmModel>), ApiError> {
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
     if input.is_default { clear_default(&pool).await?; }
 
     sqlx::query(
@@ -63,7 +63,7 @@ pub async fn update_llm_model(
     Path(id): Path<String>,
     Json(input): Json<LlmModel>,
 ) -> Result<StatusCode, ApiError> {
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
     if input.is_default { clear_default(&pool).await?; }
 
     let result = sqlx::query(
@@ -82,7 +82,7 @@ pub async fn delete_llm_model(
     State(rt): State<SharedRuntime>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
     let result = sqlx::query("DELETE FROM rootcx_system.llm_models WHERE id = $1")
         .bind(&id).execute(&pool).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     if result.rows_affected() == 0 { return Err(ApiError::NotFound(format!("LLM model '{id}' not found"))); }
@@ -94,7 +94,7 @@ pub async fn set_default_llm_model(
     State(rt): State<SharedRuntime>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
     let result = sqlx::query("UPDATE rootcx_system.llm_models SET is_default = (id = $1) WHERE id = $1 OR is_default = TRUE")
         .bind(&id).execute(&pool).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     if result.rows_affected() == 0 { return Err(ApiError::NotFound(format!("LLM model '{id}' not found"))); }
@@ -112,7 +112,7 @@ pub async fn get_forge_model(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
     let row: Option<(String, String)> = sqlx::query_as(
         "SELECT provider, model FROM rootcx_system.llm_models WHERE is_default = TRUE LIMIT 1",
     )

@@ -7,6 +7,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
+use tokio::sync::broadcast::error::RecvError;
 
 use super::approvals::{ApprovalReply, ApprovalResponse};
 use super::config;
@@ -83,7 +84,7 @@ pub async fn get_agent(
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<AgentRow>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
     sqlx::query_as::<_, AgentRow>(
         "SELECT app_id, name, description, config FROM rootcx_system.agents WHERE app_id = $1",
     )
@@ -98,10 +99,8 @@ pub async fn invoke_agent(
     Path(app_id): Path<String>,
     Json(body): Json<InvokeRequest>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
-    let (pool, wm) = {
-        let g = rt.lock().await;
-        (g.pool().cloned().ok_or(ApiError::NotReady)?, g.worker_manager().cloned().ok_or(ApiError::NotReady)?)
-    };
+    let pool = rt.pool().clone();
+    let wm = rt.worker_manager().clone();
 
     let agent_config_json: JsonValue = sqlx::query_scalar(
         "SELECT config FROM rootcx_system.agents WHERE app_id = $1",
@@ -156,7 +155,7 @@ pub async fn list_sessions(
     Path(app_id): Path<String>,
     Query(p): Query<PaginationParams>,
 ) -> Result<Json<Vec<SessionRow>>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
     let limit = p.limit.clamp(1, 1000);
     let offset = p.offset.max(0);
     let rows = sqlx::query_as::<_, SessionRow>(
@@ -173,7 +172,7 @@ pub async fn get_session(
     State(rt): State<SharedRuntime>,
     Path((app_id, session_id)): Path<(String, String)>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
     let session = sqlx::query_as::<_, SessionRow>(
         "SELECT id::text, messages, created_at::text, updated_at::text,
                 title, status, total_tokens, turn_count
@@ -226,7 +225,7 @@ pub async fn get_session_events(
     State(rt): State<SharedRuntime>,
     Path((app_id, session_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<SessionEventEntry>>, ApiError> {
-    let pool = routes::pool(&rt).await?;
+    let pool = routes::pool(&rt);
 
     // Verify session belongs to app
     let exists: bool = sqlx::query_scalar(
@@ -270,7 +269,7 @@ pub async fn list_approvals(
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<super::approvals::ApprovalRequest>>, ApiError> {
-    let approvals = rt.lock().await.pending_approvals().clone();
+    let approvals = rt.pending_approvals().clone();
     Ok(Json(approvals.list(&app_id).await))
 }
 
@@ -280,9 +279,9 @@ pub async fn reply_approval(
     Path((app_id, approval_id)): Path<(String, String)>,
     Json(body): Json<ApprovalReply>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let approvals = rt.lock().await.pending_approvals().clone();
+    let approvals = rt.pending_approvals().clone();
     // Verify approval belongs to app
-    if !approvals.list(&app_id).await.iter().any(|a| a.approval_id == approval_id) {
+    if !approvals.belongs_to_app(&approval_id, &app_id).await {
         return Err(ApiError::NotFound(format!("approval '{approval_id}' not found for app '{app_id}'")));
     }
     let response = match body.action {
@@ -296,4 +295,22 @@ pub async fn reply_approval(
     } else {
         Err(ApiError::NotFound(format!("approval '{approval_id}' not found")))
     }
+}
+
+pub async fn fleet_stream(
+    _identity: Identity,
+    State(rt): State<SharedRuntime>,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let rx = routes::wm(&rt).subscribe_fleet();
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        match rx.recv().await {
+            Ok(event) => {
+                let data = serde_json::to_string(&event).unwrap_or_default();
+                Some((Ok(Event::default().data(data)), rx))
+            }
+            Err(RecvError::Lagged(_)) => Some((Ok(Event::default().data("{}")), rx)),
+            Err(RecvError::Closed) => None,
+        }
+    });
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }

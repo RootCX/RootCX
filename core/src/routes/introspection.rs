@@ -21,7 +21,7 @@ pub async fn list_schemas(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<SchemaInfo>>, ApiError> {
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
     let rows = sqlx::query_as::<_, (String, i64)>(
         "SELECT s.schema_name, COUNT(t.table_name)::bigint
          FROM information_schema.schemata s
@@ -60,7 +60,7 @@ pub async fn list_tables(
     State(rt): State<SharedRuntime>,
     Path(schema): Path<String>,
 ) -> Result<Json<Vec<TableInfo>>, ApiError> {
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
 
     let tables: Vec<(String,)> = sqlx::query_as(
         "SELECT table_name FROM information_schema.tables
@@ -123,7 +123,7 @@ pub async fn execute_query(
     State(rt): State<SharedRuntime>,
     Json(body): Json<QueryRequest>,
 ) -> Result<Json<QueryResult>, ApiError> {
-    let pool = pool(&rt).await?;
+    let pool = pool(&rt);
     let sql = body.sql.trim();
 
     if sql.is_empty() {

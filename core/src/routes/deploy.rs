@@ -50,15 +50,11 @@ pub async fn deploy_backend(
         return Err(ApiError::BadRequest("reserved app_id".into()));
     }
 
-    let (app_dir, bun_bin, pool, secrets, wm) = {
-        let g = rt.lock().await;
-        let app_dir = g.data_dir().join("apps").join(&app_id);
-        let bun_bin = g.bun_bin().to_path_buf();
-        let pool = g.pool().cloned().ok_or(ApiError::NotReady)?;
-        let secrets = g.secret_manager().cloned().ok_or(ApiError::NotReady)?;
-        let wm = g.worker_manager().cloned().ok_or(ApiError::NotReady)?;
-        (app_dir, bun_bin, pool, secrets, wm)
-    };
+    let app_dir = rt.data_dir().join("apps").join(&app_id);
+    let bun_bin = rt.bun_bin().to_path_buf();
+    let pool = rt.pool().clone();
+    let secrets = rt.secret_manager().clone();
+    let wm = rt.worker_manager().clone();
 
     let bytes = read_archive(&mut multipart).await?;
     extract_to(bytes, &app_dir).await?;
@@ -129,7 +125,7 @@ pub async fn deploy_frontend(
         return Err(ApiError::BadRequest("reserved app_id".into()));
     }
 
-    let frontend_dir = rt.lock().await.data_dir().join("frontends").join(&app_id);
+    let frontend_dir = rt.data_dir().join("frontends").join(&app_id);
     let bytes = read_archive(&mut multipart).await?;
     extract_to(bytes, &frontend_dir).await?;
 
@@ -159,7 +155,7 @@ pub async fn serve_frontend(
     State(rt): State<SharedRuntime>,
     AxumPath((app_id, path)): AxumPath<(String, String)>,
 ) -> impl IntoResponse {
-    let frontend_dir = rt.lock().await.data_dir().join("frontends").join(&app_id);
+    let frontend_dir = rt.data_dir().join("frontends").join(&app_id);
 
     let requested = PathBuf::from(&path);
     if requested.components().any(|c| c == std::path::Component::ParentDir) {
