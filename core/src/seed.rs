@@ -6,11 +6,16 @@ use tracing::info;
 
 use crate::RuntimeError;
 use crate::extensions::agents;
+use crate::secrets::SecretManager;
+use crate::worker_manager::WorkerManager;
 
 const APP_ID: &str = "assistant";
 
+/// Install the bundled assistant using the standard deploy flow.
+/// Skips if already installed.
 pub async fn seed_assistant(
     pool: &PgPool, data_dir: &Path, resources_dir: &Path, bun_bin: &Path,
+    wm: &WorkerManager, secrets: &SecretManager,
 ) -> Result<(), RuntimeError> {
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM rootcx_system.apps WHERE id = $1)",
@@ -24,18 +29,20 @@ pub async fn seed_assistant(
     }
 
     info!("seeding built-in assistant agent");
-    let dest = data_dir.join("apps").join(APP_ID);
-    copy_recursive(&src, &dest)?;
+    let app_dir = data_dir.join("apps").join(APP_ID);
+    copy_recursive(&src, &app_dir)?;
 
-    let out = tokio::process::Command::new(bun_bin)
-        .arg("install").current_dir(&dest)
-        .stdout(Stdio::piped()).stderr(Stdio::piped())
-        .output().await
-        .map_err(|e| RuntimeError::Worker(format!("bun install: {e}")))?;
-    if !out.status.success() {
-        return Err(RuntimeError::Worker(format!(
-            "bun install failed: {}", String::from_utf8_lossy(&out.stderr)
-        )));
+    if app_dir.join("package.json").exists() {
+        let out = tokio::process::Command::new(bun_bin)
+            .arg("install").current_dir(&app_dir)
+            .stdout(Stdio::piped()).stderr(Stdio::piped())
+            .output().await
+            .map_err(|e| RuntimeError::Worker(format!("bun install: {e}")))?;
+        if !out.status.success() {
+            return Err(RuntimeError::Worker(format!(
+                "bun install failed: {}", String::from_utf8_lossy(&out.stderr)
+            )));
+        }
     }
 
     sqlx::query(
@@ -45,10 +52,12 @@ pub async fn seed_assistant(
         "appId": APP_ID, "name": "Assistant", "version": "0.1.0", "type": "agent",
     })).execute(pool).await.map_err(RuntimeError::Schema)?;
 
-    if let Some(def) = agents::config::load_agent_json(&dest).await {
+    if let Some(def) = agents::config::load_agent_json(&app_dir).await {
         agents::register_agent(pool, APP_ID, &def).await?;
     }
-    info!("assistant agent seeded");
+
+    wm.start_app(pool, secrets, APP_ID).await?;
+    info!("assistant agent seeded and started");
     Ok(())
 }
 

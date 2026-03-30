@@ -95,13 +95,14 @@ impl Runtime {
         let apps_dir = self.data_dir.join("apps");
         std::fs::create_dir_all(&apps_dir).map_err(|e| RuntimeError::Worker(format!("create apps dir: {e}")))?;
 
-        seed::seed_assistant(&pool, &self.data_dir, &self.resources_dir, &self.bun_bin).await?;
         let runtime_url = format!("http://127.0.0.1:{api_port}");
         let wm = Arc::new(WorkerManager::new(
             apps_dir, runtime_url, self.database_url.clone(), self.bun_bin.clone(),
             Arc::clone(&self.tool_registry), self.pending_approvals.clone(),
         ));
         wm.init_self_ref();
+
+        seed::seed_assistant(&pool, &self.data_dir, &self.resources_dir, &self.bun_bin, &wm, &secret_manager).await?;
         let scheduler = scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm), Arc::clone(&self.auth_config));
 
         wm.start_deployed_apps(&pool, &secret_manager).await;
