@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
 use tracing::warn;
 
-use super::types::{ChannelError, ChannelProvider, InboundMessage};
+use super::types::{ChannelError, ChannelProvider, InboundEvent};
 
 pub struct TelegramProvider {
     http: reqwest::Client,
@@ -31,20 +31,40 @@ impl TelegramProvider {
                 { "command": "newsession", "description": "Start a new conversation" },
             ]})).send().await;
     }
+
+    async fn api_post(&self, config: &JsonValue, method: &str, body: &JsonValue) -> Result<(), ChannelError> {
+        let resp = self.http
+            .post(Self::bot_url(Self::token(config)?, method))
+            .json(body).send().await
+            .map_err(|e| ChannelError::Provider(e.to_string()))?;
+        if !resp.status().is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            warn!(method, "telegram API failed: {body}");
+            return Err(ChannelError::Provider(body));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
-struct Update { message: Option<Message> }
+struct Update {
+    message: Option<Message>,
+    callback_query: Option<CallbackQuery>,
+}
 #[derive(Deserialize)]
 struct Message { chat: Chat, text: Option<String> }
 #[derive(Deserialize)]
+struct CallbackQuery { id: String, from: ChatFrom, data: Option<String> }
+#[derive(Deserialize)]
 struct Chat { id: i64 }
+#[derive(Deserialize)]
+struct ChatFrom { id: i64 }
 
 #[async_trait]
 impl ChannelProvider for TelegramProvider {
     async fn parse_webhook(
         &self, config: &JsonValue, body: Bytes, headers: &HeaderMap,
-    ) -> Result<InboundMessage, ChannelError> {
+    ) -> Result<InboundEvent, ChannelError> {
         if let Some(secret) = config["webhook_secret"].as_str() {
             let header = headers.get("x-telegram-bot-api-secret-token")
                 .and_then(|v| v.to_str().ok()).unwrap_or("");
@@ -55,29 +75,49 @@ impl ChannelProvider for TelegramProvider {
 
         let update: Update = serde_json::from_slice(&body)
             .map_err(|e| ChannelError::InvalidWebhook(e.to_string()))?;
+
+        if let Some(cb) = update.callback_query {
+            return Ok(InboundEvent::Callback {
+                chat_id: cb.from.id.to_string(),
+                callback_id: cb.id,
+                data: cb.data.unwrap_or_default(),
+            });
+        }
+
         let msg = update.message
-            .ok_or_else(|| ChannelError::InvalidWebhook("no message".into()))?;
+            .ok_or_else(|| ChannelError::InvalidWebhook("no message or callback".into()))?;
         let text = msg.text
             .ok_or_else(|| ChannelError::InvalidWebhook("no text".into()))?;
-
-        Ok(InboundMessage { chat_id: msg.chat.id.to_string(), text })
+        Ok(InboundEvent::Message { chat_id: msg.chat.id.to_string(), text })
     }
 
     async fn send_response(
         &self, config: &JsonValue, chat_id: &str, text: &str,
     ) -> Result<(), ChannelError> {
-        let resp = self.http
-            .post(Self::bot_url(Self::token(config)?, "sendMessage"))
-            .json(&json!({ "chat_id": chat_id, "text": text, "parse_mode": "Markdown" }))
-            .send().await
-            .map_err(|e| ChannelError::Provider(e.to_string()))?;
+        self.api_post(config, "sendMessage", &json!({
+            "chat_id": chat_id, "text": text, "parse_mode": "Markdown",
+        })).await
+    }
 
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            warn!(chat_id, "telegram sendMessage failed: {body}");
-            return Err(ChannelError::Provider(body));
-        }
-        Ok(())
+    async fn send_approval(
+        &self, config: &JsonValue, chat_id: &str, approval_id: &str,
+        tool_name: &str, args: &JsonValue,
+    ) -> Result<(), ChannelError> {
+        self.api_post(config, "sendMessage", &json!({
+            "chat_id": chat_id,
+            "text": format!("⚙️ *{tool_name}*\n```\n{args}\n```"),
+            "parse_mode": "Markdown",
+            "reply_markup": { "inline_keyboard": [[
+                { "text": "✅ Approve", "callback_data": format!("approve:{approval_id}") },
+                { "text": "❌ Deny",    "callback_data": format!("deny:{approval_id}") },
+            ]]}
+        })).await
+    }
+
+    async fn answer_callback(&self, config: &JsonValue, callback_id: &str, text: &str) -> Result<(), ChannelError> {
+        self.api_post(config, "answerCallbackQuery", &json!({
+            "callback_query_id": callback_id, "text": text,
+        })).await
     }
 
     async fn register_webhook(
@@ -87,25 +127,13 @@ impl ChannelProvider for TelegramProvider {
         if let Some(secret) = config["webhook_secret"].as_str() {
             payload["secret_token"] = json!(secret);
         }
-
-        let resp = self.http
-            .post(Self::bot_url(Self::token(config)?, "setWebhook"))
-            .json(&payload).send().await
-            .map_err(|e| ChannelError::Provider(e.to_string()))?;
-
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ChannelError::Provider(format!("setWebhook failed: {body}")));
-        }
-
+        self.api_post(config, "setWebhook", &payload).await?;
         self.sync_commands(config).await;
         Ok(())
     }
 
     async fn unregister_webhook(&self, config: &JsonValue) -> Result<(), ChannelError> {
-        let _ = self.http
-            .post(Self::bot_url(Self::token(config)?, "deleteWebhook"))
-            .send().await;
+        let _ = self.api_post(config, "deleteWebhook", &json!({})).await;
         Ok(())
     }
 
