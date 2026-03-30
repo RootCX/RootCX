@@ -9,7 +9,6 @@ dist/
 # Platform-specific resource binaries (downloaded via `make deps`)
 core/resources/*
 !core/resources/integrations/
-!core/resources/assistant/
 
 # OS
 .DS_Store
