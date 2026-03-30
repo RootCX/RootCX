@@ -18,6 +18,7 @@ export type {
   ActionDefinition,
   IntegrationBinding,
   IdentityRecord,
+  Job,
 } from "./client";
 
 export { RuntimeProvider, useRuntimeClient } from "./components/RuntimeProvider";

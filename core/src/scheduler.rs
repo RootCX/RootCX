@@ -34,16 +34,15 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, auth_config: Arc<Au
         info!("job scheduler started");
         loop {
             if c.is_cancelled() { break; }
-            match jobs::claim_next(&pool).await {
-                Ok(Some(job)) => {
-                    let payload = job.payload.clone().unwrap_or(serde_json::json!({}));
-                    let caller = match job.user_id {
+            match jobs::read_next(&pool).await {
+                Ok(Some((msg_id, job_msg))) => {
+                    let caller = match job_msg.user_id {
                         Some(uid) => resolve_caller(&pool, &auth_config, uid).await,
                         None => None,
                     };
-                    if let Err(e) = wm.dispatch_job(&job.app_id, job.id.to_string(), payload, caller).await {
-                        warn!(job_id = %job.id, "dispatch failed: {e}");
-                        let _ = jobs::fail(&pool, job.id, &e.to_string()).await;
+                    if let Err(e) = wm.dispatch_job(&job_msg.app_id, msg_id.to_string(), job_msg.payload, caller).await {
+                        warn!(msg_id, "dispatch failed: {e}");
+                        let _ = jobs::fail(&pool, msg_id).await;
                     }
                     continue;
                 }

@@ -150,7 +150,7 @@ pub async fn verify_schema(
 
 pub use crud::{bulk_create_records, create_record, delete_record, federated_query, get_record, list_records, query_records, update_record};
 pub use deploy::{deploy_backend, deploy_frontend, serve_frontend, serve_frontend_root};
-pub use jobs::{enqueue_job, get_job, list_jobs};
+pub use jobs::{enqueue_job, list_jobs};
 pub use secrets::{delete_secret, list_secrets, set_secret};
 pub use secrets::{delete_platform_secret, get_platform_env, list_platform_secrets, set_platform_secret};
 pub use upload::upload_file;

@@ -107,39 +107,47 @@ async fn main() {
         .init();
 
     let data_dir = data_base_dir().unwrap_or_else(|e| die(e));
-    let external = std::env::var("DATABASE_URL").is_ok();
-    let (pg, res_dir, bun_bin) = if external {
-        let pg = PostgresManager::new(PathBuf::new(), data_dir.join("data/pg"), PG_PORT);
-        let res = std::env::var("ROOTCX_RESOURCES").map(PathBuf::from)
-            .unwrap_or_else(|_| data_dir.clone());
-        let bun = std::env::var("BUN_PATH").map(PathBuf::from)
-            .unwrap_or_else(|_| rootcx_platform::bin::binary_path(&res, "bun"));
-        (pg, res, bun)
-    } else {
-        let pg_root = resolve_pg();
-        let pg = PostgresManager::new(pg_root.join("bin"), data_dir.join("data/pg"), PG_PORT)
-            .with_lib_dir(pg_root.join("lib"));
-        (pg, resources(), resolve_bun())
-    };
-    let rt = Arc::new(Mutex::new(Runtime::new(pg, data_dir, res_dir, bun_bin)));
 
+    let (database_url, embedded_pg, res_dir, bun_bin) = match std::env::var("DATABASE_URL") {
+        Ok(url) => {
+            let res = std::env::var("ROOTCX_RESOURCES").map(PathBuf::from)
+                .unwrap_or_else(|_| data_dir.clone());
+            let bun = std::env::var("BUN_PATH").map(PathBuf::from)
+                .unwrap_or_else(|_| rootcx_platform::bin::binary_path(&res, "bun"));
+            (url, None, res, bun)
+        }
+        Err(_) => {
+            let pg_root = resolve_pg();
+            let mgr = PostgresManager::new(pg_root.join("bin"), data_dir.join("data/pg"), PG_PORT)
+                .with_lib_dir(pg_root.join("lib"));
+            mgr.init_db().await.unwrap_or_else(|e| die(e));
+            mgr.start().await.unwrap_or_else(|e| die(e));
+            let url = mgr.connection_url("postgres");
+            (url, Some(mgr), resources(), resolve_bun())
+        }
+    };
+
+    let rt = Arc::new(Mutex::new(Runtime::new(database_url, data_dir, res_dir, bun_bin)));
     rt.lock().await.boot(API_PORT).await.unwrap_or_else(|e| {
         tracing::error!("boot: {e}"); std::process::exit(1);
     });
 
     if daemon { let _ = std::fs::write(&pid_file, std::process::id().to_string()); }
 
-    let (rt2, pf2) = (Arc::clone(&rt), pid_file.clone());
+    let embedded_pg = Arc::new(Mutex::new(embedded_pg));
+    let (rt2, pf2, pg2) = (Arc::clone(&rt), pid_file.clone(), Arc::clone(&embedded_pg));
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         if daemon { let _ = std::fs::remove_file(&pf2); }
         rt2.lock().await.shutdown().await.ok();
+        if let Some(ref mgr) = *pg2.lock().await { mgr.stop().await.ok(); }
         std::process::exit(0);
     });
 
     if let Err(e) = server::serve(rt, API_PORT).await {
         tracing::error!("server: {e}");
         if daemon { let _ = std::fs::remove_file(&pid_file); }
+        if let Some(ref mgr) = *embedded_pg.lock().await { mgr.stop().await.ok(); }
         std::process::exit(1);
     }
 }

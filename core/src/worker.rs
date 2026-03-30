@@ -313,17 +313,17 @@ async fn supervisor_loop(
                                 None => Ok(result.unwrap_or(JsonValue::Null)),
                             });
                         }
-                        InboundMessage::JobResult { id, result, error } => {
-                            if let Ok(job_id) = uuid::Uuid::parse_str(&id) {
+                        InboundMessage::JobResult { id, error } => {
+                            if let Ok(msg_id) = id.parse::<i64>() {
                                 if let Some(e) = error {
-                                    warn!(app_id = %app_id, job_id = %id, "job failed: {e}");
-                                    let _ = crate::jobs::fail(&config.pool, job_id, &e).await;
+                                    warn!(app_id = %app_id, msg_id, "job failed: {e}");
+                                    let _ = crate::jobs::fail(&config.pool, msg_id).await;
                                 } else {
-                                    info!(app_id = %app_id, job_id = %id, "job completed");
-                                    let _ = crate::jobs::complete(&config.pool, job_id, result.unwrap_or(JsonValue::Null)).await;
+                                    info!(app_id = %app_id, msg_id, "job completed");
+                                    let _ = crate::jobs::complete(&config.pool, msg_id).await;
                                 }
                             } else {
-                                warn!(app_id = %app_id, "invalid job id: {id}");
+                                warn!(app_id = %app_id, "invalid msg_id: {id}");
                             }
                         }
                         InboundMessage::Log { level, message } => {

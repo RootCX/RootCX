@@ -45,6 +45,15 @@ export interface EffectivePermissions {
   permissions: string[];
 }
 
+export interface Job {
+  msg_id: number;
+  app_id: string;
+  payload: Record<string, unknown>;
+  user_id: string | null;
+  read_ct: number;
+  enqueued_at: string;
+}
+
 export interface IntegrationSummary {
   id: string;
   name: string;
@@ -528,6 +537,31 @@ export class RuntimeClient {
     const res = await this.authFetch(
       `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations/${enc(integrationId)}/auth`,
       { method: "DELETE" },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async enqueueJob(
+    appId: string,
+    payload?: Record<string, unknown>,
+  ): Promise<{ msg_id: number }> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/jobs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ payload: payload ?? {} }),
+    });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async listJobs(appId: string, opts?: { archived?: boolean; limit?: number }): Promise<Job[]> {
+    const params = new URLSearchParams();
+    if (opts?.archived) params.set("archived", "true");
+    if (opts?.limit) params.set("limit", String(opts.limit));
+    const qs = params.toString() ? `?${params}` : "";
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/jobs${qs}`,
     );
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
