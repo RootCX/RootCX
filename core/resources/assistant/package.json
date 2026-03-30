@@ -1,0 +1,14 @@
+{
+  "name": "ai_agent_base-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "langchain": "^1.2.0",
+    "@langchain/core": "^1.1.0",
+    "@langchain/anthropic": "^0.3.0",
+    "@langchain/openai": "^0.5.0",
+    "@langchain/aws": "^0.1.0",
+    "zod": "^3.25.0"
+  }
+}
