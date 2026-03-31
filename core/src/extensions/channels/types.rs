@@ -50,6 +50,14 @@ pub trait ChannelProvider: Send + Sync {
         )).await
     }
 
+    async fn send_choice(
+        &self, config: &JsonValue, chat_id: &str, text: &str,
+        options: &[(String, String)],
+    ) -> Result<(), ChannelError> {
+        let list = options.iter().map(|(l, _)| format!("• {l}")).collect::<Vec<_>>().join("\n");
+        self.send_response(config, chat_id, &format!("{text}\n{list}")).await
+    }
+
     async fn answer_callback(&self, _config: &JsonValue, _callback_id: &str, _text: &str) -> Result<(), ChannelError> { Ok(()) }
 
     fn debounce_ms(&self) -> Option<u64> { None }

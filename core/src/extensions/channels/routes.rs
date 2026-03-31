@@ -196,11 +196,10 @@ pub async fn webhook(
     match event {
         InboundEvent::Ignored => {}
         InboundEvent::Callback { chat_id, callback_id, data } => {
-            handle_callback(&rt, &config, provider.as_ref(), &chat_id, &callback_id, &data).await;
+            handle_callback(&rt, &channel_id, &config, provider.as_ref(), &chat_id, &callback_id, &data).await;
         }
         InboundEvent::Message { chat_id, text } => {
-            if let Some(reply) = handle_command(&pool, &channel_id, &chat_id, &text).await {
-                let _ = provider.send_response(&config, &chat_id, &reply).await;
+            if handle_command(&pool, &channel_id, &chat_id, &text, &config, provider.as_ref()).await {
                 return Ok(Json(json!({ "ok": true })));
             }
 
@@ -293,8 +292,7 @@ async fn do_invoke(
     chat_id: &str, text: &str,
 ) -> Result<(), String> {
     fn e(e: impl std::fmt::Debug) -> String { format!("{e:?}") }
-    let app_id = resolve_agent(pool, channel_id).await.map_err(&e)?;
-    let session_id = get_or_create_session(pool, channel_id, chat_id, &app_id).await.map_err(&e)?;
+    let (app_id, session_id) = resolve_session(pool, channel_id, chat_id).await.map_err(&e)?;
 
     let agent_cfg: JsonValue = sqlx::query_scalar(
         "SELECT config FROM rootcx_system.agents WHERE app_id = $1",
@@ -355,40 +353,83 @@ async fn resolve_agent(pool: &sqlx::PgPool, channel_id: &str) -> Result<String, 
     .ok_or_else(|| ApiError::BadRequest("no agent bound to this channel".into()))
 }
 
-async fn get_or_create_session(
+async fn create_session(
     pool: &sqlx::PgPool, channel_id: &str, chat_id: &str, app_id: &str,
 ) -> Result<String, ApiError> {
-    if let Some(sid) = sqlx::query_scalar::<_, String>(
-        "SELECT session_id::text FROM rootcx_system.channel_sessions
-         WHERE channel_id = $1::uuid AND external_chat_id = $2",
-    ).bind(channel_id).bind(chat_id).fetch_optional(pool).await? {
-        return Ok(sid);
-    }
     let session_id = uuid::Uuid::new_v4().to_string();
     persistence::ensure_session(pool, &session_id, app_id, agents::agent_user_id(app_id)).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     sqlx::query(
         "INSERT INTO rootcx_system.channel_sessions (channel_id, external_chat_id, app_id, session_id)
-         VALUES ($1::uuid, $2, $3, $4::uuid) ON CONFLICT (channel_id, external_chat_id) DO NOTHING",
+         VALUES ($1::uuid, $2, $3, $4::uuid)
+         ON CONFLICT (channel_id, external_chat_id)
+         DO UPDATE SET app_id = EXCLUDED.app_id, session_id = EXCLUDED.session_id",
     ).bind(channel_id).bind(chat_id).bind(app_id).bind(&session_id)
     .execute(pool).await?;
     Ok(session_id)
 }
 
+async fn resolve_session(
+    pool: &sqlx::PgPool, channel_id: &str, chat_id: &str,
+) -> Result<(String, String), ApiError> {
+    if let Some(row) = sqlx::query_as::<_, (String, String)>(
+        "SELECT app_id, session_id::text FROM rootcx_system.channel_sessions
+         WHERE channel_id = $1::uuid AND external_chat_id = $2",
+    ).bind(channel_id).bind(chat_id).fetch_optional(pool).await? {
+        return Ok(row);
+    }
+    let app_id = resolve_agent(pool, channel_id).await?;
+    let session_id = create_session(pool, channel_id, chat_id, &app_id).await?;
+    Ok((app_id, session_id))
+}
+
+async fn bound_agents(pool: &sqlx::PgPool, channel_id: &str) -> Vec<(String, String)> {
+    sqlx::query_as(
+        "SELECT b.app_id, a.name FROM rootcx_system.channel_bindings b
+         JOIN rootcx_system.agents a ON a.app_id = b.app_id
+         WHERE b.channel_id = $1::uuid ORDER BY a.name",
+    ).bind(channel_id).fetch_all(pool).await.unwrap_or_default()
+}
+
 async fn handle_callback(
-    rt: &SharedRuntime, config: &JsonValue, provider: &dyn ChannelProvider,
+    rt: &SharedRuntime, channel_id: &str, config: &JsonValue, provider: &dyn ChannelProvider,
     chat_id: &str, callback_id: &str, data: &str,
 ) {
-    let (action, approval_id) = data.split_once(':').unwrap_or(("", ""));
-    let approvals = rt.pending_approvals().clone();
+    let (action, payload) = data.split_once(':').unwrap_or(("", ""));
 
-    let (response, ack) = match action {
-        "approve" => (ApprovalResponse::Approved, "Approved"),
-        "deny" => (ApprovalResponse::Rejected { reason: "rejected via chat".into() }, "Denied"),
-        _ => { let _ = provider.answer_callback(config, callback_id, "Unknown action").await; return; }
-    };
+    match action {
+        "approve" => {
+            handle_approval(rt, config, provider, chat_id, callback_id, payload, ApprovalResponse::Approved, "Approved").await;
+        }
+        "deny" => {
+            handle_approval(rt, config, provider, chat_id, callback_id, payload,
+                ApprovalResponse::Rejected { reason: "rejected via chat".into() }, "Denied").await;
+        }
+        "agent" => {
+            let pool = rt.pool();
+            let found = bound_agents(pool, channel_id).await
+                .into_iter().find(|(id, _)| id == payload);
+            if let Some((app_id, name)) = found {
+                if create_session(pool, channel_id, chat_id, &app_id).await.is_ok() {
+                    let _ = provider.answer_callback(config, callback_id, &format!("Switched to {name}")).await;
+                    let _ = provider.send_response(config, chat_id, &format!("Switched to *{name}*. New session started.")).await;
+                } else {
+                    let _ = provider.answer_callback(config, callback_id, "Failed to switch agent").await;
+                }
+            } else {
+                let _ = provider.answer_callback(config, callback_id, "Agent not found").await;
+            }
+        }
+        _ => { let _ = provider.answer_callback(config, callback_id, "Unknown action").await; }
+    }
+}
 
-    let replied = approvals.reply(approval_id, response).await;
+async fn handle_approval(
+    rt: &SharedRuntime, config: &JsonValue, provider: &dyn ChannelProvider,
+    chat_id: &str, callback_id: &str, approval_id: &str,
+    response: ApprovalResponse, ack: &str,
+) {
+    let replied = rt.pending_approvals().reply(approval_id, response).await;
     let msg = if replied { ack } else { "Expired or already handled" };
     let _ = provider.answer_callback(config, callback_id, msg).await;
     if replied {
@@ -396,18 +437,47 @@ async fn handle_callback(
     }
 }
 
-async fn handle_command(pool: &sqlx::PgPool, channel_id: &str, chat_id: &str, text: &str) -> Option<String> {
-    let cmd = text.split_whitespace().next()?.split('@').next()?;
+async fn handle_command(
+    pool: &sqlx::PgPool, channel_id: &str, chat_id: &str, text: &str,
+    config: &JsonValue, provider: &dyn ChannelProvider,
+) -> bool {
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    let Some(cmd) = parts.first().and_then(|p| p.split('@').next()) else { return false };
     match cmd {
         "/newsession" => {
             let _ = sqlx::query(
                 "DELETE FROM rootcx_system.channel_sessions
                  WHERE channel_id = $1::uuid AND external_chat_id = $2",
             ).bind(channel_id).bind(chat_id).execute(pool).await;
-            Some("New session started.".into())
+            let _ = provider.send_response(config, chat_id, "New session started.").await;
+            true
         }
-        "/start" => Some("Send me a message.".into()),
-        _ => None,
+        "/start" => {
+            let _ = provider.send_response(config, chat_id, "Send me a message.").await;
+            true
+        }
+        "/agent" => {
+            let agents = bound_agents(pool, channel_id).await;
+            if parts.len() > 1 {
+                let name = parts[1..].join(" ");
+                if let Some((app_id, agent_name)) = agents.iter().find(|(_, n)| n.eq_ignore_ascii_case(&name)) {
+                    let _ = create_session(pool, channel_id, chat_id, app_id).await;
+                    let _ = provider.send_response(config, chat_id,
+                        &format!("Switched to *{agent_name}*. New session started.")).await;
+                } else {
+                    let _ = provider.send_response(config, chat_id, "Agent not found.").await;
+                }
+            } else if agents.is_empty() {
+                let _ = provider.send_response(config, chat_id, "No agents available.").await;
+            } else {
+                let options: Vec<(String, String)> = agents.into_iter()
+                    .map(|(id, name)| (name, format!("agent:{id}")))
+                    .collect();
+                let _ = provider.send_choice(config, chat_id, "Choose an agent:", &options).await;
+            }
+            true
+        }
+        _ => false,
     }
 }
 
