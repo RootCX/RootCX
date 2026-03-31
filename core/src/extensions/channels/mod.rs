@@ -41,6 +41,13 @@ impl RuntimeExtension for ChannelExtension {
             )",
             "CREATE INDEX IF NOT EXISTS idx_channel_sessions_session
                 ON rootcx_system.channel_sessions (session_id)",
+            "CREATE TABLE IF NOT EXISTS rootcx_system.channel_identities (
+                channel_id       UUID NOT NULL REFERENCES rootcx_system.channels(id) ON DELETE CASCADE,
+                external_chat_id TEXT NOT NULL,
+                user_id          UUID NOT NULL REFERENCES rootcx_system.users(id) ON DELETE CASCADE,
+                linked_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (channel_id, external_chat_id)
+            )",
         ] {
             sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
         }
@@ -61,6 +68,8 @@ impl RuntimeExtension for ChannelExtension {
             .route("/api/v1/channels/{channel_id}", delete(routes::delete_channel))
             .route("/api/v1/channels/{channel_id}/activate", post(routes::activate_channel))
             .route("/api/v1/channels/{channel_id}/deactivate", post(routes::deactivate_channel))
+            .route("/api/v1/channels/{channel_id}/link", post(routes::create_link_token))
+            .route("/api/v1/channels/{channel_id}/identity", get(routes::identity_status))
             .route("/api/v1/channels/{provider}/{channel_id}/webhook", post(routes::webhook)))
     }
 }
