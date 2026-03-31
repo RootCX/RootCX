@@ -7,7 +7,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::ipc::OutboundMessage;
-use crate::tools::{AgentDispatcher, Tool, ToolContext, check_permission};
+use crate::tools::{AgentDispatcher, IntegrationCaller, Tool, ToolContext, check_permission};
 use crate::worker::AgentEvent;
 
 pub(crate) async fn execute(
@@ -16,9 +16,11 @@ pub(crate) async fn execute(
     args: JsonValue,
     app_id: String,
     user_id: Uuid,
+    invoker_user_id: Option<Uuid>,
     permissions: Vec<String>,
     pool: PgPool,
     agent_dispatch: Option<Arc<dyn AgentDispatcher>>,
+    integration_caller: Option<Arc<dyn IntegrationCaller>>,
     out_tx: mpsc::Sender<OutboundMessage>,
     stream_tx: Option<mpsc::Sender<AgentEvent>>,
     invoke_id: String,
@@ -32,7 +34,7 @@ pub(crate) async fn execute(
     let start = Instant::now();
     let (result, err) = match tool {
         Some(t) => {
-            let ctx = ToolContext { pool, app_id, user_id, permissions, args, agent_dispatch, stream_tx: stream_tx.clone() };
+            let ctx = ToolContext { pool, app_id, user_id, invoker_user_id, permissions, args, agent_dispatch, integration_caller, stream_tx: stream_tx.clone() };
             match t.execute(&ctx).await {
                 Ok(v) => (Some(v), None),
                 Err(e) => (None, Some(e)),

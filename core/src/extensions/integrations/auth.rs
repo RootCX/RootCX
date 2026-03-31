@@ -19,7 +19,7 @@ use crate::routes::SharedRuntime;
 
 type HmacSha256 = Hmac<Sha256>;
 
-struct Pending { app_id: String, integration_id: String, user_id: String, created: Instant }
+struct Pending { integration_id: String, user_id: String, created: Instant }
 
 static PENDING: LazyLock<Mutex<HashMap<String, Pending>>> = LazyLock::new(Default::default);
 const TTL_SECS: u64 = 600;
@@ -60,7 +60,7 @@ fn iuc_key(integration_id: &str, user_id: &str) -> String {
 pub async fn start(
     identity: Identity,
     State(rt): State<SharedRuntime>,
-    Path((app_id, integration_id)): Path<(String, String)>,
+    Path(integration_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
@@ -71,7 +71,7 @@ pub async fn start(
     let (cb, state) = build_callback_and_state(&headers, &nonce);
 
     PENDING.lock().await.insert(nonce, Pending {
-        app_id, integration_id: integration_id.clone(), user_id: identity.user_id.to_string(), created: Instant::now(),
+        integration_id: integration_id.clone(), user_id: identity.user_id.to_string(), created: Instant::now(),
     });
 
     let result = wm.rpc(
@@ -108,7 +108,7 @@ pub async fn callback(
 
     if let Some(creds) = result.get("credentials") {
         let key = iuc_key(&pending.integration_id, &pending.user_id);
-        secrets.set(&pool, &pending.app_id, &key, &creds.to_string()).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+        secrets.set(&pool, &pending.integration_id, &key, &creds.to_string()).await.map_err(|e| ApiError::Internal(e.to_string()))?;
         info!(integration_id = %pending.integration_id, user_id = %pending.user_id, "user credentials stored");
     }
 
@@ -120,31 +120,31 @@ pub async fn callback(
 
 pub async fn status(
     identity: Identity, State(rt): State<SharedRuntime>,
-    Path((app_id, integration_id)): Path<(String, String)>,
+    Path(integration_id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
-    let connected = secrets.get(&pool, &app_id, &iuc_key(&integration_id, &identity.user_id.to_string())).await
+    let connected = secrets.get(&pool, &integration_id, &iuc_key(&integration_id, &identity.user_id.to_string())).await
         .map_err(|e| ApiError::Internal(e.to_string()))?.is_some();
     Ok(Json(json!({ "connected": connected })))
 }
 
 pub async fn submit_credentials(
     identity: Identity, State(rt): State<SharedRuntime>,
-    Path((app_id, integration_id)): Path<(String, String)>,
+    Path(integration_id): Path<String>,
     Json(body): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let creds = body.get("credentials").ok_or_else(|| ApiError::BadRequest("missing credentials".into()))?;
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
-    secrets.set(&pool, &app_id, &iuc_key(&integration_id, &identity.user_id.to_string()), &creds.to_string()).await
+    secrets.set(&pool, &integration_id, &iuc_key(&integration_id, &identity.user_id.to_string()), &creds.to_string()).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({ "message": "credentials stored" })))
 }
 
 pub async fn disconnect(
     identity: Identity, State(rt): State<SharedRuntime>,
-    Path((app_id, integration_id)): Path<(String, String)>,
+    Path(integration_id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
-    let _ = secrets.delete(&pool, &app_id, &iuc_key(&integration_id, &identity.user_id.to_string())).await;
+    let _ = secrets.delete(&pool, &integration_id, &iuc_key(&integration_id, &identity.user_id.to_string())).await;
     Ok(Json(json!({ "message": "disconnected" })))
 }

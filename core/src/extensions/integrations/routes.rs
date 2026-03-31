@@ -2,7 +2,6 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
-use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use uuid::Uuid;
 
@@ -60,98 +59,6 @@ pub async fn list_integrations(
     Ok(Json(items))
 }
 
-pub async fn list_bindings(
-    _identity: Identity,
-    State(rt): State<SharedRuntime>,
-    Path(app_id): Path<String>,
-) -> Result<Json<Vec<JsonValue>>, ApiError> {
-    let pool = routes::pool(&rt);
-    let rows: Vec<(String, bool, Option<String>, String)> = sqlx::query_as(
-        "SELECT integration_id, enabled, webhook_token, created_at::text
-         FROM rootcx_system.integration_bindings WHERE consumer_app_id = $1",
-    )
-    .bind(&app_id)
-    .fetch_all(&pool)
-    .await?;
-
-    Ok(Json(rows.into_iter().map(|(id, enabled, token, created)| {
-        json!({ "integrationId": id, "enabled": enabled, "webhookToken": token, "createdAt": created })
-    }).collect()))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct BindRequest {
-    integration_id: String,
-}
-
-pub async fn bind(
-    _identity: Identity,
-    State(rt): State<SharedRuntime>,
-    Path(app_id): Path<String>,
-    Json(body): Json<BindRequest>,
-) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, secrets) = routes::pool_and_secrets(&rt);
-
-    let consumer_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM rootcx_system.apps WHERE id = $1)",
-    )
-    .bind(&app_id)
-    .fetch_one(&pool)
-    .await?;
-
-    if !consumer_exists {
-        return Err(ApiError::BadRequest(format!("app '{app_id}' not installed — sync your manifest first")));
-    }
-
-    let manifest: Option<(JsonValue,)> = sqlx::query_as(
-        "SELECT manifest FROM rootcx_system.apps
-         WHERE id = $1 AND manifest->>'type' = 'integration' AND status = 'installed'",
-    )
-    .bind(&body.integration_id)
-    .fetch_optional(&pool)
-    .await?;
-
-    let manifest = manifest
-        .ok_or_else(|| ApiError::NotFound(format!("integration '{}' not found", body.integration_id)))?
-        .0;
-
-    let (token,): (String,) = sqlx::query_as(
-        "INSERT INTO rootcx_system.integration_bindings (consumer_app_id, integration_id, webhook_token)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (consumer_app_id, integration_id) DO UPDATE SET enabled = true
-         RETURNING webhook_token",
-    )
-    .bind(&app_id)
-    .bind(&body.integration_id)
-    .bind(Uuid::new_v4().to_string())
-    .fetch_one(&pool)
-    .await?;
-
-    sync_integration_permissions(&pool, &app_id, &body.integration_id, &manifest).await?;
-
-    let wm = routes::wm(&rt);
-    let secret_map = platform_secret_map(&manifest);
-    let config = fetch_config(&pool, &secrets, &secret_map).await?;
-    if let Ok(result) = wm
-        .rpc(
-            &body.integration_id,
-            Uuid::new_v4().to_string(),
-            "__bind".into(),
-            json!({ "config": config, "consumerAppId": app_id, "webhookToken": token }),
-            None,
-        )
-        .await
-    {
-        if let Some(merge) = result.get("mergeConfig").and_then(|v| v.as_object()) {
-            let merged = json!(merge);
-            save_config_secrets(&pool, &secrets, &secret_map, &merged).await?;
-        }
-    }
-
-    Ok(Json(json!({ "message": "integration bound", "webhookToken": token })))
-}
-
 pub async fn save_platform_config(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
@@ -160,73 +67,42 @@ pub async fn save_platform_config(
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, secrets) = routes::pool_and_secrets(&rt);
     let manifest = get_integration_manifest(&pool, &integration_id).await?;
-    save_config_secrets(&pool, &secrets, &platform_secret_map(&manifest), &config).await?;
+    let secret_map = platform_secret_map(&manifest);
+    save_config_secrets(&pool, &secrets, &secret_map, &config).await?;
+
+    let wm = routes::wm(&rt);
+    let full_config = fetch_config(&pool, &secrets, &secret_map).await?;
+    if let Ok(result) = wm.rpc(
+        &integration_id, Uuid::new_v4().to_string(), "__bind".into(),
+        json!({ "config": full_config }), None,
+    ).await {
+        if let Some(merge) = result.get("mergeConfig").and_then(|v| v.as_object()) {
+            save_config_secrets(&pool, &secrets, &secret_map, &json!(merge)).await?;
+        }
+    }
+
     Ok(Json(json!({ "message": "config saved" })))
-}
-
-pub async fn unbind(
-    _identity: Identity,
-    State(rt): State<SharedRuntime>,
-    Path((app_id, integration_id)): Path<(String, String)>,
-) -> Result<Json<JsonValue>, ApiError> {
-    let pool = routes::pool(&rt);
-
-    sqlx::query(
-        "DELETE FROM rootcx_system.integration_bindings
-         WHERE consumer_app_id = $1 AND integration_id = $2",
-    )
-    .bind(&app_id)
-    .bind(&integration_id)
-    .execute(&pool)
-    .await?;
-
-    // starts_with avoids LIKE wildcard injection from snake_case underscores
-    sqlx::query(
-        "DELETE FROM rootcx_system.rbac_permissions
-         WHERE app_id = $1 AND starts_with(key, $2)",
-    )
-    .bind(&app_id)
-    .bind(format!("integration.{integration_id}."))
-    .execute(&pool)
-    .await?;
-
-    Ok(Json(json!({ "message": "integration unbound" })))
 }
 
 pub async fn execute_action(
     identity: Identity,
     State(rt): State<SharedRuntime>,
-    Path((app_id, integration_id, action_id)): Path<(String, String, String)>,
+    Path((integration_id, action_id)): Path<(String, String)>,
     Json(input): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, secrets) = routes::pool_and_secrets(&rt);
     let wm = routes::wm(&rt);
 
     let perm = format!("integration.{integration_id}.{action_id}");
-    let (_, perms) = resolve_permissions(&pool, &app_id, identity.user_id).await?;
+    let (_, perms) = resolve_permissions(&pool, "core", identity.user_id).await?;
     if !perms.iter().any(|p| p == "*" || p == &perm) {
         return Err(ApiError::Forbidden(format!("permission denied: {perm}")));
-    }
-
-    let bound: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM rootcx_system.integration_bindings
-         WHERE consumer_app_id = $1 AND integration_id = $2 AND enabled = true)",
-    )
-    .bind(&app_id)
-    .bind(&integration_id)
-    .fetch_one(&pool)
-    .await?;
-
-    if !bound {
-        return Err(ApiError::Forbidden(format!(
-            "app '{app_id}' not bound to integration '{integration_id}'"
-        )));
     }
 
     let config = resolve_config(&pool, &secrets, &integration_id).await?;
 
     let key = format!("_iuc.{integration_id}.{}", identity.user_id);
-    let user_credentials = match secrets.get(&pool, &app_id, &key).await {
+    let user_credentials = match secrets.get(&pool, &integration_id, &key).await {
         Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or(JsonValue::Null),
         _ => JsonValue::Null,
     };
@@ -236,7 +112,7 @@ pub async fn execute_action(
             &integration_id,
             Uuid::new_v4().to_string(),
             "__integration".into(),
-            json!({ "action": action_id, "input": input, "config": config, "userCredentials": user_credentials, "consumerAppId": app_id, "userId": identity.user_id.to_string() }),
+            json!({ "action": action_id, "input": input, "config": config, "userCredentials": user_credentials, "userId": identity.user_id.to_string() }),
             None,
         )
         .await
@@ -254,9 +130,8 @@ pub async fn webhook_ingress(
     let (pool, secrets) = routes::pool_and_secrets(&rt);
     let wm = routes::wm(&rt);
 
-    let (consumer_app_id, integration_id): (String, String) = sqlx::query_as(
-        "SELECT consumer_app_id, integration_id FROM rootcx_system.integration_bindings
-         WHERE webhook_token = $1 AND enabled = true",
+    let integration_id: String = sqlx::query_scalar(
+        "SELECT id FROM rootcx_system.apps WHERE webhook_token = $1",
     )
     .bind(&token)
     .fetch_optional(&pool)
@@ -281,7 +156,7 @@ pub async fn webhook_ingress(
             &integration_id,
             Uuid::new_v4().to_string(),
             "__webhook".into(),
-            json!({ "headers": hdr_map, "body": payload, "rawBody": raw_body, "config": config, "consumerAppId": consumer_app_id }),
+            json!({ "headers": hdr_map, "body": payload, "rawBody": raw_body, "config": config }),
             None,
         )
         .await
@@ -338,7 +213,7 @@ async fn is_configured(
     Ok(true)
 }
 
-pub(super) async fn resolve_config(
+pub async fn resolve_config(
     pool: &sqlx::PgPool,
     secrets: &crate::secrets::SecretManager,
     integration_id: &str,
@@ -362,42 +237,4 @@ async fn fetch_config(
         }
     }
     if config.is_empty() { Ok(JsonValue::Null) } else { Ok(JsonValue::Object(config)) }
-}
-
-async fn sync_integration_permissions(
-    pool: &sqlx::PgPool,
-    app_id: &str,
-    integration_id: &str,
-    manifest: &JsonValue,
-) -> Result<(), ApiError> {
-    let Some(actions) = manifest.get("actions").and_then(|a| a.as_array()) else {
-        return Ok(());
-    };
-
-    let (keys, descs): (Vec<String>, Vec<String>) = actions
-        .iter()
-        .filter_map(|a| {
-            let id = a.get("id")?.as_str()?;
-            let name = a.get("name").and_then(|v| v.as_str()).unwrap_or(id);
-            Some((
-                format!("integration.{integration_id}.{id}"),
-                format!("{name} via {integration_id}"),
-            ))
-        })
-        .unzip();
-
-    if !keys.is_empty() {
-        sqlx::query(
-            "INSERT INTO rootcx_system.rbac_permissions (app_id, key, description)
-             SELECT $1, unnest($2::text[]), unnest($3::text[])
-             ON CONFLICT (app_id, key) DO NOTHING",
-        )
-        .bind(app_id)
-        .bind(&keys)
-        .bind(&descs)
-        .execute(pool)
-        .await?;
-    }
-
-    Ok(())
 }

@@ -70,6 +70,7 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, auth_config: Arc<Au
                             history: vec![],
                             is_sub_invoke: false,
                             llm,
+                            invoker_user_id: None,
                         };
 
                         // Create session immediately so the poller can detect it
