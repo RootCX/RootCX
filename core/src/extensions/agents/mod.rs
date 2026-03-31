@@ -7,7 +7,7 @@ pub(crate) mod supervision;
 
 use async_trait::async_trait;
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use sqlx::PgPool;
 use tracing::info;
 use uuid::Uuid;
@@ -114,6 +114,8 @@ impl RuntimeExtension for AgentExtension {
     fn routes(&self) -> Option<Router<SharedRuntime>> {
         Some(
             Router::new()
+                .route("/api/v1/agents", get(routes::list_agents))
+                .route("/api/v1/agents/{app_id}", patch(routes::update_agent).delete(routes::delete_agent))
                 .route("/api/v1/apps/{app_id}/agent", get(routes::get_agent))
                 .route("/api/v1/apps/{app_id}/agent/invoke", post(routes::invoke_agent))
                 .route("/api/v1/apps/{app_id}/agent/sessions", get(routes::list_sessions))

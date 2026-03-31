@@ -79,6 +79,15 @@ pub(crate) struct SessionEventEntry {
     data: JsonValue,
 }
 
+pub async fn list_agents(
+    _identity: Identity,
+    State(rt): State<SharedRuntime>,
+) -> Result<Json<Vec<AgentRow>>, ApiError> {
+    Ok(Json(sqlx::query_as::<_, AgentRow>(
+        "SELECT app_id, name, description, config FROM rootcx_system.agents ORDER BY name",
+    ).fetch_all(&routes::pool(&rt)).await?))
+}
+
 pub async fn get_agent(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
@@ -91,6 +100,47 @@ pub async fn get_agent(
     .bind(&app_id).fetch_optional(&pool).await?
     .map(Json)
     .ok_or_else(|| ApiError::NotFound(format!("no agent for app '{app_id}'")))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateAgent {
+    #[serde(default)] name: Option<String>,
+    #[serde(default)] description: Option<String>,
+}
+
+pub async fn update_agent(
+    _identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path(app_id): Path<String>,
+    Json(body): Json<UpdateAgent>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let pool = routes::pool(&rt);
+    let result = sqlx::query(
+        "UPDATE rootcx_system.agents SET
+            name = COALESCE($2, name),
+            description = COALESCE($3, description),
+            updated_at = now()
+         WHERE app_id = $1",
+    ).bind(&app_id).bind(&body.name).bind(&body.description)
+    .execute(&pool).await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound(format!("agent '{app_id}' not found")));
+    }
+    Ok(Json(json!({"status": "ok"})))
+}
+
+pub async fn delete_agent(
+    _identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path(app_id): Path<String>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let pool = routes::pool(&rt);
+    let result = sqlx::query("DELETE FROM rootcx_system.agents WHERE app_id = $1")
+        .bind(&app_id).execute(&pool).await?;
+    if result.rows_affected() == 0 {
+        return Err(ApiError::NotFound(format!("agent '{app_id}' not found")));
+    }
+    Ok(Json(json!({"status": "ok"})))
 }
 
 pub async fn invoke_agent(
