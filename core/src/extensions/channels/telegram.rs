@@ -29,6 +29,7 @@ impl TelegramProvider {
             .post(Self::bot_url(token, "setMyCommands"))
             .json(&json!({ "commands": [
                 { "command": "newsession", "description": "Start a new conversation" },
+                { "command": "agent", "description": "Switch agent" },
             ]})).send().await;
     }
 
@@ -109,6 +110,19 @@ impl ChannelProvider for TelegramProvider {
                 { "text": "✅ Approve", "callback_data": format!("approve:{approval_id}") },
                 { "text": "❌ Deny",    "callback_data": format!("deny:{approval_id}") },
             ]]}
+        })).await
+    }
+
+    async fn send_choice(
+        &self, config: &JsonValue, chat_id: &str, text: &str,
+        options: &[(String, String)],
+    ) -> Result<(), ChannelError> {
+        let buttons: Vec<Vec<JsonValue>> = options.iter()
+            .map(|(label, data)| vec![json!({ "text": label, "callback_data": data })])
+            .collect();
+        self.api_post(config, "sendMessage", &json!({
+            "chat_id": chat_id, "text": text, "parse_mode": "Markdown",
+            "reply_markup": { "inline_keyboard": buttons },
         })).await
     }
 
