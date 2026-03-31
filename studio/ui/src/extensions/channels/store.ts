@@ -43,7 +43,6 @@ export async function setup(provider: string, config: Record<string, string>) {
   const { id } = await api<{ id: string }>("/api/v1/channels", jsonPost({ provider, name: provider, config }));
   try {
     await api(`/api/v1/channels/${id}/activate`, { method: "POST" });
-    await api(`/api/v1/channels/${id}/bindings`, jsonPost({ app_id: "assistant" }));
   } catch (e) {
     await api(`/api/v1/channels/${id}`, { method: "DELETE" }).catch(() => {});
     throw e;

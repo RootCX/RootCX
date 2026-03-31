@@ -1,15 +1,7 @@
 use async_trait::async_trait;
 use axum::body::Bytes;
 use axum::http::HeaderMap;
-use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-
-#[derive(Serialize, Deserialize, sqlx::FromRow)]
-pub struct ChannelBinding {
-    pub channel_id: String,
-    pub app_id: String,
-    pub routing: Option<JsonValue>,
-}
 
 pub enum InboundEvent {
     Message { chat_id: String, text: String },
