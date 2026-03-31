@@ -14,7 +14,7 @@ use crate::extensions::agents::approvals::PendingApprovals;
 use crate::extensions::logs::LogEntry;
 use crate::ipc::{AgentBootConfig, AgentInvokePayload, LlmModelRef, RpcCaller};
 use crate::secrets::SecretManager;
-use crate::tools::{AgentDispatcher, ToolRegistry};
+use crate::tools::{AgentDispatcher, IntegrationCaller, ToolRegistry};
 use crate::worker::{self, AgentEvent, FleetEvent, SupervisorHandle, WorkerConfig, WorkerStatus};
 
 const BACKEND_PRELUDE: &str = include_str!("backend_prelude.js");
@@ -22,6 +22,7 @@ const BACKEND_PRELUDE: &str = include_str!("backend_prelude.js");
 pub struct WorkerManager {
     workers: Arc<RwLock<HashMap<String, SupervisorHandle>>>,
     dispatch: OnceLock<Arc<dyn AgentDispatcher>>,
+    integration_call: OnceLock<Arc<dyn IntegrationCaller>>,
     fleet_tx: broadcast::Sender<FleetEvent>,
     apps_dir: PathBuf,
     prelude_path: PathBuf,
@@ -30,12 +31,14 @@ pub struct WorkerManager {
     bun_bin: PathBuf,
     tool_registry: Arc<ToolRegistry>,
     pending_approvals: PendingApprovals,
+    secret_manager: Arc<SecretManager>,
 }
 
 impl WorkerManager {
     pub fn new(
         apps_dir: PathBuf, runtime_url: String, database_url: String, bun_bin: PathBuf,
         tool_registry: Arc<ToolRegistry>, pending_approvals: PendingApprovals,
+        secret_manager: Arc<SecretManager>,
     ) -> Self {
         let prelude_path = apps_dir.join(".prelude.js");
         std::fs::write(&prelude_path, BACKEND_PRELUDE).expect("write backend prelude");
@@ -43,15 +46,19 @@ impl WorkerManager {
         Self {
             workers: Arc::new(RwLock::new(HashMap::new())),
             dispatch: OnceLock::new(),
+            integration_call: OnceLock::new(),
             fleet_tx,
             apps_dir, prelude_path, runtime_url, database_url, bun_bin,
-            tool_registry, pending_approvals,
+            tool_registry, pending_approvals, secret_manager,
         }
     }
 
-    /// Must be called after wrapping in Arc to enable sub-agent dispatch.
+    /// Must be called after wrapping in Arc to enable sub-agent dispatch and integration calling.
     pub fn init_self_ref(self: &Arc<Self>) {
         let _ = self.dispatch.set(Arc::new(SubAgentDispatch { wm: Arc::clone(self) }));
+        let _ = self.integration_call.set(Arc::new(IntegrationCallImpl {
+            wm: Arc::clone(self), secrets: Arc::clone(&self.secret_manager),
+        }));
     }
 
     async fn build_agent_boot(&self, pool: &PgPool, app_id: &str) -> Option<(AgentBootConfig, Option<rootcx_types::SupervisionConfig>)> {
@@ -116,6 +123,7 @@ impl WorkerManager {
             tool_registry: Arc::clone(&self.tool_registry),
             pending_approvals: self.pending_approvals.clone(),
             agent_dispatch: self.dispatch.get().cloned(),
+            integration_caller: self.integration_call.get().cloned(),
             agent_boot_config,
             supervision,
         };
@@ -252,6 +260,7 @@ impl AgentDispatcher for SubAgentDispatch {
             history: vec![],
             is_sub_invoke: true,
             llm,
+            invoker_user_id: None,
         };
 
         let app_id = target.to_string();
@@ -276,6 +285,41 @@ impl AgentDispatcher for SubAgentDispatch {
             }
         }
         if response.is_empty() { Err("no response from agent".into()) } else { Ok(response) }
+    }
+}
+
+// -- Integration caller (executes integration actions via worker RPC) --
+
+struct IntegrationCallImpl {
+    wm: Arc<WorkerManager>,
+    secrets: Arc<SecretManager>,
+}
+
+#[async_trait]
+impl IntegrationCaller for IntegrationCallImpl {
+    async fn call(
+        &self, pool: &PgPool, user_id: uuid::Uuid,
+        integration_id: &str, action_id: &str, input: JsonValue,
+    ) -> Result<JsonValue, String> {
+        let config = crate::extensions::integrations::routes::resolve_config(pool, &self.secrets, integration_id)
+            .await.map_err(|e| format!("{e:?}"))?;
+
+        let key = format!("_iuc.{integration_id}.{user_id}");
+        let user_credentials = match self.secrets.get(pool, integration_id, &key).await {
+            Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or(JsonValue::Null),
+            _ => JsonValue::Null,
+        };
+
+        self.wm.rpc(
+            integration_id,
+            uuid::Uuid::new_v4().to_string(),
+            "__integration".into(),
+            serde_json::json!({
+                "action": action_id, "input": input, "config": config,
+                "userCredentials": user_credentials, "userId": user_id.to_string(),
+            }),
+            None,
+        ).await.map_err(|e| e.to_string())
     }
 }
 

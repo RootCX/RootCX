@@ -99,6 +99,7 @@ pub struct WorkerConfig {
     pub tool_registry: Arc<ToolRegistry>,
     pub pending_approvals: PendingApprovals,
     pub agent_dispatch: Option<Arc<dyn AgentDispatcher>>,
+    pub integration_caller: Option<Arc<dyn crate::tools::IntegrationCaller>>,
     pub agent_boot_config: Option<AgentBootConfig>,
     pub supervision: Option<rootcx_types::SupervisionConfig>,
 }
@@ -181,6 +182,7 @@ async fn supervisor_loop(
     let mut pending_agent_streams: HashMap<String, mpsc::Sender<AgentEvent>> = HashMap::new();
     let mut policy_evaluators: HashMap<String, Arc<TokioMutex<PolicyEvaluator>>> = HashMap::new();
     let mut sub_invocations: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut invoker_user_ids: HashMap<String, uuid::Uuid> = HashMap::new();
     let pending_approvals = config.pending_approvals.clone();
     let mut crash_times: Vec<Instant> = Vec::new();
     let mut restart_count: u32 = 0;
@@ -291,6 +293,7 @@ async fn supervisor_loop(
                                 Arc::new(TokioMutex::new(PolicyEvaluator::new(supervision.clone()))));
                         }
                         if payload.is_sub_invoke { sub_invocations.insert(invoke_id.clone()); }
+                        if let Some(uid) = payload.invoker_user_id { invoker_user_ids.insert(invoke_id.clone(), uid); }
 
                         pending_agent_streams.insert(invoke_id.clone(), stream_tx);
                         if let Some(ref mut w) = ipc_writer {
@@ -356,6 +359,7 @@ async fn supervisor_loop(
                         InboundMessage::AgentDone { invoke_id, response, tokens } => {
                             policy_evaluators.remove(&invoke_id);
                             sub_invocations.remove(&invoke_id);
+                            invoker_user_ids.remove(&invoke_id);
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Done { response, tokens }).await;
                             }
@@ -363,6 +367,7 @@ async fn supervisor_loop(
                         InboundMessage::AgentError { invoke_id, error } => {
                             policy_evaluators.remove(&invoke_id);
                             sub_invocations.remove(&invoke_id);
+                            invoker_user_ids.remove(&invoke_id);
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Error { error }).await;
                             }
@@ -381,6 +386,8 @@ async fn supervisor_loop(
                             let aid = config.app_id.clone();
                             // Nesting guard: sub-agents cannot spawn sub-agents
                             let dispatch = if sub_invocations.contains(&invoke_id) { None } else { config.agent_dispatch.clone() };
+                            let int_caller = config.integration_caller.clone();
+                            let invoker_uid = invoker_user_ids.get(&invoke_id).copied();
                             let out_tx = outbound_tx.clone();
                             let evaluator = policy_evaluators.get(&invoke_id).cloned();
                             let approvals_ref = pending_approvals.clone();
@@ -452,8 +459,8 @@ async fn supervisor_loop(
                                     .await.map(|(_, p)| p).unwrap_or_default();
 
                                 crate::tool_executor::execute(
-                                    tool, tool_name, args, aid, agent_uid, permissions,
-                                    pool, dispatch,
+                                    tool, tool_name, args, aid, agent_uid, invoker_uid,
+                                    permissions, pool, dispatch, int_caller,
                                     out_tx, stream_tx, invoke_id, call_id,
                                 ).await;
                             });

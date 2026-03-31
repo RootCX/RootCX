@@ -62,6 +62,7 @@ impl Runtime {
         tool_registry.register(tools::list_apps::ListAppsTool);
         tool_registry.register(tools::describe_app::DescribeAppTool);
         tool_registry.register(tools::list_integrations::ListIntegrationsTool);
+        tool_registry.register(tools::call_integration::CallIntegrationTool);
         tool_registry.register(tools::invoke_agent::InvokeAgentTool);
 
         let mcp_manager = Arc::new(McpManager::new(Arc::clone(&tool_registry), bun_bin.clone()));
@@ -99,6 +100,7 @@ impl Runtime {
         let wm = Arc::new(WorkerManager::new(
             apps_dir, runtime_url, self.database_url.clone(), self.bun_bin.clone(),
             Arc::clone(&self.tool_registry), self.pending_approvals.clone(),
+            Arc::clone(&secret_manager),
         ));
         wm.init_self_ref();
 

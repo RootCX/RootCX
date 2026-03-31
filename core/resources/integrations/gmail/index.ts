@@ -114,15 +114,14 @@ async function gmail(config: Config, creds: UserCreds, path: string, init?: Requ
 
 async function sendEmail(config: Config, creds: UserCreds, input: any, userId?: string) {
   const { to, subject, body, cc, bcc, html } = input;
-  const mime = [
+  const headers = [
     `To: ${to}`,
-    cc ? `Cc: ${cc}` : "",
-    bcc ? `Bcc: ${bcc}` : "",
+    cc && `Cc: ${cc}`,
+    bcc && `Bcc: ${bcc}`,
     `Subject: ${subject}`,
     `Content-Type: ${html ? "text/html" : "text/plain"}; charset=UTF-8`,
-    "",
-    body,
   ].filter(Boolean).join("\r\n");
+  const mime = `${headers}\r\n\r\n${body}`;
 
   const raw = btoa(unescape(encodeURIComponent(mime)))
     .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");

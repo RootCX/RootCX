@@ -266,7 +266,7 @@ async fn do_invoke(
         invoke_id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.clone(),
         message: text.to_string(),
-        history, is_sub_invoke: false, llm,
+        history, is_sub_invoke: false, llm, invoker_user_id: None,
     };
 
     let mut rx = wm.agent_invoke(&app_id, payload).await.map_err(&e)?;

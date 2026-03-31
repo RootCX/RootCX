@@ -75,6 +75,13 @@ pub async fn deploy_from_catalog(
         .map_err(|e| ApiError::Internal(format!("parse manifest: {e}")))?;
 
     crate::manifest::install_app(&pool, &manifest, rt.extensions(), identity.user_id).await?;
+    sync_integration_permissions(&pool, &id, &manifest).await?;
+
+    sqlx::query("UPDATE rootcx_system.apps SET webhook_token = $1 WHERE id = $2 AND webhook_token IS NULL")
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&id)
+        .execute(&pool)
+        .await?;
 
     if app_dir.exists() {
         tokio::fs::remove_dir_all(&app_dir).await.map_err(|e| ApiError::Internal(format!("clear: {e}")))?;
@@ -99,7 +106,11 @@ pub async fn deploy_from_catalog(
     let _ = wm.stop_app(&id).await;
     wm.start_app(&pool, &secrets, &id).await?;
 
-    Ok(Json(json!({ "message": format!("integration '{id}' deployed and started") })))
+    let webhook_token: Option<String> = sqlx::query_scalar(
+        "SELECT webhook_token FROM rootcx_system.apps WHERE id = $1",
+    ).bind(&id).fetch_optional(&pool).await?.flatten();
+
+    Ok(Json(json!({ "message": format!("integration '{id}' deployed and started"), "webhookToken": webhook_token })))
 }
 
 pub async fn undeploy(
@@ -120,6 +131,13 @@ pub async fn undeploy(
         let _ = secrets.delete(&pool, "_platform", secret_key).await;
     }
 
+    sqlx::query(
+        "DELETE FROM rootcx_system.rbac_permissions WHERE app_id = 'core' AND key LIKE $1",
+    )
+    .bind(format!("integration.{id}.%"))
+    .execute(&pool)
+    .await?;
+
     crate::manifest::uninstall_app(&pool, &id).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -130,6 +148,28 @@ pub async fn undeploy(
 
     info!(id = %id, "integration undeployed");
     Ok(Json(json!({ "message": format!("integration '{id}' removed") })))
+}
+
+async fn sync_integration_permissions(
+    pool: &sqlx::PgPool,
+    integration_id: &str,
+    manifest: &rootcx_types::AppManifest,
+) -> Result<(), ApiError> {
+    if manifest.actions.is_empty() { return Ok(()); }
+    let (keys, descs): (Vec<String>, Vec<String>) = manifest.actions.iter().map(|a| (
+        format!("integration.{integration_id}.{}", a.id),
+        format!("{} via {integration_id}", a.name),
+    )).unzip();
+    sqlx::query(
+        "INSERT INTO rootcx_system.rbac_permissions (app_id, key, description)
+         SELECT 'core', unnest($1::text[]), unnest($2::text[])
+         ON CONFLICT (app_id, key) DO NOTHING",
+    )
+    .bind(&keys)
+    .bind(&descs)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 async fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), ApiError> {

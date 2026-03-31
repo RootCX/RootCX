@@ -174,6 +174,7 @@ pub async fn invoke_agent(
         history,
         is_sub_invoke: false,
         llm,
+        invoker_user_id: Some(identity.user_id),
     };
 
     let persist_ctx = if memory_enabled {

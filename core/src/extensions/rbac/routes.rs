@@ -271,10 +271,9 @@ pub(crate) async fn list_available_permissions(
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<PermissionDeclarationResponse>>, ApiError> {
     let pool = routes::pool(&rt);
-    // App permissions + global tool permissions (stored under 'core')
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT key, description FROM rootcx_system.rbac_permissions
-         WHERE app_id = $1 OR (app_id = 'core' AND key LIKE 'tool.%')
+         WHERE app_id = $1 OR (app_id = 'core' AND (key LIKE 'tool.%' OR key LIKE 'integration.%'))
          ORDER BY key",
     ).bind(&app_id).fetch_all(&pool).await?;
     Ok(Json(rows.into_iter().map(|(key, description)| PermissionDeclarationResponse { key, description }).collect()))

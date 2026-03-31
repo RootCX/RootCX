@@ -48,6 +48,8 @@ pub struct AgentInvokePayload {
     pub is_sub_invoke: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub llm: Option<LlmModelRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invoker_user_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize)]
