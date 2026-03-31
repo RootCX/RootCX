@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 use tracing::{error, info};
 
-use super::types::{ChannelBinding, ChannelProvider, InboundEvent};
+use super::types::{ChannelProvider, InboundEvent};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::extensions::agents::{self, config as agent_config, persistence};
@@ -124,46 +124,6 @@ pub async fn deactivate_channel(
         .bind(&channel_id).execute(&pool).await?;
     info!(channel_id, "channel deactivated");
     Ok(Json(json!({ "status": "inactive" })))
-}
-
-#[derive(Deserialize)]
-pub struct BindAgent { app_id: String, #[serde(default)] routing: Option<JsonValue> }
-
-pub async fn bind_agent(
-    _identity: Identity, State(rt): State<SharedRuntime>,
-    Path(channel_id): Path<String>, Json(body): Json<BindAgent>,
-) -> Result<Json<JsonValue>, ApiError> {
-    let pool = routes::pool(&rt);
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id = $1)",
-    ).bind(&body.app_id).fetch_one(&pool).await?;
-    if !exists { return Err(ApiError::NotFound(format!("agent '{}' not found", body.app_id))); }
-
-    sqlx::query(
-        "INSERT INTO rootcx_system.channel_bindings (channel_id, app_id, routing)
-         VALUES ($1::uuid, $2, $3)
-         ON CONFLICT (channel_id, app_id) DO UPDATE SET routing = EXCLUDED.routing",
-    ).bind(&channel_id).bind(&body.app_id).bind(&body.routing)
-    .execute(&pool).await?;
-    info!(channel_id, app_id = %body.app_id, "agent bound to channel");
-    Ok(Json(json!({ "status": "ok" })))
-}
-
-pub async fn unbind_agent(
-    _identity: Identity, State(rt): State<SharedRuntime>,
-    Path((channel_id, app_id)): Path<(String, String)>,
-) -> Result<Json<JsonValue>, ApiError> {
-    sqlx::query("DELETE FROM rootcx_system.channel_bindings WHERE channel_id = $1::uuid AND app_id = $2")
-        .bind(&channel_id).bind(&app_id).execute(&routes::pool(&rt)).await?;
-    Ok(Json(json!({ "status": "ok" })))
-}
-
-pub async fn list_bindings(
-    _identity: Identity, State(rt): State<SharedRuntime>, Path(channel_id): Path<String>,
-) -> Result<Json<Vec<ChannelBinding>>, ApiError> {
-    Ok(Json(sqlx::query_as::<_, ChannelBinding>(
-        "SELECT channel_id::text, app_id, routing FROM rootcx_system.channel_bindings WHERE channel_id = $1::uuid",
-    ).bind(&channel_id).fetch_all(&routes::pool(&rt)).await?))
 }
 
 struct DebounceEntry {
@@ -297,7 +257,7 @@ async fn do_invoke(
     let agent_cfg: JsonValue = sqlx::query_scalar(
         "SELECT config FROM rootcx_system.agents WHERE app_id = $1",
     ).bind(&app_id).fetch_one(pool).await.map_err(&e)?;
-    let memory = agent_cfg.pointer("/memory/enabled").and_then(serde_json::Value::as_bool) == Some(true);
+    let memory = agent_cfg.pointer("/memory/enabled").and_then(JsonValue::as_bool) == Some(true);
     let history = agent_config::load_history(pool, memory, &app_id, &session_id).await.map_err(&e)?;
     let llm = fetch_default_llm(pool).await.map_err(&e)?
         .map(|(p, m)| LlmModelRef { provider: p, model: m });
@@ -346,11 +306,12 @@ async fn do_invoke(
     Ok(())
 }
 
-async fn resolve_agent(pool: &sqlx::PgPool, channel_id: &str) -> Result<String, ApiError> {
-    sqlx::query_scalar(
-        "SELECT app_id FROM rootcx_system.channel_bindings WHERE channel_id = $1::uuid LIMIT 1",
-    ).bind(channel_id).fetch_optional(pool).await?
-    .ok_or_else(|| ApiError::BadRequest("no agent bound to this channel".into()))
+const DEFAULT_AGENT: &str = "assistant";
+
+async fn all_agents(pool: &sqlx::PgPool) -> Vec<(String, String)> {
+    sqlx::query_as(
+        "SELECT app_id, name FROM rootcx_system.agents ORDER BY name",
+    ).fetch_all(pool).await.unwrap_or_default()
 }
 
 async fn create_session(
@@ -378,17 +339,8 @@ async fn resolve_session(
     ).bind(channel_id).bind(chat_id).fetch_optional(pool).await? {
         return Ok(row);
     }
-    let app_id = resolve_agent(pool, channel_id).await?;
-    let session_id = create_session(pool, channel_id, chat_id, &app_id).await?;
-    Ok((app_id, session_id))
-}
-
-async fn bound_agents(pool: &sqlx::PgPool, channel_id: &str) -> Vec<(String, String)> {
-    sqlx::query_as(
-        "SELECT b.app_id, a.name FROM rootcx_system.channel_bindings b
-         JOIN rootcx_system.agents a ON a.app_id = b.app_id
-         WHERE b.channel_id = $1::uuid ORDER BY a.name",
-    ).bind(channel_id).fetch_all(pool).await.unwrap_or_default()
+    let session_id = create_session(pool, channel_id, chat_id, DEFAULT_AGENT).await?;
+    Ok((DEFAULT_AGENT.to_string(), session_id))
 }
 
 async fn handle_callback(
@@ -407,7 +359,7 @@ async fn handle_callback(
         }
         "agent" => {
             let pool = rt.pool();
-            let found = bound_agents(pool, channel_id).await
+            let found = all_agents(pool).await
                 .into_iter().find(|(id, _)| id == payload);
             if let Some((app_id, name)) = found {
                 if create_session(pool, channel_id, chat_id, &app_id).await.is_ok() {
@@ -457,7 +409,7 @@ async fn handle_command(
             true
         }
         "/agent" => {
-            let agents = bound_agents(pool, channel_id).await;
+            let agents = all_agents(pool).await;
             if parts.len() > 1 {
                 let name = parts[1..].join(" ");
                 if let Some((app_id, agent_name)) = agents.iter().find(|(_, n)| n.eq_ignore_ascii_case(&name)) {

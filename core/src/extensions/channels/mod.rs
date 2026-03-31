@@ -30,12 +30,7 @@ impl RuntimeExtension for ChannelExtension {
                 created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
             )",
-            "CREATE TABLE IF NOT EXISTS rootcx_system.channel_bindings (
-                channel_id  UUID NOT NULL REFERENCES rootcx_system.channels(id) ON DELETE CASCADE,
-                app_id      TEXT NOT NULL REFERENCES rootcx_system.agents(app_id) ON DELETE CASCADE,
-                routing     JSONB,
-                PRIMARY KEY (channel_id, app_id)
-            )",
+            "DROP TABLE IF EXISTS rootcx_system.channel_bindings",
             "CREATE TABLE IF NOT EXISTS rootcx_system.channel_sessions (
                 channel_id       UUID NOT NULL REFERENCES rootcx_system.channels(id) ON DELETE CASCADE,
                 external_chat_id TEXT NOT NULL,
@@ -66,8 +61,6 @@ impl RuntimeExtension for ChannelExtension {
             .route("/api/v1/channels/{channel_id}", delete(routes::delete_channel))
             .route("/api/v1/channels/{channel_id}/activate", post(routes::activate_channel))
             .route("/api/v1/channels/{channel_id}/deactivate", post(routes::deactivate_channel))
-            .route("/api/v1/channels/{channel_id}/bindings", get(routes::list_bindings).post(routes::bind_agent))
-            .route("/api/v1/channels/{channel_id}/bindings/{app_id}", delete(routes::unbind_agent))
             .route("/api/v1/channels/{provider}/{channel_id}/webhook", post(routes::webhook)))
     }
 }
