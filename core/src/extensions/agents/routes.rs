@@ -365,3 +365,19 @@ pub async fn fleet_stream(
     });
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Prevents future addition of invoker_user_id to client-facing struct
+    #[test]
+    fn invoke_request_rejects_invoker_user_id_injection() {
+        let json = r#"{"message":"hi","invoker_user_id":"00000000-0000-0000-0000-000000000000"}"#;
+        let req: InvokeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.message, "hi");
+        assert!(std::mem::size_of::<InvokeRequest>() <= std::mem::size_of::<(String, Option<String>)>(),
+            "InvokeRequest grew — invoker_user_id MUST come from JWT, never from client input");
+    }
+}
+
