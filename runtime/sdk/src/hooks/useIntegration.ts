@@ -27,30 +27,29 @@ export interface UseIntegrationResult {
   call: (action: string, input?: Record<string, unknown>) => Promise<unknown>;
 }
 
-export function useIntegration(appId: string, integrationId: string): UseIntegrationResult {
+export function useIntegration(integrationId: string): UseIntegrationResult {
   const client = useRuntimeClient();
   const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const checkStatus = useCallback(() =>
-    client.integrationAuthStatus(appId, integrationId)
+    client.integrationAuthStatus(integrationId)
       .then(({ connected }) => setConnected(connected))
       .catch(() => setConnected(false)),
-    [client, appId, integrationId],
+    [client, integrationId],
   );
 
   useEffect(() => { checkStatus().finally(() => setLoading(false)); }, [checkStatus]);
 
   const connect = useCallback(async () => {
-    const result = await client.integrationAuthStart(appId, integrationId);
+    const result = await client.integrationAuthStart(integrationId);
 
     if (result.type === "redirect" && result.url) {
       const url = result.url as string;
       const opened = await openExternal(url);
       if (opened) {
-        // Poll auth status — can't detect tab/browser close
         const poll = setInterval(async () => {
-          const { connected: c } = await client.integrationAuthStatus(appId, integrationId).catch(() => ({ connected: false }));
+          const { connected: c } = await client.integrationAuthStatus(integrationId).catch(() => ({ connected: false }));
           if (c) { clearInterval(poll); setConnected(true); }
         }, 2000);
         setTimeout(() => clearInterval(poll), 300_000);
@@ -61,22 +60,22 @@ export function useIntegration(appId: string, integrationId: string): UseIntegra
     if (result.type === "credentials") {
       return { type: "credentials", schema: result.schema as Record<string, unknown> | undefined };
     }
-  }, [client, appId, integrationId]);
+  }, [client, integrationId]);
 
   const submitCredentials = useCallback(async (credentials: Record<string, string>) => {
-    await client.integrationAuthSubmit(appId, integrationId, credentials);
+    await client.integrationAuthSubmit(integrationId, credentials);
     await checkStatus();
-  }, [client, appId, integrationId, checkStatus]);
+  }, [client, integrationId, checkStatus]);
 
   const disconnectFn = useCallback(async () => {
-    await client.integrationAuthDisconnect(appId, integrationId);
+    await client.integrationAuthDisconnect(integrationId);
     setConnected(false);
-  }, [client, appId, integrationId]);
+  }, [client, integrationId]);
 
   const call = useCallback(
     (action: string, input?: Record<string, unknown>) =>
-      client.callIntegration(appId, integrationId, action, input),
-    [client, appId, integrationId],
+      client.callIntegration(integrationId, action, input),
+    [client, integrationId],
   );
 
   return { connected, loading, connect, submitCredentials, disconnect: disconnectFn, call };

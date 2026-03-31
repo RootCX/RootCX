@@ -491,22 +491,20 @@ export class RuntimeClient {
   }
 
   async integrationAuthStatus(
-    appId: string,
     integrationId: string,
   ): Promise<{ connected: boolean }> {
     const res = await this.authFetch(
-      `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations/${enc(integrationId)}/auth`,
+      `${this.baseUrl}/api/v1/integrations/${enc(integrationId)}/auth`,
     );
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }
 
   async integrationAuthStart(
-    appId: string,
     integrationId: string,
   ): Promise<{ type: string; url?: string; [key: string]: unknown }> {
     const res = await this.authFetch(
-      `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations/${enc(integrationId)}/auth/start`,
+      `${this.baseUrl}/api/v1/integrations/${enc(integrationId)}/auth/start`,
       { method: "POST" },
     );
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
@@ -514,12 +512,11 @@ export class RuntimeClient {
   }
 
   async integrationAuthSubmit(
-    appId: string,
     integrationId: string,
     credentials: Record<string, string>,
   ): Promise<{ message: string }> {
     const res = await this.authFetch(
-      `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations/${enc(integrationId)}/auth/credentials`,
+      `${this.baseUrl}/api/v1/integrations/${enc(integrationId)}/auth/credentials`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -531,11 +528,10 @@ export class RuntimeClient {
   }
 
   async integrationAuthDisconnect(
-    appId: string,
     integrationId: string,
   ): Promise<{ message: string }> {
     const res = await this.authFetch(
-      `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations/${enc(integrationId)}/auth`,
+      `${this.baseUrl}/api/v1/integrations/${enc(integrationId)}/auth`,
       { method: "DELETE" },
     );
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
@@ -568,13 +564,12 @@ export class RuntimeClient {
   }
 
   async callIntegration(
-    appId: string,
     integrationId: string,
     action: string,
     input?: Record<string, unknown>,
   ): Promise<unknown> {
     const res = await this.authFetch(
-      `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations/${enc(integrationId)}/actions/${enc(action)}`,
+      `${this.baseUrl}/api/v1/integrations/${enc(integrationId)}/actions/${enc(action)}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
