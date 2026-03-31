@@ -1,6 +1,6 @@
 {
   "name": "@rootcx/sdk",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "RootCX Core SDK",
   "license": "FSL-1.1-ALv2",
   "publishConfig": {
