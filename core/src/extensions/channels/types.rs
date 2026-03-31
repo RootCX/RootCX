@@ -52,6 +52,8 @@ pub trait ChannelProvider: Send + Sync {
 
     async fn answer_callback(&self, _config: &JsonValue, _callback_id: &str, _text: &str) -> Result<(), ChannelError> { Ok(()) }
 
+    async fn resolve_bot_meta(&self, _config: &JsonValue) -> Option<JsonValue> { None }
+    fn link_url(&self, _config: &JsonValue, _token: &str) -> Option<String> { None }
     fn debounce_ms(&self) -> Option<u64> { None }
     fn start_typing(&self, _config: &JsonValue, _chat_id: &str) -> Option<tokio::task::AbortHandle> { None }
     async fn on_activate_boot(&self, _config: &JsonValue) {}

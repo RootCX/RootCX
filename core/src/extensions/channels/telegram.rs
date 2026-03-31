@@ -149,6 +149,19 @@ impl ChannelProvider for TelegramProvider {
         Ok(())
     }
 
+    async fn resolve_bot_meta(&self, config: &JsonValue) -> Option<JsonValue> {
+        let token = Self::token(config).ok()?;
+        let resp = self.http.get(Self::bot_url(token, "getMe")).send().await.ok()?;
+        let body: JsonValue = resp.json().await.ok()?;
+        let username = body.pointer("/result/username")?.as_str()?;
+        Some(json!({ "bot_username": username }))
+    }
+
+    fn link_url(&self, config: &JsonValue, token: &str) -> Option<String> {
+        let username = config.get("bot_username").and_then(|v| v.as_str())?;
+        Some(format!("https://t.me/{username}?start={token}"))
+    }
+
     async fn on_activate_boot(&self, config: &JsonValue) { self.sync_commands(config).await; }
 
     fn debounce_ms(&self) -> Option<u64> { Some(2000) }

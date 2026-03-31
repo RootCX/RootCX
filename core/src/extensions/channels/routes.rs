@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
+use std::time::Instant;
 
 use axum::Json;
 use axum::body::Bytes;
@@ -105,8 +106,22 @@ pub async fn activate_channel(
     provider.register_webhook(&cfg, &url).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    sqlx::query("UPDATE rootcx_system.channels SET status = 'active', updated_at = now() WHERE id = $1::uuid")
-        .bind(&channel_id).execute(&pool).await?;
+    let final_config = match provider.resolve_bot_meta(&cfg).await.and_then(|m| m.as_object().cloned()) {
+        Some(obj) => {
+            let mut merged = cfg.as_object().cloned().unwrap_or_default();
+            merged.extend(obj);
+            Some(JsonValue::Object(merged))
+        }
+        None => None,
+    };
+
+    if let Some(config) = final_config {
+        sqlx::query("UPDATE rootcx_system.channels SET config = $1, status = 'active', updated_at = now() WHERE id = $2::uuid")
+            .bind(config).bind(&channel_id).execute(&pool).await?;
+    } else {
+        sqlx::query("UPDATE rootcx_system.channels SET status = 'active', updated_at = now() WHERE id = $1::uuid")
+            .bind(&channel_id).execute(&pool).await?;
+    }
     info!(channel_id, "channel activated, webhook: {url}");
     Ok(Json(json!({ "status": "active", "webhook_url": url })))
 }
@@ -160,6 +175,14 @@ pub async fn webhook(
         }
         InboundEvent::Message { chat_id, text } => {
             if handle_command(&pool, &channel_id, &chat_id, &text, &config, provider.as_ref()).await {
+                return Ok(Json(json!({ "ok": true })));
+            }
+
+            if resolve_invoker(&pool, &channel_id, &chat_id).await.is_none() {
+                let _ = provider.send_response(&config, &chat_id,
+                    "Hey! 👋 To chat with AI agents, you need to link your RootCX account first.\n\n\
+                     Go to your RootCX dashboard → *Channels* → click *Link my account* and follow the instructions."
+                ).await;
                 return Ok(Json(json!({ "ok": true })));
             }
 
@@ -253,6 +276,7 @@ async fn do_invoke(
 ) -> Result<(), String> {
     fn e(e: impl std::fmt::Debug) -> String { format!("{e:?}") }
     let (app_id, session_id) = resolve_session(pool, channel_id, chat_id).await.map_err(&e)?;
+    let invoker_user_id = resolve_invoker(pool, channel_id, chat_id).await;
 
     let agent_cfg: JsonValue = sqlx::query_scalar(
         "SELECT config FROM rootcx_system.agents WHERE app_id = $1",
@@ -266,7 +290,7 @@ async fn do_invoke(
         invoke_id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.clone(),
         message: text.to_string(),
-        history, is_sub_invoke: false, llm, invoker_user_id: None,
+        history, is_sub_invoke: false, llm, invoker_user_id,
     };
 
     let mut rx = wm.agent_invoke(&app_id, payload).await.map_err(&e)?;
@@ -405,7 +429,15 @@ async fn handle_command(
             true
         }
         "/start" => {
-            let _ = provider.send_response(config, chat_id, "Send me a message.").await;
+            if let Some(token) = parts.get(1).filter(|t| t.starts_with(LINK_PREFIX)) {
+                if let Some(_uid) = try_complete_link(pool, channel_id, chat_id, token).await {
+                    let _ = provider.send_response(config, chat_id, "Account linked! Your integrations are now available.").await;
+                } else {
+                    let _ = provider.send_response(config, chat_id, "Link expired or invalid. Please try again from the dashboard.").await;
+                }
+            } else {
+                let _ = provider.send_response(config, chat_id, "Send me a message.").await;
+            }
             true
         }
         "/agent" => {
@@ -439,4 +471,121 @@ fn resolve_public_url(body_url: Option<String>) -> Result<String, ApiError> {
         .ok_or_else(|| ApiError::BadRequest(
             "public_url required (pass in body or set ROOTCX_PUBLIC_URL)".into(),
         ))
+}
+
+struct PendingLink { channel_id: String, user_id: uuid::Uuid, created: Instant }
+
+static PENDING_LINKS: LazyLock<Mutex<HashMap<String, PendingLink>>> = LazyLock::new(Default::default);
+const LINK_TTL_SECS: u64 = 300;
+const LINK_PREFIX: &str = "link_";
+
+pub async fn create_link_token(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path(channel_id): Path<String>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let pool = routes::pool(&rt);
+
+    let (provider_name, config): (String, JsonValue) = sqlx::query_as(
+        "SELECT provider, config FROM rootcx_system.channels WHERE id = $1::uuid AND status = 'active'",
+    ).bind(&channel_id).fetch_optional(&pool).await?
+    .ok_or_else(|| ApiError::NotFound("channel not found".into()))?;
+
+    let token = format!("{LINK_PREFIX}{}", uuid::Uuid::new_v4().simple());
+    PENDING_LINKS.lock().await.insert(token.clone(), PendingLink {
+        channel_id, user_id: identity.user_id, created: Instant::now(),
+    });
+
+    let mut resp = json!({ "token": token, "provider": provider_name });
+    if let Some(p) = super::provider(&provider_name) {
+        if let Some(url) = p.link_url(&config, &token) {
+            resp.as_object_mut().unwrap().insert("linkUrl".into(), json!(url));
+        }
+    }
+    Ok(Json(resp))
+}
+
+pub async fn identity_status(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path(channel_id): Path<String>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let pool = routes::pool(&rt);
+    let linked: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.channel_identities
+         WHERE channel_id = $1::uuid AND user_id = $2)",
+    ).bind(&channel_id).bind(identity.user_id).fetch_one(&pool).await?;
+    Ok(Json(json!({ "linked": linked })))
+}
+
+fn consume_link_token(
+    map: &mut HashMap<String, PendingLink>, channel_id: &str, token: &str,
+) -> Option<uuid::Uuid> {
+    map.retain(|_, p| p.created.elapsed().as_secs() < LINK_TTL_SECS);
+    let pending = map.remove(token)?;
+    if pending.channel_id != channel_id { return None; }
+    Some(pending.user_id)
+}
+
+async fn try_complete_link(
+    pool: &sqlx::PgPool, channel_id: &str, chat_id: &str, token: &str,
+) -> Option<String> {
+    let user_id = consume_link_token(&mut *PENDING_LINKS.lock().await, channel_id, token)?;
+
+    sqlx::query(
+        "INSERT INTO rootcx_system.channel_identities (channel_id, external_chat_id, user_id)
+         VALUES ($1::uuid, $2, $3)
+         ON CONFLICT (channel_id, external_chat_id)
+         DO UPDATE SET user_id = EXCLUDED.user_id, linked_at = now()",
+    ).bind(channel_id).bind(chat_id).bind(user_id)
+    .execute(pool).await.ok()?;
+
+    Some(user_id.to_string())
+}
+
+async fn resolve_invoker(
+    pool: &sqlx::PgPool, channel_id: &str, chat_id: &str,
+) -> Option<uuid::Uuid> {
+    sqlx::query_scalar(
+        "SELECT user_id FROM rootcx_system.channel_identities
+         WHERE channel_id = $1::uuid AND external_chat_id = $2",
+    ).bind(channel_id).bind(chat_id).fetch_optional(pool).await.ok().flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn insert_token(map: &mut HashMap<String, PendingLink>, token: &str, channel_id: &str, user_id: uuid::Uuid, age: std::time::Duration) {
+        map.insert(token.to_string(), PendingLink {
+            channel_id: channel_id.to_string(),
+            user_id,
+            created: Instant::now() - age,
+        });
+    }
+
+    #[test]
+    fn link_token_security() {
+        let uid = uuid::Uuid::new_v4();
+        let ch_a = "channel-a";
+        let ch_b = "channel-b";
+        let cases: Vec<(&str, &str, &str, std::time::Duration, bool)> = vec![
+            ("valid token, correct channel",    "tok1", ch_a, std::time::Duration::ZERO,          true),
+            ("wrong channel",                   "tok2", ch_b, std::time::Duration::ZERO,          false),
+            ("expired token",                   "tok3", ch_a, std::time::Duration::from_secs(301), false),
+            ("nonexistent token",               "tok_missing", ch_a, std::time::Duration::ZERO,   false),
+            ("replay: token consumed",          "tok1", ch_a, std::time::Duration::ZERO,          false),
+        ];
+
+        let mut map = HashMap::new();
+        insert_token(&mut map, "tok1", ch_a, uid, std::time::Duration::ZERO);
+        insert_token(&mut map, "tok2", ch_a, uid, std::time::Duration::ZERO); // scoped to ch_a
+        insert_token(&mut map, "tok3", ch_a, uid, std::time::Duration::from_secs(301));
+
+        for (desc, token, channel, _, expect) in &cases {
+            let result = consume_link_token(&mut map, channel, token);
+            assert_eq!(result.is_some(), *expect, "{desc}: expected {expect}, got {}", result.is_some());
+            if *expect { assert_eq!(result.unwrap(), uid, "{desc}: wrong user_id"); }
+        }
+    }
 }
