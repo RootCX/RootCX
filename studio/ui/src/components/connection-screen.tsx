@@ -92,12 +92,11 @@ function LocalStep({ onBack }: { onBack: () => void }) {
       if (!hasDocker) { setStatus("no-docker"); return; }
     } catch { setStatus("no-docker"); return; }
 
-    // Start container
     setStatus("starting");
     try {
       await invoke("start_local_core");
       if (!(await connectTo(LOCAL_URL))) {
-        setError("Core started but connection failed");
+        setError("Core started but connection failed. Check Docker logs.");
         setStatus("error");
       }
     } catch (e) {
@@ -137,7 +136,7 @@ function LocalStep({ onBack }: { onBack: () => void }) {
               {(status === "idle" || status === "error") && "Start RootCX Core"}
             </Button>
             <p className="text-[11px] text-center text-muted-foreground">
-              This will pull and run <code className="text-foreground">ghcr.io/rootcx/core:latest</code>
+              This will pull and run <code className="text-foreground">ghcr.io/rootcx/core</code>
             </p>
           </>
         )}

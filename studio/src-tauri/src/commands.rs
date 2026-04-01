@@ -357,11 +357,13 @@ pub async fn start_local_core() -> Result<(), String> {
         let _ = d.remove_container(CORE_CONTAINER, Some(opts)).await;
     }
 
-    let pull = bollard::query_parameters::CreateImageOptionsBuilder::default()
-        .from_image(CORE_IMAGE).tag(tag).build();
-    d.create_image(Some(pull), None, None)
-        .try_collect::<Vec<_>>().await
-        .map_err(|e| format!("pull failed: {e}"))?;
+    if d.inspect_image(&format!("{CORE_IMAGE}:{tag}")).await.is_err() {
+        let pull = bollard::query_parameters::CreateImageOptionsBuilder::default()
+            .from_image(CORE_IMAGE).tag(tag).build();
+        d.create_image(Some(pull), None, None)
+            .try_collect::<Vec<_>>().await
+            .map_err(|e| format!("pull failed: {e}"))?;
+    }
 
     let config = ContainerCreateBody {
         image: Some(format!("{CORE_IMAGE}:{tag}")),
@@ -384,15 +386,15 @@ pub async fn start_local_core() -> Result<(), String> {
     d.start_container(CORE_CONTAINER, None::<bollard::query_parameters::StartContainerOptions>).await
         .map_err(|e| format!("start: {e}"))?;
 
-    for _ in 0..30 {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        if reqwest::Client::new()
-            .get("http://localhost:9100/health")
+    let client = reqwest::Client::new();
+    for _ in 0..90 {
+        if client.get("http://localhost:9100/health")
             .timeout(std::time::Duration::from_secs(2))
             .send().await.map(|r| r.status().is_success()).unwrap_or(false)
         { return Ok(()); }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
-    Err("core started but health check timed out after 30s".into())
+    Err("core started but health check timed out after 90s".into())
 }
 
 #[cfg(test)]
