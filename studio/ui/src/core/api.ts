@@ -17,10 +17,6 @@ const post = (body: unknown): RequestInit => ({
   method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
 });
 
-const put = (body: unknown): RequestInit => ({
-  method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-});
-
 export const listSecrets = () => json<string[]>("/api/v1/platform/secrets");
 export const setSecret = (key: string, value: string) => send("/api/v1/platform/secrets", post({ key, value }));
 export const deleteSecret = (key: string) => send(`/api/v1/platform/secrets/${encodeURIComponent(key)}`, { method: "DELETE" });
