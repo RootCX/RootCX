@@ -101,18 +101,16 @@ pub async fn execute_action(
 
     let config = resolve_config(&pool, &secrets, &integration_id).await?;
 
-    let key = format!("_iuc.{integration_id}.{}", identity.user_id);
-    let user_credentials = match secrets.get(&pool, &integration_id, &key).await {
-        Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or(JsonValue::Null),
-        _ => JsonValue::Null,
-    };
+    let (user_credentials, effective_uid) = super::auth::resolve_credentials(
+        &secrets, &pool, &integration_id, &identity.user_id.to_string(),
+    ).await;
 
     let result = wm
         .rpc(
             &integration_id,
             Uuid::new_v4().to_string(),
             "__integration".into(),
-            json!({ "action": action_id, "input": input, "config": config, "userCredentials": user_credentials, "userId": identity.user_id.to_string() }),
+            json!({ "action": action_id, "input": input, "config": config, "userCredentials": user_credentials, "userId": effective_uid }),
             None,
         )
         .await
