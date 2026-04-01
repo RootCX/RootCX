@@ -132,9 +132,9 @@ pub async fn undeploy(
     }
 
     sqlx::query(
-        "DELETE FROM rootcx_system.rbac_permissions WHERE app_id = 'core' AND key LIKE $1",
+        "DELETE FROM rootcx_system.rbac_permissions WHERE key LIKE $1",
     )
-    .bind(format!("integration.{id}.%"))
+    .bind(format!("integration:{id}:%"))
     .execute(&pool)
     .await?;
 
@@ -157,13 +157,13 @@ async fn sync_integration_permissions(
 ) -> Result<(), ApiError> {
     if manifest.actions.is_empty() { return Ok(()); }
     let (keys, descs): (Vec<String>, Vec<String>) = manifest.actions.iter().map(|a| (
-        format!("integration.{integration_id}.{}", a.id),
+        format!("integration:{integration_id}:{}", a.id),
         format!("{} via {integration_id}", a.name),
     )).unzip();
     sqlx::query(
-        "INSERT INTO rootcx_system.rbac_permissions (app_id, key, description)
-         SELECT 'core', unnest($1::text[]), unnest($2::text[])
-         ON CONFLICT (app_id, key) DO NOTHING",
+        "INSERT INTO rootcx_system.rbac_permissions (key, description)
+         SELECT unnest($1::text[]), unnest($2::text[])
+         ON CONFLICT (key) DO NOTHING",
     )
     .bind(&keys)
     .bind(&descs)

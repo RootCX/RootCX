@@ -93,9 +93,9 @@ pub async fn execute_action(
     let (pool, secrets) = routes::pool_and_secrets(&rt);
     let wm = routes::wm(&rt);
 
-    let perm = format!("integration.{integration_id}.{action_id}");
-    let (_, perms) = resolve_permissions(&pool, "core", identity.user_id).await?;
-    if !perms.iter().any(|p| p == "*" || p == &perm) {
+    let perm = format!("integration:{integration_id}:{action_id}");
+    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
+    if !crate::extensions::rbac::policy::has_permission(&perms, &perm) {
         return Err(ApiError::Forbidden(format!("permission denied: {perm}")));
     }
 

@@ -455,7 +455,7 @@ async fn supervisor_loop(
                                 }
 
                                 let agent_uid = crate::extensions::agents::agent_user_id(&aid);
-                                let permissions = crate::extensions::rbac::policy::resolve_permissions(&pool, &aid, agent_uid)
+                                let permissions = crate::extensions::rbac::policy::resolve_permissions(&pool, agent_uid)
                                     .await.map(|(_, p)| p).unwrap_or_default();
 
                                 crate::tool_executor::execute(

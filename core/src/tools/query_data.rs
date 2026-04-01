@@ -46,7 +46,7 @@ impl Tool for QueryDataTool {
         let entity = str_arg(&ctx.args, "entity")?;
         let app = ctx.args.get("app").and_then(|v| v.as_str()).unwrap_or(&ctx.app_id);
 
-        check_permission(&ctx.permissions, &format!("{entity}.read"))?;
+        check_permission(&ctx.permissions, &format!("app:{app}:{entity}.read"))?;
 
         let types = field_type_map(&ctx.pool, app, entity).await.map_err(|e| e.to_string())?;
         let tbl = table(app, entity);

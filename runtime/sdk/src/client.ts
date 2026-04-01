@@ -342,20 +342,20 @@ export class RuntimeClient {
     return res.json();
   }
 
-  async listRoles(appId: string): Promise<RoleDefinition[]> {
-    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/roles`);
+  async listRoles(): Promise<RoleDefinition[]> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/roles`);
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }
 
-  async listRoleAssignments(appId: string): Promise<RoleAssignment[]> {
-    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/roles/assignments`);
+  async listRoleAssignments(): Promise<RoleAssignment[]> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/roles/assignments`);
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }
 
-  async assignRole(appId: string, userId: string, role: string): Promise<{ message: string }> {
-    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/roles/assign`, {
+  async assignRole(userId: string, role: string): Promise<{ message: string }> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/roles/assign`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId, role }),
@@ -364,8 +364,8 @@ export class RuntimeClient {
     return res.json();
   }
 
-  async revokeRole(appId: string, userId: string, role: string): Promise<{ message: string }> {
-    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/roles/revoke`, {
+  async revokeRole(userId: string, role: string): Promise<{ message: string }> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/roles/revoke`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId, role }),
@@ -374,28 +374,25 @@ export class RuntimeClient {
     return res.json();
   }
 
-  async getPermissions(appId: string, userId?: string): Promise<EffectivePermissions> {
+  async getPermissions(userId?: string): Promise<EffectivePermissions> {
     const path = userId
-      ? `/api/v1/apps/${enc(appId)}/permissions/${enc(userId)}`
-      : `/api/v1/apps/${enc(appId)}/permissions`;
+      ? `/api/v1/permissions/${enc(userId)}`
+      : `/api/v1/permissions`;
     const res = await this.authFetch(`${this.baseUrl}${path}`);
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }
 
-  async getAvailablePermissions(appId: string): Promise<PermissionDeclaration[]> {
-    const res = await this.authFetch(
-      `${this.baseUrl}/api/v1/apps/${enc(appId)}/permissions/available`,
-    );
+  async getAvailablePermissions(): Promise<PermissionDeclaration[]> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/permissions/available`);
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }
 
   async createRole(
-    appId: string,
     data: { name: string; description?: string; inherits?: string[]; permissions?: string[] },
   ): Promise<{ message: string }> {
-    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/roles`, {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/roles`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
@@ -405,12 +402,11 @@ export class RuntimeClient {
   }
 
   async updateRole(
-    appId: string,
     roleName: string,
     data: { description?: string; inherits?: string[]; permissions?: string[] },
   ): Promise<{ message: string }> {
     const res = await this.authFetch(
-      `${this.baseUrl}/api/v1/apps/${enc(appId)}/roles/${enc(roleName)}`,
+      `${this.baseUrl}/api/v1/roles/${enc(roleName)}`,
       {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -421,9 +417,9 @@ export class RuntimeClient {
     return res.json();
   }
 
-  async deleteRole(appId: string, roleName: string): Promise<{ message: string }> {
+  async deleteRole(roleName: string): Promise<{ message: string }> {
     const res = await this.authFetch(
-      `${this.baseUrl}/api/v1/apps/${enc(appId)}/roles/${enc(roleName)}`,
+      `${this.baseUrl}/api/v1/roles/${enc(roleName)}`,
       { method: "DELETE" },
     );
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());

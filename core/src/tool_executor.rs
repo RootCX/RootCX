@@ -26,7 +26,7 @@ pub(crate) async fn execute(
     invoke_id: String,
     call_id: String,
 ) {
-    if let Err(e) = check_permission(&permissions, &format!("tool.{tool_name}")) {
+    if let Err(e) = check_permission(&permissions, &format!("tool:{tool_name}")) {
         send_result(&out_tx, &stream_tx, &invoke_id, &call_id, &tool_name, None, Some(e), 0).await;
         return;
     }

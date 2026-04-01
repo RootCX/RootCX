@@ -43,7 +43,7 @@ pub async fn execute_tool(
         .ok_or_else(|| ApiError::NotFound(format!("unknown tool: '{tool_name}'")))?;
     let pool = rt.pool().clone();
 
-    let (_, permissions) = crate::extensions::rbac::policy::resolve_permissions(&pool, &body.app_id, identity.user_id).await?;
+    let (_, permissions) = crate::extensions::rbac::policy::resolve_permissions(&pool, identity.user_id).await?;
     let result = tool.execute(&ToolContext {
         pool, app_id: body.app_id, user_id: identity.user_id, invoker_user_id: None,
         permissions, args: body.args, agent_dispatch: None, integration_caller: None, stream_tx: None,

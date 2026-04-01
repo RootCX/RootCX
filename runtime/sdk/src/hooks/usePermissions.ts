@@ -3,7 +3,7 @@ import { type EffectivePermissions } from "../client";
 import { useRuntimeClient } from "../components/RuntimeProvider";
 
 export interface UsePermissionsResult {
-  /** Resolved roles for the current user in this app. */
+  /** Resolved roles for the current user. */
   roles: string[];
   /** Flat list of permission strings the user has. */
   permissions: string[];
@@ -17,7 +17,7 @@ export interface UsePermissionsResult {
   refetch: () => void;
 }
 
-export function usePermissions(appId: string): UsePermissionsResult {
+export function usePermissions(): UsePermissionsResult {
   const client = useRuntimeClient();
   const [data, setData] = useState<EffectivePermissions | null>(null);
   const [loading, setLoading] = useState(true);
@@ -27,7 +27,7 @@ export function usePermissions(appId: string): UsePermissionsResult {
     setLoading(true);
     setError(null);
     client
-      .getPermissions(appId)
+      .getPermissions()
       .then((result) => {
         setData(result);
         setLoading(false);
@@ -36,7 +36,7 @@ export function usePermissions(appId: string): UsePermissionsResult {
         setError(err instanceof Error ? err.message : String(err));
         setLoading(false);
       });
-  }, [client, appId]);
+  }, [client]);
 
   useEffect(() => {
     fetchPerms();
@@ -45,7 +45,10 @@ export function usePermissions(appId: string): UsePermissionsResult {
   const can = useCallback(
     (permission: string): boolean => {
       if (!data) return false;
-      return data.permissions.includes(permission) || data.permissions.includes("*");
+      return data.permissions.some((p) =>
+        p === "*" || p === permission ||
+        (p.endsWith(":*") && permission.startsWith(p.slice(0, -1))),
+      );
     },
     [data],
   );

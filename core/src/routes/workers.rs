@@ -15,7 +15,7 @@ pub async fn start_worker(
     Path(app_id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (p, secrets) = pool_and_secrets(&rt);
-    require_admin(&p, "core", identity.user_id).await?;
+    require_admin(&p, identity.user_id).await?;
     let w = wm(&rt);
     w.start_app(&p, &secrets, &app_id).await?;
     Ok(Json(json!({ "message": format!("worker '{}' started", app_id) })))
@@ -27,7 +27,7 @@ pub async fn stop_worker(
     Path(app_id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let p = pool(&rt);
-    require_admin(&p, "core", identity.user_id).await?;
+    require_admin(&p, identity.user_id).await?;
     wm(&rt).stop_app(&app_id).await?;
     Ok(Json(json!({ "message": format!("worker '{}' stopped", app_id) })))
 }
@@ -46,7 +46,7 @@ pub async fn all_worker_statuses(
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let p = pool(&rt);
-    require_admin(&p, "core", identity.user_id).await?;
+    require_admin(&p, identity.user_id).await?;
     Ok(Json(json!({ "workers": wm(&rt).all_statuses().await })))
 }
 

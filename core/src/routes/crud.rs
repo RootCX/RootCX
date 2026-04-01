@@ -12,13 +12,13 @@ use uuid::Uuid;
 use super::{SharedRuntime, parse_uuid, pool};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::extensions::rbac::policy::resolve_permissions;
+use crate::extensions::rbac::policy::{resolve_permissions, has_permission};
 use crate::manifest::{entity_identity, field_type_map, find_entities_by_identity, map_field_type, quote_ident};
 
-async fn require_perm(pool: &PgPool, app_id: &str, user_id: Uuid, perm: &str) -> Result<(), ApiError> {
-    let (_, perms) = resolve_permissions(pool, app_id, user_id).await?;
-    if perms.iter().any(|p| p == "*" || p == perm) { Ok(()) }
-    else { Err(ApiError::Forbidden(format!("permission denied: {perm}"))) }
+fn check_app_perm(permissions: &[String], app_id: &str, perm: &str) -> Result<(), ApiError> {
+    let namespaced = format!("app:{app_id}:{perm}");
+    if has_permission(permissions, &namespaced) { Ok(()) }
+    else { Err(ApiError::Forbidden(format!("permission denied: {namespaced}"))) }
 }
 
 pub(crate) const MAX_BULK_SIZE: usize = 1000;
@@ -286,7 +286,8 @@ pub async fn list_records(
 ) -> Result<Json<Vec<JsonValue>>, ApiError> {
     validate_app_id(&app_id)?;
     let pool = pool(&rt);
-    require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.read")).await?;
+    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
+    check_app_perm(&perms, &app_id, &format!("{entity}.read"))?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
 
@@ -317,7 +318,7 @@ pub async fn list_records(
             "true" => LinkedOption::All(true),
             apps => LinkedOption::Apps(apps.split(',').map(String::from).collect()),
         };
-        enrich_linked(&pool, identity.user_id, &app_id, &entity, &mut data, &linked).await?;
+        enrich_linked(&pool, &perms, &app_id, &entity, &mut data, &linked).await?;
     }
 
     Ok(Json(data))
@@ -325,7 +326,7 @@ pub async fn list_records(
 
 async fn enrich_linked(
     pool: &PgPool,
-    user_id: Uuid,
+    permissions: &[String],
     source_app: &str,
     entity: &str,
     rows: &mut [JsonValue],
@@ -352,7 +353,7 @@ async fn enrich_linked(
     if targets.is_empty() || key_values.is_empty() { return Ok(()) }
 
     for (target_app, target_entity, target_key) in &targets {
-        if require_perm(pool, target_app, user_id, &format!("{target_entity}.read")).await.is_err() {
+        if check_app_perm(permissions, target_app, &format!("{target_entity}.read")).is_err() {
             continue;
         }
 
@@ -394,7 +395,8 @@ pub async fn query_records(
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
     let pool = pool(&rt);
-    require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.read")).await?;
+    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
+    check_app_perm(&perms, &app_id, &format!("{entity}.read"))?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
 
@@ -423,7 +425,7 @@ pub async fn query_records(
     let mut data: Vec<JsonValue> = rows.into_iter().map(|(r, _)| r).collect();
 
     if let Some(ref linked) = body.linked {
-        enrich_linked(&pool, identity.user_id, &app_id, &entity, &mut data, linked).await?;
+        enrich_linked(&pool, &perms, &app_id, &entity, &mut data, linked).await?;
     }
 
     Ok(Json(serde_json::json!({ "data": data, "total": total })))
@@ -437,7 +439,8 @@ pub async fn create_record(
 ) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
     validate_app_id(&app_id)?;
     let pool = pool(&rt);
-    require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.create")).await?;
+    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
+    check_app_perm(&perms, &app_id, &format!("{entity}.create"))?;
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
@@ -530,7 +533,8 @@ pub async fn bulk_create_records(
 ) -> Result<(StatusCode, Json<Vec<JsonValue>>), ApiError> {
     validate_app_id(&app_id)?;
     let db = pool(&rt);
-    require_perm(&db, &app_id, identity.user_id, &format!("{entity}.create")).await?;
+    let (_, perms) = resolve_permissions(&db, identity.user_id).await?;
+    check_app_perm(&perms, &app_id, &format!("{entity}.create"))?;
     let records = body.as_array()
         .ok_or_else(|| ApiError::BadRequest("body must be a JSON array".into()))?;
     if records.is_empty() {
@@ -558,7 +562,8 @@ pub async fn get_record(
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
-    require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.read")).await?;
+    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
+    check_app_perm(&perms, &app_id, &format!("{entity}.read"))?;
     let tbl = table(&app_id, &entity);
     let q = format!("SELECT to_jsonb(t.*) AS row FROM {tbl} t WHERE t.id = $1");
     let query = sqlx::query_as::<_, (JsonValue,)>(&q).bind(uuid);
@@ -577,7 +582,8 @@ pub async fn update_record(
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
-    require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.update")).await?;
+    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
+    check_app_perm(&perms, &app_id, &format!("{entity}.update"))?;
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
@@ -608,7 +614,8 @@ pub async fn delete_record(
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
-    require_perm(&pool, &app_id, identity.user_id, &format!("{entity}.delete")).await?;
+    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
+    check_app_perm(&perms, &app_id, &format!("{entity}.delete"))?;
     let tbl = table(&app_id, &entity);
     let q = format!("DELETE FROM {tbl} WHERE id = $1");
     let r = sqlx::query(&q).bind(uuid).execute(&pool).await?;
@@ -625,6 +632,7 @@ pub async fn federated_query(
     Json(body): Json<QueryRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = pool(&rt);
+    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
     let targets = find_entities_by_identity(&pool, &identity_kind, None)
         .await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -633,7 +641,7 @@ pub async fn federated_query(
     let mut bind_offset = 0usize;
 
     for (app_id, entity_name, _key) in &targets {
-        if require_perm(&pool, app_id, identity.user_id, &format!("{entity_name}.read")).await.is_err() {
+        if check_app_perm(&perms, app_id, &format!("{entity_name}.read")).is_err() {
             continue;
         }
 

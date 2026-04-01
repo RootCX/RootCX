@@ -46,7 +46,7 @@ pub struct ToolContext {
 }
 
 pub fn check_permission(permissions: &[String], required: &str) -> Result<(), String> {
-    if permissions.iter().any(|p| p == "*" || p == required) { Ok(()) }
+    if crate::extensions::rbac::policy::has_permission(permissions, required) { Ok(()) }
     else { Err(format!("permission denied: {required}")) }
 }
 
@@ -82,21 +82,21 @@ impl ToolRegistry {
         self.tools.write().unwrap().retain(|name, _| !name.starts_with(prefix));
     }
 
-    /// Sync all current tool names into rbac_permissions (app_id = 'core')
+    /// Sync all current tool names into rbac_permissions (global).
     pub async fn sync_to_db(&self, pool: &PgPool) {
         let (names, descs): (Vec<String>, Vec<String>) = self.tools.read().unwrap()
-            .values().map(|(_, d)| (format!("tool.{}", d.name), d.description.clone())).unzip();
+            .values().map(|(_, d)| (format!("tool:{}", d.name), d.description.clone())).unzip();
         let mut tx = match pool.begin().await {
             Ok(tx) => tx,
             Err(e) => { tracing::warn!("tool sync begin: {e}"); return; }
         };
-        let _ = sqlx::query("DELETE FROM rootcx_system.rbac_permissions WHERE app_id = 'core' AND key LIKE 'tool.%'")
+        let _ = sqlx::query("DELETE FROM rootcx_system.rbac_permissions WHERE key LIKE 'tool:%'")
             .execute(&mut *tx).await;
         if !names.is_empty() {
             let _ = sqlx::query(
-                "INSERT INTO rootcx_system.rbac_permissions (app_id, key, description)
-                 SELECT 'core', unnest($1::text[]), unnest($2::text[])
-                 ON CONFLICT (app_id, key) DO UPDATE SET description = EXCLUDED.description"
+                "INSERT INTO rootcx_system.rbac_permissions (key, description)
+                 SELECT unnest($1::text[]), unnest($2::text[])
+                 ON CONFLICT (key) DO UPDATE SET description = EXCLUDED.description"
             ).bind(&names).bind(&descs).execute(&mut *tx).await;
         }
         if let Err(e) = tx.commit().await {
@@ -106,8 +106,8 @@ impl ToolRegistry {
 
     pub fn descriptors_for_permissions(&self, permissions: &[String], data_contract: &JsonValue) -> Vec<ToolDescriptor> {
         self.tools.read().unwrap().values().filter_map(|(tool, base)| {
-            let perm = format!("tool.{}", base.name);
-            if !permissions.iter().any(|p| p == "*" || p == &perm) { return None; }
+            let perm = format!("tool:{}", base.name);
+            if !crate::extensions::rbac::policy::has_permission(permissions, &perm) { return None; }
             let mut desc = base.clone();
             if tool.enriches_with_schema() {
                 desc.description.push_str(&format_data_contract(data_contract));

@@ -100,12 +100,12 @@ pub async fn register(
         }
     })?;
 
-    // Atomic first-user core admin: only succeeds if no core admin exists yet
+    // Atomic first-user admin: only succeeds if no admin exists yet
     sqlx::query(
-        "INSERT INTO rootcx_system.rbac_assignments (user_id, app_id, role)
-         SELECT $1, 'core', 'admin'
+        "INSERT INTO rootcx_system.rbac_assignments (user_id, role)
+         SELECT $1, 'admin'
          WHERE NOT EXISTS (
-           SELECT 1 FROM rootcx_system.rbac_assignments WHERE app_id = 'core' AND role = 'admin'
+           SELECT 1 FROM rootcx_system.rbac_assignments WHERE role = 'admin'
          )",
     )
     .bind(row.0)

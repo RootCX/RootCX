@@ -36,7 +36,7 @@ impl Tool for MutateDataTool {
         let app = ctx.args.get("app").and_then(|v| v.as_str()).unwrap_or(&ctx.app_id);
 
         let perm_action = if action == "bulk_create" { "create" } else { action };
-        check_permission(&ctx.permissions, &format!("{entity}.{perm_action}"))?;
+        check_permission(&ctx.permissions, &format!("app:{app}:{entity}.{perm_action}"))?;
 
         let tbl = table(app, entity);
 
