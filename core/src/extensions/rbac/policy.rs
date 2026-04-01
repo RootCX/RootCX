@@ -61,24 +61,14 @@ fn dfs_cycle<'a>(
     None
 }
 
-/// core:admin is the instance super-admin — gets wildcard on every app.
+/// Resolve all permissions for a user (global — no app scoping).
 pub async fn resolve_permissions(
     pool: &PgPool,
-    app_id: &str,
     user_id: Uuid,
 ) -> Result<(Vec<String>, Vec<String>), ApiError> {
-    if app_id != "core" {
-        let is_core_admin: Option<(i32,)> = sqlx::query_as(
-            "SELECT 1 FROM rootcx_system.rbac_assignments WHERE user_id = $1 AND app_id = 'core' AND role = 'admin'",
-        ).bind(user_id).fetch_optional(pool).await?;
-        if is_core_admin.is_some() {
-            return Ok((vec!["admin".into()], vec!["*".into()]));
-        }
-    }
-
     let assigned: Vec<(String,)> =
-        sqlx::query_as("SELECT role FROM rootcx_system.rbac_assignments WHERE user_id = $1 AND app_id = $2")
-            .bind(user_id).bind(app_id).fetch_all(pool).await?;
+        sqlx::query_as("SELECT role FROM rootcx_system.rbac_assignments WHERE user_id = $1")
+            .bind(user_id).fetch_all(pool).await?;
 
     let assigned_names: Vec<String> = assigned.into_iter().map(|(r,)| r).collect();
     if assigned_names.is_empty() {
@@ -86,8 +76,8 @@ pub async fn resolve_permissions(
     }
 
     let rows: Vec<(String, Vec<String>, Vec<String>)> = sqlx::query_as(
-        "SELECT name, inherits, permissions FROM rootcx_system.rbac_roles WHERE app_id = $1",
-    ).bind(app_id).fetch_all(pool).await?;
+        "SELECT name, inherits, permissions FROM rootcx_system.rbac_roles",
+    ).fetch_all(pool).await?;
 
     let mut hierarchy = HashMap::with_capacity(rows.len());
     let mut role_perms = HashMap::with_capacity(rows.len());
@@ -112,10 +102,25 @@ pub async fn resolve_permissions(
     Ok((roles, permissions))
 }
 
-pub async fn require_admin(pool: &PgPool, app_id: &str, user_id: Uuid) -> Result<(), ApiError> {
-    let (_, perms) = resolve_permissions(pool, app_id, user_id).await?;
+pub async fn require_admin(pool: &PgPool, user_id: Uuid) -> Result<(), ApiError> {
+    let (_, perms) = resolve_permissions(pool, user_id).await?;
     if perms.iter().any(|p| p == "*") { Ok(()) }
     else { Err(ApiError::Forbidden("admin access required".into())) }
+}
+
+/// Check if a user has a specific permission. Supports:
+/// - `*` global admin
+/// - `{namespace}:{scope}:*` scoped wildcard (e.g. `app:crm:*`, `tool:*`, `integration:gmail:*`)
+pub fn has_permission(permissions: &[String], required: &str) -> bool {
+    permissions.iter().any(|p| {
+        p == "*" || p == required || {
+            if let Some(prefix) = p.strip_suffix(":*") {
+                required.starts_with(prefix) && required.as_bytes().get(prefix.len()) == Some(&b':')
+            } else {
+                false
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -170,5 +175,37 @@ mod tests {
     #[test]
     fn detect_cycle_disconnected() {
         assert!(detect_cycle(&roles(&[("a", &["b"]), ("b", &[]), ("x", &["y"]), ("y", &[])])).is_none());
+    }
+
+    #[test]
+    fn has_permission_exact() {
+        assert!(has_permission(&["app:crm:customer.read".into()], "app:crm:customer.read"));
+        assert!(!has_permission(&["app:crm:customer.read".into()], "app:crm:customer.write"));
+    }
+
+    #[test]
+    fn has_permission_global_wildcard() {
+        assert!(has_permission(&["*".into()], "app:crm:customer.read"));
+        assert!(has_permission(&["*".into()], "tool:query_data"));
+    }
+
+    #[test]
+    fn has_permission_app_wildcard() {
+        assert!(has_permission(&["app:crm:*".into()], "app:crm:customer.read"));
+        assert!(!has_permission(&["app:crm:*".into()], "app:support:ticket.read"));
+        assert!(!has_permission(&["app:crm:*".into()], "tool:query_data"));
+    }
+
+    #[test]
+    fn has_permission_tool_wildcard() {
+        assert!(has_permission(&["tool:*".into()], "tool:query_data"));
+        assert!(has_permission(&["tool:*".into()], "tool:mutate_data"));
+        assert!(!has_permission(&["tool:*".into()], "app:crm:customer.read"));
+    }
+
+    #[test]
+    fn has_permission_integration_wildcard() {
+        assert!(has_permission(&["integration:gmail:*".into()], "integration:gmail:send"));
+        assert!(!has_permission(&["integration:gmail:*".into()], "integration:slack:send"));
     }
 }

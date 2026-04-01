@@ -71,7 +71,7 @@ impl WorkerManager {
             sqlx::query_scalar::<_, serde_json::Value>(
                 "SELECT COALESCE(manifest->'dataContract', '[]'::jsonb) FROM rootcx_system.apps WHERE id = $1",
             ).bind(app_id).fetch_optional(pool),
-            crate::extensions::rbac::policy::resolve_permissions(pool, app_id, agent_uid),
+            crate::extensions::rbac::policy::resolve_permissions(pool, agent_uid),
         );
 
         let data_contract = contract_res.ok()?.unwrap_or_default();

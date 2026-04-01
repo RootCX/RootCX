@@ -22,12 +22,11 @@ import {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Group permissions by namespace (first segment before "."). */
 function groupPermissions(perms: PermissionDeclaration[]) {
   const groups = new Map<string, PermissionDeclaration[]>();
   for (const p of perms) {
-    const dot = p.key.indexOf(".");
-    const ns = dot >= 0 ? p.key.slice(0, dot) : p.key;
+    const parts = p.key.split(":");
+    const ns = parts.length >= 3 ? `${parts[0]}:${parts[1]}` : parts[0];
     if (!groups.has(ns)) groups.set(ns, []);
     groups.get(ns)!.push(p);
   }
@@ -251,6 +250,19 @@ function RoleDetailView({ role, availablePermissions, isAdmin, onBack }: {
   const isBuiltIn = role.name === "admin";
   const isWildcard = role.permissions.includes("*");
 
+  const scopedWildcards = useMemo(
+    () => role.permissions.filter((p) => p.endsWith(":*")),
+    [role.permissions],
+  );
+
+  const coveredByWildcard = useMemo(() => {
+    const prefixes = scopedWildcards.map((p) => p.slice(0, -1));
+    return (key: string) => isWildcard || prefixes.some((w) => key.startsWith(w));
+  }, [scopedWildcards, isWildcard]);
+
+  const wildcardForGroup = (ns: string) =>
+    scopedWildcards.find((w) => w === `${ns}:*` || ns.startsWith(w.slice(0, -2)));
+
   const grouped = useMemo(() => groupPermissions(availablePermissions), [availablePermissions]);
 
   const filtered = useMemo(() => {
@@ -263,16 +275,18 @@ function RoleDetailView({ role, availablePermissions, isAdmin, onBack }: {
   }, [grouped, search]);
 
   const togglePermission = (key: string) => {
-    if (isBuiltIn || !isAdmin) return;
+    if (isBuiltIn || !isAdmin || coveredByWildcard(key)) return;
     const next = role.permissions.includes(key)
       ? role.permissions.filter((p) => p !== key)
       : [...role.permissions, key];
     updateRole(role.name, { permissions: next });
   };
 
-  const toggleGroup = (_ns: string, permsInGroup: PermissionDeclaration[]) => {
+  const toggleGroup = (permsInGroup: PermissionDeclaration[]) => {
     if (isBuiltIn || !isAdmin) return;
-    const keys = permsInGroup.map((p) => p.key);
+    const toggleable = permsInGroup.filter((p) => !coveredByWildcard(p.key));
+    if (toggleable.length === 0) return;
+    const keys = toggleable.map((p) => p.key);
     const allSelected = keys.every((k) => role.permissions.includes(k));
     let next: string[];
     if (allSelected) {
@@ -282,6 +296,22 @@ function RoleDetailView({ role, availablePermissions, isAdmin, onBack }: {
       keys.forEach((k) => current.add(k));
       next = [...current];
     }
+    updateRole(role.name, { permissions: next });
+  };
+
+  const expandWildcard = (ns: string, permsInGroup: PermissionDeclaration[]) => {
+    const wc = wildcardForGroup(ns);
+    if (!wc) return;
+    const next = role.permissions.filter((p) => p !== wc);
+    permsInGroup.forEach((p) => { if (!next.includes(p.key)) next.push(p.key); });
+    updateRole(role.name, { permissions: next });
+  };
+
+  const collapseToWildcard = (ns: string, permsInGroup: PermissionDeclaration[]) => {
+    const keys = new Set(permsInGroup.map((p) => p.key));
+    const wc = `${ns}:*`;
+    const next = role.permissions.filter((p) => !keys.has(p));
+    if (!next.includes(wc)) next.push(wc);
     updateRole(role.name, { permissions: next });
   };
 
@@ -348,27 +378,43 @@ function RoleDetailView({ role, availablePermissions, isAdmin, onBack }: {
       {/* Permission groups */}
       <div className="flex-1 overflow-auto">
         {filtered.map(([ns, perms]) => {
-          const selectedCount = perms.filter((p) => isWildcard || role.permissions.includes(p.key)).length;
+          const selectedCount = perms.filter((p) => coveredByWildcard(p.key) || role.permissions.includes(p.key)).length;
+          const groupWc = wildcardForGroup(ns);
+          const groupToggleable = !isBuiltIn && isAdmin && !groupWc;
           return (
             <div key={ns} className="border-b border-border/50">
               <div className="flex items-center gap-2 px-3 py-1.5">
                 <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{ns}</span>
                 <span className="text-[10px] text-muted-foreground">{selectedCount}/{perms.length}</span>
-                {!isBuiltIn && isAdmin && !isWildcard && (
-                  <Button size="xs" variant="link" className="ml-auto" onClick={() => toggleGroup(ns, perms)}>
-                    {selectedCount === perms.length ? "Clear" : "Select all"}
-                  </Button>
+                {!isBuiltIn && isAdmin && (
+                  groupWc ? (
+                    <Button size="xs" variant="link" className="ml-auto" onClick={() => expandWildcard(ns, perms)}>
+                      Customize
+                    </Button>
+                  ) : (
+                    <div className="ml-auto flex items-center gap-1">
+                      {selectedCount === perms.length && (
+                        <Button size="xs" variant="link" onClick={() => collapseToWildcard(ns, perms)}>
+                          Grant all
+                        </Button>
+                      )}
+                      <Button size="xs" variant="link" onClick={() => toggleGroup(perms)}>
+                        {selectedCount === perms.length ? "Clear" : "Select all"}
+                      </Button>
+                    </div>
+                  )
                 )}
               </div>
               {perms.map((p) => {
-                const canToggle = !isBuiltIn && isAdmin && !isWildcard;
+                const wildcarded = coveredByWildcard(p.key);
+                const canToggle = !isBuiltIn && isAdmin && !wildcarded;
                 return (
                   <ListRow
                     key={p.key}
                     onClick={canToggle ? () => togglePermission(p.key) : undefined}
                   >
                     <ToggleDot
-                      active={isWildcard || role.permissions.includes(p.key)}
+                      active={wildcarded || role.permissions.includes(p.key)}
                       disabled={!canToggle}
                     />
                     <code className="flex-1 min-w-0 truncate text-xs">{p.key}</code>
@@ -403,14 +449,11 @@ function RoleDetailView({ role, availablePermissions, isAdmin, onBack }: {
 
 export default function SecurityPanel() {
   const { projectPath } = useProjectContext();
-  const { appId, roles, users, assignments, availablePermissions, loading, error, isAdmin } = useSyncExternalStore(subscribe, getSnapshot);
+  const { roles, users, assignments, availablePermissions, loading, error, isAdmin } = useSyncExternalStore(subscribe, getSnapshot);
 
   const [view, setView] = useState<View>("users");
 
-  useEffect(() => { if (projectPath) loadProject(projectPath); }, [projectPath]);
-
-  // Reset to users view when project changes
-  useEffect(() => { setView("users"); }, [appId]);
+  useEffect(() => { if (projectPath) loadProject(); }, [projectPath]);
 
   if (!projectPath) {
     return <div className="flex h-full items-center justify-center p-6 text-xs text-muted-foreground">No project opened</div>;
@@ -423,7 +466,7 @@ export default function SecurityPanel() {
       <div className="flex h-full flex-col">
         {/* Top bar */}
         <div className="flex shrink-0 items-center justify-between border-b border-border px-3 py-1.5">
-          <span className="truncate text-xs font-medium uppercase tracking-wider text-muted-foreground">{appId ?? "Security"}</span>
+          <span className="truncate text-xs font-medium uppercase tracking-wider text-muted-foreground">Security</span>
           <Button size="icon-xs" variant="ghost" onClick={() => refresh()}>
             <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
           </Button>
@@ -431,7 +474,7 @@ export default function SecurityPanel() {
 
         {error && <div className="px-3 py-2 text-xs text-red-400">{error}</div>}
         {loading && roles.length === 0 && <div className="flex animate-pulse items-center justify-center p-6 text-xs text-muted-foreground">Loading...</div>}
-        {!loading && !error && roles.length === 0 && appId && <div className="flex items-center justify-center p-6 text-xs text-muted-foreground">No RBAC configured</div>}
+        {!loading && !error && roles.length === 0 && <div className="flex items-center justify-center p-6 text-xs text-muted-foreground">No RBAC configured</div>}
 
         {roles.length > 0 && !selectedRole && (
           <>

@@ -947,7 +947,7 @@ async fn rbac_list_roles() {
     let rt = TestRuntime::boot().await;
     rt.install("rbacapp", "items").await;
 
-    let (s, body) = rt.get_json("/api/v1/apps/rbacapp/roles").await;
+    let (s, body) = rt.get_json("/api/v1/roles").await;
     assert_eq!(s, 200);
     let roles = body.as_array().unwrap();
     assert!(roles.iter().any(|r| r["name"] == "admin"), "should have built-in admin role");
@@ -959,19 +959,19 @@ async fn rbac_create_and_delete_role() {
     let rt = TestRuntime::boot().await;
     rt.install("rbacc", "items").await;
 
-    let (s, _) = rt.post_json("/api/v1/apps/rbacc/roles", &json!({
+    let (s, _) = rt.post_json("/api/v1/roles", &json!({
         "name": "editor",
         "description": "Can edit items",
-        "permissions": ["items.read", "items.update"]
+        "permissions": ["app:rbacc:items.read", "app:rbacc:items.update"]
     })).await;
     assert_eq!(s, 200);
 
-    let (_, roles) = rt.get_json("/api/v1/apps/rbacc/roles").await;
+    let (_, roles) = rt.get_json("/api/v1/roles").await;
     assert!(roles.as_array().unwrap().iter().any(|r| r["name"] == "editor"));
 
-    assert_eq!(rt.delete("/api/v1/apps/rbacc/roles/editor").await, 200);
+    assert_eq!(rt.delete("/api/v1/roles/editor").await, 200);
 
-    let (_, roles) = rt.get_json("/api/v1/apps/rbacc/roles").await;
+    let (_, roles) = rt.get_json("/api/v1/roles").await;
     assert!(!roles.as_array().unwrap().iter().any(|r| r["name"] == "editor"));
     rt.shutdown().await;
 }
@@ -981,7 +981,7 @@ async fn rbac_cannot_create_admin_role() {
     let rt = TestRuntime::boot().await;
     rt.install("rbacadm", "items").await;
 
-    let (s, _) = rt.post_json("/api/v1/apps/rbacadm/roles", &json!({"name":"admin"})).await;
+    let (s, _) = rt.post_json("/api/v1/roles", &json!({"name":"admin"})).await;
     assert!(s == 400 || s == 409, "creating admin role should fail, got {s}");
     rt.shutdown().await;
 }
@@ -1003,19 +1003,19 @@ async fn rbac_assign_and_revoke_role() {
         .find(|u| u["email"] == "rbacuser@test.local").unwrap()["id"].as_str().unwrap().to_string();
 
     // create role
-    rt.post_json("/api/v1/apps/rbacas/roles", &json!({"name":"viewer","permissions":["items.read"]})).await;
+    rt.post_json("/api/v1/roles", &json!({"name":"viewer","permissions":["app:rbacas:items.read"]})).await;
 
     // assign
-    let (s, _) = rt.post_json("/api/v1/apps/rbacas/roles/assign", &json!({"userId": user_id, "role": "viewer"})).await;
+    let (s, _) = rt.post_json("/api/v1/roles/assign", &json!({"userId": user_id, "role": "viewer"})).await;
     assert_eq!(s, 200);
 
     // list assignments
-    let (s, body) = rt.get_json("/api/v1/apps/rbacas/roles/assignments").await;
+    let (s, body) = rt.get_json("/api/v1/roles/assignments").await;
     assert_eq!(s, 200);
     assert!(body.as_array().unwrap().iter().any(|a| a["role"] == "viewer"));
 
     // revoke
-    let (s, _) = rt.post_json("/api/v1/apps/rbacas/roles/revoke", &json!({"userId": user_id, "role": "viewer"})).await;
+    let (s, _) = rt.post_json("/api/v1/roles/revoke", &json!({"userId": user_id, "role": "viewer"})).await;
     assert_eq!(s, 200);
 
     rt.shutdown().await;
@@ -1026,7 +1026,7 @@ async fn rbac_my_permissions() {
     let rt = TestRuntime::boot().await;
     rt.install("rbacperm", "items").await;
 
-    let (s, body) = rt.get_json("/api/v1/apps/rbacperm/permissions").await;
+    let (s, body) = rt.get_json("/api/v1/permissions").await;
     assert_eq!(s, 200);
     let roles: Vec<&str> = body["roles"].as_array().unwrap().iter().filter_map(|r| r.as_str()).collect();
     assert!(roles.contains(&"admin"), "first user should be admin");
@@ -1038,12 +1038,13 @@ async fn rbac_available_permissions() {
     let rt = TestRuntime::boot().await;
     rt.install("rbacavail", "items").await;
 
-    let (s, body) = rt.get_json("/api/v1/apps/rbacavail/permissions/available").await;
+    let (s, body) = rt.get_json("/api/v1/permissions/available").await;
     assert_eq!(s, 200);
     let perms = body.as_array().unwrap();
     let keys: Vec<&str> = perms.iter().filter_map(|p| p["key"].as_str()).collect();
-    assert!(keys.contains(&"items.read"));
-    assert!(keys.contains(&"items.create"));
+    // Permissions are namespaced: app:{app_id}:{entity}.{action}
+    assert!(keys.contains(&"app:rbacavail:items.read"));
+    assert!(keys.contains(&"app:rbacavail:items.create"));
     rt.shutdown().await;
 }
 

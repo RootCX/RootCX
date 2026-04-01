@@ -83,38 +83,36 @@ fn validate_hierarchy(pool_roles: Vec<(String, Vec<String>)>, name: &str, inheri
 
 pub(crate) async fn list_roles(
     State(rt): State<SharedRuntime>,
-    Path(app_id): Path<String>,
 ) -> Result<Json<Vec<RoleResponse>>, ApiError> {
     let pool = routes::pool(&rt);
     let rows: Vec<(String, Option<String>, Vec<String>, Vec<String>)> = sqlx::query_as(
-        "SELECT name, description, inherits, permissions FROM rootcx_system.rbac_roles WHERE app_id = $1 ORDER BY name",
-    ).bind(&app_id).fetch_all(&pool).await?;
+        "SELECT name, description, inherits, permissions FROM rootcx_system.rbac_roles ORDER BY name",
+    ).fetch_all(&pool).await?;
     Ok(Json(rows.into_iter().map(|(name, description, inherits, permissions)| RoleResponse { name, description, inherits, permissions }).collect()))
 }
 
 pub(crate) async fn create_role(
     State(rt): State<SharedRuntime>,
-    Path(app_id): Path<String>,
     identity: Identity,
     Json(body): Json<CreateRoleRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
-    require_admin(&pool, &app_id, identity.user_id).await?;
+    require_admin(&pool, identity.user_id).await?;
 
     if body.name.is_empty() { return Err(ApiError::BadRequest("role name must not be empty".into())); }
     if body.name == "admin" { return Err(ApiError::BadRequest("cannot create a role named 'admin' (reserved)".into())); }
 
     if !body.inherits.is_empty() {
-        let existing = sqlx::query_as("SELECT name, inherits FROM rootcx_system.rbac_roles WHERE app_id = $1")
-            .bind(&app_id).fetch_all(&pool).await?;
+        let existing = sqlx::query_as("SELECT name, inherits FROM rootcx_system.rbac_roles")
+            .fetch_all(&pool).await?;
         validate_hierarchy(existing, &body.name, &body.inherits)?;
     }
 
     let inherits: Vec<&str> = body.inherits.iter().map(|s| s.as_str()).collect();
     let permissions: Vec<&str> = body.permissions.iter().map(|s| s.as_str()).collect();
 
-    sqlx::query("INSERT INTO rootcx_system.rbac_roles (app_id, name, description, inherits, permissions) VALUES ($1, $2, $3, $4, $5)")
-        .bind(&app_id).bind(&body.name).bind(body.description.as_deref()).bind(&inherits).bind(&permissions)
+    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, description, inherits, permissions) VALUES ($1, $2, $3, $4)")
+        .bind(&body.name).bind(body.description.as_deref()).bind(&inherits).bind(&permissions)
         .execute(&pool).await
         .map_err(|e| match e {
             sqlx::Error::Database(ref db) if db.constraint().is_some() => ApiError::BadRequest(format!("role '{}' already exists", body.name)),
@@ -126,12 +124,12 @@ pub(crate) async fn create_role(
 
 pub(crate) async fn update_role(
     State(rt): State<SharedRuntime>,
-    Path((app_id, role_name)): Path<(String, String)>,
+    Path(role_name): Path<String>,
     identity: Identity,
     Json(body): Json<UpdateRoleRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
-    require_admin(&pool, &app_id, identity.user_id).await?;
+    require_admin(&pool, identity.user_id).await?;
 
     if role_name == "admin" && (body.permissions.is_some() || body.inherits.is_some()) {
         return Err(ApiError::BadRequest("cannot modify permissions or inherits on built-in admin role".into()));
@@ -141,8 +139,8 @@ pub(crate) async fn update_role(
     }
 
     if let Some(ref new_inherits) = body.inherits {
-        let existing = sqlx::query_as("SELECT name, inherits FROM rootcx_system.rbac_roles WHERE app_id = $1")
-            .bind(&app_id).fetch_all(&pool).await?;
+        let existing = sqlx::query_as("SELECT name, inherits FROM rootcx_system.rbac_roles")
+            .fetch_all(&pool).await?;
         validate_hierarchy(existing, &role_name, new_inherits)?;
     }
 
@@ -161,8 +159,7 @@ pub(crate) async fn update_role(
         if !first { qb.push(", "); }
         qb.push("permissions = ").push_bind(p.iter().map(|s| s.as_str()).collect::<Vec<_>>());
     }
-    qb.push(" WHERE app_id = ").push_bind(&app_id);
-    qb.push(" AND name = ").push_bind(&role_name);
+    qb.push(" WHERE name = ").push_bind(&role_name);
 
     let r = qb.build().execute(&pool).await?;
     if r.rows_affected() == 0 { return Err(ApiError::NotFound(format!("role '{role_name}' not found"))); }
@@ -171,74 +168,70 @@ pub(crate) async fn update_role(
 
 pub(crate) async fn delete_role(
     State(rt): State<SharedRuntime>,
-    Path((app_id, role_name)): Path<(String, String)>,
+    Path(role_name): Path<String>,
     identity: Identity,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
-    require_admin(&pool, &app_id, identity.user_id).await?;
+    require_admin(&pool, identity.user_id).await?;
     if role_name == "admin" { return Err(ApiError::BadRequest("cannot delete built-in admin role".into())); }
 
-    let r = sqlx::query("DELETE FROM rootcx_system.rbac_roles WHERE app_id = $1 AND name = $2")
-        .bind(&app_id).bind(&role_name).execute(&pool).await?;
+    let r = sqlx::query("DELETE FROM rootcx_system.rbac_roles WHERE name = $1")
+        .bind(&role_name).execute(&pool).await?;
     if r.rows_affected() == 0 { return Err(ApiError::NotFound(format!("role '{role_name}' not found"))); }
 
-    sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE app_id = $1 AND role = $2")
-        .bind(&app_id).bind(&role_name).execute(&pool).await?;
+    sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE role = $1")
+        .bind(&role_name).execute(&pool).await?;
     Ok(Json(json!({ "message": format!("role '{role_name}' deleted") })))
 }
 
 pub(crate) async fn list_assignments(
     State(rt): State<SharedRuntime>,
-    Path(app_id): Path<String>,
     identity: Identity,
 ) -> Result<Json<Vec<AssignmentResponse>>, ApiError> {
     let pool = routes::pool(&rt);
-    require_admin(&pool, &app_id, identity.user_id).await?;
+    require_admin(&pool, identity.user_id).await?;
     let rows: Vec<(Uuid, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT user_id, role, assigned_at FROM rootcx_system.rbac_assignments WHERE app_id = $1 ORDER BY assigned_at DESC",
-    ).bind(&app_id).fetch_all(&pool).await?;
+        "SELECT user_id, role, assigned_at FROM rootcx_system.rbac_assignments ORDER BY assigned_at DESC",
+    ).fetch_all(&pool).await?;
     Ok(Json(rows.into_iter().map(|(user_id, role, assigned_at)| AssignmentResponse { user_id, role, assigned_at }).collect()))
 }
 
 pub(crate) async fn assign_role(
     State(rt): State<SharedRuntime>,
-    Path(app_id): Path<String>,
     identity: Identity,
     Json(body): Json<RoleAssignment>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
-    require_admin(&pool, &app_id, identity.user_id).await?;
+    require_admin(&pool, identity.user_id).await?;
 
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_roles WHERE app_id = $1 AND name = $2)")
-        .bind(&app_id).bind(&body.role).fetch_one(&pool).await?;
-    if !exists { return Err(ApiError::BadRequest(format!("role '{}' not defined for app '{app_id}'", body.role))); }
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_roles WHERE name = $1)")
+        .bind(&body.role).fetch_one(&pool).await?;
+    if !exists { return Err(ApiError::BadRequest(format!("role '{}' not defined", body.role))); }
 
-    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, app_id, role) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING")
-        .bind(body.user_id).bind(&app_id).bind(&body.role).execute(&pool).await?;
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(body.user_id).bind(&body.role).execute(&pool).await?;
     Ok(Json(json!({ "message": format!("role '{}' assigned", body.role) })))
 }
 
 pub(crate) async fn revoke_role(
     State(rt): State<SharedRuntime>,
-    Path(app_id): Path<String>,
     identity: Identity,
     Json(body): Json<RoleAssignment>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
-    require_admin(&pool, &app_id, identity.user_id).await?;
+    require_admin(&pool, identity.user_id).await?;
 
     let mut tx = pool.begin().await?;
-    // Lock admin rows to prevent race on last-admin check
     let admin_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM (SELECT 1 FROM rootcx_system.rbac_assignments WHERE app_id = $1 AND role = 'admin' FOR UPDATE) t",
-    ).bind(&app_id).fetch_one(&mut *tx).await?;
+        "SELECT COUNT(*) FROM (SELECT 1 FROM rootcx_system.rbac_assignments WHERE role = 'admin' FOR UPDATE) t",
+    ).fetch_one(&mut *tx).await?;
 
     if body.role == "admin" && admin_count <= 1 {
-        return Err(ApiError::BadRequest("cannot revoke the last admin of an app".into()));
+        return Err(ApiError::BadRequest("cannot revoke the last admin".into()));
     }
 
-    let r = sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1 AND app_id = $2 AND role = $3")
-        .bind(body.user_id).bind(&app_id).bind(&body.role).execute(&mut *tx).await?;
+    let r = sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1 AND role = $2")
+        .bind(body.user_id).bind(&body.role).execute(&mut *tx).await?;
     tx.commit().await?;
 
     if r.rows_affected() == 0 { return Err(ApiError::NotFound(format!("assignment not found for role '{}'", body.role))); }
@@ -247,34 +240,30 @@ pub(crate) async fn revoke_role(
 
 pub(crate) async fn my_permissions(
     State(rt): State<SharedRuntime>,
-    Path(app_id): Path<String>,
     identity: Identity,
 ) -> Result<Json<EffectivePermissions>, ApiError> {
     let pool = routes::pool(&rt);
-    let (roles, permissions) = resolve_permissions(&pool, &app_id, identity.user_id).await?;
+    let (roles, permissions) = resolve_permissions(&pool, identity.user_id).await?;
     Ok(Json(EffectivePermissions { roles, permissions }))
 }
 
 pub(crate) async fn user_permissions(
     State(rt): State<SharedRuntime>,
-    Path((app_id, target)): Path<(String, Uuid)>,
+    Path(target): Path<Uuid>,
     identity: Identity,
 ) -> Result<Json<EffectivePermissions>, ApiError> {
     let pool = routes::pool(&rt);
-    if identity.user_id != target { require_admin(&pool, &app_id, identity.user_id).await?; }
-    let (roles, permissions) = resolve_permissions(&pool, &app_id, target).await?;
+    if identity.user_id != target { require_admin(&pool, identity.user_id).await?; }
+    let (roles, permissions) = resolve_permissions(&pool, target).await?;
     Ok(Json(EffectivePermissions { roles, permissions }))
 }
 
 pub(crate) async fn list_available_permissions(
     State(rt): State<SharedRuntime>,
-    Path(app_id): Path<String>,
 ) -> Result<Json<Vec<PermissionDeclarationResponse>>, ApiError> {
     let pool = routes::pool(&rt);
     let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT key, description FROM rootcx_system.rbac_permissions
-         WHERE app_id = $1 OR (app_id = 'core' AND (key LIKE 'tool.%' OR key LIKE 'integration.%'))
-         ORDER BY key",
-    ).bind(&app_id).fetch_all(&pool).await?;
+        "SELECT key, description FROM rootcx_system.rbac_permissions ORDER BY key",
+    ).fetch_all(&pool).await?;
     Ok(Json(rows.into_iter().map(|(key, description)| PermissionDeclarationResponse { key, description }).collect()))
 }

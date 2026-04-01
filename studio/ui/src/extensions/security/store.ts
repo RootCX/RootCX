@@ -1,4 +1,3 @@
-import { invoke } from "@tauri-apps/api/core";
 import { fetchCore } from "@/core/auth";
 
 export interface Role { name: string; description: string | null; inherits: string[]; permissions: string[] }
@@ -7,13 +6,12 @@ export interface Assignment { userId: string; role: string; assignedAt: string }
 export interface PermissionDeclaration { key: string; description: string }
 
 interface State {
-  appId: string | null;
   roles: Role[]; users: User[]; assignments: Assignment[];
   availablePermissions: PermissionDeclaration[];
   loading: boolean; error: string | null; isAdmin: boolean;
 }
 
-let state: State = { appId: null, roles: [], users: [], assignments: [], availablePermissions: [], loading: false, error: null, isAdmin: false };
+let state: State = { roles: [], users: [], assignments: [], availablePermissions: [], loading: false, error: null, isAdmin: false };
 const listeners = new Set<() => void>();
 let snapshot = state;
 
@@ -36,35 +34,24 @@ const json = (body: unknown): RequestInit => ({
   method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
 });
 
-function appPath(id: string) { return `/api/v1/apps/${encodeURIComponent(id)}`; }
-
-async function fetchAll(appId: string) {
-  const p = appPath(appId);
+async function fetchAll() {
   const [roles, users, assignments, availablePermissions, perms] = await Promise.all([
-    api<Role[]>(`${p}/roles`),
+    api<Role[]>("/api/v1/roles"),
     api<User[]>("/api/v1/users"),
-    api<Assignment[]>(`${p}/roles/assignments`, undefined, []),
-    api<PermissionDeclaration[]>(`${p}/permissions/available`),
-    api<{ permissions: string[] }>(`${p}/permissions`, undefined, { permissions: [] }),
+    api<Assignment[]>("/api/v1/roles/assignments", undefined, []),
+    api<PermissionDeclaration[]>("/api/v1/permissions/available"),
+    api<{ permissions: string[] }>("/api/v1/permissions", undefined, { permissions: [] }),
   ]);
   return { roles, users, assignments, availablePermissions, isAdmin: perms.permissions.includes("*") };
 }
 
-export async function loadProject(projectPath: string) {
-  state = { ...state, loading: true, error: null }; emit();
-  try {
-    const raw = await invoke<string>("read_file", { path: `${projectPath}/manifest.json` });
-    const { appId } = JSON.parse(raw) as { appId: string };
-    state = { ...state, appId, ...(await fetchAll(appId)), loading: false }; emit();
-  } catch (e) { state = { ...state, loading: false, error: errMsg(e) }; emit(); }
-}
-
 export async function refresh() {
-  if (!state.appId) return;
   state = { ...state, loading: true, error: null }; emit();
-  try { state = { ...state, ...(await fetchAll(state.appId!)), loading: false }; emit(); }
+  try { state = { ...state, ...(await fetchAll()), loading: false }; emit(); }
   catch (e) { state = { ...state, loading: false, error: errMsg(e) }; emit(); }
 }
+
+export const loadProject = refresh;
 
 async function withRefresh(fn: () => Promise<unknown>) {
   try { await fn(); await refresh(); }
@@ -72,16 +59,16 @@ async function withRefresh(fn: () => Promise<unknown>) {
 }
 
 export const assignRole = (userId: string, role: string) =>
-  withRefresh(() => api(`${appPath(state.appId!)}/roles/assign`, json({ userId, role })));
+  withRefresh(() => api("/api/v1/roles/assign", json({ userId, role })));
 
 export const revokeRole = (userId: string, role: string) =>
-  withRefresh(() => api(`${appPath(state.appId!)}/roles/revoke`, json({ userId, role })));
+  withRefresh(() => api("/api/v1/roles/revoke", json({ userId, role })));
 
 export const createRole = (name: string, description?: string) =>
-  withRefresh(() => api(`${appPath(state.appId!)}/roles`, json({ name, description })));
+  withRefresh(() => api("/api/v1/roles", json({ name, description })));
 
 export const updateRole = (roleName: string, data: { description?: string; inherits?: string[]; permissions?: string[] }) =>
-  withRefresh(() => api(`${appPath(state.appId!)}/roles/${encodeURIComponent(roleName)}`, { ...json(data), method: "PATCH" }));
+  withRefresh(() => api(`/api/v1/roles/${encodeURIComponent(roleName)}`, { ...json(data), method: "PATCH" }));
 
 export const deleteRole = (roleName: string) =>
-  withRefresh(() => api(`${appPath(state.appId!)}/roles/${encodeURIComponent(roleName)}`, { method: "DELETE" }));
+  withRefresh(() => api(`/api/v1/roles/${encodeURIComponent(roleName)}`, { method: "DELETE" }));
