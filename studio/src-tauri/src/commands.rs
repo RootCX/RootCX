@@ -327,64 +327,62 @@ pub fn clear_recent(app_handle: tauri::AppHandle, state: State<'_, AppState>) {
     crate::menu::rebuild_recent_menu(&app_handle, &[]);
 }
 
-const CORE_IMAGE: &str = "ghcr.io/rootcx/core";
-const CORE_CONTAINER: &str = "rootcx-core";
-
-fn docker() -> Result<bollard::Docker, String> {
-    bollard::Docker::connect_with_local_defaults().map_err(|e| format!("docker: {e}"))
-}
+const COMPOSE_YAML: &str = r#"services:
+  postgres:
+    image: ghcr.io/rootcx/postgresql:16-pgmq
+    user: root
+    entrypoint: ["/pg-entrypoint.sh"]
+    environment:
+      POSTGRES_USER: rootcx
+      POSTGRES_PASSWORD: rootcx
+      POSTGRES_DB: rootcx
+      PGDATA: /data/pgdata
+    volumes:
+      - pgdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rootcx -d rootcx"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+  core:
+    image: ghcr.io/rootcx/core:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://rootcx:rootcx@postgres:5432/rootcx
+    ports:
+      - "9100:9100"
+    volumes:
+      - data:/data
+volumes:
+  pgdata:
+  data:
+"#;
 
 #[tauri::command]
 pub async fn check_docker() -> Result<bool, String> {
-    let Ok(d) = docker() else { return Ok(false) };
-    Ok(d.ping().await.is_ok())
+    let out = tokio::process::Command::new("docker").arg("info")
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .status().await;
+    Ok(out.map(|s| s.success()).unwrap_or(false))
 }
 
 #[tauri::command]
 pub async fn start_local_core() -> Result<(), String> {
-    use bollard::models::*;
-    use futures_util::TryStreamExt;
+    let dir = std::env::temp_dir().join("rootcx-compose");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("tmpdir: {e}"))?;
+    let file = dir.join("docker-compose.yml");
+    std::fs::write(&file, COMPOSE_YAML).map_err(|e| format!("write compose: {e}"))?;
 
-    let d = docker()?;
-    let tag = env!("CARGO_PKG_VERSION");
+    let out = tokio::process::Command::new("docker")
+        .args(["compose", "-f", &file.to_string_lossy(), "up", "-d", "--wait"])
+        .output().await.map_err(|e| format!("docker compose: {e}"))?;
 
-    if let Ok(info) = d.inspect_container(CORE_CONTAINER, None).await {
-        if info.state.and_then(|s| s.running) == Some(true) {
-            return Ok(());
-        }
-        let opts = bollard::query_parameters::RemoveContainerOptionsBuilder::default()
-            .force(true).build();
-        let _ = d.remove_container(CORE_CONTAINER, Some(opts)).await;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("docker compose up failed: {stderr}"));
     }
-
-    if d.inspect_image(&format!("{CORE_IMAGE}:{tag}")).await.is_err() {
-        let pull = bollard::query_parameters::CreateImageOptionsBuilder::default()
-            .from_image(CORE_IMAGE).tag(tag).build();
-        d.create_image(Some(pull), None, None)
-            .try_collect::<Vec<_>>().await
-            .map_err(|e| format!("pull failed: {e}"))?;
-    }
-
-    let config = ContainerCreateBody {
-        image: Some(format!("{CORE_IMAGE}:{tag}")),
-        host_config: Some(HostConfig {
-            port_bindings: Some([(
-                "9100/tcp".into(),
-                Some(vec![PortBinding { host_ip: Some("0.0.0.0".into()), host_port: Some("9100".into()) }]),
-            )].into()),
-            binds: Some(vec!["rootcx-data:/data".into()]),
-            restart_policy: Some(RestartPolicy { name: Some(RestartPolicyNameEnum::UNLESS_STOPPED), ..Default::default() }),
-            init: Some(true),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    let name = bollard::query_parameters::CreateContainerOptionsBuilder::default()
-        .name(CORE_CONTAINER).build();
-    d.create_container(Some(name), config).await.map_err(|e| format!("create: {e}"))?;
-    d.start_container(CORE_CONTAINER, None::<bollard::query_parameters::StartContainerOptions>).await
-        .map_err(|e| format!("start: {e}"))?;
 
     let client = reqwest::Client::new();
     for _ in 0..90 {

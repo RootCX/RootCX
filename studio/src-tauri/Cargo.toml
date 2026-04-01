@@ -37,5 +37,3 @@ notify-debouncer-mini = "0.5"
 uuid = { version = "1", features = ["v4"] }
 urlencoding = "2"
 fix-path-env = { git = "https://github.com/tauri-apps/fix-path-env-rs" }
-bollard = "0.20"
-futures-util = "0.3"

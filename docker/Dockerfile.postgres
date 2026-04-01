@@ -10,4 +10,7 @@ RUN apt-get update \
     && apt-get purge -y build-essential postgresql-server-dev-16 git \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* /tmp/pgmq
+
+COPY pg-entrypoint.sh /pg-entrypoint.sh
+RUN chmod +x /pg-entrypoint.sh
 USER postgres

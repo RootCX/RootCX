@@ -136,7 +136,7 @@ function LocalStep({ onBack }: { onBack: () => void }) {
               {(status === "idle" || status === "error") && "Start RootCX Core"}
             </Button>
             <p className="text-[11px] text-center text-muted-foreground">
-              This will pull and run <code className="text-foreground">ghcr.io/rootcx/core</code>
+              Requires Docker Desktop running on this machine
             </p>
           </>
         )}
