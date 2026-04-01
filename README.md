@@ -81,15 +81,16 @@ Run a Core instance on your own machine. Ideal for offline development or full c
 
 **Prerequisite:** [Docker Desktop](https://docker.com/get-started) must be installed and running.
 
-1. In Studio's welcome screen, select **Run locally**.
-2. Studio pulls and starts the `ghcr.io/rootcx/core` Docker container automatically.
-3. Once the Core is healthy, Studio connects to `http://localhost:9100`.
+**Via Studio:** select **Run locally** on the welcome screen. Studio handles everything automatically.
 
-No manual configuration required. You can also run the container yourself:
+**Via command line:**
 
 ```bash
-docker run -d --name rootcx-core -p 9100:9100 -e ROOTCX_BIND=1 ghcr.io/rootcx/core:latest
+git clone https://github.com/rootcx/rootcx.git && cd rootcx
+docker compose up -d
 ```
+
+Core will be available at `http://localhost:9100` once both services are healthy.
 
 For production self-hosting, see the [Self-Hosting guide](https://rootcx.com/docs/developers/self-hosting).
 
