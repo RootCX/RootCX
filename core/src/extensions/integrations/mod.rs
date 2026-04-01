@@ -1,4 +1,4 @@
-mod auth;
+pub(crate) mod auth;
 mod catalog;
 pub(crate) mod routes;
 
@@ -52,6 +52,7 @@ impl RuntimeExtension for IntegrationsExtension {
             .route("/api/v1/integrations/{integration_id}/auth", get(auth::status).delete(auth::disconnect))
             .route("/api/v1/integrations/{integration_id}/auth/start", post(auth::start))
             .route("/api/v1/integrations/{integration_id}/auth/credentials", post(auth::submit_credentials))
+            .route("/api/v1/integrations/{integration_id}/auth/delegate", post(auth::delegate))
             .route("/api/v1/integrations/auth/callback", get(auth::callback))
             .route("/api/v1/hooks/{token}", post(routes::webhook_ingress)))
     }

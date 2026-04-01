@@ -304,11 +304,9 @@ impl IntegrationCaller for IntegrationCallImpl {
         let config = crate::extensions::integrations::routes::resolve_config(pool, &self.secrets, integration_id)
             .await.map_err(|e| format!("{e:?}"))?;
 
-        let key = format!("_iuc.{integration_id}.{user_id}");
-        let user_credentials = match self.secrets.get(pool, integration_id, &key).await {
-            Ok(Some(raw)) => serde_json::from_str(&raw).unwrap_or(JsonValue::Null),
-            _ => JsonValue::Null,
-        };
+        let (user_credentials, effective_uid) = crate::extensions::integrations::auth::resolve_credentials(
+            &self.secrets, pool, integration_id, &user_id.to_string(),
+        ).await;
 
         self.wm.rpc(
             integration_id,
@@ -316,7 +314,7 @@ impl IntegrationCaller for IntegrationCallImpl {
             "__integration".into(),
             serde_json::json!({
                 "action": action_id, "input": input, "config": config,
-                "userCredentials": user_credentials, "userId": user_id.to_string(),
+                "userCredentials": user_credentials, "userId": effective_uid,
             }),
             None,
         ).await.map_err(|e| e.to_string())
