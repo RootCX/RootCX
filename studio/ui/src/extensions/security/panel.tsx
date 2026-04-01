@@ -380,7 +380,6 @@ function RoleDetailView({ role, availablePermissions, isAdmin, onBack }: {
         {filtered.map(([ns, perms]) => {
           const selectedCount = perms.filter((p) => coveredByWildcard(p.key) || role.permissions.includes(p.key)).length;
           const groupWc = wildcardForGroup(ns);
-          const groupToggleable = !isBuiltIn && isAdmin && !groupWc;
           return (
             <div key={ns} className="border-b border-border/50">
               <div className="flex items-center gap-2 px-3 py-1.5">
