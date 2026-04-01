@@ -2,14 +2,13 @@ services:
   postgres:
     image: ghcr.io/rootcx/postgresql:16-pgmq
     user: root
-    entrypoint: ["/docker/pg-entrypoint.sh"]
+    entrypoint: ["/pg-entrypoint.sh"]
     environment:
       POSTGRES_USER: rootcx
       POSTGRES_PASSWORD: rootcx
       POSTGRES_DB: rootcx
       PGDATA: /data/pgdata
     volumes:
-      - ./docker/pg-entrypoint.sh:/docker/pg-entrypoint.sh:ro
       - pgdata:/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rootcx -d rootcx"]

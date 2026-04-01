@@ -1,6 +1,6 @@
 [package]
 name = "rootcx-client"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 license-file = "../../LICENSE.md"
 description = "RootCX runtime client"
@@ -10,4 +10,4 @@ repository = "https://github.com/rootcx/rootcx"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
 serde_json = "1"
 thiserror = "2"
-rootcx-types = { version = "0.6.1", path = "../../crates/shared-types" }
+rootcx-types = { version = "0.6.2", path = "../../crates/shared-types" }
