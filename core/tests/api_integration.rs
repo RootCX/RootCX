@@ -1571,3 +1571,169 @@ async fn federated_query_across_apps() {
     rt.shutdown().await;
 }
 
+// ── OIDC ────────────────────────────────────────────────────────────────────
+
+/// Seed a provider directly in DB (bypasses discovery validation).
+async fn seed_oidc_provider(pool: &sqlx::PgPool, id: &str, display_name: &str, enabled: bool) {
+    sqlx::query(
+        "INSERT INTO rootcx_system.oidc_providers
+            (id, display_name, issuer_url, client_id, scopes, auto_register, default_role, enabled)
+         VALUES ($1, $2, 'https://fake.example.com', 'cid', '{openid}', true, 'admin', $3)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(id)
+    .bind(display_name)
+    .bind(enabled)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn oidc_auth_mode_includes_providers() {
+    let rt = TestRuntime::boot().await;
+
+    // Baseline: no providers
+    let (s, body) = rt.get_json("/api/v1/auth/mode").await;
+    assert_eq!(s, 200);
+    assert!(body["providers"].as_array().unwrap().is_empty());
+    assert_eq!(body["passwordLoginEnabled"], true);
+
+    // Seed one provider
+    seed_oidc_provider(rt.pool(), "acme", "Acme SSO", true).await;
+    let (_, body) = rt.get_json("/api/v1/auth/mode").await;
+    let providers = body["providers"].as_array().unwrap();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0]["id"], "acme");
+    assert_eq!(providers[0]["displayName"], "Acme SSO");
+
+    // Disabled provider is excluded
+    seed_oidc_provider(rt.pool(), "hidden", "Hidden", false).await;
+    let (_, body) = rt.get_json("/api/v1/auth/mode").await;
+    assert_eq!(body["providers"].as_array().unwrap().len(), 1, "disabled provider must not appear");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn oidc_list_providers_is_public() {
+    let rt = TestRuntime::boot().await;
+
+    // Unauthenticated access should work (login screen needs this)
+    let r = rt.client.get(rt.url("/api/v1/auth/oidc/providers")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let body: Value = r.json().await.unwrap();
+    assert!(body.as_array().unwrap().is_empty());
+
+    seed_oidc_provider(rt.pool(), "corp", "Corp IdP", true).await;
+    seed_oidc_provider(rt.pool(), "disabled", "Off", false).await;
+
+    let r = rt.client.get(rt.url("/api/v1/auth/oidc/providers")).send().await.unwrap();
+    let body: Value = r.json().await.unwrap();
+    let ids: Vec<&str> = body.as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, vec!["corp"], "only enabled providers are listed");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn oidc_upsert_provider_validation() {
+    let rt = TestRuntime::boot().await;
+
+    for (label, body, expected_status) in [
+        ("empty id", json!({"id":"","displayName":"X","issuerUrl":"https://x.com","clientId":"c"}), 400),
+        ("empty issuer", json!({"id":"x","displayName":"X","issuerUrl":"","clientId":"c"}), 400),
+        ("empty client_id", json!({"id":"x","displayName":"X","issuerUrl":"https://x.com","clientId":""}), 400),
+        ("http non-localhost", json!({"id":"x","displayName":"X","issuerUrl":"http://evil.com","clientId":"c"}), 400),
+    ] {
+        let (s, _) = rt.post_json("/api/v1/auth/oidc/providers", &body).await;
+        assert_eq!(s, expected_status, "upsert validation: {label}");
+    }
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn oidc_upsert_provider_rejects_unauthenticated() {
+    let rt = TestRuntime::boot().await;
+    let body = json!({"id":"x","displayName":"X","issuerUrl":"https://x.com","clientId":"c"});
+    let (s, _) = rt.post_unauthed("/api/v1/auth/oidc/providers", &body).await;
+    assert_eq!(s, 401);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn oidc_delete_provider_lifecycle() {
+    let rt = TestRuntime::boot().await;
+
+    // Delete nonexistent → 404
+    let (s, _) = rt.delete_json("/api/v1/auth/oidc/providers/ghost").await;
+    assert_eq!(s, 404, "deleting nonexistent provider should 404");
+
+    // Seed and delete
+    seed_oidc_provider(rt.pool(), "todel", "To Delete", true).await;
+    let (s, _) = rt.delete_json("/api/v1/auth/oidc/providers/todel").await;
+    assert_eq!(s, 200);
+
+    // Verify gone
+    let r = rt.client.get(rt.url("/api/v1/auth/oidc/providers")).send().await.unwrap();
+    let body: Value = r.json().await.unwrap();
+    assert!(body.as_array().unwrap().is_empty(), "provider should be deleted");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn oidc_delete_provider_rejects_unauthenticated() {
+    let rt = TestRuntime::boot().await;
+    let s = rt.delete_unauthed("/api/v1/auth/oidc/providers/anything").await;
+    assert_eq!(s, 401);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn oidc_token_exchange_unknown_provider() {
+    let rt = TestRuntime::boot().await;
+    let (s, body) = rt.post_json("/api/v1/auth/oidc/token-exchange", &json!({
+        "providerId": "nonexistent",
+        "idToken": "fake.jwt.here",
+    })).await;
+    assert_eq!(s, 404, "token exchange with unknown provider: {body}");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn oidc_token_exchange_invalid_id_token() {
+    let rt = TestRuntime::boot().await;
+    seed_oidc_provider(rt.pool(), "testidp", "Test IdP", true).await;
+
+    let (s, _) = rt.post_json("/api/v1/auth/oidc/token-exchange", &json!({
+        "providerId": "testidp",
+        "idToken": "not-a-valid-jwt",
+    })).await;
+    // Discovery fetch for fake issuer will fail → 500
+    assert!(s.is_client_error() || s.is_server_error(), "invalid id_token should fail");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn oidc_authorize_unknown_provider() {
+    let rt = TestRuntime::boot().await;
+    let r = rt.client
+        .get(rt.url("/api/v1/auth/oidc/ghost/authorize"))
+        .send().await.unwrap();
+    // Provider not found → error (404 or 500 from discovery failure)
+    assert!(r.status().is_client_error() || r.status().is_server_error());
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn oidc_callback_rejects_invalid_state() {
+    let rt = TestRuntime::boot().await;
+    let r = rt.client
+        .get(rt.url("/api/v1/auth/oidc/callback?code=fake&state=bogus"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 401, "callback with unknown state should be rejected");
+    rt.shutdown().await;
+}
+

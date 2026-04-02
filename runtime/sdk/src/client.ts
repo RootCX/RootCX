@@ -22,6 +22,18 @@ export interface RegisterInput {
   displayName?: string;
 }
 
+export interface OidcProvider {
+  id: string;
+  displayName: string;
+}
+
+export interface AuthMode {
+  authRequired: boolean;
+  setupRequired: boolean;
+  passwordLoginEnabled: boolean;
+  providers: OidcProvider[];
+}
+
 export interface RoleDefinition {
   name: string;
   description: string | null;
@@ -281,6 +293,27 @@ export class RuntimeClient {
     });
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
+  }
+
+  async authMode(): Promise<AuthMode> {
+    const res = await fetch(`${this.baseUrl}/api/v1/auth/mode`);
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async oidcLogin(providerId: string): Promise<void> {
+    // Tauri: open system browser via oidc_login command (RFC 8252)
+    // Uses window.__TAURI__ public API (requires withGlobalTauri: true in tauri.conf.json)
+    const tauri = typeof window !== "undefined" && (window as any).__TAURI__;
+    if (tauri?.core?.invoke) {
+      const tokens: { accessToken: string; refreshToken: string } = await tauri.core.invoke("oidc_login", { providerId });
+      this.accessToken = tokens.accessToken;
+      this.refreshToken = tokens.refreshToken;
+      return;
+    }
+    // Browser: standard redirect
+    const redirectUri = window.location.href.split("?")[0];
+    window.location.href = `${this.baseUrl}/api/v1/auth/oidc/${encodeURIComponent(providerId)}/authorize?redirect_uri=${encodeURIComponent(redirectUri)}`;
   }
 
   async register(data: RegisterInput): Promise<{ user: AuthUser }> {

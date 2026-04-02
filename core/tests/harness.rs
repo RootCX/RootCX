@@ -8,8 +8,8 @@ use tempfile::TempDir;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt, runners::AsyncRunner};
 use testcontainers::core::{IntoContainerPort, WaitFor};
 
-const PG_IMAGE: &str = "rootcx-postgres";
-const PG_TAG: &str = "17";
+const PG_IMAGE: &str = "ghcr.io/rootcx/postgresql";
+const PG_TAG: &str = "16-pgmq";
 
 pub struct TestRuntime {
     base_url: String,
@@ -32,15 +32,18 @@ impl TestRuntime {
         let container = GenericImage::new(PG_IMAGE, PG_TAG)
             .with_exposed_port(5432_u16.tcp())
             .with_wait_for(WaitFor::message_on_stderr("database system is ready to accept connections"))
-            .with_env_var("POSTGRES_USER", "postgres")
-            .with_env_var("POSTGRES_PASSWORD", "postgres")
-            .with_env_var("POSTGRES_DB", "postgres")
+            .with_entrypoint("/pg-entrypoint.sh")
+            .with_user("root")
+            .with_env_var("POSTGRES_USER", "rootcx")
+            .with_env_var("POSTGRES_PASSWORD", "rootcx")
+            .with_env_var("POSTGRES_DB", "rootcx")
+            .with_env_var("PGDATA", "/tmp/pgdata")
             .start()
             .await
             .expect("failed to start postgres container");
 
         let pg_port = container.get_host_port_ipv4(5432).await.unwrap();
-        let db_url = format!("postgresql://postgres:postgres@127.0.0.1:{pg_port}/postgres");
+        let db_url = format!("postgresql://rootcx:rootcx@127.0.0.1:{pg_port}/rootcx");
 
         let resources_dir = data_dir.join("resources");
         std::fs::create_dir_all(&resources_dir).unwrap();
@@ -67,6 +70,8 @@ impl TestRuntime {
 
         Self { base_url, client, runtime, token, _tmp: tmp, _container: container }
     }
+
+    pub fn pool(&self) -> &sqlx::PgPool { self.runtime.pool() }
 
     pub fn url(&self, path: &str) -> String {
         format!("{}{path}", self.base_url)

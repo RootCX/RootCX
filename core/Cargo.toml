@@ -40,6 +40,10 @@ jsonwebtoken = "9"
 hmac = "0.12"
 sha2 = "0.10"
 
+# OIDC Relying Party
+openidconnect = { version = "4", features = ["reqwest"] }
+url = "2"
+
 # Job Engine
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

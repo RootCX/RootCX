@@ -23,4 +23,7 @@ pub enum RuntimeError {
 
     #[error("MCP error: {0}")]
     Mcp(String),
+
+    #[error("configuration error: {0}")]
+    Config(String),
 }
