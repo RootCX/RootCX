@@ -81,7 +81,7 @@ async fn accept_callback(listener: TcpListener) -> Result<OidcTokens, String> {
     };
 
     let html = if body.is_ok() {
-        "Authenticated — you can close this tab."
+        "Authenticated - you can close this tab."
     } else {
         "Authentication failed."
     };
