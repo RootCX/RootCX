@@ -99,6 +99,19 @@ jobs:
             --bundles ${{ matrix.bundles }} \
             --config '{"build":{"beforeBuildCommand":""}}'
 
+      - name: Tag macOS updater bundle with arch
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          ARCH="${{ matrix.target }}" && ARCH="${ARCH%%-*}"
+          DIR="target/${{ matrix.target }}/release/bundle/macos"
+          for f in "${DIR}"/*.app.tar.gz "${DIR}"/*.app.tar.gz.sig; do
+            [ -f "$f" ] || continue
+            base="${f%.app.tar.gz*}"
+            ext="${f#"$base"}"
+            mv "$f" "${base}_${ARCH}${ext}"
+          done
+
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
@@ -130,17 +143,13 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create version-free copies for stable download URLs
+      - name: Normalize filenames (spaces to dots, matching GitHub asset names)
         shell: bash
         run: |
           cd artifacts
-          find . -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \) -print0 | while IFS= read -r -d '' f; do
-            base=$(basename "$f")
-            stable=$(echo "$base" | sed 's/_[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*_/_/')
-            if [ "$base" != "$stable" ]; then
-              cp "$f" "$(dirname "$f")/$stable"
-              echo "  $base -> $stable"
-            fi
+          for f in *' '*; do
+            [ -e "$f" ] || continue
+            mv "$f" "${f// /.}"
           done
 
       - name: Generate latest.json
@@ -151,25 +160,24 @@ jobs:
           BASE="https://github.com/RootCX/RootCX/releases/download/${TAG}"
 
           sig() { cat "$1" 2>/dev/null || echo ""; }
-          url() { echo "${BASE}/$(basename "$1" 2>/dev/null)"; }
 
-          MAC_ARM=$(echo artifacts/**/*aarch64*.app.tar.gz)
-          MAC_X64=$(echo artifacts/**/*x86_64*.app.tar.gz)
-          LINUX=$(echo artifacts/**/*.AppImage)
-          WIN=$(echo artifacts/**/*-setup.exe)
+          MAC_ARM="RootCX.Studio_aarch64.app.tar.gz"
+          MAC_X64="RootCX.Studio_x86_64.app.tar.gz"
+          LINUX="RootCX.Studio_${VERSION}_amd64.AppImage"
+          WIN="RootCX.Studio_${VERSION}_x64-setup.exe"
 
           jq -n \
             --arg v "$VERSION" \
             --arg notes "Release ${TAG}" \
             --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            --arg mac_arm_sig "$(sig "${MAC_ARM}.sig")" \
-            --arg mac_arm_url "$(url "$MAC_ARM")" \
-            --arg mac_x64_sig "$(sig "${MAC_X64}.sig")" \
-            --arg mac_x64_url "$(url "$MAC_X64")" \
-            --arg linux_sig "$(sig "${LINUX}.sig")" \
-            --arg linux_url "$(url "$LINUX")" \
-            --arg win_sig "$(sig "${WIN}.sig")" \
-            --arg win_url "$(url "$WIN")" \
+            --arg mac_arm_sig "$(sig "artifacts/${MAC_ARM}.sig")" \
+            --arg mac_arm_url "${BASE}/${MAC_ARM}" \
+            --arg mac_x64_sig "$(sig "artifacts/${MAC_X64}.sig")" \
+            --arg mac_x64_url "${BASE}/${MAC_X64}" \
+            --arg linux_sig "$(sig "artifacts/${LINUX}.sig")" \
+            --arg linux_url "${BASE}/${LINUX}" \
+            --arg win_sig "$(sig "artifacts/${WIN}.sig")" \
+            --arg win_url "${BASE}/${WIN}" \
             '{
               version: $v,
               notes: $notes,
@@ -183,6 +191,19 @@ jobs:
             }' > latest.json
 
           cat latest.json
+
+      - name: Create version-free copies for stable download URLs
+        shell: bash
+        run: |
+          cd artifacts
+          find . -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.AppImage' \) -print0 | while IFS= read -r -d '' f; do
+            base=$(basename "$f")
+            stable=$(echo "$base" | sed 's/_[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*_/_/')
+            if [ "$base" != "$stable" ]; then
+              cp "$f" "$(dirname "$f")/$stable"
+              echo "  $base -> $stable"
+            fi
+          done
 
       - uses: softprops/action-gh-release@v2
         with:
