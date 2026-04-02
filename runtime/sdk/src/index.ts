@@ -2,6 +2,8 @@ export { RuntimeClient, RuntimeApiError, DEFAULT_BASE_URL } from "./client";
 export type {
   RuntimeClientOptions,
   AuthUser,
+  AuthMode,
+  OidcProvider,
   LoginResponse,
   RegisterInput,
   RoleDefinition,

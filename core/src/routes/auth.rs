@@ -80,6 +80,15 @@ pub async fn register(
     }
 
     let pool = super::pool(&rt);
+
+    // Check if password login is disabled (bypass for first user setup)
+    if password_login_disabled() {
+        let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM rootcx_system.users WHERE is_system = false")
+            .fetch_one(&pool).await?;
+        if count > 0 {
+            return Err(ApiError::Forbidden("password registration is disabled".into()));
+        }
+    }
     let pw_hash = password::hash(&req.password)?;
 
     let row: UserRow = sqlx::query_as(
@@ -121,6 +130,10 @@ pub async fn login(
     axum::Extension(auth_config): axum::Extension<Arc<AuthConfig>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
+    if password_login_disabled() {
+        return Err(ApiError::Forbidden("password login is disabled".into()));
+    }
+
     let pool = super::pool(&rt);
 
     let row: Option<(Uuid, String, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>)> =
@@ -210,12 +223,32 @@ pub async fn logout(
     Ok(Json(json!({ "message": "logged out" })))
 }
 
+pub fn password_login_disabled() -> bool {
+    std::env::var("ROOTCX_DISABLE_PASSWORD_LOGIN")
+        .is_ok_and(|v| v == "true" || v == "1")
+}
+
 pub async fn auth_mode(State(rt): State<SharedRuntime>) -> Result<Json<JsonValue>, ApiError> {
     let pool = super::pool(&rt);
     let (count,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM rootcx_system.users WHERE is_system = false")
         .fetch_one(&pool)
         .await?;
-    Ok(Json(json!({ "authRequired": true, "setupRequired": count == 0 })))
+
+    let setup_required = count == 0;
+
+    let providers: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, display_name FROM rootcx_system.oidc_providers WHERE enabled = true ORDER BY id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    Ok(Json(json!({
+        "authRequired": true,
+        "setupRequired": setup_required,
+        "passwordLoginEnabled": !password_login_disabled() || setup_required,
+        "providers": providers.iter().map(|(id, name)| json!({ "id": id, "displayName": name })).collect::<Vec<_>>(),
+    })))
 }
 
 pub async fn list_users(

@@ -22,6 +22,18 @@ export interface AuthUser {
   displayName: string | null;
 }
 
+export interface OidcProvider {
+  id: string;
+  displayName: string;
+}
+
+export interface AuthMode {
+  authRequired: boolean;
+  setupRequired: boolean;
+  passwordLoginEnabled: boolean;
+  providers: OidcProvider[];
+}
+
 interface AuthState {
   user: AuthUser | null;
   loading: boolean;
@@ -95,6 +107,22 @@ export async function disconnect() {
   BASE = "";
   await setCoreUrl("");
   state = { user: null, loading: false, connected: false };
+  emit();
+}
+
+export async function fetchAuthMode(): Promise<AuthMode> {
+  const res = await fetch(`${BASE}/api/v1/auth/mode`);
+  if (!res.ok) throw new Error("failed to fetch auth mode");
+  return res.json();
+}
+
+export async function oidcLogin(providerId: string) {
+  const tokens = await invoke<{ accessToken: string; refreshToken: string }>("oidc_login", { providerId });
+  accessToken = tokens.accessToken;
+  refreshToken = tokens.refreshToken;
+  if (refreshToken) localStorage.setItem(REFRESH_KEY, refreshToken);
+  syncToken();
+  state = { ...state, user: await fetchMe() };
   emit();
 }
 

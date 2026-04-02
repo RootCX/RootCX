@@ -2,6 +2,7 @@ mod commands;
 mod forge;
 mod launch;
 mod menu;
+mod oidc;
 mod runner;
 mod scaffold;
 mod state;
@@ -63,6 +64,7 @@ pub fn run() {
             forge::forge_reply_question,
             forge::forge_reject_question,
             forge::forge_reload_config,
+            oidc::oidc_login,
         ])
         .setup(|app| {
             let view_menu = menu::setup(app)?;

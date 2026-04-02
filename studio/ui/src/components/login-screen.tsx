@@ -2,7 +2,7 @@ import { useState, useEffect, type FormEvent } from "react";
 import { Server, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/logo";
-import { login, register, disconnect, getCoreUrl, fetchCore } from "@/core/auth";
+import { login, register, disconnect, getCoreUrl, fetchAuthMode, oidcLogin, type AuthMode } from "@/core/auth";
 
 const ERROR_MAP: Record<string, string> = {
   "invalid credentials": "Incorrect email or password",
@@ -38,13 +38,16 @@ export function LoginScreen() {
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [coreUrl, setCoreUrl] = useState("");
+  const [authModeData, setAuthModeData] = useState<AuthMode | null>(null);
 
   useEffect(() => { getCoreUrl().then(setCoreUrl); }, []);
 
   useEffect(() => {
-    fetchCore("/api/v1/auth/mode")
-      .then((r) => r.json())
-      .then((d) => { if (d.setupRequired) setMode("register"); })
+    fetchAuthMode()
+      .then((m) => {
+        setAuthModeData(m);
+        if (m.setupRequired) setMode("register");
+      })
       .catch(() => {});
   }, []);
 
@@ -94,46 +97,76 @@ export function LoginScreen() {
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="flex flex-col gap-3 rounded-lg border border-border bg-sidebar p-6">
+        <div className="flex flex-col gap-3 rounded-lg border border-border bg-sidebar p-6">
           <h1 className="mb-1 text-center text-lg font-semibold text-foreground">
             {mode === "login" ? "Sign in" : "Create account"}
           </h1>
 
-          {mode === "register" && (
-            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-              Full name
-              <input type="text" autoFocus value={displayName} onChange={(e) => setDisplayName(e.target.value)} className={INPUT} />
-            </label>
+          {(authModeData?.providers ?? []).length > 0 && (
+            <div className="flex flex-col gap-2">
+              {authModeData!.providers.map((p) => (
+                <Button
+                  key={p.id}
+                  type="button"
+                  variant="outline"
+                  onClick={() => { setError(null); setSubmitting(true); oidcLogin(p.id).catch((e) => setError(friendlyError(String(e)))).finally(() => setSubmitting(false)); }}
+                  disabled={submitting}
+                  className="w-full cursor-pointer"
+                >
+                  Sign in with {p.displayName}
+                </Button>
+              ))}
+            </div>
           )}
 
-          <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-            Email
-            <input type="email" required autoFocus={mode === "login"} value={email} onChange={(e) => setEmail(e.target.value)} className={INPUT} />
-          </label>
-
-          <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-            Password
-            <input type="password" required minLength={6} value={password} onChange={(e) => setPassword(e.target.value)} className={INPUT} />
-          </label>
-
-          {mode === "register" && (
-            <label className="flex flex-col gap-1 text-xs text-muted-foreground">
-              Confirm password
-              <input type="password" required minLength={6} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className={INPUT} />
-            </label>
+          {(authModeData?.providers ?? []).length > 0 && (authModeData?.passwordLoginEnabled ?? true) && (
+            <div className="relative my-1">
+              <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-border" /></div>
+              <div className="relative flex justify-center text-[10px] uppercase">
+                <span className="bg-sidebar px-2 text-muted-foreground">or</span>
+              </div>
+            </div>
           )}
 
           {error && <div className="rounded-md border border-red-900/50 bg-red-950/30 px-3 py-2 text-xs text-red-400">{error}</div>}
 
-          <Button type="submit" disabled={submitting} className="mt-1 cursor-pointer">
-            {submitting ? "..." : mode === "login" ? "Sign in" : "Create account"}
-          </Button>
+          {(authModeData?.passwordLoginEnabled ?? true) && (
+            <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+              {mode === "register" && (
+                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                  Full name
+                  <input type="text" autoFocus value={displayName} onChange={(e) => setDisplayName(e.target.value)} className={INPUT} />
+                </label>
+              )}
 
-          <button type="button" onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(null); }}
-            className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
-            {mode === "login" ? "Don't have an account? Register" : "Already have an account? Sign in"}
-          </button>
-        </form>
+              <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                Email
+                <input type="email" required autoFocus={mode === "login"} value={email} onChange={(e) => setEmail(e.target.value)} className={INPUT} />
+              </label>
+
+              <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                Password
+                <input type="password" required minLength={6} value={password} onChange={(e) => setPassword(e.target.value)} className={INPUT} />
+              </label>
+
+              {mode === "register" && (
+                <label className="flex flex-col gap-1 text-xs text-muted-foreground">
+                  Confirm password
+                  <input type="password" required minLength={6} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className={INPUT} />
+                </label>
+              )}
+
+              <Button type="submit" disabled={submitting} className="mt-1 cursor-pointer">
+                {submitting ? "..." : mode === "login" ? "Sign in" : "Create account"}
+              </Button>
+
+              <button type="button" onClick={() => { setMode(mode === "login" ? "register" : "login"); setError(null); }}
+                className="cursor-pointer text-xs text-muted-foreground hover:text-foreground">
+                {mode === "login" ? "Don't have an account? Register" : "Already have an account? Sign in"}
+              </button>
+            </form>
+          )}
+        </div>
       </div>
     </div>
   );

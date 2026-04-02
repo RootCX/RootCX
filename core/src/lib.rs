@@ -86,11 +86,13 @@ impl Runtime {
         schema::bootstrap(&pool).await?;
         sqlx::migrate!("./migrations").run(&pool).await.map_err(|e| RuntimeError::Schema(e.into()))?;
 
+        let secret_manager = Arc::new(SecretManager::new(&self.data_dir)?);
+
         for ext in &self.extensions {
             ext.bootstrap(&pool).await?;
         }
 
-        let secret_manager = Arc::new(SecretManager::new(&self.data_dir)?);
+        extensions::oidc::seed_from_env(&pool, &secret_manager).await?;
 
         let apps_dir = self.data_dir.join("apps");
         std::fs::create_dir_all(&apps_dir).map_err(|e| RuntimeError::Worker(format!("create apps dir: {e}")))?;
