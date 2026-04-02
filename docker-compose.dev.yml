@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: ghcr.io/rootcx/postgresql:16-pgmq
+    user: root
+    entrypoint: ["/pg-entrypoint.sh"]
+    environment:
+      POSTGRES_USER: rootcx
+      POSTGRES_PASSWORD: rootcx
+      POSTGRES_DB: rootcx
+      PGDATA: /data/pgdata
+    volumes:
+      - pgdata-dev:/data
+    ports:
+      - "5480:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rootcx -d rootcx"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata-dev:

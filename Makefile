@@ -62,10 +62,17 @@ test-image:
 
 # ── Development ───────────────────────────────────────────────────────────────
 
+DEV_DB := postgres://rootcx:rootcx@localhost:5480/rootcx
+
 dev:
 	pnpm --dir runtime/ui install
 	pnpm --dir studio/ui install
 	cargo tauri dev
+
+dev-core:
+	docker compose -f docker-compose.dev.yml up -d
+	@echo "Waiting for Postgres..." && until docker compose -f docker-compose.dev.yml exec -T postgres pg_isready -U rootcx -d rootcx >/dev/null 2>&1; do sleep 0.5; done
+	DATABASE_URL=$(DEV_DB) cargo run -p rootcx-core
 
 # ── Resource dependencies (PostgreSQL + Bun) ──────────────────────────────────
 
