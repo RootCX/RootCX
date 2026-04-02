@@ -4,6 +4,9 @@ use std::sync::Arc;
 use rootcx_types::{AppManifest, InstalledApp, OsStatus, SchemaVerification};
 use serde_json::Value as JsonValue;
 
+#[cfg(feature = "tauri")]
+pub mod oidc;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
     #[error("HTTP request failed: {0}")]
