@@ -39,7 +39,6 @@ function useEventListeners(dispatch: React.Dispatch<Action>) {
       win.listen<string>("toggle-view", (e) => dispatch({ type: "TOGGLE_VIEW", viewId: e.payload })),
       win.listen("run", () => executeCommand("rootcx.run")),
       win.listen("deploy", () => executeCommand("rootcx.deploy")),
-      win.listen("apply-migrations", () => executeCommand("rootcx.applyMigrations")),
       win.listen("bundle", () => executeCommand("rootcx.bundle")),
       win.listen("reset-layout", async () => {
         if (await ask("Reset all views to their default positions?", { title: "Reset Layout", kind: "warning", okLabel: "Reset", cancelLabel: "Cancel" }))

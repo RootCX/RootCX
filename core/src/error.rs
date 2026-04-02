@@ -23,7 +23,4 @@ pub enum RuntimeError {
 
     #[error("MCP error: {0}")]
     Mcp(String),
-
-    #[error("migration error: {0}")]
-    Migration(String),
 }

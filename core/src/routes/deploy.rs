@@ -61,8 +61,6 @@ pub async fn deploy_backend(
 
     info!(app_id = %app_id, dir = %app_dir.display(), "backend deployed");
 
-    crate::migrations::run_pending(&pool, &app_id, &app_dir).await?;
-
     if app_dir.join("package.json").exists() {
         install_deps(&bun_bin, &app_dir).await?;
     }

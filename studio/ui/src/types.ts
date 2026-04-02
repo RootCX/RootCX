@@ -32,7 +32,6 @@ export interface SchemaChange {
   change_type: string;
   column: string;
   detail: string | null;
-  safe: boolean;
 }
 
 export interface SchemaVerification {

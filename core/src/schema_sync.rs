@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use sqlx::PgPool;
+use sqlx::{Connection, PgPool};
 use tracing::info;
 
 use crate::RuntimeError;
@@ -171,21 +171,6 @@ pub fn compute_diff(
     TableDiff { schema_name: schema_name.to_string(), table_name: table_name.to_string(), changes }
 }
 
-fn is_safe_change(change: &ColumnDiff) -> bool {
-    match change {
-        // Nullable or has default → Postgres backfills safely
-        ColumnDiff::Add { field, .. } => !field.required || field.default_value.is_some(),
-        ColumnDiff::DropNotNull { .. }
-        | ColumnDiff::SetDefault { .. }
-        | ColumnDiff::DropDefault { .. }
-        | ColumnDiff::DropCheckConstraint { .. } => true,
-        ColumnDiff::Drop { .. }
-        | ColumnDiff::AlterType { .. }
-        | ColumnDiff::SetNotNull { .. }
-        | ColumnDiff::ReplaceCheckConstraint { .. } => false,
-    }
-}
-
 fn generate_using_clause(col_name: &str, to: &str) -> String {
     let col = quote_ident(col_name);
     match to {
@@ -287,7 +272,7 @@ pub async fn sync_schema(
     entities: &[EntityContract],
     pk_types: &HashMap<String, &'static str>,
 ) -> Result<(), RuntimeError> {
-    let mut dangerous: Vec<SchemaChange> = Vec::new();
+    let mut has_type_changes = false;
 
     for entity in entities {
         let db_columns = introspect_table(pool, app_id, &entity.entity_name).await?;
@@ -299,43 +284,36 @@ pub async fn sync_schema(
         let diff = compute_diff(app_id, &entity.entity_name, &db_columns, &entity.fields, pk_types);
 
         if diff.changes.is_empty() {
-            info!(table = %format!("{}.{}", app_id, entity.entity_name), "schema in sync");
+            info!(
+                table = %format!("{}.{}", app_id, entity.entity_name),
+                "schema in sync"
+            );
             continue;
         }
 
-        let (safe, unsafe_changes): (Vec<_>, Vec<_>) = diff.changes.iter()
-            .partition(|c| is_safe_change(c));
+        has_type_changes |= diff.changes.iter().any(|c| matches!(c, ColumnDiff::AlterType { .. }));
 
-        for c in &unsafe_changes {
-            dangerous.push(column_diff_to_schema_change(&entity.entity_name, c));
-        }
+        let stmts = generate_ddl(&diff);
+        info!(
+            table = %format!("{}.{}", app_id, entity.entity_name),
+            changes = diff.changes.len(),
+            statements = stmts.len(),
+            "applying schema sync"
+        );
 
-        if !safe.is_empty() {
-            let safe_diff = TableDiff {
-                schema_name: app_id.to_string(),
-                table_name: entity.entity_name.clone(),
-                changes: safe.into_iter().cloned().collect(),
-            };
-            let stmts = generate_ddl(&safe_diff);
-            info!(
-                table = %format!("{}.{}", app_id, entity.entity_name),
-                safe_changes = safe_diff.changes.len(),
-                statements = stmts.len(),
-                "applying safe schema sync"
-            );
-            apply_ddl(pool, &stmts).await?;
-        }
+        apply_ddl(pool, &stmts).await?;
     }
 
-    let db_tables = list_tables_in_schema(pool, app_id).await?;
-    for table in find_orphaned_tables(&db_tables, entities) {
-        info!(app = %app_id, table = %table, "orphaned table — write a migration to drop if unused");
-    }
-
-    for c in &dangerous {
-        let col_part = if c.column.is_empty() { String::new() } else { format!(".{}", c.column) };
-        let detail_part = c.detail.as_ref().map(|d| format!(" ({d})")).unwrap_or_default();
-        info!(app = %app_id, "dangerous change requires migration: {}.{}{}: {}{}", app_id, c.entity, col_part, c.change_type, detail_part);
+    // Invalidate sqlx prepared-statement caches after column type changes
+    // to prevent stale parameter-type bindings (e.g. f64 sent as TEXT).
+    if has_type_changes {
+        let mut conns = Vec::new();
+        while let Some(conn) = pool.try_acquire() {
+            conns.push(conn);
+        }
+        for conn in &mut conns {
+            conn.clear_cached_statements().await.ok();
+        }
     }
 
     Ok(())
@@ -413,9 +391,7 @@ pub async fn list_tables_in_schema(pool: &PgPool, schema_name: &str) -> Result<V
 
 pub(crate) fn find_orphaned_tables(db_tables: &[String], manifest_entities: &[EntityContract]) -> Vec<String> {
     let manifest_names: HashSet<&str> = manifest_entities.iter().map(|e| e.entity_name.as_str()).collect();
-    db_tables.iter()
-        .filter(|t| !manifest_names.contains(t.as_str()) && !t.starts_with('_'))
-        .cloned().collect()
+    db_tables.iter().filter(|t| !manifest_names.contains(t.as_str())).cloned().collect()
 }
 
 fn column_diff_to_schema_change(entity: &str, diff: &ColumnDiff) -> SchemaChange {
@@ -434,8 +410,7 @@ fn column_diff_to_schema_change(entity: &str, diff: &ColumnDiff) -> SchemaChange
         }
         ColumnDiff::DropCheckConstraint { column_name, .. } => ("drop_enum", column_name, None),
     };
-    let safe = is_safe_change(diff);
-    SchemaChange { entity: entity.to_string(), change_type: change_type.to_string(), column: column.clone(), detail, safe }
+    SchemaChange { entity: entity.to_string(), change_type: change_type.to_string(), column: column.clone(), detail }
 }
 
 pub async fn verify_all(
@@ -453,7 +428,6 @@ pub async fn verify_all(
                 change_type: "create_table".to_string(),
                 column: String::new(),
                 detail: Some(format!("{} fields", entity.fields.len())),
-                safe: true,
             });
             continue;
         }
@@ -468,7 +442,6 @@ pub async fn verify_all(
             change_type: "drop_table".to_string(),
             column: String::new(),
             detail: None,
-            safe: false,
         });
     }
 
@@ -494,7 +467,6 @@ async fn verify_identity_indexes(
                     change_type: "add_identity_index".to_string(),
                     column: entity.identity_key.clone().unwrap_or_default(),
                     detail: entity.identity_kind.clone(),
-                    safe: true,
                 });
             }
         }
@@ -506,7 +478,6 @@ async fn verify_identity_indexes(
                     change_type: "drop_identity_index".to_string(),
                     column: name.clone(),
                     detail: None,
-                    safe: true,
                 });
             }
         }
@@ -821,71 +792,6 @@ mod tests {
         );
     }
 
-    // ── is_safe_change ───────────────────────────────────────────────
-
-    #[test]
-    fn safe_add_nullable_column() {
-        let change = ColumnDiff::Add { field: mfield("notes", "text"), pg_type: "TEXT".into() };
-        assert!(is_safe_change(&change), "nullable add should be safe");
-    }
-
-    #[test]
-    fn safe_add_required_with_default() {
-        let mut f = mfield("status", "text");
-        f.required = true;
-        f.default_value = Some(json!("draft"));
-        let change = ColumnDiff::Add { field: f, pg_type: "TEXT".into() };
-        assert!(is_safe_change(&change), "required add with default should be safe");
-    }
-
-    #[test]
-    fn unsafe_add_required_no_default() {
-        let mut f = mfield("email", "text");
-        f.required = true;
-        let change = ColumnDiff::Add { field: f, pg_type: "TEXT".into() };
-        assert!(!is_safe_change(&change), "required add without default should be dangerous");
-    }
-
-    #[test]
-    fn safe_drop_not_null() {
-        assert!(is_safe_change(&ColumnDiff::DropNotNull { column_name: "x".into() }));
-    }
-
-    #[test]
-    fn safe_set_default() {
-        assert!(is_safe_change(&ColumnDiff::SetDefault { column_name: "x".into(), default_sql: "'a'".into() }));
-    }
-
-    #[test]
-    fn safe_drop_default() {
-        assert!(is_safe_change(&ColumnDiff::DropDefault { column_name: "x".into() }));
-    }
-
-    #[test]
-    fn safe_drop_check_constraint() {
-        assert!(is_safe_change(&ColumnDiff::DropCheckConstraint { column_name: "x".into(), constraint_names: vec![] }));
-    }
-
-    #[test]
-    fn unsafe_drop_column() {
-        assert!(!is_safe_change(&ColumnDiff::Drop { column_name: "x".into() }));
-    }
-
-    #[test]
-    fn unsafe_alter_type() {
-        assert!(!is_safe_change(&ColumnDiff::AlterType { column_name: "x".into(), from_type: "text".into(), to_type: "DOUBLE PRECISION".into() }));
-    }
-
-    #[test]
-    fn unsafe_set_not_null() {
-        assert!(!is_safe_change(&ColumnDiff::SetNotNull { column_name: "x".into() }));
-    }
-
-    #[test]
-    fn unsafe_replace_check_constraint() {
-        assert!(!is_safe_change(&ColumnDiff::ReplaceCheckConstraint { column_name: "x".into(), old_constraint_names: vec![], new_values: vec!["a".into()] }));
-    }
-
     // ── generate_ddl ─────────────────────────────────────────────────
 
     #[test]
@@ -1094,11 +1000,4 @@ mod tests {
         assert!(orphans.is_empty());
     }
 
-    #[test]
-    fn find_orphaned_tables_excludes_underscore_prefix() {
-        let db_tables = vec!["tasks".to_string(), "_migrations".to_string()];
-        let entities = vec![mentity("tasks", vec![mfield("name", "text")])];
-        let orphans = find_orphaned_tables(&db_tables, &entities);
-        assert!(orphans.is_empty(), "_migrations should not be orphaned: {orphans:?}");
-    }
 }

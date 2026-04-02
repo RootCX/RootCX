@@ -5,7 +5,6 @@ pub mod extensions;
 mod ipc;
 mod jobs;
 mod manifest;
-pub(crate) mod migrations;
 pub mod mcp;
 mod routes;
 mod scheduler;

@@ -41,42 +41,9 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
 
 ---
 
-## Migrations
+## Schema Sync
 
-**Dual model.** Manifest drives initial DDL (`CREATE TABLE`) and safe auto-sync. Migrations handle everything else.
-
-### What Core does automatically from manifest
-
-On install/deploy, Core runs `CREATE SCHEMA IF NOT EXISTS` + `CREATE TABLE IF NOT EXISTS` for each entity in `dataContract`. Then `sync_schema` diffs DB vs manifest and auto-applies safe changes only:
-
-| Safe (auto-applied) | Dangerous (requires migration) |
-|---|---|
-| Add nullable column | Drop column |
-| Add column with default | Alter column type |
-| Drop NOT NULL | Set NOT NULL |
-| Set/drop DEFAULT | Replace CHECK constraint |
-| Drop CHECK constraint | |
-
-Dangerous changes are logged as warnings, not applied. Orphaned tables (in DB but not in manifest) are warned — Core never auto-drops tables.
-
-### App-owned migrations
-
-Files in `migrations/` (root of deployed archive), named `NNN_description.sql` (e.g. `001_add_status_index.sql`). Numeric prefix = execution order, must be unique. Multi-statement OK (`;`-separated, `$$` blocks respected). Pure PostgreSQL.
-
-Core creates the schema automatically before running migrations. Each migration runs in its own transaction. Applied state tracked in `"{appId}"._migrations`. Already-applied files skipped. No `migrations/` dir = no migrations run (tables still created from manifest).
-
-### When you need a migration
-
-Only for dangerous changes the auto-sync won't apply:
-
-| Operation | Migration SQL |
-|---|---|
-| Change type | `ALTER TABLE "{appId}"."{entity}" ALTER COLUMN "{field}" TYPE {NEW_TYPE} USING "{field}"::{NEW_TYPE}` |
-| Set required | Backfill nulls first, then `ALTER TABLE ... ALTER COLUMN "{field}" SET NOT NULL` |
-| Drop column | `ALTER TABLE ... DROP COLUMN IF EXISTS "{field}" CASCADE` |
-| Rename field | `ADD COLUMN "new"` → `UPDATE SET "new" = "old"` → `DROP COLUMN "old"` |
-| Update enum | `DROP CONSTRAINT` old check → `ADD CONSTRAINT "chk_{entity}_{field}" CHECK (...)` |
-| Custom indexes, data backfills, triggers | Raw SQL |
+On install/deploy, Core runs `CREATE SCHEMA IF NOT EXISTS` + `CREATE TABLE IF NOT EXISTS` for each entity in `dataContract`. Then `sync_schema` diffs DB vs manifest and auto-applies all changes (add/drop columns, alter types, nullability, defaults, check constraints). Studio shows a confirmation dialog before applying.
 
 ### Manifest ↔ DB contract
 

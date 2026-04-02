@@ -181,8 +181,6 @@ pub struct SchemaChange {
     pub change_type: String,
     pub column: String,
     pub detail: Option<String>,
-    #[serde(default)]
-    pub safe: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
