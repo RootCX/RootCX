@@ -143,10 +143,12 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Normalize filenames (spaces to dots, matching GitHub asset names)
+      - name: Flatten and normalize filenames
         shell: bash
         run: |
           cd artifacts
+          find . -mindepth 2 -type f -exec mv {} . \;
+          find . -mindepth 1 -type d -empty -delete
           for f in *' '*; do
             [ -e "$f" ] || continue
             mv "$f" "${f// /.}"
