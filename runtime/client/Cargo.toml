@@ -1,6 +1,6 @@
 [package]
 name = "rootcx-client"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 license-file = "../../LICENSE.md"
 description = "RootCX runtime client"
