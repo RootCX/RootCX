@@ -1,6 +1,9 @@
 // Utilities
 export { cn } from "./lib/utils";
 
+// Theme
+export { ThemeProvider, useTheme } from "./theme/theme-provider";
+
 // Primitives
 export * from "./primitives";
 
