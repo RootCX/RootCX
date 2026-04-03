@@ -25,7 +25,7 @@ export function KPICard({ label, value, trend, icon, className }: KPICardProps) 
             <span
               className={cn(
                 "inline-flex items-center gap-0.5 text-xs font-medium",
-                trend.value > 0 ? "text-green-600" : trend.value < 0 ? "text-destructive" : "text-muted-foreground",
+                trend.value > 0 ? "text-green-500" : trend.value < 0 ? "text-destructive" : "text-muted-foreground",
               )}
             >
               {trend.value > 0 ? <IconTrendingUp className="h-3 w-3" /> : trend.value < 0 ? <IconTrendingDown className="h-3 w-3" /> : null}
