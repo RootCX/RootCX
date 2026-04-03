@@ -34,6 +34,17 @@ fn llm_config(provider: &str) -> LlmConfig {
             dep_name: "@langchain/aws",
             dep_version: "^0.1.0",
         },
+        "rootcx" => LlmConfig {
+            import: r#"import { ChatOpenAI } from "@langchain/openai";"#,
+            init: concat!(
+                r#"new ChatOpenAI({ "#,
+                r#"apiKey: credentials.ROOTCX_API_KEY, "#,
+                r#"configuration: { baseURL: process.env.ROOTCX_LLM_ENDPOINT || "https://rootcx.com/api/llm/v1" }, "#,
+                r#"model: "rootcx" })"#,
+            ),
+            dep_name: "@langchain/openai",
+            dep_version: "^0.5.0",
+        },
         _ => LlmConfig {
             import: r#"import { ChatAnthropic } from "@langchain/anthropic";"#,
             init: r#"new ChatAnthropic({ apiKey: credentials.ANTHROPIC_API_KEY, model: "claude-sonnet-4-6" })"#,

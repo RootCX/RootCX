@@ -76,6 +76,7 @@ dev-core:
 	ROOTCX_OIDC_ISSUER=$${ROOTCX_OIDC_ISSUER:-http://localhost:3000} \
 	ROOTCX_OIDC_CLIENT_ID=$${ROOTCX_OIDC_CLIENT_ID:-rootcx-local} \
 	ROOTCX_OIDC_CLIENT_SECRET=$${ROOTCX_OIDC_CLIENT_SECRET:-xMh0Aoj2Qa6eB5quFm-Y_K4b62bcHUV5wypqGMCCiUc} \
+	ROOTCX_LLM_ENDPOINT=$${ROOTCX_LLM_ENDPOINT:-http://localhost:3000/api/llm} \
 	cargo run -p rootcx-core
 
 # ── Resource dependencies (PostgreSQL + Bun) ──────────────────────────────────

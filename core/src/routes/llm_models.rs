@@ -119,6 +119,7 @@ pub async fn get_forge_model(
     .fetch_optional(&pool).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let model_str = match row {
+        Some((ref provider, ref model)) if provider == "rootcx" => format!("rootcx/{model}"),
         Some((ref provider, ref model)) if provider == "bedrock" => format!("amazon-bedrock/{model}"),
         Some((provider, model)) => format!("{provider}/{model}"),
         None => "anthropic/claude-sonnet-4-6".to_string(),

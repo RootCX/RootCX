@@ -9,13 +9,14 @@ use super::{
 };
 use crate::error::ForgeError;
 
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
+const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 const MAX_TOKENS: u32 = 16384;
 
 pub struct Anthropic {
     model: String,
     api_key: String,
+    base_url: String,
     client: reqwest::Client,
 }
 
@@ -24,6 +25,16 @@ impl Anthropic {
         Self {
             model,
             api_key,
+            base_url: DEFAULT_BASE_URL.into(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    pub fn with_base_url(model: String, api_key: String, base_url: String) -> Self {
+        Self {
+            model,
+            api_key,
+            base_url,
             client: reqwest::Client::new(),
         }
     }
@@ -96,9 +107,10 @@ impl LlmProvider for Anthropic {
             body["tools"] = json!(Self::build_tools(tools));
         }
 
+        let url = format!("{}/v1/messages", self.base_url);
         let resp = self
             .client
-            .post(API_URL)
+            .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", API_VERSION)
             .header("content-type", "application/json")

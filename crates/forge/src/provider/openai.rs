@@ -7,12 +7,13 @@ use super::{
 };
 use crate::error::ForgeError;
 
-const API_URL: &str = "https://api.openai.com/v1/chat/completions";
+const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 const MAX_TOKENS: u32 = 16384;
 
 pub struct OpenAi {
     model: String,
     api_key: String,
+    base_url: String,
     client: reqwest::Client,
 }
 
@@ -21,6 +22,16 @@ impl OpenAi {
         Self {
             model,
             api_key,
+            base_url: DEFAULT_BASE_URL.into(),
+            client: reqwest::Client::new(),
+        }
+    }
+
+    pub fn with_base_url(model: String, api_key: String, base_url: String) -> Self {
+        Self {
+            model,
+            api_key,
+            base_url,
             client: reqwest::Client::new(),
         }
     }
@@ -141,7 +152,7 @@ impl LlmProvider for OpenAi {
 
         let resp = self
             .client
-            .post(API_URL)
+            .post(format!("{}/v1/chat/completions", self.base_url))
             .bearer_auth(&self.api_key)
             .json(&body)
             .send()

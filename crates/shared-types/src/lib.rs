@@ -195,6 +195,7 @@ pub enum ProviderType {
     Anthropic,
     OpenAI,
     Bedrock,
+    RootCX,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

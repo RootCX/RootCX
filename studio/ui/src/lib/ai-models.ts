@@ -16,6 +16,7 @@ export interface AIProvider {
 }
 
 export const AI_PROVIDERS: AIProvider[] = [
+  { id: "rootcx", name: "RootCX (Managed)", env: ["ROOTCX_API_KEY"] },
   { id: "anthropic", name: "Anthropic", env: ["ANTHROPIC_API_KEY"] },
   { id: "openai", name: "OpenAI", env: ["OPENAI_API_KEY"] },
   { id: "bedrock", name: "AWS Bedrock", env: [] },
@@ -34,6 +35,7 @@ export function envKeysForProvider(p: AIProvider, awsAuthMode?: AwsAuthMode): st
 }
 
 const DEFAULT_MODELS: Record<string, string> = {
+  rootcx: "rootcx",
   anthropic: "claude-sonnet-4-6",
   openai: "gpt-4.1",
   bedrock: "us.anthropic.claude-sonnet-4-6",

@@ -78,5 +78,14 @@ pub fn build_provider(
             region.map(String::from),
             api_key.map(String::from),
         )),
+        ProviderType::RootCX => {
+            let base_url = std::env::var("ROOTCX_LLM_ENDPOINT")
+                .unwrap_or_else(|_| "https://rootcx.com/api/llm".into());
+            Box::new(openai::OpenAi::with_base_url(
+                model.to_string(),
+                api_key.unwrap_or_default().to_string(),
+                base_url,
+            ))
+        }
     }
 }

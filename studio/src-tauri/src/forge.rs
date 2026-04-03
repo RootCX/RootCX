@@ -53,6 +53,7 @@ async fn build_config(client: &RuntimeClient) -> Result<ForgeConfig, String> {
     let provider_str = ai.get("model").and_then(|m| m.as_str()).unwrap_or("anthropic/claude-sonnet-4-6");
     let (provider, model) = parse_provider_model(provider_str);
     let secret_key = match provider {
+        rootcx_types::ProviderType::RootCX => "ROOTCX_API_KEY",
         rootcx_types::ProviderType::Anthropic => "ANTHROPIC_API_KEY",
         rootcx_types::ProviderType::OpenAI => "OPENAI_API_KEY",
         rootcx_types::ProviderType::Bedrock => "AWS_BEARER_TOKEN_BEDROCK",
@@ -70,6 +71,7 @@ async fn build_config(client: &RuntimeClient) -> Result<ForgeConfig, String> {
 
 fn parse_provider_model(s: &str) -> (rootcx_types::ProviderType, String) {
     use rootcx_types::ProviderType::*;
+    if let Some(m) = s.strip_prefix("rootcx/") { return (RootCX, m.into()); }
     if let Some(m) = s.strip_prefix("openai/") { return (OpenAI, m.into()); }
     if s.starts_with("bedrock/") || s.starts_with("amazon-bedrock/") {
         let model = s.split_once('/').map(|(_, m)| m).unwrap_or(s);
