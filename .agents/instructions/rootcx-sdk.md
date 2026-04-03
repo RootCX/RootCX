@@ -136,38 +136,8 @@ Stack: **Tailwind CSS v4** + **`@rootcx/ui`** (pre-configured).
 - Tailwind utilities for layout/spacing — never inline `style={{}}`
 - Icons: `@tabler/icons-react`
 - Custom components in `src/components/` only when `@rootcx/ui` doesn't cover the need
-- Use semantic color tokens (`bg-background`, `text-foreground`, `bg-card`, `border-border`, `text-muted-foreground`, `bg-accent`, `bg-primary`, `text-primary-foreground`, `bg-destructive`) — never hardcode colors like `bg-white`, `text-black`, `border-gray-200`
-- Never use `dark:` prefix — CSS variables handle theme switching automatically
-
-### Dark Mode
-
-`@rootcx/ui` includes `ThemeProvider` and `useTheme` for dark mode support. The scaffold wraps apps with `<ThemeProvider>` by default — system preference is auto-detected.
-
-```tsx
-import { ThemeProvider, useTheme } from "@rootcx/ui";
-
-// Already in main.tsx — don't add again
-<ThemeProvider>
-  <App />
-</ThemeProvider>
-
-// Toggle anywhere in the app
-const { theme, setTheme } = useTheme();
-setTheme("dark");   // or "light" or "system"
-```
-
-To add a toggle in the sidebar:
-
-```tsx
-import { useTheme } from "@rootcx/ui";
-import { IconSun, IconMoon } from "@tabler/icons-react";
-
-const { theme, setTheme } = useTheme();
-<SidebarItem
-  icon={theme === "dark" ? <IconSun /> : <IconMoon />}
-  label={theme === "dark" ? "Light mode" : "Dark mode"}
-  onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-/>
+- Prefer semantic color tokens (`bg-background`, `text-foreground`, `bg-card`, `border-border`, `text-muted-foreground`, `bg-accent`, `bg-primary`) over hardcoded colors. Avoid `dark:` prefix — CSS variables switch automatically.
+- Dark mode: `ThemeProvider` wraps app in `main.tsx` (scaffold does this). Use `useTheme()` for toggle: `const { theme, setTheme } = useTheme()`. Values: `"dark"`, `"light"`, `"system"`.
 
 ### Imports
 
