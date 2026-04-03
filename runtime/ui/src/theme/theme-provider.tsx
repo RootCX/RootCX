@@ -26,8 +26,11 @@ export function ThemeProvider({
   storageKey = "rootcx-ui-theme",
   ...props
 }: ThemeProviderProps) {
+  const urlTheme = new URLSearchParams(window.location.search).get("theme") as Theme | null;
+  const isEmbedded = urlTheme === "dark" || urlTheme === "light";
+
   const [theme, setTheme] = useState<Theme>(
-    () => (localStorage.getItem(storageKey) as Theme) || defaultTheme,
+    () => isEmbedded ? urlTheme : (localStorage.getItem(storageKey) as Theme) || defaultTheme,
   );
 
   useEffect(() => {
@@ -47,10 +50,24 @@ export function ThemeProvider({
     root.classList.add(theme);
   }, [theme]);
 
+  // Listen for THEME_CHANGED postMessage from parent (iframe embedding)
+  useEffect(() => {
+    const handler = (e: MessageEvent) => {
+      if (
+        e.data?.type === "THEME_CHANGED" &&
+        (e.data.theme === "dark" || e.data.theme === "light")
+      ) {
+        setTheme(e.data.theme);
+      }
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, []);
+
   const value = {
     theme,
     setTheme: (theme: Theme) => {
-      localStorage.setItem(storageKey, theme);
+      if (!isEmbedded) localStorage.setItem(storageKey, theme);
       setTheme(theme);
     },
   };
