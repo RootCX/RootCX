@@ -4,5 +4,8 @@
   "private": true,
   "dependencies": {
     "fast-xml-parser": "^4.5.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.2"
   }
 }

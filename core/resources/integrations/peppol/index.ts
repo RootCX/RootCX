@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "crypto";
-import { XMLParser } from "fast-xml-parser";
+import { parseUbl, type ParsedUBLDocument } from "./parseUbl";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -82,18 +82,6 @@ interface PeppolCountryConfig {
   identifierDigits: number;
 }
 
-interface ParsedUBLDocument {
-  documentNumber: string;
-  documentType: "invoice" | "credit_note";
-  issueDate: string;
-  dueDate?: string;
-  currency: string;
-  amount: number;
-  sender: { peppolId: string; name: string; vatNumber?: string };
-  receiver: { peppolId: string; name: string; vatNumber?: string };
-  instanceIdentifier?: string;
-  attachments: { id: string; description?: string; mimeCode: string; filename: string; base64Content: string }[];
-}
 
 // ─── Country Configs ─────────────────────────────────────────────────────────
 
@@ -374,124 +362,6 @@ function generateTestInvoiceXml(peppolId: string, vatNumber: string): { xml: str
     taxTotal: 0, taxableAmount: 100, payableAmount: 100, note: "Test invoice - do not process",
   });
   return { xml, invoiceNumber };
-}
-
-// ─── UBL Parser ──────────────────────────────────────────────────────────────
-
-const xmlParser = new XMLParser({
-  ignoreAttributes: false,
-  attributeNamePrefix: "@_",
-  removeNSPrefix: true,
-  isArray: (name) => ["InvoiceLine", "CreditNoteLine", "AdditionalDocumentReference", "DocumentResponse"].includes(name),
-});
-
-function getTextValue(node: unknown): string {
-  if (typeof node === "string") return node;
-  if (typeof node === "number") return String(node);
-  if (node && typeof node === "object" && "#text" in node) return String((node as any)["#text"]);
-  return "";
-}
-
-function getNestedValue(obj: unknown, path: string): unknown {
-  let current = obj;
-  for (const key of path.split(".")) {
-    if (current && typeof current === "object" && key in current) current = (current as any)[key];
-    else return undefined;
-  }
-  return current;
-}
-
-function extractPeppolId(party: unknown): string {
-  const endpointId = getNestedValue(party, "EndpointID");
-  if (endpointId) {
-    const schemeId = (getNestedValue(endpointId, "@_schemeID") as string) || "";
-    const value = getTextValue(endpointId);
-    if (schemeId && value) return `${schemeId}:${value}`;
-    return value;
-  }
-  const partyId = getNestedValue(party, "PartyIdentification.ID");
-  if (partyId) {
-    const schemeId = (getNestedValue(partyId, "@_schemeID") as string) || "";
-    const value = getTextValue(partyId);
-    if (schemeId && value) return `${schemeId}:${value}`;
-    return value;
-  }
-  return "";
-}
-
-function extractPartyName(party: unknown): string {
-  return getTextValue(getNestedValue(party, "PartyName.Name"))
-    || getTextValue(getNestedValue(party, "PartyLegalEntity.RegistrationName"))
-    || "";
-}
-
-function extractVatNumber(party: unknown): string | undefined {
-  const taxCompany = getNestedValue(party, "PartyTaxScheme.CompanyID");
-  if (taxCompany) return getTextValue(taxCompany);
-  const legalCompany = getNestedValue(party, "PartyLegalEntity.CompanyID");
-  if (legalCompany) return getTextValue(legalCompany);
-  return undefined;
-}
-
-function parseUbl(xmlContent: string): ParsedUBLDocument {
-  const parsed = xmlParser.parse(xmlContent);
-
-  let document: unknown;
-  let documentType: "invoice" | "credit_note";
-  let instanceIdentifier: string | undefined;
-
-  if (parsed.StandardBusinessDocument) {
-    const sbd = parsed.StandardBusinessDocument;
-    const sbdh = sbd.StandardBusinessDocumentHeader;
-    if (sbdh) instanceIdentifier = getTextValue(getNestedValue(sbdh, "DocumentIdentification.InstanceIdentifier"));
-    if (sbd.Invoice) { document = sbd.Invoice; documentType = "invoice"; }
-    else if (sbd.CreditNote) { document = sbd.CreditNote; documentType = "credit_note"; }
-    else throw new Error("Unsupported document type in SBD");
-  } else if (parsed.Invoice) { document = parsed.Invoice; documentType = "invoice"; }
-  else if (parsed.CreditNote) { document = parsed.CreditNote; documentType = "credit_note"; }
-  else throw new Error("Unsupported document format");
-
-  const documentNumber = getTextValue(getNestedValue(document, "ID"));
-  const issueDate = getTextValue(getNestedValue(document, "IssueDate"));
-  const dueDate = getTextValue(getNestedValue(document, "DueDate"));
-  const currency = getTextValue(getNestedValue(document, "DocumentCurrencyCode"));
-  const payableAmount = getNestedValue(document, "LegalMonetaryTotal.PayableAmount");
-  const amount = payableAmount ? parseFloat(getTextValue(payableAmount)) : 0;
-
-  const supplierParty = getNestedValue(document, "AccountingSupplierParty.Party");
-  const customerParty = getNestedValue(document, "AccountingCustomerParty.Party");
-
-  if (!documentNumber) throw new Error("Missing required field: document ID");
-  if (!issueDate) throw new Error("Missing required field: issue date");
-
-  const attachments: ParsedUBLDocument["attachments"] = [];
-  const additionalRefs = getNestedValue(document, "AdditionalDocumentReference") as unknown[] | undefined;
-  if (Array.isArray(additionalRefs)) {
-    for (const ref of additionalRefs) {
-      const embeddedObj = getNestedValue(ref, "Attachment.EmbeddedDocumentBinaryObject");
-      if (!embeddedObj) continue;
-      const base64Content = getTextValue(embeddedObj);
-      if (!base64Content) continue;
-      attachments.push({
-        id: getTextValue(getNestedValue(ref, "ID")) || "unknown",
-        description: getTextValue(getNestedValue(ref, "DocumentDescription")) || undefined,
-        mimeCode: getTextValue(getNestedValue(embeddedObj, "@_mimeCode")) || "application/octet-stream",
-        filename: getTextValue(getNestedValue(embeddedObj, "@_filename")) || "attachment",
-        base64Content,
-      });
-    }
-  }
-
-  return {
-    documentNumber, documentType, issueDate,
-    dueDate: dueDate || undefined,
-    currency: currency || "EUR",
-    amount: isNaN(amount) ? 0 : amount,
-    sender: { peppolId: extractPeppolId(supplierParty), name: extractPartyName(supplierParty), vatNumber: extractVatNumber(supplierParty) },
-    receiver: { peppolId: extractPeppolId(customerParty), name: extractPartyName(customerParty), vatNumber: extractVatNumber(customerParty) },
-    instanceIdentifier,
-    attachments,
-  };
 }
 
 // ─── Action Handlers ─────────────────────────────────────────────────────────
@@ -873,12 +743,12 @@ async function handleWebhook(params: any) {
           issue_date: parsed.issueDate,
           due_date: parsed.dueDate || "",
           currency: parsed.currency,
-          amount: parsed.amount,
-          sender_peppol_id: parsed.sender.peppolId,
-          sender_name: parsed.sender.name,
-          sender_vat: parsed.sender.vatNumber || "",
-          receiver_peppol_id: parsed.receiver.peppolId,
-          receiver_name: parsed.receiver.name,
+          amount: parsed.monetaryTotal.payableAmount,
+          sender_peppol_id: parsed.seller.peppolId,
+          sender_name: parsed.seller.name,
+          sender_vat: parsed.seller.vatNumber || "",
+          receiver_peppol_id: parsed.buyer.peppolId,
+          receiver_name: parsed.buyer.name,
           status: "received",
           instance_identifier: instanceIdentifier || "",
           as4_message_id: as4MessageId || "",
