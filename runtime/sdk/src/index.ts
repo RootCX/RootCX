@@ -29,6 +29,9 @@ export type { RuntimeProviderProps } from "./components/RuntimeProvider";
 export { useAppCollection } from "./hooks/useAppCollection";
 export type { UseAppCollectionResult } from "./hooks/useAppCollection";
 
+export { useCoreCollection } from "./hooks/useCoreCollection";
+export type { UseCoreCollectionResult } from "./hooks/useCoreCollection";
+
 export { useAppRecord } from "./hooks/useAppRecord";
 export type { UseAppRecordResult } from "./hooks/useAppRecord";
 

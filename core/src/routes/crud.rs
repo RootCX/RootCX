@@ -13,7 +13,7 @@ use super::{SharedRuntime, parse_uuid, pool};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::extensions::rbac::policy::{resolve_permissions, has_permission};
-use crate::manifest::{entity_identity, field_type_map, find_entities_by_identity, map_field_type, quote_ident};
+use crate::manifest::{entity_exists, entity_identity, field_type_map, find_entities_by_identity, map_field_type, quote_ident};
 
 fn check_app_perm(permissions: &[String], app_id: &str, perm: &str) -> Result<(), ApiError> {
     let namespaced = format!("app:{app_id}:{perm}");
@@ -27,6 +27,13 @@ const PG_PARAM_LIMIT: usize = 65535;
 pub(crate) fn validate_app_id(app_id: &str) -> Result<(), ApiError> {
     if matches!(app_id, "rootcx_system" | "pg_catalog" | "information_schema") || app_id.starts_with("pg_") {
         return Err(ApiError::Forbidden(format!("access to schema '{app_id}' is blocked")));
+    }
+    Ok(())
+}
+
+async fn ensure_entity(pool: &PgPool, app_id: &str, entity: &str) -> Result<(), ApiError> {
+    if !entity_exists(pool, app_id, entity).await? {
+        return Err(ApiError::NotFound(format!("entity '{entity}' not found in app '{app_id}'")));
     }
     Ok(())
 }
@@ -286,6 +293,7 @@ pub async fn list_records(
 ) -> Result<Json<Vec<JsonValue>>, ApiError> {
     validate_app_id(&app_id)?;
     let pool = pool(&rt);
+    ensure_entity(&pool, &app_id, &entity).await?;
     let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
     check_app_perm(&perms, &app_id, &format!("{entity}.read"))?;
     let tbl = table(&app_id, &entity);
@@ -395,6 +403,7 @@ pub async fn query_records(
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
     let pool = pool(&rt);
+    ensure_entity(&pool, &app_id, &entity).await?;
     let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
     check_app_perm(&perms, &app_id, &format!("{entity}.read"))?;
     let tbl = table(&app_id, &entity);
@@ -439,6 +448,7 @@ pub async fn create_record(
 ) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
     validate_app_id(&app_id)?;
     let pool = pool(&rt);
+    ensure_entity(&pool, &app_id, &entity).await?;
     let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
     check_app_perm(&perms, &app_id, &format!("{entity}.create"))?;
     let obj = require_object(&body)?;
@@ -533,6 +543,7 @@ pub async fn bulk_create_records(
 ) -> Result<(StatusCode, Json<Vec<JsonValue>>), ApiError> {
     validate_app_id(&app_id)?;
     let db = pool(&rt);
+    ensure_entity(&db, &app_id, &entity).await?;
     let (_, perms) = resolve_permissions(&db, identity.user_id).await?;
     check_app_perm(&perms, &app_id, &format!("{entity}.create"))?;
     let records = body.as_array()
@@ -562,6 +573,7 @@ pub async fn get_record(
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
+    ensure_entity(&pool, &app_id, &entity).await?;
     let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
     check_app_perm(&perms, &app_id, &format!("{entity}.read"))?;
     let tbl = table(&app_id, &entity);
@@ -582,6 +594,7 @@ pub async fn update_record(
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
+    ensure_entity(&pool, &app_id, &entity).await?;
     let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
     check_app_perm(&perms, &app_id, &format!("{entity}.update"))?;
     let obj = require_object(&body)?;
@@ -614,6 +627,7 @@ pub async fn delete_record(
 ) -> Result<Json<JsonValue>, ApiError> {
     validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
+    ensure_entity(&pool, &app_id, &entity).await?;
     let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
     check_app_perm(&perms, &app_id, &format!("{entity}.delete"))?;
     let tbl = table(&app_id, &entity);

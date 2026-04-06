@@ -35,7 +35,7 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
 ### Rules
 
 - `id`, `created_at`, `updated_at` are auto-generated — omit from `fields`
-- `entity_link` requires `"references": { "entity": "<name>", "field": "id" }`
+- `entity_link` requires `"references": { "entity": "<target>", "field": "id" }`. `<target>` is `"<entity>"` (same app) or `"core:users"` (FK → `rootcx_system.users`, `ON DELETE SET NULL`). Cross-app refs not yet supported.
 - `"required": true` = mandatory on create; omit key for optional
 - `"enum_values": [...]` restricts text fields to fixed values
 
@@ -106,15 +106,27 @@ const { connected, loading, connect, submitCredentials, disconnect, call } = use
 
 **Call `list_integrations` first. Never guess action IDs.**
 
+### useCoreCollection
+
+```tsx
+useCoreCollection<T>(entity)
+```
+
+Returns: `{ data: T[], loading, error, refetch }`
+
+Read-only access to core platform entities. `GET /api/v1/{entity}` (not app collections).
+
+**`core:users` in manifest `entity_link` references → use `useCoreCollection("users")` to fetch org members. Do NOT use `useAppCollection` with `core:users` — it will 404.**
+
 ### useRuntimeClient
 
 ```tsx
 const client = useRuntimeClient();
 ```
 
-`client.queryRecords<T>(appId, entity, QueryOptions) → {data, total}` · `client.rpc(appId, method, params?) → unknown`
+`client.queryRecords<T>(appId, entity, QueryOptions) → {data, total}` · `client.rpc(appId, method, params?) → unknown` · `client.core().collection<T>(entity).list() → T[]` · `client.core().collection<T>(entity).get(id) → T`
 
-For imperative calls in event handlers. For reactive data, use `useAppCollection` with `QueryOptions`.
+For imperative calls in event handlers. For reactive data, use `useAppCollection` / `useCoreCollection`.
 
 ---
 

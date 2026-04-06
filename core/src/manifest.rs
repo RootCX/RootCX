@@ -276,6 +276,10 @@ async fn load_entity(
     Ok(m.data_contract.into_iter().find(|e| e.entity_name == entity))
 }
 
+pub async fn entity_exists(pool: &PgPool, app_id: &str, entity: &str) -> Result<bool, crate::RuntimeError> {
+    Ok(load_entity(pool, app_id, entity).await?.is_some())
+}
+
 pub async fn field_type_map(
     pool: &PgPool,
     app_id: &str,
