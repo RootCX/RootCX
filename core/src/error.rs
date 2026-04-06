@@ -26,4 +26,7 @@ pub enum RuntimeError {
 
     #[error("configuration error: {0}")]
     Config(String),
+
+    #[error("conflict: {0}")]
+    Conflict(String),
 }

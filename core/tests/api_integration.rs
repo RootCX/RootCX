@@ -1811,3 +1811,53 @@ async fn delete_user_rejects_unauthorized_and_unsafe_operations() {
     rt.shutdown().await;
 }
 
+// Verifies the `core:users` entity_link DSL produces a real, enforced FK
+// against rootcx_system.users with ON DELETE SET NULL.
+#[tokio::test]
+async fn entity_link_core_users_fk_is_enforced() {
+    let rt = TestRuntime::boot().await;
+
+    let manifest = json!({
+        "appId": "tasks", "name": "tasks", "version": "1.0.0",
+        "dataContract": [{
+            "entityName": "tickets",
+            "fields": [
+                { "name": "title", "type": "text", "required": true },
+                { "name": "owner_id", "type": "entity_link",
+                  "references": { "entity": "core:users", "field": "id" } }
+            ]
+        }]
+    });
+    rt.install_manifest(&manifest).await;
+
+    let owner_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO rootcx_system.users (email, is_system) VALUES ($1, false) RETURNING id"
+    )
+    .bind("ticket-owner@test.local")
+    .fetch_one(rt.pool()).await.unwrap();
+
+    let ticket = rt.create("tasks", "tickets", &json!({
+        "title": "triage inbox",
+        "owner_id": owner_id.to_string(),
+    })).await;
+    let ticket_id: uuid::Uuid = ticket["id"].as_str().unwrap().parse().unwrap();
+
+    let (status, _) = rt.post_json("/api/v1/apps/tasks/collections/tickets", &json!({
+        "title": "bad ref",
+        "owner_id": uuid::Uuid::new_v4().to_string(),
+    })).await;
+    assert!(!status.is_success(), "expected FK violation, got {status} with bogus owner_id");
+
+    sqlx::query("DELETE FROM rootcx_system.users WHERE id = $1")
+        .bind(owner_id).execute(rt.pool()).await.unwrap();
+
+    let owner_after: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT owner_id FROM tasks.tickets WHERE id = $1"
+    )
+    .bind(ticket_id)
+    .fetch_one(rt.pool()).await.unwrap();
+    assert!(owner_after.is_none(), "owner_id should be NULL after referenced user deleted");
+
+    rt.shutdown().await;
+}
+

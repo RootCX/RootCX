@@ -122,44 +122,38 @@ fn generate_foreign_keys(app_id: &str, entity: &EntityContract, all_entities: &[
     let mut stmts = Vec::new();
 
     for field in &entity.fields {
-        if field.field_type != "entity_link" {
-            continue;
-        }
-
+        if field.field_type != "entity_link" { continue; }
         let refs = match &field.references {
             Some(r) => r,
             None => continue,
         };
 
-        if refs.entity.starts_with("system.") {
-            continue;
-        }
-        let is_local = all_entities.iter().any(|e| e.entity_name == refs.entity);
-        if !is_local {
-            continue;
-        }
+        let (target_table, pk_col, fk_suffix) = match parse_entity_ref(&refs.entity) {
+            RefTarget::Local(ref target) => {
+                if !all_entities.iter().any(|e| e.entity_name == *target) { continue; }
+                (format!("{}.{}", quote_ident(app_id), quote_ident(target)), "id", target.clone())
+            }
+            RefTarget::Core(ref name) => {
+                let Some((schema, tbl, pk, _)) = resolve_core_entity(name) else { continue };
+                (format!("{}.{}", quote_ident(schema), quote_ident(tbl)), pk, format!("core_{name}"))
+            }
+            RefTarget::App { .. } => continue,
+        };
 
-        let target_table = format!("{}.{}", quote_ident(app_id), quote_ident(&refs.entity));
-        let fk_name = format!("fk_{}_{}_{}_{}", app_id, entity.entity_name, field.name, refs.entity);
-
+        let fk_name = format!("fk_{}_{}_{}_{}", app_id, entity.entity_name, field.name, fk_suffix);
         stmts.push(format!(
             "DO $$ BEGIN \
                ALTER TABLE {} ADD CONSTRAINT {} \
-               FOREIGN KEY ({}) REFERENCES {}(\"id\") ON DELETE SET NULL; \
+               FOREIGN KEY ({}) REFERENCES {}({}) ON DELETE SET NULL; \
              EXCEPTION WHEN duplicate_object THEN NULL; \
              END $$",
-            table_name,
-            quote_ident(&fk_name),
-            quote_ident(&field.name),
-            target_table
+            table_name, quote_ident(&fk_name), quote_ident(&field.name), target_table, quote_ident(pk_col)
         ));
 
         let idx_name = format!("idx_{}_{}_{}", app_id, entity.entity_name, field.name);
         stmts.push(format!(
             "CREATE INDEX IF NOT EXISTS {} ON {} ({})",
-            quote_ident(&idx_name),
-            table_name,
-            quote_ident(&field.name)
+            quote_ident(&idx_name), table_name, quote_ident(&field.name)
         ));
     }
 
@@ -175,6 +169,19 @@ pub(crate) fn build_pk_type_map(entities: &[EntityContract]) -> HashMap<String, 
             None => "UUID",
         };
         map.insert(entity.entity_name.clone(), pg_type);
+    }
+    // Include core entity PK types so field_to_column resolves correct types
+    for entity in entities {
+        for field in &entity.fields {
+            if field.field_type != "entity_link" { continue; }
+            if let Some(refs) = &field.references {
+                if let RefTarget::Core(name) = parse_entity_ref(&refs.entity) {
+                    if let Some((_, _, _, pk_type)) = resolve_core_entity(&name) {
+                        map.insert(refs.entity.clone(), pk_type);
+                    }
+                }
+            }
+        }
     }
     map
 }
@@ -352,6 +359,34 @@ async fn drop_orphaned_identity_indexes(
     Ok(())
 }
 
+// ── Cross-app reference DSL ─────────────────────────────────────────
+// "accounts"      → Local  (same app)
+// "core:users"    → Core   (rootcx_system)
+// "crm:contacts"  → App    (cross-app, Phase 2)
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RefTarget {
+    Local(String),
+    Core(String),
+    App { app: String, entity: String },
+}
+
+fn parse_entity_ref(raw: &str) -> RefTarget {
+    match raw.split_once(':') {
+        Some(("core", e)) => RefTarget::Core(e.into()),
+        Some((app, e)) => RefTarget::App { app: app.into(), entity: e.into() },
+        None => RefTarget::Local(raw.into()),
+    }
+}
+
+/// Resolve a `core:X` name to (schema, table, pk_column, pk_type).
+fn resolve_core_entity(name: &str) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+    match name {
+        "users" => Some(("rootcx_system", "users", "id", "UUID")),
+        _ => None,
+    }
+}
+
 pub fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
@@ -369,13 +404,41 @@ fn validate_ident(value: &str, label: &str) -> Result<(), RuntimeError> {
     ))))
 }
 
-fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
+pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
     validate_ident(&manifest.app_id, "appId")?;
+    let all_entity_names: Vec<&str> = manifest.data_contract.iter().map(|e| e.entity_name.as_str()).collect();
     for entity in &manifest.data_contract {
         validate_ident(&entity.entity_name, "entity name")?;
         for field in &entity.fields {
             validate_ident(&field.name, "field name")?;
         }
+        for field in &entity.fields {
+            if field.field_type != "entity_link" { continue; }
+            if let Some(refs) = &field.references {
+                match parse_entity_ref(&refs.entity) {
+                    RefTarget::Core(name) => {
+                        if resolve_core_entity(&name).is_none() {
+                            return Err(RuntimeError::Schema(sqlx::Error::Protocol(format!(
+                                "field '{}' references 'core:{name}' — unknown core entity", field.name
+                            ))));
+                        }
+                    }
+                    RefTarget::App { app, entity: ent } => {
+                        return Err(RuntimeError::Schema(sqlx::Error::Protocol(format!(
+                            "field '{}' references '{app}:{ent}' — cross-app references not yet supported", field.name
+                        ))));
+                    }
+                    RefTarget::Local(ref target) => {
+                        if !all_entity_names.contains(&target.as_str()) {
+                            return Err(RuntimeError::Schema(sqlx::Error::Protocol(format!(
+                                "field '{}' references entity '{target}' which is not defined in this manifest", field.name
+                            ))));
+                        }
+                    }
+                }
+            }
+        }
+
         if let (Some(kind), Some(key)) = (&entity.identity_kind, &entity.identity_key) {
             validate_ident(kind, "identityKind")?;
             if !entity.fields.iter().any(|f| f.name == *key) {
@@ -574,24 +637,35 @@ mod tests {
     }
 
     #[test]
-    fn generate_foreign_keys_skips_system() {
+    fn generate_foreign_keys_core_ref() {
         let mut fk_field = field("owner_id", "entity_link");
-        fk_field.references = Some(FieldReference { entity: "system.users".to_string(), field: "id".to_string() });
-        let deals = entity("deals", vec![fk_field]);
-        let all = vec![deals.clone()];
-        let stmts = generate_foreign_keys("myapp", &deals, &all);
-        assert!(stmts.is_empty(), "system refs should be skipped: {stmts:?}");
+        fk_field.references = Some(FieldReference { entity: "core:users".to_string(), field: "id".to_string() });
+        let tasks = entity("tasks", vec![fk_field]);
+        let all = vec![tasks.clone()];
+        let stmts = generate_foreign_keys("myapp", &tasks, &all);
+        assert_eq!(stmts.len(), 2, "expected FK + index for core ref: {stmts:?}");
+        assert!(stmts[0].contains("\"rootcx_system\".\"users\""), "FK should target rootcx_system.users: {}", stmts[0]);
+        assert!(stmts[0].contains("ON DELETE SET NULL"), "FK should SET NULL: {}", stmts[0]);
     }
 
     #[test]
     fn generate_foreign_keys_skips_cross_app() {
-        let mut fk_field = field("project_id", "entity_link");
-        fk_field.references = Some(FieldReference { entity: "projects".to_string(), field: "id".to_string() });
-        // "projects" is NOT in all_entities
+        let mut fk_field = field("contact_id", "entity_link");
+        fk_field.references = Some(FieldReference { entity: "crm:contacts".to_string(), field: "id".to_string() });
         let tasks = entity("tasks", vec![fk_field]);
         let all = vec![tasks.clone()];
         let stmts = generate_foreign_keys("myapp", &tasks, &all);
         assert!(stmts.is_empty(), "cross-app refs should be skipped: {stmts:?}");
+    }
+
+    #[test]
+    fn generate_foreign_keys_skips_unknown_local() {
+        let mut fk_field = field("project_id", "entity_link");
+        fk_field.references = Some(FieldReference { entity: "projects".to_string(), field: "id".to_string() });
+        let tasks = entity("tasks", vec![fk_field]);
+        let all = vec![tasks.clone()];
+        let stmts = generate_foreign_keys("myapp", &tasks, &all);
+        assert!(stmts.is_empty(), "unknown local refs should be skipped: {stmts:?}");
     }
 
     #[test]
@@ -666,6 +740,47 @@ mod tests {
     #[test]
     fn validate_identity_accepts_absent() {
         let m = manifest_with(vec![entity("contacts", vec![field("name", "text")])]);
+        assert!(validate_manifest(&m).is_ok());
+    }
+
+    #[test]
+    fn parse_entity_ref_variants() {
+        let cases: Vec<(&str, RefTarget)> = vec![
+            ("accounts", RefTarget::Local("accounts".into())),
+            ("core:users", RefTarget::Core("users".into())),
+            ("crm:contacts", RefTarget::App { app: "crm".into(), entity: "contacts".into() }),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(parse_entity_ref(input), expected, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_invalid_entity_link_refs() {
+        let cases: Vec<(&str, &str, &str)> = vec![
+            ("core:nonexistent", "unknown core entity", "unknown core ref"),
+            ("crm:contacts",     "not yet supported",  "cross-app ref"),
+            ("projects",         "not defined",         "missing local ref"),
+        ];
+        for (ref_entity, expected_err, label) in cases {
+            let mut f = field("ref_id", "entity_link");
+            f.references = Some(FieldReference { entity: ref_entity.into(), field: "id".into() });
+            let m = manifest_with(vec![entity("tasks", vec![f])]);
+            let err = validate_manifest(&m).unwrap_err().to_string();
+            assert!(err.contains(expected_err), "{label}: got {err}");
+        }
+    }
+
+    #[test]
+    fn validate_accepts_valid_entity_link_refs() {
+        let mut core_ref = field("owner_id", "entity_link");
+        core_ref.references = Some(FieldReference { entity: "core:users".into(), field: "id".into() });
+        let mut local_ref = field("account_id", "entity_link");
+        local_ref.references = Some(FieldReference { entity: "accounts".into(), field: "id".into() });
+        let m = manifest_with(vec![
+            entity("tasks", vec![core_ref, local_ref]),
+            entity("accounts", vec![field("name", "text")]),
+        ]);
         assert!(validate_manifest(&m).is_ok());
     }
 }

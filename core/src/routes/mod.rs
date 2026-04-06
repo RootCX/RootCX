@@ -135,6 +135,7 @@ pub async fn verify_schema(
     Json(manifest): Json<AppManifest>,
 ) -> Result<Json<SchemaVerification>, ApiError> {
     let pool = pool(&rt);
+    crate::manifest::validate_manifest(&manifest).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     let pk_types = crate::manifest::build_pk_type_map(&manifest.data_contract);
     Ok(Json(crate::schema_sync::verify_all(&pool, &manifest.app_id, &manifest.data_contract, &pk_types).await?))
 }
