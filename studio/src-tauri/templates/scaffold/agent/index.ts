@@ -77,7 +77,7 @@ async function runAgent(message: string, history: any[], invokeId: string, onChu
     let response = "";
     for await (const [chunk, metadata] of stream) {
         if (metadata.langgraph_node !== "model_request") continue;
-        const text = typeof chunk.content === "string" ? chunk.content : "";
+        const text = chunk.text ?? "";
         if (text) { response += text; onChunk?.(text); }
     }
     return response;
