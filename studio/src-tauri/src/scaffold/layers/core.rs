@@ -35,7 +35,7 @@ impl Layer for CoreLayer {
   "type": "module",
   "scripts": {{ "dev": "vite", "build": "vite build", "tauri": "tauri" }},
   "dependencies": {{
-    "@rootcx/sdk": "^0.9.0",
+    "@rootcx/sdk": "^0.10.0",
     "@rootcx/ui": "^0.5.0",
     "@tabler/icons-react": "^3.30.0",
     "@tauri-apps/plugin-shell": "^2.0.0",
