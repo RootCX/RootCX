@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use sqlx::PgPool;
 use tracing::info;
 
@@ -65,6 +65,7 @@ impl RuntimeExtension for AuthExtension {
                 .route("/api/v1/auth/me", get(crate::routes::auth::me))
                 .route("/api/v1/auth/mode", get(crate::routes::auth::auth_mode))
                 .route("/api/v1/users", get(crate::routes::auth::list_users))
+                .route("/api/v1/users/{id}", delete(crate::routes::auth::delete_user))
                 .layer(axum::Extension(Arc::clone(&self.config))),
         )
     }
