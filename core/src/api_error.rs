@@ -8,6 +8,7 @@ pub enum ApiError {
     BadRequest(String),
     Unauthorized(String),
     Forbidden(String),
+    Conflict(String),
     NotReady,
     Internal(String),
 }
@@ -19,6 +20,7 @@ impl IntoResponse for ApiError {
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             Self::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg),
             Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
+            Self::Conflict(msg) => (StatusCode::CONFLICT, msg),
             Self::NotReady => (StatusCode::SERVICE_UNAVAILABLE, "runtime not ready".into()),
             Self::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
         };
@@ -37,6 +39,7 @@ impl From<crate::RuntimeError> for ApiError {
     fn from(e: crate::RuntimeError) -> Self {
         match &e {
             // Worker/Job/IPC errors are user-facing (e.g., "no worker for app 'x'")
+            crate::RuntimeError::Conflict(_) => Self::Conflict(e.to_string()),
             crate::RuntimeError::Worker(_) | crate::RuntimeError::Job(_) | crate::RuntimeError::Ipc(_) => {
                 Self::Internal(e.to_string())
             }
