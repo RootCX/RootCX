@@ -15,7 +15,7 @@ pub struct TestRuntime {
     base_url: String,
     pub client: Client,
     runtime: Arc<ReadyRuntime>,
-    token: String,
+    pub token: String,
     _tmp: TempDir,
     _container: ContainerAsync<GenericImage>,
 }

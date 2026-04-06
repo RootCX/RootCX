@@ -65,6 +65,7 @@ async fn mgmt_endpoints_reject_unauthenticated() {
     assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/jobs", &json!({"payload":{}})).await.0, 401);
     assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/worker/start", &json!({})).await.0, 401);
     assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/worker/stop", &json!({})).await.0, 401);
+    assert_eq!(rt.delete_unauthed("/api/v1/users/00000000-0000-0000-0000-000000000099").await, 401);
     rt.shutdown().await;
 }
 
@@ -1734,6 +1735,79 @@ async fn oidc_callback_rejects_invalid_state() {
         .get(rt.url("/api/v1/auth/oidc/callback?code=fake&state=bogus"))
         .send().await.unwrap();
     assert_eq!(r.status(), 401, "callback with unknown state should be rejected");
+    rt.shutdown().await;
+}
+
+// ── Delete User ──
+
+#[tokio::test]
+async fn delete_user_removes_from_list_and_cascades_assignments() {
+    let rt = TestRuntime::boot().await;
+
+    rt.post_unauthed(
+        "/api/v1/auth/register",
+        &json!({"email":"victim@test.local","password":"Str0ngPass1"}),
+    ).await;
+
+    let (_, users) = rt.get_json("/api/v1/users").await;
+    let victim_id = users.as_array().unwrap().iter()
+        .find(|u| u["email"] == "victim@test.local").unwrap()["id"]
+        .as_str().unwrap().to_string();
+
+    // Assign a role so we can verify ON DELETE CASCADE cleans up rbac_assignments
+    rt.post_json("/api/v1/roles/assign", &json!({"userId": victim_id, "role": "admin"})).await;
+
+    let (s, _) = rt.delete_json(&format!("/api/v1/users/{victim_id}")).await;
+    assert_eq!(s, 200);
+
+    let (_, users_after) = rt.get_json("/api/v1/users").await;
+    assert!(
+        !users_after.as_array().unwrap().iter().any(|u| u["email"] == "victim@test.local"),
+        "deleted user must not appear in GET /api/v1/users"
+    );
+
+    let (_, assignments) = rt.get_json("/api/v1/roles/assignments").await;
+    assert!(
+        !assignments.as_array().unwrap().iter().any(|a| a["userId"] == victim_id.as_str()),
+        "deleted user must have no role assignments"
+    );
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn delete_user_rejects_unauthorized_and_unsafe_operations() {
+    let rt = TestRuntime::boot().await;
+
+    rt.post_unauthed(
+        "/api/v1/auth/register",
+        &json!({"email":"nonadmin@test.local","password":"Str0ngPass1"}),
+    ).await;
+    let (_, login) = rt.post_unauthed(
+        "/api/v1/auth/login",
+        &json!({"email":"nonadmin@test.local","password":"Str0ngPass1"}),
+    ).await;
+    let nonadmin_token = login["accessToken"].as_str().unwrap();
+
+    let (_, users) = rt.get_json("/api/v1/users").await;
+    let admin_id = users.as_array().unwrap().iter()
+        .find(|u| u["email"] == "admin@test.local").unwrap()["id"]
+        .as_str().unwrap().to_string();
+
+    let cases: &[(&str, &str, &str, u16)] = &[
+        ("non-admin cannot delete",  nonadmin_token, &admin_id,                                  403),
+        ("cannot delete last admin",  &rt.token,     &admin_id,                                  400),
+        ("nonexistent user returns 404", &rt.token,  "00000000-0000-0000-0000-ffffffffffff",     404),
+    ];
+
+    for &(label, token, target_id, expected) in cases {
+        let r = rt.client
+            .delete(rt.url(&format!("/api/v1/users/{target_id}")))
+            .bearer_auth(token)
+            .send().await.unwrap();
+        assert_eq!(r.status().as_u16(), expected, "{label}");
+    }
+
     rt.shutdown().await;
 }
 

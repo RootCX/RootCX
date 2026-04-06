@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::auth::{AuthConfig, jwt, password};
+use crate::extensions::rbac::policy::require_admin;
 use crate::routes::SharedRuntime;
 
 #[derive(Deserialize)]
@@ -278,4 +279,40 @@ pub async fn me(State(rt): State<SharedRuntime>, identity: Identity) -> Result<J
     .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
 
     Ok(Json(user_response(row)))
+}
+
+pub async fn delete_user(
+    State(rt): State<SharedRuntime>,
+    identity: Identity,
+    Path(target): Path<Uuid>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let pool = super::pool(&rt);
+    require_admin(&pool, identity.user_id).await?;
+
+    // Lock admin rows to prevent concurrent revoke/delete races on the last-admin guard
+    let mut tx = pool.begin().await?;
+    let admin_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM rootcx_system.rbac_assignments WHERE role = 'admin' FOR UPDATE) t",
+    ).fetch_one(&mut *tx).await?;
+
+    let target_is_admin: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_assignments WHERE user_id = $1 AND role = 'admin')",
+    ).bind(target).fetch_one(&mut *tx).await?;
+
+    if target_is_admin && admin_count <= 1 {
+        return Err(ApiError::BadRequest("cannot delete the last admin".into()));
+    }
+
+    // ON DELETE CASCADE cleans up sessions, rbac_assignments, channel_participants, etc.
+    let r = sqlx::query("DELETE FROM rootcx_system.users WHERE id = $1 AND is_system = false")
+        .bind(target)
+        .execute(&mut *tx)
+        .await?;
+
+    if r.rows_affected() == 0 {
+        return Err(ApiError::NotFound("user not found".into()));
+    }
+
+    tx.commit().await?;
+    Ok(Json(json!({ "message": "user deleted" })))
 }
