@@ -609,6 +609,24 @@ export class RuntimeClient {
     return res.json();
   }
 
+  core(): CoreNamespace {
+    return new CoreNamespace(this);
+  }
+
+  /** @internal */
+  async listCoreRecords<T>(route: string): Promise<T[]> {
+    const res = await this.authFetch(`${this.baseUrl}${route}`);
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  /** @internal */
+  async getCoreRecord<T>(route: string, id: string): Promise<T> {
+    const res = await this.authFetch(`${this.baseUrl}${route}/${enc(id)}`);
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
   private async authFetch(url: string, init?: RequestInit): Promise<Response> {
     const doFetch = (token: string | null) => {
       const headers = new Headers(init?.headers);
@@ -631,6 +649,32 @@ export class RuntimeClient {
 
 function enc(s: string): string {
   return encodeURIComponent(s);
+}
+
+const CORE_ROUTES: Record<string, string> = {
+  users: "/api/v1/users",
+};
+
+class CoreNamespace {
+  constructor(private client: RuntimeClient) {}
+
+  collection<T = Record<string, unknown>>(entity: string): CoreCollection<T> {
+    const route = CORE_ROUTES[entity];
+    if (!route) throw new Error(`unknown core entity: '${entity}'`);
+    return new CoreCollection<T>(this.client, route);
+  }
+}
+
+class CoreCollection<T = Record<string, unknown>> {
+  constructor(private client: RuntimeClient, private route: string) {}
+
+  async list(): Promise<T[]> {
+    return this.client.listCoreRecords<T>(this.route);
+  }
+
+  async get(id: string): Promise<T> {
+    return this.client.getCoreRecord<T>(this.route, id);
+  }
 }
 
 export class RuntimeApiError extends Error {

@@ -225,6 +225,26 @@ async fn crud_not_found() {
 }
 
 #[tokio::test]
+async fn crud_unknown_entity_returns_404() {
+    let rt = TestRuntime::boot().await;
+    rt.install("unkapp", "contacts").await;
+    let (s, body) = rt.get_json("/api/v1/apps/unkapp/collections/ghosts").await;
+    assert_eq!(s, 404);
+    assert!(body["error"].as_str().unwrap().contains("ghosts"), "should name entity: {body}");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn crud_namespaced_entity_returns_404() {
+    let rt = TestRuntime::boot().await;
+    rt.install("nsapp", "contacts").await;
+    let (s, body) = rt.get_json("/api/v1/apps/nsapp/collections/core:users").await;
+    assert_eq!(s, 404);
+    assert!(body["error"].as_str().unwrap().contains("core:users"), "should name entity: {body}");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
 async fn crud_invalid_uuid() {
     let rt = TestRuntime::boot().await;
     rt.install("uu", "contacts").await;
