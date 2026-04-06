@@ -17,7 +17,7 @@ fn llm_config(provider: &str) -> LlmConfig {
             import: r#"import { ChatOpenAI } from "@langchain/openai";"#,
             init: r#"new ChatOpenAI({ apiKey: credentials.OPENAI_API_KEY, model: "gpt-4.1" })"#,
             dep_name: "@langchain/openai",
-            dep_version: "^0.5.0",
+            dep_version: "^1.4.0",
         },
         "bedrock" => LlmConfig {
             import: r#"import { ChatBedrockConverse } from "@langchain/aws";"#,
@@ -32,13 +32,13 @@ fn llm_config(provider: &str) -> LlmConfig {
                 r#"secretAccessKey: credentials.AWS_SECRET_ACCESS_KEY ?? "" } } : {}) }); })()"#,
             ),
             dep_name: "@langchain/aws",
-            dep_version: "^0.1.0",
+            dep_version: "^1.3.0",
         },
         _ => LlmConfig {
             import: r#"import { ChatAnthropic } from "@langchain/anthropic";"#,
             init: r#"new ChatAnthropic({ apiKey: credentials.ANTHROPIC_API_KEY, model: "claude-sonnet-4-6" })"#,
             dep_name: "@langchain/anthropic",
-            dep_version: "^0.3.0",
+            dep_version: "^1.3.0",
         },
     }
 }
