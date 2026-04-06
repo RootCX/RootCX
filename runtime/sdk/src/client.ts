@@ -613,16 +613,9 @@ export class RuntimeClient {
     return new CoreNamespace(this);
   }
 
-  /** @internal */
-  async listCoreRecords<T>(route: string): Promise<T[]> {
-    const res = await this.authFetch(`${this.baseUrl}${route}`);
-    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
-    return res.json();
-  }
-
-  /** @internal */
-  async getCoreRecord<T>(route: string, id: string): Promise<T> {
-    const res = await this.authFetch(`${this.baseUrl}${route}/${enc(id)}`);
+  /** @internal — exposed for CoreCollection */
+  async fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+    const res = await this.authFetch(url, init);
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }
@@ -666,14 +659,14 @@ class CoreNamespace {
 }
 
 class CoreCollection<T = Record<string, unknown>> {
-  constructor(private client: RuntimeClient, private route: string) {}
+  constructor(private client: RuntimeClient, private base: string) {}
 
-  async list(): Promise<T[]> {
-    return this.client.listCoreRecords<T>(this.route);
+  list(): Promise<T[]> {
+    return this.client.fetchJson(`${this.client.getBaseUrl()}${this.base}`);
   }
 
-  async get(id: string): Promise<T> {
-    return this.client.getCoreRecord<T>(this.route, id);
+  get(id: string): Promise<T> {
+    return this.client.fetchJson(`${this.client.getBaseUrl()}${this.base}/${enc(id)}`);
   }
 }
 
