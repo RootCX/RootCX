@@ -44,6 +44,10 @@ impl RuntimeClient {
         *self.token.write().unwrap() = token;
     }
 
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     pub fn token(&self) -> Option<String> {
         self.token.read().unwrap().clone()
     }
