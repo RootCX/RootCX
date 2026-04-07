@@ -292,6 +292,8 @@ const columns: ColumnDef<T, unknown>[] = [
 
 Apps can have a `backend/` directory with a Bun worker for server-side logic. Core manages lifecycle (spawn, crash recovery, shutdown). IPC via JSON-lines on stdin/stdout.
 
+Deps: add `backend/package.json` for backend-only npm deps. Core runs `bun install` there at deploy. Do NOT put backend deps in the root `package.json` (that one is for the frontend/Vite).
+
 ### IPC protocol
 
 Core sends `discover` immediately after spawn. Worker listens on stdin, responds on stdout. JSON-lines (one JSON object per line).
