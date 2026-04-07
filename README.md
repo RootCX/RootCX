@@ -24,7 +24,7 @@ Build a fleet of interconnected apps and AI agents with managed database, Auth, 
 <br />
 
 <p align="center">
-  <img src="https://rootcx.com/docs/rootcx-studio.png" alt="RootCX Studio" width="800" />
+  <img src="https://rootcx.com/docs/cloud/crm-desktop.png" alt="RootCX - CRM running on RootCX Cloud" width="800" />
 </p>
 
 <br />
@@ -32,9 +32,8 @@ Build a fleet of interconnected apps and AI agents with managed database, Auth, 
 ## Table of Contents
 
 - [What is RootCX?](#what-is-rootcx)
+- [Features](#features)
 - [Quickstart](#quickstart)
-  - [1. Download Studio](#1-download-studio)
-  - [2. Connect to a Core](#2-connect-to-a-core)
 - [Architecture](#architecture)
 - [Development](#development)
 - [Community](#community)
@@ -46,11 +45,72 @@ RootCX is an open-source\* infrastructure for building custom internal software 
 
 **Develop locally. Deploy anywhere. Self-host or use our cloud.**
 
+## Features
+
+- **Fleet of apps** sharing one database, one auth system, one permission model
+- **AI Agents** with built-in tools, session memory, supervision policies, and cross-agent delegation
+- **OIDC Single Sign-On** -- Azure AD, Okta, Google Workspace, Auth0
+- **Global RBAC** with namespaced permissions (`app:crm:contacts.read`) and wildcard matching
+- **Channels** -- connect agents to Telegram in one click
+- **Integrations** -- Apollo, GitHub, Stripe, Slack, and custom connectors
+- **Automatic schema sync** -- define your data model, Core creates and migrates the database
+- **Immutable audit log** -- every INSERT, UPDATE, DELETE captured at the database trigger level
+- **AES-256 encrypted secret vault** -- API keys and credentials, never stored in plaintext
+- **Build from anywhere** -- Studio (desktop IDE), CLI, or Claude Code
+
+<p align="center">
+  <img src="https://rootcx.com/docs/cloud/fleet-3d.png" alt="Fleet 3D view with AI Agent" width="800" />
+</p>
+
 ## Quickstart
 
-### 1. Download Studio
+### Option A: RootCX Cloud (fastest)
 
-RootCX Studio is the native desktop app where you build, deploy, and manage everything.
+No installation, no Docker, no infrastructure. A managed Core is provisioned for you in minutes.
+
+1. Sign up at [rootcx.com/app/register](https://rootcx.com/app/register).
+2. Create a project and hit **Launch Project**.
+3. Once active, copy the **API URL** from the project dashboard.
+
+### Option B: Run locally
+
+**Prerequisite:** [Docker Desktop](https://docker.com/get-started) must be installed.
+
+```bash
+git clone https://github.com/rootcx/rootcx.git && cd rootcx
+docker compose up -d
+```
+
+Core is running at `http://localhost:9100`.
+
+### Connect and build
+
+Once you have a running Core, choose your tool:
+
+**Studio** (desktop IDE):
+1. [Download Studio](#download-studio) and open it.
+2. Select **Connect to a server** and paste your Core URL.
+3. Open AI Forge, describe what you want, hit Run (F5).
+
+**CLI**:
+```bash
+rootcx connect http://localhost:9100
+rootcx new agent support_bot
+# ... build your agent ...
+rootcx deploy
+```
+
+**Claude Code**:
+```bash
+/rootcx-connect http://localhost:9100
+/rootcx-new agent support_bot
+# Claude Code builds it using 6 official RootCX skills
+/rootcx-deploy
+```
+
+See the [Getting Started guide](https://rootcx.com/docs/guides/getting-started) for a full walkthrough.
+
+### Download Studio
 
 | Platform | Download |
 |----------|----------|
@@ -59,40 +119,6 @@ RootCX Studio is the native desktop app where you build, deploy, and manage ever
 | Windows | [RootCX Studio (.exe)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_x64-setup.exe) |
 | Linux (.deb) | [RootCX Studio (.deb)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_amd64.deb) |
 | Linux (.AppImage) | [RootCX Studio (.AppImage)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_amd64.AppImage) |
-
-### 2. Connect to a Core
-
-On first launch, Studio asks how you want to connect to a RootCX Core instance. You have two options:
-
-#### Option A: RootCX Cloud (fastest)
-
-No installation, no Docker, no infrastructure. A managed Core is provisioned for you in minutes.
-
-1. Sign up at [rootcx.com/app/register](https://rootcx.com/app/register).
-2. Create a project and hit **Launch Project**.
-3. Once active, copy the **API URL** from the project overview.
-4. In Studio, select **Connect to a server** and paste the URL.
-
-You're ready to build. Your project gets its own dedicated Core with a managed database, API, authentication, and AI runtime.
-
-#### Option B: Run locally with Docker
-
-Run a Core instance on your own machine. Ideal for offline development or full control.
-
-**Prerequisite:** [Docker Desktop](https://docker.com/get-started) must be installed and running.
-
-**Via Studio:** select **Run locally** on the welcome screen. Studio handles everything automatically.
-
-**Via command line:**
-
-```bash
-git clone https://github.com/rootcx/rootcx.git && cd rootcx
-docker compose up -d
-```
-
-Core will be available at `http://localhost:9100` once both services are healthy.
-
-For production self-hosting, see the [Self-Hosting guide](https://rootcx.com/docs/developers/self-hosting).
 
 ## Architecture
 
@@ -106,23 +132,48 @@ For production self-hosting, see the [Self-Hosting guide](https://rootcx.com/doc
 
 **Core** is a Rust daemon that powers your entire fleet. Every app and agent you deploy inherits the same enterprise primitives:
 
-- Managed PostgreSQL with automatic schema sync
+- PostgreSQL with automatic schema sync -- no migration files
 - Automatic CRUD APIs generated from your data model
-- JWT authentication and session management
-- Granular role-based access control (RBAC)
+- JWT authentication with OIDC SSO (Azure AD, Okta, Google)
+- Global RBAC with namespaced permissions, inheritance, and wildcards
 - Immutable audit logs at the database trigger level
 - AES-256 encrypted secret vault
-- Isolated process supervisor with crash recovery
-- Background job queue
+- Isolated Bun process supervisor with crash recovery
+- Durable background job queue with automatic retry
 - Real-time log streaming via SSE
+- Channels for connecting AI agents to messaging platforms (Telegram)
 
-**Studio** is a native desktop IDE built with Tauri. You use it to build apps, AI agents, integrations, and MCP servers. Each one is a standalone project with its own code, its own frontend, and its own backend logic. When deployed, they all connect to the same Core and share its database, auth, RBAC, and governance layer.
+<p align="center">
+  <img src="https://rootcx.com/docs/cloud/rbac-roles.png" alt="RBAC with namespaced permissions" width="800" />
+</p>
+
+**Studio** is a native desktop IDE built with Tauri. Build apps, AI agents, integrations, and MCP servers. Deploy with a single keystroke.
 
 - AI Forge: describe intent in plain language, get production-ready code
-- Visual database browser and schema manager
+- Visual database browser and SQL editor
 - Governance UI for RBAC, audit logs, secrets, and auth
-- Integrated terminal and live log streaming
-- One-click deploy to any connected Core
+- Integration catalog with one-click connect
+- Live log streaming and process monitoring
+
+<p align="center">
+  <img src="https://rootcx.com/docs/cloud/tools-catalog.png" alt="Integration and tools catalog" width="800" />
+</p>
+
+**CLI + Claude Code** for developers who prefer the terminal:
+
+- `rootcx` CLI for scaffolding, deploying, and invoking agents
+- Claude Code plugin with 6 official skills for AI-assisted development
+- Same output as Studio -- fully compatible, switch tools anytime
+
+<p align="center">
+  <img src="https://rootcx.com/docs/cloud/database-browser.png" alt="Database browser" width="400" />
+  <img src="https://rootcx.com/docs/cloud/sql-editor.png" alt="SQL editor" width="400" />
+</p>
+
+<p align="center">
+  <img src="https://rootcx.com/docs/cloud/audit-log.png" alt="Audit log with before/after diff" width="400" />
+  <img src="https://rootcx.com/docs/cloud/secrets-vault.png" alt="Encrypted secret vault" width="400" />
+</p>
 
 ## Development
 
@@ -130,7 +181,7 @@ For production self-hosting, see the [Self-Hosting guide](https://rootcx.com/doc
 # Clone the repo
 git clone https://github.com/rootcx/rootcx.git && cd rootcx
 
-# Download bundled PostgreSQL + Bun
+# Download Bun runtime
 make deps
 
 # Start Studio in dev mode (hot reload)
