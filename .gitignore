@@ -23,6 +23,9 @@ Thumbs.db
 # Deploy (lives in separate private repo)
 /deploy/
 
+# RootCX CLI workspace config (contains tokens)
+.rootcx/
+
 # Secrets / Credentials
 .env
 .env.*

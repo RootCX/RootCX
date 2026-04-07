@@ -6,6 +6,7 @@ members = [
     "crates/browser",
     "crates/forge",
     "crates/platform",
+    "crates/rootcx-cli",
     "crates/shared-types",
     "studio/src-tauri",
 ]

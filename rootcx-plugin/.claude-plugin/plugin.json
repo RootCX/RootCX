@@ -1,0 +1,8 @@
+{
+  "name": "rootcx",
+  "version": "0.1.0",
+  "description": "Build and deploy RootCX apps and AI agents from Claude Code",
+  "author": { "name": "RootCX" },
+  "homepage": "https://rootcx.com",
+  "keywords": ["rootcx", "agents", "langchain", "lowcode"]
+}
