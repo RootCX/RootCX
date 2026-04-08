@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "Plugin Structure": {
+      "source": "anthropics/claude-code",
+      "sourceType": "github",
+      "computedHash": "c4e9b3ea36efad4ab599465aaac71f81dc3320a183920678fe1587181c446b07"
+    }
+  }
+}
