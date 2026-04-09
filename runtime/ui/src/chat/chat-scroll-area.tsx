@@ -81,7 +81,7 @@ const ChatScrollArea = forwardRef<ChatScrollAreaHandle, ChatScrollAreaProps>(
           <button
             type="button"
             onClick={() => scrollToBottom()}
-            className="absolute bottom-4 left-1/2 z-10 flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full border border-border/60 bg-card shadow-lg shadow-black/20 text-muted-foreground transition-all hover:bg-muted hover:text-foreground"
+            className="absolute bottom-4 left-1/2 z-10 flex h-10 w-10 -translate-x-1/2 items-center justify-center rounded-full border border-border/60 bg-card shadow-lg shadow-black/20 text-muted-foreground transition-all hover:bg-muted hover:text-foreground"
           >
             <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6" /></svg>
           </button>

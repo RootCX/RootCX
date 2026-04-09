@@ -33,7 +33,7 @@ export function SearchInput({ value: controlledValue, onChange, placeholder = "S
   }, []);
 
   return (
-    <div className={cn("relative", className)}>
+    <div className={cn("relative w-full sm:max-w-sm", className)}>
       <IconSearch className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
       <Input
         placeholder={placeholder}

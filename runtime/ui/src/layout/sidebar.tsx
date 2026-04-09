@@ -1,6 +1,7 @@
 import * as React from "react";
 import { cn } from "../lib/utils";
 import { IconChevronDown } from "@tabler/icons-react";
+import { useSidebarOptional } from "./app-shell";
 
 interface SidebarProps {
   children: React.ReactNode;
@@ -65,10 +66,16 @@ interface SidebarItemProps {
 }
 
 export function SidebarItem({ icon, label, badge, active = false, onClick, className }: SidebarItemProps) {
+  const sidebar = useSidebarOptional();
+  const handleClick = () => {
+    onClick?.();
+    // Auto-dismiss the mobile drawer after navigation so content is immediately visible.
+    if (sidebar?.isMobile) sidebar.setOpenMobile(false);
+  };
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={handleClick}
       className={cn(
         "flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-sm font-medium transition-colors",
         active

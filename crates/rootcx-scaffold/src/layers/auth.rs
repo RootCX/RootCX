@@ -20,7 +20,7 @@ fn simple_app(name: &str) -> String {
 
 export default function App() {{
   return (
-    <div className="p-6">
+    <div className="mx-auto w-full max-w-5xl p-4 sm:p-6 lg:p-8">
       <PageHeader title="{name}" description="Get started by editing src/App.tsx" />
     </div>
   );
@@ -32,7 +32,17 @@ export default function App() {{
 fn auth_app(name: &str) -> String {
     format!(
         r#"import {{ AuthGate }} from "@rootcx/sdk";
-import {{ AppShell, AppShellSidebar, AppShellMain, Sidebar, SidebarItem, PageHeader, Button }} from "@rootcx/ui";
+import {{
+  AppShell,
+  AppShellSidebar,
+  AppShellMain,
+  AppShellHeader,
+  SidebarTrigger,
+  Sidebar,
+  SidebarItem,
+  PageHeader,
+  Button,
+}} from "@rootcx/ui";
 import {{ IconLogout, IconHome }} from "@tabler/icons-react";
 
 export default function App() {{
@@ -44,9 +54,14 @@ export default function App() {{
             <Sidebar
               header={{<span className="text-sm font-semibold">{name}</span>}}
               footer={{
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <span className="truncate text-sm text-muted-foreground">{{user.email}}</span>
-                  <Button variant="ghost" size="icon" onClick={{() => logout()}}>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={{() => logout()}}
+                    aria-label="Sign out"
+                  >
                     <IconLogout className="h-4 w-4" />
                   </Button>
                 </div>
@@ -56,7 +71,11 @@ export default function App() {{
             </Sidebar>
           </AppShellSidebar>
           <AppShellMain>
-            <div className="p-6">
+            <AppShellHeader>
+              <SidebarTrigger />
+              <span className="text-sm font-semibold">{name}</span>
+            </AppShellHeader>
+            <div className="mx-auto w-full max-w-5xl p-4 sm:p-6 lg:p-8">
               <PageHeader title="Home" description="Welcome to {name}" />
             </div>
           </AppShellMain>

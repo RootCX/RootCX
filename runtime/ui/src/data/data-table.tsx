@@ -77,9 +77,8 @@ function ResizeHandle({ header }: { header: { getResizeHandler: () => (e: unknow
   return (
     <div
       onMouseDown={header.getResizeHandler()}
-      onTouchStart={header.getResizeHandler()}
       className={cn(
-        "absolute right-0 top-0 h-full w-1 cursor-col-resize select-none touch-none opacity-0 hover:opacity-100 group-hover/head:opacity-50",
+        "absolute right-0 top-0 hidden h-full w-1 cursor-col-resize select-none opacity-0 hover:opacity-100 group-hover/head:opacity-50 md:block",
         header.column.getIsResizing() && "opacity-100 bg-primary",
       )}
     />
@@ -139,20 +138,24 @@ export function DataTable<T extends { id: string }>({
       cols.push({
         id: "_select",
         header: ({ table }) => (
-          <input
-            type="checkbox"
-            className="h-4 w-4 rounded border-input"
-            checked={table.getIsAllPageRowsSelected()}
-            onChange={(e) => table.toggleAllPageRowsSelected(e.target.checked)}
-          />
+          <label className="flex h-8 w-8 cursor-pointer items-center justify-center">
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border-input"
+              checked={table.getIsAllPageRowsSelected()}
+              onChange={(e) => table.toggleAllPageRowsSelected(e.target.checked)}
+            />
+          </label>
         ),
         cell: ({ row }) => (
-          <input
-            type="checkbox"
-            className="h-4 w-4 rounded border-input"
-            checked={row.getIsSelected()}
-            onChange={(e) => { e.stopPropagation(); row.toggleSelected(e.target.checked); }}
-          />
+          <label className="flex h-8 w-8 cursor-pointer items-center justify-center" onClick={(e) => e.stopPropagation()}>
+            <input
+              type="checkbox"
+              className="h-4 w-4 rounded border-input"
+              checked={row.getIsSelected()}
+              onChange={(e) => row.toggleSelected(e.target.checked)}
+            />
+          </label>
         ),
         size: 40,
         enableSorting: false,
@@ -242,9 +245,9 @@ export function DataTable<T extends { id: string }>({
   return (
     <div className={cn("flex flex-col gap-3", className)}>
       {(searchable || (bulkActions && selectedRows.length > 0)) && (
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
           {searchable && (
-            <div className="relative max-w-sm">
+            <div className="relative w-full sm:max-w-sm">
               <IconSearch className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
                 placeholder={searchPlaceholder}
@@ -255,7 +258,7 @@ export function DataTable<T extends { id: string }>({
             </div>
           )}
           {bulkActions && selectedRows.length > 0 && (
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="text-sm text-muted-foreground">{selectedRows.length} selected</span>
               {bulkActions.map((action) => (
                 <Button
@@ -336,17 +339,29 @@ export function DataTable<T extends { id: string }>({
       </div>
 
       {pageCount > 1 && !loading && (
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-muted-foreground">
+        <div className="flex flex-col-reverse items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <p className="text-center text-sm text-muted-foreground sm:text-left">
             Page {pagination.pageIndex + 1} of {pageCount}
           </p>
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={() => table.previousPage()} disabled={!table.getCanPreviousPage()}>
+          <div className="flex items-center justify-end gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => table.previousPage()}
+              disabled={!table.getCanPreviousPage()}
+              aria-label="Previous page"
+            >
               <IconChevronLeft className="h-4 w-4" />
-              Previous
+              <span className="hidden sm:inline">Previous</span>
             </Button>
-            <Button variant="outline" size="sm" onClick={() => table.nextPage()} disabled={!table.getCanNextPage()}>
-              Next
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => table.nextPage()}
+              disabled={!table.getCanNextPage()}
+              aria-label="Next page"
+            >
+              <span className="hidden sm:inline">Next</span>
               <IconChevronRight className="h-4 w-4" />
             </Button>
           </div>
