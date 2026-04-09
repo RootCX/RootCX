@@ -1,3 +1,4 @@
+/// <reference path="../rootcx-worker.d.ts" />
 import { createHmac, timingSafeEqual } from "crypto";
 import { parseUbl, type ParsedUBLDocument } from "./parseUbl";
 import { handleWebhook as handleWebhookImpl, type WebhookDeps } from "./webhook-handler";
@@ -664,20 +665,9 @@ const actions: Record<string, (config: Config, input: any) => Promise<any> | any
   reject_invoice: rejectInvoice,
 };
 
-// ─── Webhook Handler ─────────────────────────────────────────────────────────
-
-async function handleWebhook(params: any) {
-  const deps: WebhookDeps = {
-    collectionOp,
-    uploadFile: (globalThis as any).uploadFile,
-    dokapiRequest,
-  };
-  return handleWebhookImpl(params, deps);
-}
-
 // ─── IPC Protocol ────────────────────────────────────────────────────────────
 
-const rpcHandlers: Record<string, (params: any) => Promise<any>> = {
+const rpcHandlers: Record<string, (params: any, caller: any, ctx: RootCxCtx) => Promise<any>> = {
   async __bind(params) {
     const { config } = params;
     if (!config?.clientId || !config?.clientSecret) return {};
@@ -694,62 +684,17 @@ const rpcHandlers: Record<string, (params: any) => Promise<any>> = {
     return handler(config, input);
   },
 
-  async __webhook(params) {
-    return handleWebhook(params);
+  async __webhook(params, _caller, ctx) {
+    const deps: WebhookDeps = {
+      collectionOp: (op, entity, data) =>
+        op === "insert" ? ctx.collection(entity).insert(data)
+        : op === "update" ? ctx.collection(entity).update(data)
+        : Promise.reject(new Error(`unsupported collection op: ${op}`)),
+      uploadFile: ctx.uploadFile,
+      dokapiRequest,
+    };
+    return handleWebhookImpl(params, deps);
   },
 };
 
-const send = (msg: Record<string, unknown>) => process.stdout.write(JSON.stringify(msg) + "\n");
-const pendingOps = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void }>();
-let opSeq = 0;
-
-function collectionOp(op: string, entity: string, data: Record<string, unknown>): Promise<any> {
-  const id = `cop_${++opSeq}`;
-  return new Promise((resolve, reject) => {
-    pendingOps.set(id, { resolve, reject });
-    send({ type: "collection_op", id, op, entity, data });
-  });
-}
-
-let buffer = "";
-process.stdin.setEncoding("utf-8");
-process.stdin.on("data", (chunk: string) => {
-  buffer += chunk;
-  let nl: number;
-  while ((nl = buffer.indexOf("\n")) !== -1) {
-    const line = buffer.slice(0, nl).trim();
-    buffer = buffer.slice(nl + 1);
-    if (!line) continue;
-    const msg = JSON.parse(line);
-    switch (msg.type) {
-      case "discover":
-        send({ type: "discover", methods: Object.keys(rpcHandlers) });
-        break;
-      case "rpc":
-        handleRpc(msg);
-        break;
-      case "collection_op_result": {
-        const p = pendingOps.get(msg.id);
-        if (!p) break;
-        pendingOps.delete(msg.id);
-        msg.error ? p.reject(new Error(msg.error)) : p.resolve(msg.result);
-        break;
-      }
-      case "shutdown":
-        process.exit(0);
-    }
-  }
-});
-
-async function handleRpc(msg: any) {
-  const handler = rpcHandlers[msg.method];
-  if (!handler) {
-    send({ type: "rpc_response", id: msg.id, error: `unknown method: ${msg.method}` });
-    return;
-  }
-  try {
-    send({ type: "rpc_response", id: msg.id, result: await handler(msg.params) });
-  } catch (e: any) {
-    send({ type: "rpc_response", id: msg.id, error: e.message });
-  }
-}
+serve({ rpc: rpcHandlers });

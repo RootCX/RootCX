@@ -1881,3 +1881,135 @@ async fn entity_link_core_users_fk_is_enforced() {
     rt.shutdown().await;
 }
 
+// ── IPC Protocol v1/v2 Integration ──────────────────────────────────────────
+// These tests verify the real Rust supervisor ↔ Bun worker boundary through
+// the injected prelude. Unit tests (backend_prelude.test.ts) cover the JS
+// dispatch logic in isolation; these tests cover what they structurally
+// cannot: wire-format agreement, protocol negotiation, and collection_op
+// round-trips through the Rust layer.
+
+#[tokio::test]
+async fn ipc_v2_rpc_round_trip() {
+    let rt = TestRuntime::boot().await;
+    rt.install("ipcv2", "items").await;
+
+    let backend = br#"
+        serve({
+            rpc: {
+                ping: (params) => ({ reply: "pong", echo: params.msg }),
+            },
+        });
+    "#;
+    let archive = make_tar_gz(&[("index.ts", backend)]);
+    let (s, _) = rt.deploy("ipcv2", &archive).await;
+    assert_eq!(s, 200);
+
+    // Worker needs a moment to complete the discover handshake.
+    let mut result = json!(null);
+    for _ in 0..20 {
+        let (s, body) = rt.post_json("/api/v1/apps/ipcv2/rpc", &json!({
+            "method": "ping", "params": {"msg": "hello"}
+        })).await;
+        if s == 200 {
+            result = body;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert_eq!(result["reply"], "pong");
+    assert_eq!(result["echo"], "hello");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn ipc_v2_collection_op_round_trip() {
+    let rt = TestRuntime::boot().await;
+    rt.install("ipcco", "items").await;
+
+    let backend = br#"
+        serve({
+            rpc: {
+                async create_item(params, _caller, ctx) {
+                    const row = await ctx.collection("items").insert({
+                        first_name: params.first_name,
+                        last_name: params.last_name,
+                    });
+                    return { id: row.id };
+                },
+            },
+        });
+    "#;
+    let archive = make_tar_gz(&[("index.ts", backend)]);
+    let (s, _) = rt.deploy("ipcco", &archive).await;
+    assert_eq!(s, 200);
+
+    let mut rpc_result = json!(null);
+    for _ in 0..20 {
+        let (s, body) = rt.post_json("/api/v1/apps/ipcco/rpc", &json!({
+            "method": "create_item",
+            "params": {"first_name": "Alice", "last_name": "Martin"}
+        })).await;
+        if s == 200 {
+            rpc_result = body;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert!(rpc_result["id"].is_string(), "RPC should return inserted row id: {rpc_result}");
+
+    // Verify the record exists in the database via REST API
+    let (s, rows) = rt.get_json("/api/v1/apps/ipcco/collections/items").await;
+    assert_eq!(s, 200);
+    let items = rows.as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["first_name"], "Alice");
+    assert_eq!(items[0]["last_name"], "Martin");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn ipc_v1_legacy_worker_with_new_prelude() {
+    let rt = TestRuntime::boot().await;
+    rt.install("ipcv1", "items").await;
+
+    // Legacy backend: manual stdin handler, no serve(). Must still work
+    // with the new prelude injected via --preload (prelude stays silent on
+    // discover/rpc when _handlers is null).
+    let backend = br#"
+        const write = (m) => process.stdout.write(JSON.stringify(m) + "\n");
+        process.stdin.setEncoding("utf-8");
+        let buf = "";
+        process.stdin.on("data", (chunk) => {
+            buf += chunk;
+            let nl;
+            while ((nl = buf.indexOf("\n")) !== -1) {
+                const line = buf.slice(0, nl).trim();
+                buf = buf.slice(nl + 1);
+                if (!line) continue;
+                const msg = JSON.parse(line);
+                if (msg.type === "discover") write({ type: "discover", methods: ["ping"] });
+                if (msg.type === "rpc" && msg.method === "ping")
+                    write({ type: "rpc_response", id: msg.id, result: { reply: "legacy_pong" } });
+                if (msg.type === "shutdown") process.exit(0);
+            }
+        });
+    "#;
+    let archive = make_tar_gz(&[("index.ts", backend)]);
+    let (s, _) = rt.deploy("ipcv1", &archive).await;
+    assert_eq!(s, 200);
+
+    let mut result = json!(null);
+    for _ in 0..20 {
+        let (s, body) = rt.post_json("/api/v1/apps/ipcv1/rpc", &json!({
+            "method": "ping", "params": {}
+        })).await;
+        if s == 200 {
+            result = body;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert_eq!(result["reply"], "legacy_pong", "v1 legacy worker must still work: {result}");
+    rt.shutdown().await;
+}
+

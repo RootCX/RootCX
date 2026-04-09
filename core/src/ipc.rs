@@ -89,10 +89,40 @@ pub enum OutboundMessage {
     Shutdown,
 }
 
+/// Worker IPC protocol version.
+///
+/// Versioning rules (see also `backend_prelude.js`):
+///
+/// * **v1 (legacy)** — worker manages its own stdin listener, writes the
+///   IPC protocol by hand, does not call `serve()`. Any worker that omits
+///   the `protocol` field in its `discover` response is implicitly v1.
+///   Supported indefinitely: existing client apps ship on v1.
+///
+/// * **v2** — worker calls `globalThis.serve({ rpc, onStart, onJob,
+///   onShutdown })` from the injected prelude. The prelude owns the single
+///   stdin dispatcher and builds a `ctx` (`collection`, `uploadFile`, …).
+///   The worker MUST announce `protocol: 2` in its `discover` response.
+///
+/// Adding a new version = add a const, bump the scaffold template, teach
+/// the supervisor which messages are safe to send based on the negotiated
+/// version. Never remove a version without an explicit migration plan.
+pub const LATEST_PROTOCOL_VERSION: u32 = 2;
+
+fn default_protocol_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum InboundMessage {
-    Discover {},
+    /// Worker handshake. `protocol` advertises the IPC version the worker
+    /// speaks. Absent = v1 (legacy, pre-`serve()` apps). Extra fields
+    /// (`methods`, …) are accepted and currently ignored by the Core but
+    /// may be used by future versions — see `LATEST_PROTOCOL_VERSION`.
+    Discover {
+        #[serde(default = "default_protocol_version")]
+        protocol: u32,
+    },
     RpcResponse {
         id: String,
         #[serde(default)]
@@ -262,15 +292,32 @@ mod tests {
     }
 
     #[test]
-    fn inbound_discover_deserialization() {
+    fn inbound_discover_without_protocol_defaults_to_v1() {
+        // Legacy apps (pre-`serve()`) omit `protocol` entirely. They must
+        // still parse cleanly and fall through to protocol v1.
         let msg: InboundMessage = serde_json::from_str(r#"{"type":"discover"}"#).unwrap();
-        assert!(matches!(msg, InboundMessage::Discover {}));
+        let InboundMessage::Discover { protocol } = msg else { panic!("expected Discover") };
+        assert_eq!(protocol, 1);
     }
 
     #[test]
-    fn inbound_discover_ignores_extra_fields() {
-        let msg: InboundMessage = serde_json::from_str(r#"{"type":"discover","methods":["ping"]}"#).unwrap();
-        assert!(matches!(msg, InboundMessage::Discover {}));
+    fn inbound_discover_ignores_extra_fields_but_reads_protocol() {
+        // Workers MAY send `methods` (ignored today) alongside `protocol`.
+        let raw = r#"{"type":"discover","protocol":2,"methods":["ping"]}"#;
+        let msg: InboundMessage = serde_json::from_str(raw).unwrap();
+        let InboundMessage::Discover { protocol } = msg else { panic!("expected Discover") };
+        assert_eq!(protocol, 2);
+    }
+
+    #[test]
+    fn inbound_discover_accepts_future_protocol_versions() {
+        // Unknown (higher) protocol versions deserialize successfully; it
+        // is the supervisor's job — not the parser's — to decide whether
+        // it can speak to that worker. This keeps forward-compat cheap.
+        let raw = r#"{"type":"discover","protocol":99}"#;
+        let msg: InboundMessage = serde_json::from_str(raw).unwrap();
+        let InboundMessage::Discover { protocol } = msg else { panic!("expected Discover") };
+        assert_eq!(protocol, 99);
     }
 
     #[test]

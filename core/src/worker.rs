@@ -188,6 +188,14 @@ async fn supervisor_loop(
     let mut crash_times: Vec<Instant> = Vec::new();
     let mut restart_count: u32 = 0;
     let mut output_handles = Vec::new();
+    // IPC protocol version negotiated with the worker via the `discover`
+    // handshake. Defaults to v1 (legacy: apps that don't call `serve()`)
+    // until the worker explicitly advertises a higher version.
+    // Not yet read by dispatch logic — foundational, will gate
+    // version-specific message sends once a future bump introduces
+    // differences. See `ipc::LATEST_PROTOCOL_VERSION` for the contract.
+    #[allow(unused_assignments)]
+    let mut worker_protocol: u32 = 1;
 
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundMessage>(64);
 
@@ -321,6 +329,23 @@ async fn supervisor_loop(
             } => {
                 match event {
                     Some(IpcEvent::Message(msg)) => match msg {
+                        InboundMessage::Discover { protocol } => {
+                            // Worker handshake. Record the negotiated IPC
+                            // version; future message-dispatch decisions
+                            // that depend on worker capabilities should
+                            // gate on `worker_protocol`.
+                            worker_protocol = protocol;
+                            if worker_protocol > crate::ipc::LATEST_PROTOCOL_VERSION {
+                                warn!(
+                                    app_id = %app_id,
+                                    worker = worker_protocol,
+                                    core = crate::ipc::LATEST_PROTOCOL_VERSION,
+                                    "worker advertises newer IPC protocol than Core supports; proceeding on best-effort basis",
+                                );
+                            } else {
+                                info!(app_id = %app_id, protocol = worker_protocol, "worker handshake ok");
+                            }
+                        }
                         InboundMessage::RpcResponse { id, result, error } => {
                             pending_rpcs.resolve(&id, match error {
                                 Some(e) => Err(e),
@@ -496,7 +521,6 @@ async fn supervisor_loop(
                             let tx = outbound_tx.clone();
                             let _ = tx.send(OutboundMessage::StorageUploadUrl { id, url }).await;
                         }
-                        _ => {}
                     },
                     Some(IpcEvent::Output(line)) => {
                         emit_log(&log_tx, "stdout", &line);
