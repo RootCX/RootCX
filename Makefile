@@ -73,6 +73,7 @@ dev-core:
 	docker compose -f docker-compose.dev.yml up -d
 	@echo "Waiting for Postgres..." && until docker compose -f docker-compose.dev.yml exec -T postgres pg_isready -U rootcx -d rootcx >/dev/null 2>&1; do sleep 0.5; done
 	DATABASE_URL=$(DEV_DB) \
+	ROOTCX_TENANT_REF=$${ROOTCX_TENANT_REF:-local} \
 	ROOTCX_OIDC_ISSUER=$${ROOTCX_OIDC_ISSUER:-http://localhost:3000} \
 	ROOTCX_OIDC_CLIENT_ID=$${ROOTCX_OIDC_CLIENT_ID:-rootcx-local} \
 	ROOTCX_OIDC_CLIENT_SECRET=$${ROOTCX_OIDC_CLIENT_SECRET:-xMh0Aoj2Qa6eB5quFm-Y_K4b62bcHUV5wypqGMCCiUc} \

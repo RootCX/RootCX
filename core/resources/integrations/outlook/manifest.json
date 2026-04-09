@@ -1,0 +1,129 @@
+{
+  "appId": "outlook",
+  "name": "Outlook",
+  "version": "0.1.0",
+  "type": "integration",
+  "description": "Send, read and manage emails via Microsoft Graph API (Outlook)",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "clientId": { "type": "string", "description": "Microsoft Entra App (client) ID", "platformSecret": "OUTLOOK_CLIENT_ID" },
+      "clientSecret": { "type": "string", "description": "Microsoft Entra Client Secret", "platformSecret": "OUTLOOK_CLIENT_SECRET" },
+      "proxyToken": { "type": "string", "description": "Managed proxy HMAC token (managed mode only)", "platformSecret": "OUTLOOK_PROXY_TOKEN" },
+      "baseUrl": { "type": "string", "description": "Managed proxy base URL (managed mode only)", "platformSecret": "OUTLOOK_BASE_URL" }
+    }
+  },
+  "userAuth": { "type": "redirect" },
+  "actions": [
+    {
+      "id": "send_email",
+      "name": "Send Email",
+      "description": "Send an email via Outlook",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "to": { "type": "string" },
+          "subject": { "type": "string" },
+          "body": { "type": "string" },
+          "cc": { "type": "string" },
+          "bcc": { "type": "string" },
+          "html": { "type": "boolean", "default": false },
+          "saveToSentItems": { "type": "boolean", "default": true }
+        },
+        "required": ["to", "subject", "body"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" }
+        }
+      }
+    },
+    {
+      "id": "list_emails",
+      "name": "List Emails",
+      "description": "List recent emails from a mail folder",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "folder": { "type": "string", "description": "Mail folder name or ID (default: Inbox)", "default": "Inbox" },
+          "top": { "type": "integer", "description": "Number of messages to return (max 1000)", "default": 10 },
+          "filter": { "type": "string", "description": "OData $filter expression (e.g. \"isRead eq false\")" },
+          "search": { "type": "string", "description": "Search query (KQL syntax, e.g. \"from:user@example.com\")" }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string" },
+                "conversationId": { "type": "string" },
+                "subject": { "type": "string" },
+                "from": { "type": "string" },
+                "receivedDateTime": { "type": "string" },
+                "isRead": { "type": "boolean" },
+                "bodyPreview": { "type": "string" }
+              }
+            }
+          },
+          "nextLink": { "type": "string", "description": "@odata.nextLink for pagination" }
+        }
+      }
+    },
+    {
+      "id": "get_email",
+      "name": "Get Email",
+      "description": "Get full email by message ID",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "messageId": { "type": "string" } },
+        "required": ["messageId"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "conversationId": { "type": "string" },
+          "subject": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "array", "items": { "type": "string" } },
+          "cc": { "type": "array", "items": { "type": "string" } },
+          "receivedDateTime": { "type": "string" },
+          "isRead": { "type": "boolean" },
+          "importance": { "type": "string" },
+          "hasAttachments": { "type": "boolean" },
+          "bodyPreview": { "type": "string" },
+          "body": { "type": "string", "description": "HTML or plain text body" },
+          "flag": { "type": "object" }
+        }
+      }
+    },
+    {
+      "id": "modify_email",
+      "name": "Modify Email",
+      "description": "Update message properties (read status, flag, importance, categories)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": { "type": "string" },
+          "isRead": { "type": "boolean" },
+          "flag": { "type": "string", "enum": ["flagged", "notFlagged", "complete"] },
+          "importance": { "type": "string", "enum": ["low", "normal", "high"] },
+          "categories": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["messageId"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": { "ok": { "type": "boolean" } }
+      }
+    }
+  ],
+  "webhooks": ["mail_notification"],
+  "instructions": "Outlook integration with OAuth 2.0 per-user auth via Microsoft Entra ID (Azure AD).\n\n`list_emails` returns a summary of messages (id, subject, from, receivedDateTime, isRead, bodyPreview). Use `get_email` for full body content.\n\nThe `folder` param in `list_emails` defaults to \"Inbox\". Other well-known folder names: Drafts, SentItems, DeletedItems, Junk, Archive.\n\nOData `$filter` syntax supported (e.g. `isRead eq false`, `importance eq 'high'`). KQL `$search` syntax also supported (e.g. `from:user@example.com subject:invoice`).\n\n`modify_email` can update: isRead (true/false), flag (flagged/notFlagged/complete), importance (low/normal/high), and categories (array of category names).\n\nMicrosoft Graph sendMail returns 202 Accepted with no body — the output is `{ ok: true }` on success.",
+  "entities": []
+}
