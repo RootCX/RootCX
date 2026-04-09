@@ -116,7 +116,7 @@ main() {
                 *)    rc_file="" ;;
             esac
 
-            if [ -n "$rc_file" ]; then
+            if [ -n "$rc_file" ] && ! grep -q "# rootcx" "$rc_file" 2>/dev/null; then
                 case "$shell_name" in
                     fish)
                         echo "" >> "$rc_file"
