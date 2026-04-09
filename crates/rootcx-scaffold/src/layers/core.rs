@@ -1,10 +1,10 @@
-use crate::scaffold::emitter::Emitter;
-use crate::scaffold::types::{AnswerValue, Layer, LayerFuture, ScaffoldContext};
+use crate::emitter::Emitter;
+use crate::types::{AnswerValue, Layer, LayerFuture, ScaffoldContext};
 
-const TPL_TSCONFIG: &str = include_str!("../../../templates/scaffold/tsconfig.json");
-const TPL_MAIN_TSX: &str = include_str!("../../../templates/scaffold/main.tsx");
-const TPL_GLOBALS_CSS: &str = include_str!("../../../templates/scaffold/globals.css");
-const TPL_UTILS_TS: &str = include_str!("../../../templates/scaffold/utils.ts");
+const TPL_TSCONFIG: &str = include_str!("../../templates/scaffold/tsconfig.json");
+const TPL_MAIN_TSX: &str = include_str!("../../templates/scaffold/main.tsx");
+const TPL_GLOBALS_CSS: &str = include_str!("../../templates/scaffold/globals.css");
+const TPL_UTILS_TS: &str = include_str!("../../templates/scaffold/utils.ts");
 
 pub struct CoreLayer;
 
@@ -19,12 +19,10 @@ impl Layer for CoreLayer {
                 "description": "", "dataContract": []
             });
             if permissions {
-                manifest["permissions"] = serde_json::json!({
-                    "permissions": []
-                });
+                manifest["permissions"] = serde_json::json!({ "permissions": [] });
             }
             e.write_json("manifest.json", &manifest).await?;
-            e.write(".rootcx/launch.json", "{\n  \"preLaunch\": [\"verify_schema\", \"sync_manifest\", \"install_deps\", \"deploy_backend\", \"publish_frontend\"],\n  \"command\": \"cargo tauri dev\"\n}\n").await?;
+            e.write(".rootcx/launch.json", "{\n  \"preLaunch\": [\"verify_schema\", \"sync_manifest\", \"install_deps\", \"deploy_backend\", \"publish_frontend\"]\n}\n").await?;
 
             e.write(
                 "package.json",
@@ -33,12 +31,11 @@ impl Layer for CoreLayer {
   "name": "{app_id}",
   "private": true,
   "type": "module",
-  "scripts": {{ "dev": "vite", "build": "vite build", "tauri": "tauri" }},
+  "scripts": {{ "dev": "vite", "build": "vite build" }},
   "dependencies": {{
     "@rootcx/sdk": "^0.10.0",
     "@rootcx/ui": "^0.5.0",
     "@tabler/icons-react": "^3.30.0",
-    "@tauri-apps/plugin-shell": "^2.0.0",
     "@tailwindcss/vite": "^4.0.0",
     "clsx": "^2.1.0",
     "react": "^19.0.0",
@@ -48,7 +45,6 @@ impl Layer for CoreLayer {
     "tw-animate-css": "^1.4.0"
   }},
   "devDependencies": {{
-    "@tauri-apps/cli": "^2.0.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
@@ -92,7 +88,7 @@ export default defineConfig({{
             )
             .await?;
 
-            e.write(".gitignore", "node_modules/\ndist/\ntarget/\n.bundle/\nsrc-tauri/vendor/\nsrc-tauri/resources/\n").await?;
+            e.write(".gitignore", "node_modules/\ndist/\ntarget/\n.bundle/\n").await?;
 
             e.write("tsconfig.json", TPL_TSCONFIG).await?;
             e.write("src/main.tsx", TPL_MAIN_TSX).await?;

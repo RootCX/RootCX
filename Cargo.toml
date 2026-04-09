@@ -7,6 +7,7 @@ members = [
     "crates/forge",
     "crates/platform",
     "crates/rootcx-cli",
+    "crates/rootcx-scaffold",
     "crates/shared-types",
     "studio/src-tauri",
 ]
@@ -45,3 +46,4 @@ rootcx-core = { path = "core" }
 rootcx-platform = { path = "crates/platform" }
 rootcx-client = { path = "runtime/client" }
 rootcx-types = { path = "crates/shared-types" }
+rootcx-scaffold = { path = "crates/rootcx-scaffold" }
