@@ -12,6 +12,7 @@ mod deploy;
 mod oidc;
 mod scaffold;
 mod sse;
+mod upgrade;
 #[cfg(test)]
 mod testutil;
 
@@ -53,11 +54,20 @@ enum Cmd {
     },
     /// Print the path to bundled skills (for plugin use)
     SkillsPath,
+    /// Upgrade the rootcx binary to the latest release
+    Upgrade {
+        /// Install a specific version instead of the latest (e.g. 0.9.1)
+        #[arg(long)]
+        version: Option<String>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if !matches!(cli.cmd, Cmd::Upgrade { .. } | Cmd::SkillsPath) {
+        tokio::spawn(upgrade::check_passive());
+    }
     match cli.cmd {
         Cmd::Connect { url, token } => auth::connect(&url, token).await,
         Cmd::Logout => logout(),
@@ -73,6 +83,7 @@ async fn main() -> Result<()> {
             println!("{}", config::skills_dir()?.display());
             Ok(())
         }
+        Cmd::Upgrade { version } => upgrade::run(version).await,
     }
 }
 

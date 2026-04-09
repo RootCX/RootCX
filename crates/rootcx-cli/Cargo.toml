@@ -28,3 +28,4 @@ zip = "2"
 urlencoding = "2"
 webbrowser = "1"
 rpassword = "7"
+self_update = { version = "0.42", default-features = false, features = ["archive-tar", "compression-flate2", "rustls"] }
