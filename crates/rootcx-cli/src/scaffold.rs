@@ -19,7 +19,7 @@ pub async fn run(name: &str, base: &Path) -> Result<()> {
         .map_err(|e| anyhow::anyhow!(e))?;
 
     println!("\u{2713} created {name}");
-    println!("  cd {name} && bun install && rootcx deploy");
+    println!("  cd {name} && rootcx deploy");
     Ok(())
 }
 
