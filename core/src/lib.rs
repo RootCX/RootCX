@@ -98,10 +98,11 @@ impl Runtime {
         std::fs::create_dir_all(&apps_dir).map_err(|e| RuntimeError::Worker(format!("create apps dir: {e}")))?;
 
         let runtime_url = format!("http://127.0.0.1:{api_port}");
+        let upload_nonces = Arc::new(std::sync::Mutex::new(extensions::storage::nonce::NonceStore::default()));
         let wm = Arc::new(WorkerManager::new(
             apps_dir, runtime_url, self.database_url.clone(), self.bun_bin.clone(),
             Arc::clone(&self.tool_registry), self.pending_approvals.clone(),
-            Arc::clone(&secret_manager),
+            Arc::clone(&secret_manager), Arc::clone(&upload_nonces),
         ));
         wm.init_self_ref();
 
@@ -124,6 +125,7 @@ impl Runtime {
             mcp_manager: self.mcp_manager,
             pending_approvals: self.pending_approvals,
             scheduler,
+            upload_nonces,
             resources_dir: self.resources_dir,
             data_dir: self.data_dir,
             bun_bin: self.bun_bin,
@@ -142,6 +144,7 @@ pub struct ReadyRuntime {
     mcp_manager: Arc<McpManager>,
     pending_approvals: PendingApprovals,
     scheduler: SchedulerHandle,
+    upload_nonces: Arc<std::sync::Mutex<extensions::storage::nonce::NonceStore>>,
     resources_dir: PathBuf,
     data_dir: PathBuf,
     bun_bin: PathBuf,
@@ -184,4 +187,5 @@ impl ReadyRuntime {
     pub fn bun_bin(&self) -> &std::path::Path { &self.bun_bin }
     pub fn resources_dir(&self) -> &std::path::Path { &self.resources_dir }
     pub fn data_dir(&self) -> &std::path::Path { &self.data_dir }
+    pub fn upload_nonces(&self) -> &Arc<std::sync::Mutex<extensions::storage::nonce::NonceStore>> { &self.upload_nonces }
 }

@@ -82,6 +82,10 @@ pub enum OutboundMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    StorageUploadUrl {
+        id: String,
+        url: String,
+    },
     Shutdown,
 }
 
@@ -143,6 +147,18 @@ pub enum InboundMessage {
         #[serde(default)]
         data: JsonValue,
     },
+    StorageUpload {
+        id: String,
+        name: String,
+        #[serde(default = "default_content_type")]
+        content_type: String,
+        #[serde(default)]
+        size: usize,
+    },
+}
+
+fn default_content_type() -> String {
+    "application/octet-stream".into()
 }
 
 fn default_level() -> String {

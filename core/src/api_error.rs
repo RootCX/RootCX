@@ -40,6 +40,7 @@ impl From<crate::RuntimeError> for ApiError {
         match &e {
             // Worker/Job/IPC errors are user-facing (e.g., "no worker for app 'x'")
             crate::RuntimeError::Conflict(_) => Self::Conflict(e.to_string()),
+            crate::RuntimeError::NotFound(_) => Self::NotFound(e.to_string()),
             crate::RuntimeError::Worker(_) | crate::RuntimeError::Job(_) | crate::RuntimeError::Ipc(_) => {
                 Self::Internal(e.to_string())
             }
