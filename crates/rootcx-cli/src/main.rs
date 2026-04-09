@@ -6,6 +6,7 @@ use std::path::Path;
 
 mod archive;
 mod auth;
+mod bun;
 mod config;
 mod deploy;
 mod oidc;
@@ -33,9 +34,8 @@ enum Cmd {
     Logout,
     /// Show connected Core status
     Status,
-    /// Scaffold a new app or agent
+    /// Create a new RootCX app
     New {
-        kind: scaffold::ProjectKind,
         name: String,
     },
     /// Deploy current project to the connected Core
@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
         Cmd::Connect { url, token } => auth::connect(&url, token).await,
         Cmd::Logout => logout(),
         Cmd::Status => status().await,
-        Cmd::New { kind, name } => scaffold::run(kind, &name, &std::env::current_dir()?),
+        Cmd::New { name } => scaffold::run(&name, &std::env::current_dir()?).await,
         Cmd::Deploy => run_deploy().await,
         Cmd::Apps => apps().await,
         Cmd::Uninstall { app_id } => uninstall(&app_id).await,
@@ -126,9 +126,32 @@ async fn run_deploy() -> Result<()> {
     let manifest: AppManifest = serde_json::from_str(&std::fs::read_to_string(&manifest_path)?)
         .context("invalid manifest.json")?;
     let app_id = manifest.app_id.clone();
-    let plan = deploy::plan_deploy(&cwd);
 
-    let client = client_from_config()?;
+    let cfg = config::load().context("no .rootcx/config.json — run `rootcx connect <url>` first")?;
+    let core_url = &cfg.url;
+
+    // Auto-install + build if the project has a package.json
+    if cwd.join("package.json").exists() {
+        let bun = bun::ensure().await?;
+
+        if !cwd.join("node_modules").exists() {
+            println!("→ installing dependencies");
+            bun::exec(&bun, &cwd, &["install"], &[]).await?;
+        }
+
+        if cwd.join("src").exists() {
+            println!("→ building frontend");
+            let base_flag = format!("--base=/apps/{app_id}/");
+            let args = &["run", "build", "--", &base_flag];
+            bun::exec(&bun, &cwd, args, &[("VITE_ROOTCX_URL", core_url.as_str())]).await?;
+        }
+    }
+
+    let plan = deploy::plan_deploy(&cwd);
+    let client = RuntimeClient::new(core_url);
+    if let Some(ref t) = cfg.token {
+        client.set_token(Some(t.clone()));
+    }
 
     println!("→ installing manifest ({})", app_id);
     client.install_app(&manifest).await.context("install_app failed")?;
@@ -145,8 +168,6 @@ async fn run_deploy() -> Result<()> {
         let tar = archive::pack_dir(&cwd, Path::new("dist"))?;
         println!("→ uploading frontend ({} bytes)", tar.len());
         client.deploy_frontend(&app_id, tar).await.context("deploy_frontend failed")?;
-    } else if plan.warn_missing_dist {
-        eprintln!("ℹ skipping frontend: no dist/ (run your build first)");
     }
 
     if plan.backend {

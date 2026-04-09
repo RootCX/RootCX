@@ -1,7 +1,7 @@
-use crate::scaffold::emitter::Emitter;
-use crate::scaffold::types::{Layer, LayerFuture, ScaffoldContext};
+use crate::emitter::Emitter;
+use crate::types::{Layer, LayerFuture, ScaffoldContext};
 
-const BACKEND_WORKER: &str = include_str!("../../../templates/backend-worker.ts");
+const BACKEND_WORKER: &str = include_str!("../../templates/backend-worker.ts");
 
 pub struct BackendLayer;
 

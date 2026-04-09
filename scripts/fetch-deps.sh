@@ -10,7 +10,7 @@
 set -euo pipefail
 
 TARGET="${1:-$(rustc -vV 2>/dev/null | awk '/^host:/{print $2}')}"
-BUN_VERSION="${ROOTCX_BUN_VERSION:-1.3.10}"
+BUN_VERSION="${ROOTCX_BUN_VERSION:-$(cat "$(dirname "$0")/../BUN_VERSION" | tr -d '[:space:]')}"
 
 RESOURCES="$(dirname "$0")/../core/resources"
 mkdir -p "$RESOURCES"

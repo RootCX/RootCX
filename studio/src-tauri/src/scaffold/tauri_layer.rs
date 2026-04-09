@@ -1,13 +1,12 @@
-use crate::scaffold::emitter::Emitter;
-use crate::scaffold::types::{Layer, LayerFuture, ScaffoldContext};
+use rootcx_scaffold::emitter::Emitter;
+use rootcx_scaffold::types::{Layer, LayerFuture, ScaffoldContext};
 
 const SCAFFOLD_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https: http://localhost:* http://127.0.0.1:*; img-src 'self' data:";
 
-const ICON_PNG: &[u8] = include_bytes!("../../../icons/32x32.png");
-const ICON_ICO: &[u8] = include_bytes!("../../../icons/icon.ico");
-const ICON_ICNS: &[u8] = include_bytes!("../../../icons/icon.icns");
+const ICON_PNG: &[u8] = include_bytes!("../../icons/32x32.png");
+const ICON_ICO: &[u8] = include_bytes!("../../icons/icon.ico");
+const ICON_ICNS: &[u8] = include_bytes!("../../icons/icon.icns");
 
-/// Emits: src-tauri/* (Cargo.toml, tauri.conf.json, lib.rs, main.rs, icons, capabilities)
 pub struct TauriLayer;
 
 impl Layer for TauriLayer {
@@ -115,6 +114,21 @@ fn main() {{
             )
             .await?;
 
+            // Patch package.json with Tauri-specific deps (on top of CoreLayer's base)
+            e.merge_json("package.json", &serde_json::json!({
+                "scripts": { "tauri": "tauri" },
+                "dependencies": { "@tauri-apps/plugin-shell": "^2.0.0" },
+                "devDependencies": { "@tauri-apps/cli": "^2.0.0" }
+            })).await?;
+
+            // Patch launch.json with Tauri dev command
+            e.merge_json(".rootcx/launch.json", &serde_json::json!({
+                "command": "cargo tauri dev"
+            })).await?;
+
+            // Append Tauri-specific gitignore entries
+            e.append(".gitignore", "src-tauri/vendor/\nsrc-tauri/resources/\n").await?;
+
             Ok(())
         })
     }
@@ -133,7 +147,7 @@ mod tests {
 
     #[test]
     fn studio_csp_enforces_restrictions() {
-        let conf: serde_json::Value = serde_json::from_str(include_str!("../../../tauri.conf.json")).unwrap();
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
         let csp = conf["app"]["security"]["csp"].as_str().expect("csp must not be null");
         assert!(csp.contains("default-src 'self'"));
         assert!(csp.contains("script-src 'self'"));

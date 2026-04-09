@@ -1,8 +1,8 @@
-use crate::scaffold::emitter::Emitter;
-use crate::scaffold::types::{AnswerValue, Layer, LayerFuture, ScaffoldContext};
+use crate::emitter::Emitter;
+use crate::types::{AnswerValue, Layer, LayerFuture, ScaffoldContext};
 
-const TPL_AGENT_APP: &str = include_str!("../../../templates/scaffold/agent-app.tsx");
-const TPL_INDEX: &str = include_str!("../../../templates/scaffold/agent/index.ts");
+const TPL_AGENT_APP: &str = include_str!("../../templates/scaffold/agent-app.tsx");
+const TPL_INDEX: &str = include_str!("../../templates/scaffold/agent/index.ts");
 
 struct LlmConfig {
     import: &'static str,

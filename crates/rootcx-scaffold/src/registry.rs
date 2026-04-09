@@ -1,7 +1,6 @@
-use super::presets::BlankPreset;
-use super::types::{Preset, PresetInfo, Question};
+use crate::presets::BlankPreset;
+use crate::types::{Preset, PresetInfo, Question};
 
-/// Holds all registered presets. Add new presets here.
 pub struct PresetRegistry {
     presets: Vec<Box<dyn Preset>>,
 }

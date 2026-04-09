@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
-/// Boxed async return type for Layer::emit — eliminates Future/Pin imports from every layer file.
 pub type LayerFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,7 +13,6 @@ pub struct PresetInfo {
     pub icon: &'static str,
 }
 
-/// Only show this question when a prior answer matches.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DependsOn {
     pub key: String,
@@ -83,5 +81,5 @@ pub trait Preset: Send + Sync {
 }
 
 pub trait Layer: Send + Sync {
-    fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, emitter: &'a super::emitter::Emitter) -> LayerFuture<'a>;
+    fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, emitter: &'a crate::emitter::Emitter) -> LayerFuture<'a>;
 }

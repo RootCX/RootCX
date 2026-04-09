@@ -1,8 +1,6 @@
-use crate::scaffold::emitter::Emitter;
-use crate::scaffold::types::{Layer, LayerFuture, ScaffoldContext};
+use crate::emitter::Emitter;
+use crate::types::{Layer, LayerFuture, ScaffoldContext};
 
-/// Emits: src/App.tsx with login/register flow using @rootcx/sdk auth.
-/// When `include_auth` is false, emits a simple hello-world App instead.
 pub struct AuthLayer {
     pub include_auth: bool,
 }

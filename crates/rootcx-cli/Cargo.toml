@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 rootcx-client = { workspace = true }
+rootcx-scaffold = { workspace = true }
 rootcx-types = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -22,6 +23,8 @@ flate2 = "1"
 walkdir = "2"
 futures-util = "0.3"
 dirs = "5"
+tempfile = "3"
+zip = "2"
 urlencoding = "2"
 webbrowser = "1"
 rpassword = "7"

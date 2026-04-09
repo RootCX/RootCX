@@ -7,7 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$BunVersion = "1.3.10"
+$BunVersion = (Get-Content "$PSScriptRoot\..\BUN_VERSION" -Raw).Trim()
 if ($env:ROOTCX_BUN_VERSION) { $BunVersion = $env:ROOTCX_BUN_VERSION }
 
 $Resources = Join-Path $PSScriptRoot "..\core\resources"
