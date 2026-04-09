@@ -1,7 +1,7 @@
-const GMAIL_API = "https://www.googleapis.com/gmail/v1/users/me";
-const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
-const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const SCOPES = "https://www.googleapis.com/auth/gmail.modify";
+const GRAPH_API = "https://graph.microsoft.com/v1.0/me";
+const AUTH_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
+const TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token";
+const SCOPES = "offline_access Mail.ReadWrite Mail.Send";
 
 interface Config {
   clientId?: string;
@@ -27,12 +27,11 @@ async function authStart(params: any) {
     return { type: "redirect", url: url.toString() };
   }
 
-  const url = new URL(GOOGLE_AUTH_URL);
+  const url = new URL(AUTH_URL);
   url.searchParams.set("client_id", config.clientId!);
   url.searchParams.set("redirect_uri", callbackUrl);
   url.searchParams.set("response_type", "code");
   url.searchParams.set("scope", SCOPES);
-  url.searchParams.set("access_type", "offline");
   url.searchParams.set("prompt", "consent");
   if (state) url.searchParams.set("state", state);
   return { type: "redirect", url: url.toString() };
@@ -45,7 +44,7 @@ async function authCallback(params: any) {
     return { credentials: { managed: true } };
   }
 
-  const res = await fetch(GOOGLE_TOKEN_URL, {
+  const res = await fetch(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -54,6 +53,7 @@ async function authCallback(params: any) {
       client_secret: config.clientSecret!,
       redirect_uri: query.redirect_uri ?? params.callbackUrl ?? "",
       grant_type: "authorization_code",
+      scope: SCOPES,
     }),
   });
   if (!res.ok) throw new Error(`token exchange failed: ${await res.text()}`);
@@ -86,7 +86,7 @@ async function getAccessToken(config: Config, creds: UserCreds, userId?: string)
   if (creds.accessToken && creds.expiresAt && Date.now() < creds.expiresAt - 30_000) {
     return creds.accessToken;
   }
-  const res = await fetch(GOOGLE_TOKEN_URL, {
+  const res = await fetch(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -94,6 +94,7 @@ async function getAccessToken(config: Config, creds: UserCreds, userId?: string)
       client_secret: config.clientSecret!,
       refresh_token: creds.refreshToken!,
       grant_type: "refresh_token",
+      scope: SCOPES,
     }),
   });
   if (!res.ok) throw new Error(`token refresh failed: ${await res.text()}`);
@@ -103,96 +104,112 @@ async function getAccessToken(config: Config, creds: UserCreds, userId?: string)
   return data.access_token;
 }
 
-async function gmail(config: Config, creds: UserCreds, path: string, init?: RequestInit, userId?: string): Promise<any> {
+async function graph(config: Config, creds: UserCreds, path: string, init?: RequestInit, userId?: string): Promise<Response> {
   const token = await getAccessToken(config, creds, userId);
-  const res = await fetch(`${GMAIL_API}${path}`, {
+  return fetch(`${GRAPH_API}${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${token}`, ...init?.headers },
   });
-  if (!res.ok) throw new Error(`Gmail API ${res.status}: ${await res.text()}`);
+}
+
+async function graphJson(config: Config, creds: UserCreds, path: string, init?: RequestInit, userId?: string): Promise<any> {
+  const res = await graph(config, creds, path, init, userId);
+  if (!res.ok) throw new Error(`Graph API ${res.status}: ${await res.text()}`);
   return res.json();
 }
 
+// --- actions ---
+
+const fmtAddr = (r: any) => r?.emailAddress?.address
+  ? (r.emailAddress.name ? `${r.emailAddress.name} <${r.emailAddress.address}>` : r.emailAddress.address)
+  : "";
+
 async function sendEmail(config: Config, creds: UserCreds, input: any, userId?: string) {
-  const { to, subject, body, cc, bcc, html } = input;
-  const headers = [
-    `To: ${to}`,
-    cc && `Cc: ${cc}`,
-    bcc && `Bcc: ${bcc}`,
-    `Subject: ${subject}`,
-    `Content-Type: ${html ? "text/html" : "text/plain"}; charset=UTF-8`,
-  ].filter(Boolean).join("\r\n");
-  const mime = `${headers}\r\n\r\n${body}`;
+  const toList = input.to.split(",").map((a: string) => ({ emailAddress: { address: a.trim() } }));
+  const message: any = {
+    subject: input.subject,
+    body: { contentType: input.html ? "HTML" : "Text", content: input.body },
+    toRecipients: toList,
+  };
+  if (input.cc) message.ccRecipients = input.cc.split(",").map((a: string) => ({ emailAddress: { address: a.trim() } }));
+  if (input.bcc) message.bccRecipients = input.bcc.split(",").map((a: string) => ({ emailAddress: { address: a.trim() } }));
 
-  const raw = btoa(unescape(encodeURIComponent(mime)))
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-
-  const result = await gmail(config, creds, "/messages/send", {
+  const res = await graph(config, creds, "/sendMail", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ raw }),
+    body: JSON.stringify({ message, saveToSentItems: input.saveToSentItems ?? true }),
   }, userId);
-  return { messageId: result.id, threadId: result.threadId };
+
+  // Microsoft Graph sendMail returns 202 Accepted with no body
+  if (!res.ok) throw new Error(`sendMail ${res.status}: ${await res.text()}`);
+  return { ok: true };
 }
 
 async function listEmails(config: Config, creds: UserCreds, input: any, userId?: string) {
-  const { query, maxResults = 10, labelIds = ["INBOX"] } = input ?? {};
-  const params = new URLSearchParams({ maxResults: String(maxResults) });
-  if (query) params.set("q", query);
-  for (const l of labelIds) params.append("labelIds", l);
+  const { folder = "Inbox", top = 10, filter, search } = input ?? {};
 
-  const list = await gmail(config, creds, `/messages?${params}`, undefined, userId);
-  if (!list.messages?.length) return { messages: [], resultSizeEstimate: 0 };
+  const params = new URLSearchParams();
+  params.set("$top", String(top));
+  params.set("$select", "id,conversationId,subject,from,receivedDateTime,isRead,bodyPreview");
+  params.set("$orderby", "receivedDateTime desc");
+  if (filter) params.set("$filter", filter);
+  if (search) params.set("$search", `"${search}"`);
+
+  const data = await graphJson(config, creds, `/mailFolders/${folder}/messages?${params}`, undefined, userId);
 
   return {
-    messages: list.messages.map((m: any) => ({ id: m.id, threadId: m.threadId })),
-    resultSizeEstimate: list.resultSizeEstimate ?? list.messages.length,
+    messages: (data.value ?? []).map((m: any) => ({
+      id: m.id,
+      conversationId: m.conversationId,
+      subject: m.subject,
+      from: fmtAddr(m.from),
+      receivedDateTime: m.receivedDateTime,
+      isRead: m.isRead,
+      bodyPreview: m.bodyPreview,
+    })),
+    nextLink: data["@odata.nextLink"] ?? null,
   };
 }
 
 async function getEmail(config: Config, creds: UserCreds, input: any, userId?: string) {
-  return parseMessage(await gmail(config, creds, `/messages/${input.messageId}?format=full`, undefined, userId));
-}
-
-async function modifyEmail(config: Config, creds: UserCreds, input: any, userId?: string) {
-  const body: any = {};
-  if (input.addLabels?.length) body.addLabelIds = input.addLabels;
-  if (input.removeLabels?.length) body.removeLabelIds = input.removeLabels;
-  await gmail(config, creds, `/messages/${input.messageId}/modify`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  }, userId);
-  return { ok: true };
-}
-
-function parseMessage(msg: any) {
-  const hdrs = msg.payload?.headers ?? [];
-  const h = (n: string) => hdrs.find((h: any) => h.name.toLowerCase() === n.toLowerCase())?.value ?? "";
+  const msg = await graphJson(config, creds, `/messages/${input.messageId}`, undefined, userId);
   return {
-    id: msg.id, threadId: msg.threadId,
-    from: h("From"), to: h("To"), subject: h("Subject"), date: h("Date"),
-    snippet: msg.snippet, labelIds: msg.labelIds ?? [],
-    body: extractBody(msg.payload),
+    id: msg.id,
+    conversationId: msg.conversationId,
+    subject: msg.subject,
+    from: fmtAddr(msg.from),
+    to: (msg.toRecipients ?? []).map(fmtAddr),
+    cc: (msg.ccRecipients ?? []).map(fmtAddr),
+    receivedDateTime: msg.receivedDateTime,
+    isRead: msg.isRead,
+    importance: msg.importance,
+    hasAttachments: msg.hasAttachments,
+    bodyPreview: msg.bodyPreview,
+    body: msg.body?.content ?? "",
+    flag: msg.flag ?? null,
   };
 }
 
-function extractBody(payload: any): string {
-  if (!payload) return "";
-  if (payload.body?.data) return decodeBase64Url(payload.body.data);
-  if (!payload.parts) return "";
-  const part = payload.parts.find((p: any) => p.mimeType === "text/html")
-    ?? payload.parts.find((p: any) => p.mimeType === "text/plain");
-  return part?.body?.data ? decodeBase64Url(part.body.data) : "";
-}
+async function modifyEmail(config: Config, creds: UserCreds, input: any, userId?: string) {
+  const patch: any = {};
+  if (input.isRead !== undefined) patch.isRead = input.isRead;
+  if (input.flag) patch.flag = { flagStatus: input.flag };
+  if (input.importance) patch.importance = input.importance;
+  if (input.categories) patch.categories = input.categories;
 
-function decodeBase64Url(data: string): string {
-  return decodeURIComponent(escape(atob(data.replace(/-/g, "+").replace(/_/g, "/"))));
+  await graphJson(config, creds, `/messages/${input.messageId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  }, userId);
+  return { ok: true };
 }
 
 const actions: Record<string, (c: Config, u: UserCreds, i: any, userId?: string) => Promise<any>> = {
   send_email: sendEmail, list_emails: listEmails, get_email: getEmail, modify_email: modifyEmail,
 };
+
+// --- RPC handlers ---
 
 const rpcHandlers: Record<string, (params: any) => Promise<any>> = {
   __auth_start: authStart,
@@ -209,13 +226,20 @@ const rpcHandlers: Record<string, (params: any) => Promise<any>> = {
 
   async __webhook(params) {
     const { body } = params;
-    const data = body?.message?.data;
-    if (!data) return { skipped: true, reason: "no push data" };
-    const decoded = JSON.parse(decodeBase64Url(data));
-    if (!decoded.historyId) return { skipped: true, reason: "no historyId" };
-    return { event: "push_notification", historyId: decoded.historyId };
+    if (!body?.value?.length) return { skipped: true, reason: "no change notifications" };
+    return {
+      event: "mail_notification",
+      changes: body.value.map((n: any) => ({
+        changeType: n.changeType,
+        resource: n.resource,
+        subscriptionId: n.subscriptionId,
+        resourceData: n.resourceData,
+      })),
+    };
   },
 };
+
+// --- IPC protocol ---
 
 const send = (msg: Record<string, unknown>) =>
   process.stdout.write(JSON.stringify(msg) + "\n");
