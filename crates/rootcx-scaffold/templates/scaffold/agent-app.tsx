@@ -371,9 +371,9 @@ function Chat({ user, onLogout }: { user: { email: string }; onLogout: () => voi
 
   if (messages.length === 0) {
     return (
-      <div className="flex h-screen flex-col bg-background text-foreground">
+      <div className="flex h-[100dvh] flex-col bg-background text-foreground">
         <Header user={user} onLogout={onLogout} />
-        <div className="flex flex-1 flex-col items-center justify-center px-6">
+        <div className="flex flex-1 flex-col items-center justify-center px-4 sm:px-6">
           <div className="flex w-full max-w-3xl flex-col items-center gap-8">
             <div className="flex flex-col items-center gap-3">
               <h1 className="text-2xl font-medium tracking-tight text-foreground/80">What can I help you with?</h1>
@@ -387,12 +387,12 @@ function Chat({ user, onLogout }: { user: { email: string }; onLogout: () => voi
   }
 
   return (
-    <div className="flex h-screen flex-col bg-background text-foreground">
+    <div className="flex h-[100dvh] flex-col bg-background text-foreground">
       <Header user={user} onLogout={onLogout} />
-      <ChatScrollArea className="flex-1" contentClassName="mx-auto w-full max-w-3xl space-y-5 px-6 py-6">
+      <ChatScrollArea className="flex-1" contentClassName="mx-auto w-full max-w-3xl space-y-5 px-4 py-4 sm:px-6 sm:py-6">
         {items}
       </ChatScrollArea>
-      <div className="shrink-0 px-6 pb-5 pt-2">
+      <div className="shrink-0 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-2 sm:px-6 sm:pb-5">
         <Composer input={input} setInput={setInput} onSubmit={sendMessage} onAbort={abort} streaming={streaming} liveTools={liveTools} />
       </div>
     </div>
