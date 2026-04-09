@@ -1,3 +1,4 @@
+/// <reference path="../rootcx-worker.d.ts" />
 const GMAIL_API = "https://www.googleapis.com/gmail/v1/users/me";
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -217,42 +218,4 @@ const rpcHandlers: Record<string, (params: any) => Promise<any>> = {
   },
 };
 
-const send = (msg: Record<string, unknown>) =>
-  process.stdout.write(JSON.stringify(msg) + "\n");
-
-let buffer = "";
-process.stdin.setEncoding("utf-8");
-process.stdin.on("data", (chunk: string) => {
-  buffer += chunk;
-  let nl: number;
-  while ((nl = buffer.indexOf("\n")) !== -1) {
-    const line = buffer.slice(0, nl).trim();
-    buffer = buffer.slice(nl + 1);
-    if (!line) continue;
-
-    const msg = JSON.parse(line);
-    switch (msg.type) {
-      case "discover":
-        send({ type: "discover", methods: Object.keys(rpcHandlers) });
-        break;
-      case "rpc":
-        handleRpc(msg);
-        break;
-      case "shutdown":
-        process.exit(0);
-    }
-  }
-});
-
-async function handleRpc(msg: any) {
-  const handler = rpcHandlers[msg.method];
-  if (!handler) {
-    send({ type: "rpc_response", id: msg.id, error: `unknown method: ${msg.method}` });
-    return;
-  }
-  try {
-    send({ type: "rpc_response", id: msg.id, result: await handler(msg.params) });
-  } catch (e: any) {
-    send({ type: "rpc_response", id: msg.id, error: e.message });
-  }
-}
+serve({ rpc: rpcHandlers });
