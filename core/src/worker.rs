@@ -102,6 +102,7 @@ pub struct WorkerConfig {
     pub integration_caller: Option<Arc<dyn crate::tools::IntegrationCaller>>,
     pub agent_boot_config: Option<AgentBootConfig>,
     pub supervision: Option<rootcx_types::SupervisionConfig>,
+    pub upload_nonces: Arc<std::sync::Mutex<crate::extensions::storage::nonce::NonceStore>>,
 }
 
 #[derive(Clone)]
@@ -486,6 +487,14 @@ async fn supervisor_loop(
                         InboundMessage::Event { name, data } => {
                             info!(app_id = %app_id, event = %name, "worker event");
                             emit_log(&log_tx, "event", format!("{name}: {data}"));
+                        }
+                        InboundMessage::StorageUpload { id, name, content_type, size } => {
+                            let nonce = config.upload_nonces.lock().unwrap_or_else(|e| e.into_inner()).create(
+                                &config.app_id, &name, &content_type, size,
+                            );
+                            let url = format!("{}/api/v1/storage/upload/{nonce}", config.runtime_url);
+                            let tx = outbound_tx.clone();
+                            let _ = tx.send(OutboundMessage::StorageUploadUrl { id, url }).await;
                         }
                         _ => {}
                     },

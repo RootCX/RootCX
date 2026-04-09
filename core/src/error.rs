@@ -29,4 +29,7 @@ pub enum RuntimeError {
 
     #[error("conflict: {0}")]
     Conflict(String),
+
+    #[error("not found: {0}")]
+    NotFound(String),
 }

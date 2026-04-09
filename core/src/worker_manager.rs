@@ -32,6 +32,7 @@ pub struct WorkerManager {
     tool_registry: Arc<ToolRegistry>,
     pending_approvals: PendingApprovals,
     secret_manager: Arc<SecretManager>,
+    upload_nonces: Arc<std::sync::Mutex<crate::extensions::storage::nonce::NonceStore>>,
 }
 
 impl WorkerManager {
@@ -39,6 +40,7 @@ impl WorkerManager {
         apps_dir: PathBuf, runtime_url: String, database_url: String, bun_bin: PathBuf,
         tool_registry: Arc<ToolRegistry>, pending_approvals: PendingApprovals,
         secret_manager: Arc<SecretManager>,
+        upload_nonces: Arc<std::sync::Mutex<crate::extensions::storage::nonce::NonceStore>>,
     ) -> Self {
         let prelude_path = apps_dir.join(".prelude.js");
         std::fs::write(&prelude_path, BACKEND_PRELUDE).expect("write backend prelude");
@@ -49,7 +51,7 @@ impl WorkerManager {
             integration_call: OnceLock::new(),
             fleet_tx,
             apps_dir, prelude_path, runtime_url, database_url, bun_bin,
-            tool_registry, pending_approvals, secret_manager,
+            tool_registry, pending_approvals, secret_manager, upload_nonces,
         }
     }
 
@@ -126,6 +128,7 @@ impl WorkerManager {
             integration_caller: self.integration_call.get().cloned(),
             agent_boot_config,
             supervision,
+            upload_nonces: Arc::clone(&self.upload_nonces),
         };
 
         let handle = worker::spawn_supervisor(config);

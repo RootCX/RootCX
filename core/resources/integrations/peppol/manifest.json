@@ -369,7 +369,7 @@
         { "name": "status", "type": "string" },
         { "name": "instance_identifier", "type": "string" },
         { "name": "as4_message_id", "type": "string" },
-        { "name": "xml", "type": "text" },
+        { "name": "xml", "type": "file" },
         { "name": "attachments", "type": "json" }
       ]
     },
