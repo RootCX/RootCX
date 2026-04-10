@@ -279,14 +279,23 @@ function _dispatch(msg) {
   }
 }
 
-// Wire transport → dispatch
+// Wire transport → dispatch, then immediately pause stdin.
+// Why: the prelude loads before the main script (--preload). For ESM modules
+// with heavy imports (e.g. langchain), the event loop ticks during async module
+// resolution. If stdin is flowing, the Discover message fires before the main
+// script's readline handler is attached — v1 agents never see it and never boot.
+// Pausing here keeps data buffered in the pipe until a consumer resumes:
+//   - v2 apps: serve() calls resume()
+//   - v1 apps: adding a "data" listener (readline or raw) triggers resume via newListener
 _transport.onMessage(_dispatch);
+process.stdin.pause();
+process.stdin.on("newListener", (ev) => { if (ev === "data") process.stdin.resume(); });
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 globalThis.serve = (handlers) => {
   if (_handlers) throw new Error("serve() called twice");
-  if (!handlers) { _handlers = {}; return; }
+  if (!handlers) { _handlers = {}; process.stdin.resume(); return; }
   // Detect old signature: serve({ methodName: fn, ... })
   // vs new signature:     serve({ rpc, onStart, onJob, onShutdown })
   // If any reserved key is present, it's the new signature.
@@ -295,4 +304,5 @@ globalThis.serve = (handlers) => {
     globalThis.log.warn("serve() called with flat signature (deprecated). Use serve({ rpc: { ... } }) instead.");
   }
   _handlers = isNew ? handlers : { rpc: handlers };
+  process.stdin.resume();
 };
