@@ -42,11 +42,16 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
             overlap_policy  TEXT NOT NULL DEFAULT 'skip' CHECK (overlap_policy IN ('skip','queue')),
             enabled         BOOLEAN NOT NULL DEFAULT true,
             pg_job_id       BIGINT,
+            created_by      UUID,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
             UNIQUE (app_id, name)
         )
     "#).execute(pool).await.map_err(err)?;
+
+    sqlx::query(
+        "ALTER TABLE rootcx_system.cron_schedules ADD COLUMN IF NOT EXISTS created_by UUID"
+    ).execute(pool).await.map_err(err)?;
 
     sqlx::query(r#"
         CREATE OR REPLACE FUNCTION rootcx_system.enqueue_cron(
@@ -56,7 +61,7 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
             p_skip_over  boolean
         ) RETURNS bigint
         LANGUAGE plpgsql AS $fn$
-        DECLARE v_id bigint;
+        DECLARE v_id bigint; v_user_id uuid; v_msg jsonb;
         BEGIN
             IF p_skip_over AND EXISTS (
                 SELECT 1 FROM pgmq.q_jobs
@@ -64,10 +69,16 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
             ) THEN
                 RETURN NULL;
             END IF;
-            SELECT pgmq.send('jobs', jsonb_build_object(
+            SELECT created_by INTO v_user_id
+            FROM rootcx_system.cron_schedules WHERE id = p_cron_id;
+            v_msg := jsonb_build_object(
                 'app_id',  p_app_id,
                 'payload', p_payload || jsonb_build_object('cron_id', p_cron_id::text)
-            )) INTO v_id;
+            );
+            IF v_user_id IS NOT NULL THEN
+                v_msg := v_msg || jsonb_build_object('user_id', v_user_id::text);
+            END IF;
+            SELECT pgmq.send('jobs', v_msg) INTO v_id;
             RETURN v_id;
         END
         $fn$;
@@ -91,6 +102,7 @@ pub struct CronSchedule {
     pub overlap_policy: String,
     pub enabled: bool,
     pub pg_job_id: Option<i64>,
+    pub created_by: Option<Uuid>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -101,10 +113,11 @@ pub struct CreateCron {
     pub timezone: Option<String>,
     pub payload: JsonValue,
     pub overlap_policy: String,
+    pub created_by: Option<Uuid>,
 }
 
 const SELECT_COLS: &str =
-    "id, app_id, name, schedule, timezone, payload, overlap_policy, enabled, pg_job_id, created_at::text AS created_at, updated_at::text AS updated_at";
+    "id, app_id, name, schedule, timezone, payload, overlap_policy, enabled, pg_job_id, created_by, created_at::text AS created_at, updated_at::text AS updated_at";
 
 // ── CRUD ────────────────────────────────────────────────────────────
 
@@ -120,11 +133,11 @@ pub async fn create(pool: &PgPool, app_id: &str, c: CreateCron) -> Result<CronSc
     let mut tx = pool.begin().await.map_err(err)?;
 
     sqlx::query(
-        "INSERT INTO rootcx_system.cron_schedules (id, app_id, name, schedule, timezone, payload, overlap_policy)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)"
+        "INSERT INTO rootcx_system.cron_schedules (id, app_id, name, schedule, timezone, payload, overlap_policy, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
     )
     .bind(id).bind(app_id).bind(&c.name).bind(&c.schedule)
-    .bind(&c.timezone).bind(&c.payload).bind(&c.overlap_policy)
+    .bind(&c.timezone).bind(&c.payload).bind(&c.overlap_policy).bind(c.created_by)
     .execute(&mut *tx).await.map_err(err)?;
 
     let pg_job_id = schedule_pg_cron(&mut tx, &id, app_id, &c.schedule, &c.payload, skip).await?;
@@ -242,7 +255,7 @@ pub async fn get(pool: &PgPool, app_id: &str, cron_id: Uuid) -> Result<CronSched
 pub async fn trigger(pool: &PgPool, app_id: &str, cron_id: Uuid) -> Result<i64, RuntimeError> {
     require_pg_cron()?;
     let row = get(pool, app_id, cron_id).await?;
-    let msg_id = crate::jobs::enqueue(pool, app_id, row.payload, None).await?;
+    let msg_id = crate::jobs::enqueue(pool, app_id, row.payload, row.created_by).await?;
     info!(app_id, id = %cron_id, msg_id, "cron triggered manually");
     Ok(msg_id)
 }
@@ -253,6 +266,7 @@ pub async fn sync_from_manifest(
     pool: &PgPool,
     app_id: &str,
     defs: &[rootcx_types::CronDefinition],
+    created_by: Option<Uuid>,
 ) -> Result<(), RuntimeError> {
     if !PG_CRON_AVAILABLE.load(Ordering::Relaxed) {
         warn!(app_id, "skipping cron sync — pg_cron not available");
@@ -293,6 +307,7 @@ pub async fn sync_from_manifest(
                     timezone: def.timezone.clone(),
                     payload,
                     overlap_policy: def.overlap_policy.clone(),
+                    created_by,
                 }).await?;
             }
         }

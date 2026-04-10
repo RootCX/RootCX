@@ -78,6 +78,7 @@ export interface CronSchedule {
   overlapPolicy: OverlapPolicy;
   enabled: boolean;
   pgJobId: number | null;
+  createdBy: string | null;
   createdAt: string;
   updatedAt: string;
 }

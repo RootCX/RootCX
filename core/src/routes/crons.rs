@@ -10,7 +10,7 @@ use crate::auth::identity::Identity;
 use crate::crons::{self, CreateCron};
 
 pub async fn create_cron(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
     Json(body): Json<JsonValue>,
@@ -30,6 +30,7 @@ pub async fn create_cron(
         timezone,
         payload,
         overlap_policy: overlap.into(),
+        created_by: Some(identity.user_id),
     }).await?;
 
     rt.scheduler_wake().notify_one();
