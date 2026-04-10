@@ -111,6 +111,72 @@ async fn oidc_login(base: &str, provider_id: &str) -> Result<Config> {
     Ok(Config { url: base.to_string(), token: Some(tokens.access_token), refresh_token: Some(tokens.refresh_token) })
 }
 
+pub async fn ensure_valid_token(cfg: &mut Config) -> Result<()> {
+    let Some(ref rt) = cfg.refresh_token else { return Ok(()) };
+    let http = reqwest::Client::new();
+    let resp = http.post(format!("{}/api/v1/auth/refresh", cfg.url))
+        .json(&json!({ "refreshToken": rt }))
+        .send().await
+        .context("refresh request failed")?;
+    let new_token = if resp.status().is_success() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct R { access_token: String }
+        Some(resp.json::<R>().await?.access_token)
+    } else {
+        None
+    };
+    let ok = apply_refresh(cfg, new_token);
+    config::save(cfg)?;
+    if !ok {
+        bail!("session expired — run `rootcx connect {}` to re-authenticate", cfg.url);
+    }
+    Ok(())
+}
+
+fn apply_refresh(cfg: &mut Config, new_access_token: Option<String>) -> bool {
+    match new_access_token {
+        Some(token) => {
+            cfg.token = Some(token);
+            true
+        }
+        None => {
+            cfg.token = None;
+            cfg.refresh_token = None;
+            false
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(token: Option<&str>, refresh: Option<&str>) -> Config {
+        Config {
+            url: "http://core".into(),
+            token: token.map(Into::into),
+            refresh_token: refresh.map(Into::into),
+        }
+    }
+
+    #[test]
+    fn refresh_success_updates_token_preserves_refresh() {
+        let mut c = cfg(Some("old"), Some("rt"));
+        assert!(apply_refresh(&mut c, Some("new".into())));
+        assert_eq!(c.token.as_deref(), Some("new"));
+        assert_eq!(c.refresh_token.as_deref(), Some("rt"));
+    }
+
+    #[test]
+    fn refresh_failure_clears_both_tokens() {
+        let mut c = cfg(Some("old"), Some("rt"));
+        assert!(!apply_refresh(&mut c, None));
+        assert!(c.token.is_none());
+        assert!(c.refresh_token.is_none());
+    }
+}
+
 fn prompt_credentials() -> Result<(String, String)> {
     eprint!("  email: ");
     std::io::Write::flush(&mut std::io::stderr())?;
