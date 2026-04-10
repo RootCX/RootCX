@@ -16,6 +16,7 @@ if [ ! -s "$PGDATA/PG_VERSION" ]; then
   cat >> "$PGDATA/postgresql.conf" <<'PGCONF'
 listen_addresses='*'
 shared_preload_libraries='pg_cron'
+cron.use_background_workers=on
 PGCONF
   echo "cron.database_name='${POSTGRES_DB:-postgres}'" >> "$PGDATA/postgresql.conf"
 
