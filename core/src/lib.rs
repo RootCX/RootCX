@@ -1,5 +1,6 @@
 mod api_error;
 pub mod auth;
+mod crons;
 mod error;
 pub mod extensions;
 mod ipc;

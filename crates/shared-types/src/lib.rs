@@ -98,7 +98,27 @@ pub struct AppManifest {
     /// Trigger: auto-invoke this agent on entity events
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<TriggerConfig>,
+    /// Declarative cron schedules synced on deploy
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crons: Vec<CronDefinition>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CronDefinition {
+    pub name: String,
+    pub schedule: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<JsonValue>,
+    #[serde(default = "default_overlap_policy")]
+    pub overlap_policy: String,
+}
+
+fn default_overlap_policy() -> String { "skip".into() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

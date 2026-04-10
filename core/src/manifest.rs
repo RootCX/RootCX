@@ -62,6 +62,10 @@ pub async fn install_app(
         }
     }
 
+    if !manifest.crons.is_empty() {
+        crate::crons::sync_from_manifest(pool, app_id, &manifest.crons).await?;
+    }
+
     for ext in extensions {
         ext.on_app_installed(pool, manifest, installed_by).await?;
     }
@@ -76,6 +80,8 @@ pub async fn install_app(
 }
 
 pub async fn uninstall_app(pool: &PgPool, app_id: &str) -> Result<(), RuntimeError> {
+    crate::crons::delete_all_for_app(pool, app_id).await?;
+
     let drop_schema = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(app_id));
     sqlx::query(&drop_schema).execute(pool).await.map_err(RuntimeError::Schema)?;
 
@@ -395,6 +401,10 @@ pub fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
+pub fn quote_literal(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
 /// Reject identifiers that aren't valid unquoted PostgreSQL names.
 fn validate_ident(value: &str, label: &str) -> Result<(), RuntimeError> {
     if !value.is_empty()
@@ -695,6 +705,7 @@ mod tests {
             webhooks: vec![],
             instructions: None,
             trigger: None,
+            crons: vec![],
         }
     }
 
@@ -786,5 +797,19 @@ mod tests {
             entity("accounts", vec![field("name", "text")]),
         ]);
         assert!(validate_manifest(&m).is_ok());
+    }
+
+    #[test]
+    fn quote_literal_escapes_single_quotes() {
+        let cases: Vec<(&str, &str)> = vec![
+            ("hello", "'hello'"),
+            ("it's", "'it''s'"),
+            ("", "''"),
+            ("a''b", "'a''''b'"),
+            ("'; DROP TABLE x;--", "'''; DROP TABLE x;--'"),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(super::quote_literal(input), expected, "input: {input:?}");
+        }
     }
 }

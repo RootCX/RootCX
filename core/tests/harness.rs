@@ -9,7 +9,7 @@ use testcontainers::{ContainerAsync, GenericImage, ImageExt, runners::AsyncRunne
 use testcontainers::core::{IntoContainerPort, WaitFor};
 
 const PG_IMAGE: &str = "ghcr.io/rootcx/postgresql";
-const PG_TAG: &str = "16-pgmq";
+const PG_TAG: &str = "16-pgmq-cron";
 
 pub struct TestRuntime {
     base_url: String,
