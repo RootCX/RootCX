@@ -2185,3 +2185,64 @@ async fn cron_manifest_sync() {
     rt.shutdown().await;
 }
 
+#[tokio::test]
+async fn cron_job_carries_creator_user_id() {
+    let rt = TestRuntime::boot().await;
+    rt.install("cronuser", "items").await;
+
+    // Create cron — the authenticated user should be stored as created_by
+    let (s, body) = rt.post_json("/api/v1/apps/cronuser/crons", &json!({
+        "name": "sync-job", "schedule": "0 * * * *",
+        "payload": { "type": "sync_replies" }
+    })).await;
+    assert_eq!(s, 201, "create: {body}");
+    let cron_id = body["id"].as_str().unwrap();
+    assert!(body["createdBy"].is_string(), "createdBy should be set on create: {body}");
+
+    // Trigger → enqueues a pgmq message
+    let (s, trig) = rt.post_json(
+        &format!("/api/v1/apps/cronuser/crons/{cron_id}/trigger"),
+        &json!({}),
+    ).await;
+    assert_eq!(s, 200, "trigger: {trig}");
+    let msg_id = trig["msgId"].as_i64().unwrap();
+
+    // Read the raw pgmq message and verify user_id is present
+    let (raw,): (serde_json::Value,) = sqlx::query_as(
+        "SELECT message FROM pgmq.q_jobs WHERE msg_id = $1"
+    ).bind(msg_id).fetch_one(rt.pool()).await.unwrap();
+
+    assert!(raw.get("user_id").is_some(), "pgmq job message must contain user_id: {raw}");
+    assert_eq!(
+        raw["user_id"].as_str().unwrap(),
+        body["createdBy"].as_str().unwrap(),
+        "user_id in job must match cron creator"
+    );
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn cron_manifest_sync_stores_created_by() {
+    let rt = TestRuntime::boot().await;
+    let manifest = json!({
+        "appId": "cronown", "name": "cronown", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "label", "type": "text" }
+        ]}],
+        "crons": [
+            { "name": "bg-job", "schedule": "*/5 * * * *", "method": "run" }
+        ]
+    });
+    rt.install_manifest(&manifest).await;
+
+    let (s, list) = rt.get_json("/api/v1/apps/cronown/crons").await;
+    assert_eq!(s, 200);
+    let arr = list.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    // Manifest install is authenticated — created_by should be the installing user
+    assert!(arr[0]["createdBy"].is_string(), "manifest-synced cron should have createdBy: {}", arr[0]);
+
+    rt.shutdown().await;
+}
+

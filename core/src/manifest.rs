@@ -63,7 +63,7 @@ pub async fn install_app(
     }
 
     if !manifest.crons.is_empty() {
-        crate::crons::sync_from_manifest(pool, app_id, &manifest.crons).await?;
+        crate::crons::sync_from_manifest(pool, app_id, &manifest.crons, Some(installed_by)).await?;
     }
 
     for ext in extensions {
