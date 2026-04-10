@@ -172,7 +172,7 @@ jobs:
           bin=rootcx
           [ "${{ runner.os }}" = "Windows" ] && bin=rootcx.exe
           tar -czf rootcx-${{ matrix.target }}.tar.gz "$bin"
-          mv rootcx-${{ matrix.target }}.tar.gz ${{ github.workspace }}/
+          mv rootcx-${{ matrix.target }}.tar.gz "$GITHUB_WORKSPACE/"
 
       - uses: actions/upload-artifact@v4
         with:
