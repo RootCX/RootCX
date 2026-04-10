@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
         Cmd::Apps => apps().await,
         Cmd::Uninstall { app_id } => uninstall(&app_id).await,
         Cmd::Invoke { app_id, message, session } => {
-            sse::invoke(&client_from_config()?, &app_id, &message, session.as_deref()).await
+            sse::invoke(&client_from_config().await?, &app_id, &message, session.as_deref()).await
         }
         Cmd::SkillsPath => {
             println!("{}", config::skills_dir()?.display());
@@ -87,8 +87,9 @@ async fn main() -> Result<()> {
     }
 }
 
-fn client_from_config() -> Result<RuntimeClient> {
-    let cfg = config::load().context("no .rootcx/config.json — run `rootcx connect <url>` first")?;
+async fn client_from_config() -> Result<RuntimeClient> {
+    let mut cfg = config::load().context("no .rootcx/config.json — run `rootcx connect <url>` first")?;
+    auth::ensure_valid_token(&mut cfg).await?;
     let client = RuntimeClient::new(&cfg.url);
     if let Some(t) = cfg.token {
         client.set_token(Some(t));
@@ -106,14 +107,14 @@ fn logout() -> Result<()> {
 }
 
 async fn status() -> Result<()> {
-    let client = client_from_config()?;
+    let client = client_from_config().await?;
     let s = client.status().await.context("status request failed")?;
     println!("{}", serde_json::to_string_pretty(&s)?);
     Ok(())
 }
 
 async fn apps() -> Result<()> {
-    let client = client_from_config()?;
+    let client = client_from_config().await?;
     let list = client.list_apps().await.context("list_apps failed")?;
     for app in list {
         println!("{}  {}", app.id, app.name);
@@ -122,7 +123,7 @@ async fn apps() -> Result<()> {
 }
 
 async fn uninstall(app_id: &str) -> Result<()> {
-    let client = client_from_config()?;
+    let client = client_from_config().await?;
     client.uninstall_app(app_id).await.context("uninstall failed")?;
     println!("✓ uninstalled {app_id}");
     Ok(())
@@ -138,8 +139,8 @@ async fn run_deploy() -> Result<()> {
         .context("invalid manifest.json")?;
     let app_id = manifest.app_id.clone();
 
-    let cfg = config::load().context("no .rootcx/config.json — run `rootcx connect <url>` first")?;
-    let core_url = &cfg.url;
+    let client = client_from_config().await?;
+    let core_url = client.base_url();
 
     // Auto-install + build if the project has a package.json
     if cwd.join("package.json").exists() {
@@ -154,16 +155,11 @@ async fn run_deploy() -> Result<()> {
             println!("→ building frontend");
             let base_flag = format!("--base=/apps/{app_id}/");
             let args = &["run", "build", "--", &base_flag];
-            bun::exec(&bun, &cwd, args, &[("VITE_ROOTCX_URL", core_url.as_str())]).await?;
+            bun::exec(&bun, &cwd, args, &[("VITE_ROOTCX_URL", core_url)]).await?;
         }
     }
 
     let plan = deploy::plan_deploy(&cwd);
-    let client = RuntimeClient::new(core_url);
-    if let Some(ref t) = cfg.token {
-        client.set_token(Some(t.clone()));
-    }
-
     println!("→ installing manifest ({})", app_id);
     client.install_app(&manifest).await.context("install_app failed")?;
 
