@@ -63,6 +63,8 @@ async fn mgmt_endpoints_reject_unauthenticated() {
     assert_eq!(rt.get_unauthed("/api/v1/apps/authtest/secrets").await, 401);
     assert_eq!(rt.delete_unauthed("/api/v1/apps/authtest/secrets/K").await, 401);
     assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/jobs", &json!({"payload":{}})).await.0, 401);
+    assert_eq!(rt.get_unauthed("/api/v1/apps/authtest/crons").await, 401);
+    assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/crons", &json!({"name":"x","schedule":"* * * * *"})).await.0, 401);
     assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/worker/start", &json!({})).await.0, 401);
     assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/worker/stop", &json!({})).await.0, 401);
     assert_eq!(rt.delete_unauthed("/api/v1/users/00000000-0000-0000-0000-000000000099").await, 401);
@@ -2010,6 +2012,176 @@ async fn ipc_v1_legacy_worker_with_new_prelude() {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
     assert_eq!(result["reply"], "legacy_pong", "v1 legacy worker must still work: {result}");
+    rt.shutdown().await;
+}
+
+// ── Cron schedule tests ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn cron_crud_lifecycle() {
+    let rt = TestRuntime::boot().await;
+    rt.install("cronapp", "items").await;
+
+    // Create
+    let (s, body) = rt.post_json("/api/v1/apps/cronapp/crons", &json!({
+        "name": "daily-sync",
+        "schedule": "0 8 * * *",
+        "payload": { "method": "syncAll" },
+        "overlapPolicy": "skip"
+    })).await;
+    assert_eq!(s, 201, "create cron: {body}");
+    let cron_id = body["id"].as_str().expect("id missing");
+    assert_eq!(body["name"], "daily-sync");
+    assert_eq!(body["schedule"], "0 8 * * *");
+    assert_eq!(body["overlapPolicy"], "skip");
+    assert!(body["pgJobId"].as_i64().is_some(), "pg_cron job should be assigned: {body}");
+
+    // List
+    let (s, list) = rt.get_json("/api/v1/apps/cronapp/crons").await;
+    assert_eq!(s, 200);
+    let arr = list.as_array().expect("should be array");
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"], "daily-sync");
+
+    // Update
+    let (s, updated) = rt.patch_json(
+        &format!("/api/v1/apps/cronapp/crons/{cron_id}"),
+        &json!({ "schedule": "*/5 * * * *", "overlapPolicy": "queue" }),
+    ).await;
+    assert_eq!(s, 200, "update cron: {updated}");
+    assert_eq!(updated["schedule"], "*/5 * * * *");
+    assert_eq!(updated["overlapPolicy"], "queue");
+
+    // Trigger
+    let (s, trig) = rt.post_json(
+        &format!("/api/v1/apps/cronapp/crons/{cron_id}/trigger"),
+        &json!({}),
+    ).await;
+    assert_eq!(s, 200, "trigger cron: {trig}");
+    assert!(trig["msgId"].as_i64().is_some(), "should return pgmq msg id: {trig}");
+
+    // Disable
+    let (s, disabled) = rt.patch_json(
+        &format!("/api/v1/apps/cronapp/crons/{cron_id}"),
+        &json!({ "enabled": false }),
+    ).await;
+    assert_eq!(s, 200, "disable: {disabled}");
+    assert_eq!(disabled["enabled"], false);
+    assert!(disabled["pgJobId"].is_null(), "disabled cron should have no pg_cron job: {disabled}");
+
+    // Re-enable
+    let (s, reenabled) = rt.patch_json(
+        &format!("/api/v1/apps/cronapp/crons/{cron_id}"),
+        &json!({ "enabled": true }),
+    ).await;
+    assert_eq!(s, 200);
+    assert!(reenabled["pgJobId"].as_i64().is_some(), "re-enabled should reassign pg_cron: {reenabled}");
+
+    // Delete
+    let s = rt.delete(&format!("/api/v1/apps/cronapp/crons/{cron_id}")).await;
+    assert_eq!(s, 200, "delete cron");
+
+    // Verify empty
+    let (_, list) = rt.get_json("/api/v1/apps/cronapp/crons").await;
+    assert_eq!(list.as_array().unwrap().len(), 0);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn cron_validation_returns_400() {
+    let rt = TestRuntime::boot().await;
+    rt.install("cronval", "items").await;
+
+    let cases = vec![
+        (json!({"name": "ok", "schedule": "bad schedule"}), "invalid schedule"),
+        (json!({"name": "semi;colon", "schedule": "0 * * * *"}), "invalid name"),
+        (json!({"name": "ok", "schedule": "0 * * * *", "overlapPolicy": "nope"}), "invalid overlap"),
+        (json!({"schedule": "0 * * * *"}), "missing name"),
+        (json!({"name": "ok"}), "missing schedule"),
+    ];
+    for (body, label) in cases {
+        let (s, _) = rt.post_json("/api/v1/apps/cronval/crons", &body).await;
+        assert_eq!(s, 400, "{label} should return 400");
+    }
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn cron_blocked_for_system_schemas() {
+    let rt = TestRuntime::boot().await;
+    let (s, _) = rt.get_json("/api/v1/apps/rootcx_system/crons").await;
+    assert_eq!(s, 403, "rootcx_system should be blocked");
+    let (s, _) = rt.get_json("/api/v1/apps/pg_catalog/crons").await;
+    assert_eq!(s, 403, "pg_catalog should be blocked");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn cron_cleanup_on_uninstall() {
+    let rt = TestRuntime::boot().await;
+    rt.install("cronclean", "items").await;
+
+    let (s, _) = rt.post_json("/api/v1/apps/cronclean/crons", &json!({
+        "name": "job1", "schedule": "0 * * * *"
+    })).await;
+    assert_eq!(s, 201);
+
+    let s = rt.delete("/api/v1/apps/cronclean").await;
+    assert_eq!(s, 200, "uninstall should succeed");
+
+    // Verify pg_cron jobs cleaned up
+    let (count,): (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM cron.job WHERE jobname LIKE 'rootcx-%'"
+    ).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(count, 0, "pg_cron jobs should be cleaned up after uninstall");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn cron_manifest_sync() {
+    let rt = TestRuntime::boot().await;
+    let manifest = json!({
+        "appId": "cronsync", "name": "cronsync", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "label", "type": "text" }
+        ]}],
+        "crons": [
+            { "name": "hourly", "schedule": "0 * * * *", "method": "tick" },
+            { "name": "nightly", "schedule": "0 2 * * *", "overlapPolicy": "queue" }
+        ]
+    });
+    rt.install_manifest(&manifest).await;
+
+    let (s, list) = rt.get_json("/api/v1/apps/cronsync/crons").await;
+    assert_eq!(s, 200);
+    let arr = list.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "manifest declared 2 crons: {list}");
+
+    let hourly = arr.iter().find(|c| c["name"] == "hourly").expect("hourly missing");
+    assert_eq!(hourly["payload"]["method"], "tick", "method should be in payload: {hourly}");
+    let nightly = arr.iter().find(|c| c["name"] == "nightly").expect("nightly missing");
+    assert_eq!(nightly["overlapPolicy"], "queue");
+
+    // Re-install with one cron removed — should delete the orphan
+    let manifest2 = json!({
+        "appId": "cronsync", "name": "cronsync", "version": "1.0.1",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "label", "type": "text" }
+        ]}],
+        "crons": [
+            { "name": "hourly", "schedule": "*/30 * * * *", "method": "tick" }
+        ]
+    });
+    rt.install_manifest(&manifest2).await;
+
+    let (_, list2) = rt.get_json("/api/v1/apps/cronsync/crons").await;
+    let arr2 = list2.as_array().unwrap();
+    assert_eq!(arr2.len(), 1, "orphaned 'nightly' should be deleted: {list2}");
+    assert_eq!(arr2[0]["schedule"], "*/30 * * * *", "hourly should be updated: {list2}");
+
     rt.shutdown().await;
 }
 

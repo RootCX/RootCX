@@ -36,6 +36,9 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .route("/api/v1/platform/secrets", get(routes::list_platform_secrets).post(routes::set_platform_secret))
         .route("/api/v1/platform/secrets/env", get(routes::get_platform_env))
         .route("/api/v1/platform/secrets/{key_name}", delete(routes::delete_platform_secret))
+        .route("/api/v1/apps/{app_id}/crons", get(routes::list_crons).post(routes::create_cron))
+        .route("/api/v1/apps/{app_id}/crons/{id}", axum::routing::patch(routes::update_cron).delete(routes::delete_cron))
+        .route("/api/v1/apps/{app_id}/crons/{id}/trigger", post(routes::trigger_cron))
         .route("/api/v1/apps/{app_id}/jobs", get(routes::list_jobs).post(routes::enqueue_job))
         .route("/api/v1/apps/{app_id}/upload", post(routes::upload_file).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)))
         .route(

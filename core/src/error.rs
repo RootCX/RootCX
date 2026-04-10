@@ -15,6 +15,9 @@ pub enum RuntimeError {
     #[error("job engine error: {0}")]
     Job(String),
 
+    #[error("cron error: {0}")]
+    Cron(String),
+
     #[error("IPC error: {0}")]
     Ipc(String),
 
