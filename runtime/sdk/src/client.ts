@@ -66,6 +66,37 @@ export interface Job {
   enqueued_at: string;
 }
 
+export type OverlapPolicy = "skip" | "queue";
+
+export interface CronSchedule {
+  id: string;
+  appId: string;
+  name: string;
+  schedule: string;
+  timezone: string | null;
+  payload: Record<string, unknown>;
+  overlapPolicy: OverlapPolicy;
+  enabled: boolean;
+  pgJobId: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateCronInput {
+  name: string;
+  schedule: string;
+  timezone?: string;
+  payload?: Record<string, unknown>;
+  overlapPolicy?: OverlapPolicy;
+}
+
+export interface UpdateCronInput {
+  schedule?: string;
+  payload?: Record<string, unknown>;
+  overlapPolicy?: OverlapPolicy;
+  enabled?: boolean;
+}
+
 export interface IntegrationSummary {
   id: string;
   name: string;
@@ -588,6 +619,47 @@ export class RuntimeClient {
     const res = await this.authFetch(
       `${this.baseUrl}/api/v1/apps/${enc(appId)}/jobs${qs}`,
     );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async listCrons(appId: string): Promise<CronSchedule[]> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/crons`);
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async createCron(appId: string, input: CreateCronInput): Promise<CronSchedule> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/crons`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async updateCron(appId: string, id: string, patch: UpdateCronInput): Promise<CronSchedule> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/crons/${enc(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async deleteCron(appId: string, id: string): Promise<void> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/crons/${enc(id)}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+  }
+
+  async triggerCron(appId: string, id: string): Promise<{ msgId: number }> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/crons/${enc(id)}/trigger`, {
+      method: "POST",
+    });
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }

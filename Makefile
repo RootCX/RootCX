@@ -2,6 +2,8 @@
 #
 #   make release         # auto-detect platform, build native package
 #   make dev             # debug loop on current host
+#   make dev-mode        # CLI + Claude Code plugin → local dev builds
+#   make prod-mode       # CLI + Claude Code plugin → production
 #   make deps            # download PG + Bun for current host
 #   make dist-mac-arm    # .dmg  (Apple Silicon)    — requires macOS
 #   make dist-mac-x86    # .dmg  (Intel Mac)        — requires macOS
@@ -33,7 +35,7 @@ endif
 
 DIST := target/dist
 
-.PHONY: test-image release dev deps \
+.PHONY: test-image release dev deps dev-mode prod-mode \
         deps-mac-arm deps-mac-x86 deps-linux deps-linux-arm deps-win \
         require-mac require-linux require-win \
         build-frontend \
@@ -63,6 +65,33 @@ test-image:
 # ── Development ───────────────────────────────────────────────────────────────
 
 DEV_DB := postgres://rootcx:rootcx@localhost:5480/rootcx
+
+CLAUDE_SETTINGS := $(HOME)/.claude/settings.json
+define set-plugin # $(1) = plugin key
+	@command -v jq >/dev/null || { echo "jq required: brew install jq"; exit 1; }
+	@jq '.enabledPlugins = {"$(1)": true}' $(CLAUDE_SETTINGS) > $(CLAUDE_SETTINGS).tmp \
+		&& mv $(CLAUDE_SETTINGS).tmp $(CLAUDE_SETTINGS)
+endef
+
+dev-mode:
+ifndef PLUGIN_DIR
+	$(error PLUGIN_DIR is required — path to your local claude-code-plugin checkout. Usage: make dev-mode PLUGIN_DIR=/path/to/claude-code-plugin)
+endif
+	cargo build -p rootcx-cli
+	@mkdir -p $(HOME)/.local/bin
+	ln -sf $(CURDIR)/target/debug/rootcx $(HOME)/.local/bin/rootcx
+	@jq '.extraKnownMarketplaces["rootcx-local"].source = {"source":"directory","path":"$(PLUGIN_DIR)"}' \
+		$(CLAUDE_SETTINGS) > $(CLAUDE_SETTINGS).tmp && mv $(CLAUDE_SETTINGS).tmp $(CLAUDE_SETTINGS)
+	$(call set-plugin,rootcx@rootcx-local)
+	@rm -rf $(HOME)/.claude/plugins/cache/rootcx-local
+	@echo "✓ dev mode: CLI → target/debug, plugin → $(PLUGIN_DIR) (cache cleared)"
+
+prod-mode:
+	@if [ -L $(HOME)/.local/bin/rootcx ]; then \
+		rm $(HOME)/.local/bin/rootcx; echo "✓ removed dev CLI symlink"; \
+	fi
+	$(call set-plugin,rootcx@rootcx)
+	@echo "✓ prod mode: plugin → GitHub rootcx"
 
 dev:
 	pnpm --dir runtime/ui install

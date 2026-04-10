@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: ghcr.io/rootcx/postgresql:16-pgmq
+    image: ghcr.io/rootcx/postgresql:16-pgmq-cron
     user: root
     entrypoint: ["/pg-entrypoint.sh"]
     environment:
@@ -10,6 +10,7 @@ services:
       PGDATA: /data/pgdata
     volumes:
       - pgdata-dev:/data
+      - ./docker/pg-entrypoint.sh:/pg-entrypoint.sh:ro
     ports:
       - "5480:5432"
     healthcheck:
