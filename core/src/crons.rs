@@ -347,12 +347,21 @@ fn validate_name(name: &str) -> Result<(), RuntimeError> {
 
 fn validate_schedule(schedule: &str) -> Result<(), RuntimeError> {
     let parts: Vec<&str> = schedule.split_whitespace().collect();
+    // pg_cron interval syntax: "N seconds" (1-59)
+    if parts.len() == 2 && parts[1] == "seconds" {
+        let n: u32 = parts[0].parse().map_err(|_| RuntimeError::Cron(
+            format!("invalid seconds interval: '{schedule}'")))?;
+        if n < 1 || n > 59 {
+            return Err(RuntimeError::Cron(format!("seconds must be 1-59, got: {n}")));
+        }
+        return Ok(());
+    }
     if parts.len() != 5 {
         return Err(RuntimeError::Cron(format!(
-            "invalid cron schedule: '{schedule}' (expected 5 fields: min hour dom mon dow)"
+            "invalid cron schedule: '{schedule}' (expected 5 fields or 'N seconds')"
         )));
     }
-    if !schedule.bytes().all(|b| b.is_ascii_digit() || b == b' ' || b == b'*' || b == b'/' || b == b'-' || b == b',') {
+    if !schedule.bytes().all(|b| b.is_ascii_digit() || b == b' ' || b == b'*' || b == b'/' || b == b'-' || b == b',' || b == b'$') {
         return Err(RuntimeError::Cron(format!("invalid characters in cron schedule: '{schedule}'")));
     }
     Ok(())
@@ -396,7 +405,7 @@ mod tests {
 
     #[test]
     fn validate_schedule_accepts_valid() {
-        for expr in ["0 8 * * *", "*/5 * * * *", "0 0 1,15 * *", "30 2 * * 1-5", "0 0 1 1 *"] {
+        for expr in ["0 8 * * *", "*/5 * * * *", "0 0 1,15 * *", "30 2 * * 1-5", "0 0 1 1 *", "10 seconds", "1 seconds", "59 seconds", "0 0 $ * *"] {
             assert!(validate_schedule(expr).is_ok(), "should accept: {expr}");
         }
     }
@@ -407,6 +416,9 @@ mod tests {
             ("", "empty"),
             ("0 8 * *", "4 fields"),
             ("0 8 * * * *", "6 fields"),
+            ("0 seconds", "zero seconds"),
+            ("60 seconds", "60 seconds out of range"),
+            ("abc seconds", "non-numeric seconds"),
             ("@daily", "named shortcut"),
             ("0 8 * * MON", "alpha day name"),
             ("; DROP TABLE x;--", "injection attempt"),

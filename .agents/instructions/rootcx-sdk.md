@@ -118,6 +118,26 @@ Read-only access to core platform entities. `GET /api/v1/{entity}` (not app coll
 
 **`core:users` in manifest `entity_link` references → use `useCoreCollection("users")` to fetch org members. Do NOT use `useAppCollection` with `core:users` — it will 404.**
 
+### useCrons
+
+```tsx
+const { data, loading, error, refetch, create, update, remove, trigger } = useCrons(appId);
+```
+
+Returns: `{ data: CronSchedule[], loading, error, refetch, create, update, remove, trigger }`
+
+CRUD for scheduled jobs. Crons fire via pg_cron → pgmq → Core scheduler → worker `onJob`.
+
+`create({ name, schedule, payload?, timezone?, overlapPolicy? }) → CronSchedule` · `update(id, { schedule?, payload?, enabled?, overlapPolicy? }) → CronSchedule` · `remove(id) → void` · `trigger(id) → { msgId }` (manual fire)
+
+**schedule:** 5-field cron (`"0 9 * * *"` = daily 9am) or `"N seconds"` interval (`"10 seconds"`, 1-59). `$` = last day of month. All times GMT unless timezone set. **overlapPolicy:** `"skip"` (default, dedup) or `"queue"`. **payload:** arbitrary JSON passed to worker `onJob`.
+
+```tsx
+await create({ name: `check-${campaignId}`, schedule: "0 9 * * *", payload: { campaignId } });
+await update(cronId, { enabled: false }); // pause
+await trigger(cronId); // manual fire
+```
+
 ### useRuntimeClient
 
 ```tsx
@@ -398,6 +418,24 @@ Base: `/api/v1/apps/{app_id}/jobs`
 
 Use jobs for long-running work (bulk fetches, batch imports, async syncs) that would exceed the 30s RPC timeout.
 
+### Core REST API — Crons
+
+Scheduled jobs via pg_cron. Crons fire → pgmq → scheduler → worker `onJob`.
+
+Base: `/api/v1/apps/{app_id}/crons`
+
+| Method | Path | Body | Response |
+|--------|------|------|----------|
+| POST | `/` | `{name, schedule, payload?, timezone?, overlapPolicy?}` | `CronSchedule` (201) |
+| GET | `/` | — | `CronSchedule[]` |
+| PATCH | `/{id}` | `{schedule?, payload?, overlapPolicy?, enabled?}` | `CronSchedule` |
+| DELETE | `/{id}` | — | `{message}` |
+| POST | `/{id}/trigger` | — | `{msgId}` |
+
+**schedule:** 5-field cron (`min hr dom mon dow`) or `"N seconds"` interval (`"10 seconds"`, 1-59). `$` in dom = last day of month. All times GMT unless timezone set. **overlapPolicy:** `"skip"` (default) or `"queue"`. **enabled:** toggle on/off without deleting.
+
+Cron payload arrives in worker `onJob(payload, caller, ctx)` with the configured payload + `cron_id`.
+
 ### Frontend → Worker
 
 ```tsx
@@ -454,6 +492,28 @@ async function dispatch(method: string, params: any, caller: Caller | null): Pro
   }
 }
 ```
+
+### serve() API (v2)
+
+Preferred over raw stdin/stdout. Prelude injects `serve()` globally:
+
+```typescript
+serve({
+  rpc: {
+    ping: async (params, caller, ctx) => ({ pong: true }),
+  },
+  onJob: async (payload, caller, ctx) => {
+    ctx.log.info("job received");
+    await ctx.collection("entity").insert({ field: "value" });
+  },
+  onStart: async (ctx) => {},
+  onShutdown: () => {},
+});
+```
+
+`ctx`: `{ appId, runtimeUrl, databaseUrl, credentials, log: { info, warn, error }, emit(name, data?), collection(entity): { insert, update }, uploadFile() }`
+
+**Cron → onJob:** `useCrons().create({ schedule, payload })` → pg_cron → pgmq → scheduler → `onJob(payload)`.
 
 ### Rules
 

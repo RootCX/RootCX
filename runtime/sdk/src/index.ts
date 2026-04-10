@@ -21,6 +21,10 @@ export type {
   IntegrationBinding,
   IdentityRecord,
   Job,
+  CronSchedule,
+  CreateCronInput,
+  UpdateCronInput,
+  OverlapPolicy,
 } from "./client";
 
 export { RuntimeProvider, useRuntimeClient } from "./components/RuntimeProvider";
@@ -46,6 +50,9 @@ export type { UseIntegrationResult } from "./hooks/useIntegration";
 
 export { useIdentity } from "./hooks/useIdentity";
 export type { UseIdentityResult } from "./hooks/useIdentity";
+
+export { useCrons } from "./hooks/useCrons";
+export type { UseCronsResult } from "./hooks/useCrons";
 
 export { PermissionsProvider, usePermissionsContext } from "./components/PermissionsProvider";
 export type { PermissionsProviderProps } from "./components/PermissionsProvider";

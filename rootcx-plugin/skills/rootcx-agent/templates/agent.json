@@ -1,8 +1,0 @@
-{
-  "name": "my-agent",
-  "description": "Describe what this agent does",
-  "systemPrompt": "./agent/system.md",
-  "memory": { "enabled": true },
-  "limits": { "maxTurns": 50, "maxContextTokens": 100000, "keepRecentMessages": 10 },
-  "supervision": { "mode": "autonomous" }
-}
