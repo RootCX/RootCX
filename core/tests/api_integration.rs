@@ -2376,3 +2376,31 @@ async fn cron_created_by_nulled_on_user_deletion() {
     rt.shutdown().await;
 }
 
+// ── Job impersonation ──────────────────────────────────────────────
+
+#[tokio::test]
+async fn job_enqueue_with_user_id_requires_admin() {
+    let rt = TestRuntime::boot().await;
+    rt.install("jobimp", "items").await;
+
+    let other = rt.register_and_login("other@test.local").await;
+    let (_, users) = rt.get_json("/api/v1/users").await;
+    let other_id = users.as_array().unwrap().iter()
+        .find(|u| u["email"] == "other@test.local").unwrap()["id"]
+        .as_str().unwrap().to_string();
+
+    // Admin can enqueue as another user
+    let (s, body) = rt.post_json("/api/v1/apps/jobimp/jobs", &json!({
+        "payload": { "type": "test" }, "user_id": other_id
+    })).await;
+    assert_eq!(s, 201, "admin impersonation: {body}");
+
+    // Non-admin cannot
+    let (s, _) = rt.request_as(
+        Method::POST, "/api/v1/apps/jobimp/jobs", &other,
+        Some(&json!({"payload": {"type": "test"}, "user_id": rt.token.clone()})),
+    ).await;
+    assert_eq!(s, 403, "non-admin impersonation must be forbidden");
+
+    rt.shutdown().await;
+}

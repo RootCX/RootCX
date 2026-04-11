@@ -17,7 +17,14 @@ pub async fn enqueue_job(
 ) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
     let pool = pool(&rt);
     let payload = body.get("payload").cloned().unwrap_or(json!({}));
-    let msg_id = crate::jobs::enqueue(&pool, &app_id, payload, Some(identity.user_id)).await?;
+    let run_as = match body.get("user_id").and_then(|v| v.as_str()) {
+        Some(uid) if uid != identity.user_id.to_string() => {
+            crate::extensions::rbac::policy::require_admin(&pool, identity.user_id).await?;
+            Some(uid.parse::<uuid::Uuid>().map_err(|_| ApiError::BadRequest("invalid user_id".into()))?)
+        }
+        _ => Some(identity.user_id),
+    };
+    let msg_id = crate::jobs::enqueue(&pool, &app_id, payload, run_as).await?;
     rt.scheduler_wake().notify_one();
     Ok((StatusCode::CREATED, Json(json!({ "msg_id": msg_id }))))
 }
