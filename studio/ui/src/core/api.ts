@@ -29,3 +29,34 @@ export const setDefaultLlmModel = (id: string) => send(`/api/v1/llm-models/${enc
 
 export const verifySchema = (manifest: unknown) => json<SchemaVerification>("/api/v1/apps/schema/verify", post(manifest));
 export const syncManifest = (manifest: unknown) => send("/api/v1/apps", post(manifest));
+
+export type AppSummary = { id: string; name: string };
+export type CronSchedule = {
+  id: string;
+  appId: string;
+  name: string;
+  schedule: string;
+  timezone: string | null;
+  payload: unknown;
+  overlapPolicy: "skip" | "queue";
+  enabled: boolean;
+  pgJobId: number | null;
+  createdBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+export type CronRun = {
+  runid: number;
+  jobPid: number | null;
+  status: string;
+  returnMessage: string | null;
+  startTime: string | null;
+  endTime: string | null;
+};
+
+export const listApps = () => json<AppSummary[]>("/api/v1/apps");
+export const listAllCrons = () => json<CronSchedule[]>("/api/v1/crons");
+export const listCrons = (appId: string) =>
+  json<CronSchedule[]>(`/api/v1/apps/${encodeURIComponent(appId)}/crons`);
+export const listCronRuns = (appId: string, cronId: string) =>
+  json<CronRun[]>(`/api/v1/apps/${encodeURIComponent(appId)}/crons/${encodeURIComponent(cronId)}/runs`);

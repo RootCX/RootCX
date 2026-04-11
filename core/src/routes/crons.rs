@@ -28,6 +28,32 @@ fn require_owner(perms: &[String], app_id: &str, row_owner: Option<Uuid>, caller
     Ok(())
 }
 
+pub async fn list_all_crons(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let db = pool(&rt);
+    let (_, perms) = resolve_permissions(&db, identity.user_id).await?;
+
+    let app_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM rootcx_system.apps WHERE status != 'system' ORDER BY name"
+    ).fetch_all(&db).await?;
+
+    let mut full_access = Vec::new();
+    let mut own_only = Vec::new();
+    for app_id in &app_ids {
+        if !has_permission(&perms, &format!("app:{app_id}:cron.read")) { continue; }
+        if has_permission(&perms, &format!("app:{app_id}:cron.manage_others")) {
+            full_access.push(app_id.clone());
+        } else {
+            own_only.push(app_id.clone());
+        }
+    }
+
+    let rows = crons::list_all(&db, &full_access, &own_only, identity.user_id).await?;
+    Ok(Json(serde_json::to_value(rows).unwrap_or(json!([]))))
+}
+
 pub async fn create_cron(
     identity: Identity,
     State(rt): State<SharedRuntime>,
@@ -110,6 +136,23 @@ pub async fn delete_cron(
     require_owner(&perms, &app_id, existing.created_by, identity.user_id)?;
     crons::delete(&db, &app_id, cron_id).await?;
     Ok(Json(json!({ "message": "cron deleted" })))
+}
+
+pub async fn list_cron_runs(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path((app_id, id)): Path<(String, String)>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<JsonValue>, ApiError> {
+    validate_app_id(&app_id)?;
+    let cron_id = super::parse_uuid(&id)?;
+    let limit = params.get("limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(50).min(500);
+    let db = pool(&rt);
+    let perms = require_cron_perm(&db, identity.user_id, &app_id, "read").await?;
+    let existing = crons::get(&db, &app_id, cron_id).await?;
+    require_owner(&perms, &app_id, existing.created_by, identity.user_id)?;
+    let runs = crons::list_runs(&db, &app_id, cron_id, limit).await?;
+    Ok(Json(serde_json::to_value(runs).unwrap_or(json!([]))))
 }
 
 pub async fn trigger_cron(

@@ -84,6 +84,11 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
         $fn$;
     "#).execute(pool).await.map_err(err)?;
 
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS ix_job_run_details_jobid_start \
+         ON cron.job_run_details (jobid, start_time DESC NULLS LAST)"
+    ).execute(pool).await.map_err(err)?;
+
     info!("pg_cron + cron_schedules ready");
     Ok(())
 }
@@ -128,6 +133,17 @@ pub struct CreateCron {
     pub payload: JsonValue,
     pub overlap_policy: String,
     pub created_by: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct CronRun {
+    pub runid: i64,
+    pub job_pid: Option<i32>,
+    pub status: String,
+    pub return_message: Option<String>,
+    pub start_time: Option<String>,
+    pub end_time: Option<String>,
 }
 
 const SELECT_COLS: &str =
@@ -259,11 +275,47 @@ pub async fn list(pool: &PgPool, app_id: &str) -> Result<Vec<CronSchedule>, Runt
     )).bind(app_id).fetch_all(pool).await.map_err(err)
 }
 
+pub async fn list_all(
+    pool: &PgPool,
+    full_access_apps: &[String],
+    own_only_apps: &[String],
+    user_id: Uuid,
+) -> Result<Vec<CronSchedule>, RuntimeError> {
+    if !PG_CRON_AVAILABLE.load(Ordering::Relaxed) { return Ok(vec![]); }
+    if full_access_apps.is_empty() && own_only_apps.is_empty() { return Ok(vec![]); }
+    let all_apps: Vec<&str> = full_access_apps.iter().chain(own_only_apps.iter()).map(|s| s.as_str()).collect();
+    sqlx::query_as::<_, CronSchedule>(&format!(
+        "SELECT {SELECT_COLS} FROM rootcx_system.cron_schedules \
+         WHERE app_id = ANY($1) AND (app_id = ANY($2) OR created_by = $3) \
+         ORDER BY app_id, name"
+    ))
+    .bind(&all_apps)
+    .bind(full_access_apps)
+    .bind(user_id)
+    .fetch_all(pool).await.map_err(err)
+}
+
 pub async fn get(pool: &PgPool, app_id: &str, cron_id: Uuid) -> Result<CronSchedule, RuntimeError> {
     sqlx::query_as::<_, CronSchedule>(&format!(
         "SELECT {SELECT_COLS} FROM rootcx_system.cron_schedules WHERE id = $1 AND app_id = $2"
     )).bind(cron_id).bind(app_id).fetch_optional(pool).await.map_err(err)?
       .ok_or_else(|| RuntimeError::NotFound(format!("cron '{cron_id}' not found")))
+}
+
+pub async fn list_runs(
+    pool: &PgPool, app_id: &str, cron_id: Uuid, limit: i64,
+) -> Result<Vec<CronRun>, RuntimeError> {
+    if !PG_CRON_AVAILABLE.load(Ordering::Relaxed) { return Ok(vec![]); }
+    let row = get(pool, app_id, cron_id).await?;
+    let Some(job_id) = row.pg_job_id else { return Ok(vec![]); };
+    sqlx::query_as::<_, CronRun>(
+        "SELECT runid, job_pid, status, return_message, \
+         start_time::text AS start_time, end_time::text AS end_time \
+         FROM cron.job_run_details \
+         WHERE jobid = $1 \
+         ORDER BY start_time DESC NULLS LAST \
+         LIMIT $2"
+    ).bind(job_id).bind(limit).fetch_all(pool).await.map_err(err)
 }
 
 pub async fn trigger(pool: &PgPool, app_id: &str, cron_id: Uuid) -> Result<i64, RuntimeError> {
