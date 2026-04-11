@@ -168,6 +168,20 @@ impl TestRuntime {
         self.upload(&format!("/api/v1/apps/{app_id}/deploy"), "backend.tar.gz", "application/gzip", data).await
     }
 
+    pub async fn register_and_login(&self, email: &str) -> String {
+        self.post_unauthed("/api/v1/auth/register", &json!({"email": email, "password": "Str0ngPass1"})).await;
+        let (_, body) = self.post_unauthed("/api/v1/auth/login", &json!({"email": email, "password": "Str0ngPass1"})).await;
+        body["accessToken"].as_str().expect("login must return accessToken").to_string()
+    }
+
+    pub async fn request_as(&self, method: Method, path: &str, token: &str, body: Option<&Value>) -> (StatusCode, Value) {
+        let mut req = self.client.request(method, self.url(path)).bearer_auth(token);
+        if let Some(b) = body { req = req.json(b); }
+        let r = req.send().await.unwrap();
+        let s = r.status();
+        (s, r.json().await.unwrap_or(Value::Null))
+    }
+
     pub async fn shutdown(self) {
         self.runtime.shutdown().await;
     }
