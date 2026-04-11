@@ -84,11 +84,6 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
         $fn$;
     "#).execute(pool).await.map_err(err)?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS ix_job_run_details_jobid_start \
-         ON cron.job_run_details (jobid, start_time DESC NULLS LAST)"
-    ).execute(pool).await.map_err(err)?;
-
     info!("pg_cron + cron_schedules ready");
     Ok(())
 }
@@ -308,14 +303,20 @@ pub async fn list_runs(
     if !PG_CRON_AVAILABLE.load(Ordering::Relaxed) { return Ok(vec![]); }
     let row = get(pool, app_id, cron_id).await?;
     let Some(job_id) = row.pg_job_id else { return Ok(vec![]); };
-    sqlx::query_as::<_, CronRun>(
+    match sqlx::query_as::<_, CronRun>(
         "SELECT runid, job_pid, status, return_message, \
          start_time::text AS start_time, end_time::text AS end_time \
          FROM cron.job_run_details \
          WHERE jobid = $1 \
          ORDER BY start_time DESC NULLS LAST \
          LIMIT $2"
-    ).bind(job_id).bind(limit).fetch_all(pool).await.map_err(err)
+    ).bind(job_id).bind(limit).fetch_all(pool).await {
+        Ok(rows) => Ok(rows),
+        Err(e) => {
+            warn!("cannot read job_run_details: {e}");
+            Ok(vec![])
+        }
+    }
 }
 
 pub async fn trigger(pool: &PgPool, app_id: &str, cron_id: Uuid) -> Result<i64, RuntimeError> {
