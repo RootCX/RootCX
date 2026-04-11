@@ -88,6 +88,20 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+/// Deferred because cron_schedules bootstraps before RBAC creates the users table.
+pub async fn add_deferred_constraints(pool: &PgPool) -> Result<(), RuntimeError> {
+    if !PG_CRON_AVAILABLE.load(Ordering::Relaxed) { return Ok(()); }
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_constraint WHERE conname = 'cron_schedules_created_by_fkey')"
+    ).fetch_one(pool).await.map_err(err)?;
+    if exists { return Ok(()); }
+    sqlx::query(
+        "ALTER TABLE rootcx_system.cron_schedules ADD CONSTRAINT cron_schedules_created_by_fkey \
+         FOREIGN KEY (created_by) REFERENCES rootcx_system.users(id) ON DELETE SET NULL"
+    ).execute(pool).await.map_err(err)?;
+    Ok(())
+}
+
 // ── Types ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, sqlx::FromRow)]

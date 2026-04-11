@@ -1,5 +1,6 @@
 mod harness;
 use harness::TestRuntime;
+use reqwest::Method;
 use rootcx_types::SchemaVerification;
 use serde_json::{Value, json};
 
@@ -2242,6 +2243,135 @@ async fn cron_manifest_sync_stores_created_by() {
     assert_eq!(arr.len(), 1);
     // Manifest install is authenticated — created_by should be the installing user
     assert!(arr[0]["createdBy"].is_string(), "manifest-synced cron should have createdBy: {}", arr[0]);
+
+    rt.shutdown().await;
+}
+
+// ── Cron Security ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn cron_routes_require_permission() {
+    let rt = TestRuntime::boot().await;
+    rt.install("cronperm", "items").await;
+
+    let (s, cron) = rt.post_json("/api/v1/apps/cronperm/crons", &json!({
+        "name": "sec-job", "schedule": "0 * * * *", "payload": {}
+    })).await;
+    assert_eq!(s, 201);
+    let cron_id = cron["id"].as_str().unwrap();
+
+    let nobody = rt.register_and_login("nobody@test.local").await;
+
+    let cron_url = format!("/api/v1/apps/cronperm/crons/{cron_id}");
+    let cases: &[(&str, Method, String, Option<Value>)] = &[
+        ("list",    Method::GET,    "/api/v1/apps/cronperm/crons".into(),   None),
+        ("create",  Method::POST,   "/api/v1/apps/cronperm/crons".into(),   Some(json!({"name":"x","schedule":"0 * * * *"}))),
+        ("update",  Method::PATCH,  cron_url.clone(),                       Some(json!({"schedule":"*/5 * * * *"}))),
+        ("trigger", Method::POST,   format!("{cron_url}/trigger"),           Some(json!({}))),
+        ("delete",  Method::DELETE, cron_url.clone(),                        None),
+    ];
+    for (label, method, path, body) in cases {
+        let (s, _) = rt.request_as(method.clone(), path, &nobody, body.as_ref()).await;
+        assert_eq!(s, 403, "{label}: user without permissions must be denied");
+    }
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn cron_non_owner_cannot_update_or_trigger() {
+    let rt = TestRuntime::boot().await;
+    rt.install("cronown2", "items").await;
+
+    rt.post_json("/api/v1/roles", &json!({
+        "name": "cron-user",
+        "permissions": ["app:cronown2:cron.read", "app:cronown2:cron.write", "app:cronown2:cron.trigger"]
+    })).await;
+
+    let alice = rt.register_and_login("alice@test.local").await;
+    let bob = rt.register_and_login("bob@test.local").await;
+
+    let (_, users) = rt.get_json("/api/v1/users").await;
+    for email in ["alice@test.local", "bob@test.local"] {
+        let uid = users.as_array().unwrap().iter()
+            .find(|u| u["email"] == email).unwrap()["id"].as_str().unwrap();
+        rt.post_json("/api/v1/roles/assign", &json!({"userId": uid, "role": "cron-user"})).await;
+    }
+
+    let (s, cron) = rt.request_as(
+        Method::POST, "/api/v1/apps/cronown2/crons", &alice,
+        Some(&json!({"name": "alice-job", "schedule": "0 * * * *", "payload": {}})),
+    ).await;
+    assert_eq!(s, 201, "alice creates her cron");
+
+    let cron_url = format!("/api/v1/apps/cronown2/crons/{}", cron["id"].as_str().unwrap());
+    let cases: &[(&str, Method, String, Option<Value>)] = &[
+        ("update",  Method::PATCH,  cron_url.clone(),              Some(json!({"schedule":"*/5 * * * *"}))),
+        ("trigger", Method::POST,   format!("{cron_url}/trigger"), Some(json!({}))),
+        ("delete",  Method::DELETE, cron_url.clone(),               None),
+    ];
+    for (label, method, path, body) in cases {
+        let (s, _) = rt.request_as(method.clone(), path, &bob, body.as_ref()).await;
+        assert_eq!(s, 403, "bob {label} alice's cron without manage_others must be forbidden");
+    }
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn cron_created_by_immutable_via_update() {
+    let rt = TestRuntime::boot().await;
+    rt.install("cronimm", "items").await;
+
+    let (s, cron) = rt.post_json("/api/v1/apps/cronimm/crons", &json!({
+        "name": "imm-job", "schedule": "0 * * * *", "payload": {}
+    })).await;
+    assert_eq!(s, 201);
+    let cron_id = cron["id"].as_str().unwrap();
+    let original = cron["createdBy"].as_str().unwrap();
+
+    let (_, updated) = rt.patch_json(
+        &format!("/api/v1/apps/cronimm/crons/{cron_id}"),
+        &json!({"createdBy": "00000000-0000-0000-0000-ffffffffffff"}),
+    ).await;
+
+    assert_eq!(
+        updated["createdBy"].as_str().unwrap(), original,
+        "created_by must not change via update body"
+    );
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn cron_created_by_nulled_on_user_deletion() {
+    let rt = TestRuntime::boot().await;
+    rt.install("cronorphan", "items").await;
+
+    let doomed = rt.register_and_login("doomed@test.local").await;
+    let (_, users) = rt.get_json("/api/v1/users").await;
+    let doomed_id = users.as_array().unwrap().iter()
+        .find(|u| u["email"] == "doomed@test.local").unwrap()["id"]
+        .as_str().unwrap().to_string();
+
+    rt.post_json("/api/v1/roles/assign", &json!({"userId": doomed_id, "role": "admin"})).await;
+
+    let (s, cron) = rt.request_as(
+        Method::POST, "/api/v1/apps/cronorphan/crons", &doomed,
+        Some(&json!({"name": "orphan-job", "schedule": "0 * * * *", "payload": {}})),
+    ).await;
+    assert_eq!(s, 201);
+    let cron_id = cron["id"].as_str().unwrap();
+    assert_eq!(cron["createdBy"].as_str().unwrap(), doomed_id);
+
+    let (s, _) = rt.delete_json(&format!("/api/v1/users/{doomed_id}")).await;
+    assert_eq!(s, 200);
+
+    let (created_by,): (Option<uuid::Uuid>,) = sqlx::query_as(
+        "SELECT created_by FROM rootcx_system.cron_schedules WHERE id = $1::uuid"
+    ).bind(cron_id).fetch_one(rt.pool()).await.unwrap();
+
+    assert!(created_by.is_none(), "created_by must be NULL after user deletion, got: {created_by:?}");
 
     rt.shutdown().await;
 }

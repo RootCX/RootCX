@@ -92,6 +92,7 @@ impl Runtime {
         for ext in &self.extensions {
             ext.bootstrap(&pool).await?;
         }
+        crons::add_deferred_constraints(&pool).await?;
 
         extensions::oidc::seed_from_env(&pool, &secret_manager).await?;
 

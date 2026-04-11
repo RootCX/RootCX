@@ -96,6 +96,8 @@ impl RuntimeExtension for RbacExtension {
             manifest.data_contract.iter()
                 .flat_map(|e| ["create", "read", "update", "delete"]
                     .map(|a| (format!("app:{app_id}:{}.{a}", e.entity_name), format!("{a} {}", e.entity_name))))
+                .chain(["read", "write", "trigger"].into_iter()
+                    .map(|a| (format!("app:{app_id}:cron.{a}"), format!("{a} crons"))))
                 .unzip()
         };
 
