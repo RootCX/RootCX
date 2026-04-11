@@ -148,7 +148,7 @@ pub use secrets::{delete_secret, list_secrets, set_secret};
 pub use secrets::{delete_platform_secret, get_platform_env, list_platform_secrets, set_platform_secret};
 pub use upload::upload_file;
 pub use introspection::{execute_query, list_schemas, list_tables};
-pub use crons::{create_cron, delete_cron, list_crons, trigger_cron, update_cron};
+pub use crons::{create_cron, delete_cron, list_all_crons, list_cron_runs, list_crons, trigger_cron, update_cron};
 pub use workers::{all_worker_statuses, rpc_proxy, start_worker, stop_worker, worker_status};
 
 #[cfg(test)]

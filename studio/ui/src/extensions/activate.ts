@@ -17,6 +17,7 @@ import { activate as workers } from "./workers";
 import { activate as integrations } from "./integrations";
 import { activate as mcpServers } from "./mcp-servers";
 import { activate as secrets } from "./secrets";
+import { activate as crons } from "./crons";
 import { activate as llmModels } from "./llm-models";
 import { activate as channels } from "./channels";
 import { activate as updater } from "./updater";
@@ -41,6 +42,7 @@ export function activateBuiltins() {
   integrations();
   mcpServers();
   secrets();
+  crons();
   llmModels();
   channels();
   updater();

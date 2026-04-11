@@ -1,5 +1,5 @@
 import { useEffect, useState, useMemo, useSyncExternalStore } from "react";
-import { Cable, Container, Database, FolderOpen, Hammer, KeyRound, MessageCircle, Plug, Shield, Sparkles, LogOut, ServerOff, type LucideIcon } from "lucide-react";
+import { Cable, Clock, Container, Database, FolderOpen, Hammer, KeyRound, MessageCircle, Plug, Shield, Sparkles, LogOut, ServerOff, type LucideIcon } from "lucide-react";
 import { useAuth, logout, disconnect } from "@/core/auth";
 import { cn } from "@/lib/utils";
 import { useLayout, type ZoneId, type LayoutState } from "./layout-store";
@@ -18,6 +18,7 @@ const BASE_NAV: NavItem[] = [
   { id: "security", icon: Shield, label: "Security", desc: "Manage roles and permissions", zone: "sidebar" },
   { id: "integrations", icon: Plug, label: "Integrations", desc: "Connect external services", zone: "sidebar" },
   { id: "secrets", icon: KeyRound, label: "Platform Secrets", desc: "Manage encrypted env variables", zone: "sidebar" },
+  { id: "crons", icon: Clock, label: "Scheduled Jobs", desc: "Observe cron runs across apps", zone: "sidebar" },
   { id: "channels", icon: MessageCircle, label: "Channels", desc: "Telegram, WhatsApp, and more", zone: "sidebar" },
   { id: "mcp-servers", icon: Cable, label: "MCP Servers", desc: "Connect MCP tool servers", zone: "sidebar" },
   { id: "llm-models", icon: Sparkles, label: "LLM Models", desc: "Configure language models", zone: "sidebar" },
