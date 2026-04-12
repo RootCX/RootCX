@@ -52,7 +52,7 @@ Returns: `{ data: T|null, loading, error, refetch, update, remove }`
 ## useIntegration
 
 ```tsx
-const { connected, loading, connect, submitCredentials, disconnect, call } = useIntegration(appId, integrationId);
+const { connected, loading, connect, submitCredentials, disconnect, call } = useIntegration(integrationId);
 ```
 
 `connect()` → OAuth redirect or `{type:"credentials", schema}` · `call(actionId, params?) → result`
