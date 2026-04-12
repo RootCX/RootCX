@@ -1,0 +1,255 @@
+{
+  "appId": "notion",
+  "name": "Notion",
+  "version": "0.1.0",
+  "type": "integration",
+  "description": "Connect Notion databases as live data sources. Query, create and update entries without duplication.",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "apiToken": { "type": "string", "description": "Notion internal integration token. Create one at notion.so/profile/integrations/internal", "platformSecret": "NOTION_API_TOKEN" }
+    },
+    "required": ["apiToken"]
+  },
+  "actions": [
+    {
+      "id": "search",
+      "name": "Search",
+      "description": "Search pages and databases by title across the workspace",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "description": "Search query (title match)" },
+          "filter": { "type": "string", "enum": ["page", "data_source"], "description": "Restrict to pages or data sources" },
+          "pageSize": { "type": "integer", "default": 10 }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "results": { "type": "array" },
+          "hasMore": { "type": "boolean" },
+          "nextCursor": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "get_page",
+      "name": "Get Page",
+      "description": "Retrieve a page's content as markdown",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "pageId": { "type": "string" } },
+        "required": ["pageId"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "url": { "type": "string" },
+          "markdown": { "type": "string" },
+          "properties": { "type": "object" },
+          "lastEditedAt": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "create_page",
+      "name": "Create Page",
+      "description": "Create a page under a parent (page or database) with markdown content",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "parentId": { "type": "string", "description": "Parent page or database ID" },
+          "parentType": { "type": "string", "enum": ["page", "database"], "default": "page" },
+          "title": { "type": "string" },
+          "markdown": { "type": "string", "description": "Page body as markdown" },
+          "properties": { "type": "object", "description": "Database properties (when parent is a database)" }
+        },
+        "required": ["parentId", "title"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "url": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "update_page",
+      "name": "Update Page",
+      "description": "Update a page's markdown content and/or properties",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pageId": { "type": "string" },
+          "markdown": { "type": "string", "description": "Replace page body with this markdown" },
+          "properties": { "type": "object", "description": "Properties to update" }
+        },
+        "required": ["pageId"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "url": { "type": "string" },
+          "lastEditedAt": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "trash_page",
+      "name": "Trash Page",
+      "description": "Move a page to trash",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "pageId": { "type": "string" } },
+        "required": ["pageId"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": { "ok": { "type": "boolean" } }
+      }
+    },
+    {
+      "id": "list_databases",
+      "name": "List Databases",
+      "description": "List all databases the integration has access to",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pageSize": { "type": "integer", "default": 10 },
+          "startCursor": { "type": "string" }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "databases": { "type": "array" },
+          "hasMore": { "type": "boolean" },
+          "nextCursor": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "get_database_schema",
+      "name": "Get Database Schema",
+      "description": "Retrieve a database's schema (properties/columns with types)",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "databaseId": { "type": "string" } },
+        "required": ["databaseId"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "properties": { "type": "object", "description": "Map of property name to {id, type, config}" }
+        }
+      }
+    },
+    {
+      "id": "query_database",
+      "name": "Query Database",
+      "description": "Query a database with optional filters and sorts",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "databaseId": { "type": "string" },
+          "filter": { "type": "object", "description": "Notion filter object" },
+          "sorts": { "type": "array", "description": "Array of {property, direction} or {timestamp, direction}" },
+          "pageSize": { "type": "integer", "default": 100 },
+          "startCursor": { "type": "string" }
+        },
+        "required": ["databaseId"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "results": { "type": "array" },
+          "hasMore": { "type": "boolean" },
+          "nextCursor": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "create_entry",
+      "name": "Create Database Entry",
+      "description": "Add a new entry (page) to a database with property values",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "databaseId": { "type": "string" },
+          "properties": { "type": "object", "description": "Property values keyed by property name" },
+          "markdown": { "type": "string", "description": "Optional page body content" }
+        },
+        "required": ["databaseId", "properties"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "url": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "update_entry",
+      "name": "Update Database Entry",
+      "description": "Update properties of an existing database entry",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pageId": { "type": "string", "description": "The entry's page ID" },
+          "properties": { "type": "object", "description": "Properties to update" }
+        },
+        "required": ["pageId", "properties"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "url": { "type": "string" },
+          "lastEditedAt": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "add_comment",
+      "name": "Add Comment",
+      "description": "Add a comment to a page or discussion",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pageId": { "type": "string" },
+          "text": { "type": "string" }
+        },
+        "required": ["pageId", "text"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" }
+        }
+      }
+    }
+  ],
+  "webhooks": ["page_created", "page_updated", "page_deleted", "database_content_updated"],
+  "instructions": "Notion integration using an internal integration token (platform secret).\n\nNotion is the single source of truth. Every read goes through the API, every write pushes directly to Notion. No local duplication.\n\nThe internal integration only has access to pages and databases explicitly shared with it in Notion (Add Connections).\n\n`search` finds pages and data sources by title. Use `filter: \"page\"` or `filter: \"data_source\"` to restrict results.\n\n`list_databases` discovers accessible data sources. `get_database_schema` returns the column structure (property names, types). Use it to understand available fields before querying or creating entries.\n\n`query_database` supports Notion's native filter syntax:\n- Text: `{\"property\": \"Name\", \"rich_text\": {\"contains\": \"foo\"}}`\n- Select: `{\"property\": \"Status\", \"select\": {\"equals\": \"Done\"}}`\n- Date: `{\"property\": \"Due\", \"date\": {\"on_or_after\": \"2026-01-01\"}}`\n- Checkbox: `{\"property\": \"Done\", \"checkbox\": {\"equals\": true}}`\n- Compound: `{\"and\": [{...}, {...}]}` or `{\"or\": [{...}, {...}]}`\n\nSorts: `[{\"property\": \"Name\", \"direction\": \"ascending\"}]` or `[{\"timestamp\": \"last_edited_time\", \"direction\": \"descending\"}]`\n\n`create_page` and `create_entry` both create pages. The difference is the parent: `create_entry` targets a database (sets properties), `create_page` targets a page (freeform content).\n\nMarkdown endpoints (`get_page` returns markdown, `create_page`/`update_page` accept markdown) use Notion's enhanced markdown format.\n\nProperty values for `create_entry`/`update_entry` use simplified format (the worker converts to Notion's verbose format):\n- Title: `{\"Name\": \"My title\"}`\n- Rich text: `{\"Description\": \"Some text\"}`\n- Number: `{\"Price\": 42.5}`\n- Select: `{\"Status\": \"In Progress\"}`\n- Multi-select: `{\"Tags\": [\"urgent\", \"frontend\"]}`\n- Date: `{\"Due\": \"2026-04-15\"}` or `{\"Due\": {\"start\": \"2026-04-15\", \"end\": \"2026-04-20\"}}`\n- Checkbox: `{\"Done\": true}`\n- URL: `{\"Link\": \"https://example.com\"}`\n- Email: `{\"Contact\": \"a@b.com\"}`\n- Phone: `{\"Phone\": \"+32 123 456 789\"}`\n- Status: `{\"Status\": \"In Progress\"}`",
+  "dataContract": [
+    {
+      "entityName": "connected_databases",
+      "fields": [
+        { "name": "notion_database_id", "type": "string" },
+        { "name": "title", "type": "string" },
+        { "name": "schema_snapshot", "type": "json" },
+        { "name": "field_mapping", "type": "json" },
+        { "name": "last_synced_at", "type": "string" }
+      ]
+    }
+  ],
+  "entities": []
+}
