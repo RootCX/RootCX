@@ -67,6 +67,8 @@ impl RuntimeExtension for StorageExtension {
             Router::new()
                 // Nonce-authenticated upload for workers (no Identity required)
                 .route("/api/v1/storage/upload/{nonce}", post(upload_via_nonce).layer(DefaultBodyLimit::max(MAX_FILE_BYTES)))
+                // Nonce-authenticated download for workers (no Identity required)
+                .route("/api/v1/storage/download/{nonce}", get(download_via_nonce))
                 // JWT-authenticated upload for users/frontend — scoped by app_id
                 .route("/api/v1/apps/{app_id}/storage/upload", post(upload_file).layer(DefaultBodyLimit::max(MAX_FILE_BYTES)))
                 // JWT-authenticated download/delete — scoped by app_id
@@ -77,6 +79,19 @@ impl RuntimeExtension for StorageExtension {
 
 fn backend() -> PostgresBackend {
     PostgresBackend
+}
+
+async fn fetch_file(pool: &PgPool, file_id: Uuid, app_id: &str) -> Result<backend::StorageObject, ApiError> {
+    backend().get(pool, file_id, app_id).await
+        .map_err(|e| match e {
+            crate::RuntimeError::NotFound(_) => ApiError::NotFound(format!("file {file_id}")),
+            e => ApiError::Internal(e.to_string()),
+        })
+}
+
+/// Build a one-time nonce download URL for the given nonce.
+pub fn download_url(runtime_url: &str, nonce: &str) -> String {
+    format!("{runtime_url}/api/v1/storage/download/{nonce}")
 }
 
 /// POST /api/v1/storage/upload/{nonce} — worker upload via single-use nonce.
@@ -148,27 +163,38 @@ async fn upload_file(
     }))))
 }
 
+/// GET /api/v1/storage/download/{nonce} — worker download via single-use nonce.
+/// No JWT required. Used by agent workers to fetch file attachments.
+async fn download_via_nonce(
+    State(rt): State<SharedRuntime>,
+    Path(nonce_id): Path<String>,
+) -> Result<Response, ApiError> {
+    let (file_id, app_id) = {
+        let mut store = rt.upload_nonces().lock().unwrap_or_else(|e| e.into_inner());
+        let nonce = store.consume_download(&nonce_id)
+            .ok_or_else(|| ApiError::NotFound("invalid or expired download nonce".into()))?;
+        (nonce.file_id, nonce.app_id)
+    };
+    let obj = fetch_file(rt.pool(), file_id, &app_id).await?;
+    let mut headers = HeaderMap::new();
+    headers.insert(header::CONTENT_TYPE, obj.content_type.parse().unwrap_or(header::HeaderValue::from_static("application/octet-stream")));
+    headers.insert(header::CONTENT_LENGTH, obj.size.to_string().parse().unwrap());
+    Ok((headers, Body::from(obj.content)).into_response())
+}
+
 /// GET /api/v1/apps/:app_id/storage/:file_id — download file (requires JWT, scoped by app)
 async fn get_file(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
     Path((app_id, file_id)): Path<(String, Uuid)>,
 ) -> Result<Response, ApiError> {
-    let pool = rt.pool().clone();
-
-    let obj = backend().get(&pool, file_id, &app_id).await
-        .map_err(|e| match e {
-            RuntimeError::NotFound(_) => ApiError::NotFound(format!("file {file_id}")),
-            e => ApiError::Internal(e.to_string()),
-        })?;
-
+    let obj = fetch_file(rt.pool(), file_id, &app_id).await?;
+    let safe_name: String = obj.name.chars().filter(|c| !c.is_control() && *c != '"' && *c != '\\').collect();
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, obj.content_type.parse().unwrap_or(header::HeaderValue::from_static("application/octet-stream")));
-    let safe_name: String = obj.name.chars().filter(|c| !c.is_control() && *c != '"' && *c != '\\').collect();
     headers.insert(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", safe_name).parse().unwrap_or(header::HeaderValue::from_static("attachment")));
     headers.insert(header::CONTENT_LENGTH, obj.size.to_string().parse().unwrap());
     headers.insert(header::HeaderName::from_static("x-content-type-options"), header::HeaderValue::from_static("nosniff"));
-
     Ok((headers, Body::from(obj.content)).into_response())
 }
 

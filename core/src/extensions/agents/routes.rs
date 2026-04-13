@@ -13,10 +13,8 @@ use super::approvals::{ApprovalReply, ApprovalResponse};
 use super::config;
 use super::persistence::PersistCtx;
 use super::streaming;
-use base64::Engine as _;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::extensions::storage::backend::{PostgresBackend, StorageBackend};
 use crate::ipc::{AgentInvokePayload, FileAttachment, LlmModelRef};
 use crate::routes::{self, SharedRuntime, llm_models::fetch_default_llm};
 
@@ -171,23 +169,21 @@ pub async fn invoke_agent(
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .map(|(provider, model)| LlmModelRef { provider, model });
 
-    // Resolve file_ids → base64 attachments fetched from BYTEA storage.
+    // Resolve file_ids → nonce download URLs (worker fetches bytes via HTTP, no base64 in IPC).
     let attachments = if let Some(ids) = body.file_ids.as_deref() {
         let mut list = Vec::with_capacity(ids.len());
-        let storage = PostgresBackend;
         for raw_id in ids {
             let file_id = raw_id.parse::<uuid::Uuid>()
                 .map_err(|_| ApiError::BadRequest(format!("invalid file_id: {raw_id}")))?;
-            let obj = storage.get(&pool, file_id, &app_id).await
-                .map_err(|e| match e {
-                    crate::RuntimeError::NotFound(_) => ApiError::NotFound(format!("file {file_id}")),
-                    e => ApiError::Internal(e.to_string()),
-                })?;
-            list.push(FileAttachment {
-                name: obj.name,
-                content_type: obj.content_type,
-                data: base64::engine::general_purpose::STANDARD.encode(&obj.content),
-            });
+            let (name, content_type): (String, String) = sqlx::query_as(
+                "SELECT name, content_type FROM rootcx_system.files WHERE id = $1 AND app_id = $2",
+            ).bind(file_id).bind(&app_id).fetch_optional(&pool).await?
+            .ok_or_else(|| ApiError::NotFound(format!("file {file_id}")))?;
+
+            let nonce = rt.upload_nonces().lock().unwrap_or_else(|e| e.into_inner())
+                .create_download(file_id, &app_id);
+            let url = crate::extensions::storage::download_url(rt.runtime_url(), &nonce);
+            list.push(FileAttachment { name, content_type, url });
         }
         Some(list)
     } else {

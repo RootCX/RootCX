@@ -39,12 +39,12 @@ pub struct LlmModelRef {
 }
 
 /// A file attachment forwarded to the agent worker for multimodal LLM input.
-/// `data` is base64-encoded file content.
+/// `url` is a one-time nonce download URL — worker fetches bytes via HTTP.
 #[derive(Debug, Clone, Serialize)]
 pub struct FileAttachment {
     pub name: String,
     pub content_type: String,
-    pub data: String, // base64
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

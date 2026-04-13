@@ -102,7 +102,7 @@ impl Runtime {
         let runtime_url = format!("http://127.0.0.1:{api_port}");
         let upload_nonces = Arc::new(std::sync::Mutex::new(extensions::storage::nonce::NonceStore::default()));
         let wm = Arc::new(WorkerManager::new(
-            apps_dir, runtime_url, self.database_url.clone(), self.bun_bin.clone(),
+            apps_dir, runtime_url.clone(), self.database_url.clone(), self.bun_bin.clone(),
             Arc::clone(&self.tool_registry), self.pending_approvals.clone(),
             Arc::clone(&secret_manager), Arc::clone(&upload_nonces),
         ));
@@ -128,6 +128,7 @@ impl Runtime {
             pending_approvals: self.pending_approvals,
             scheduler,
             upload_nonces,
+            runtime_url,
             resources_dir: self.resources_dir,
             data_dir: self.data_dir,
             bun_bin: self.bun_bin,
@@ -147,6 +148,7 @@ pub struct ReadyRuntime {
     pending_approvals: PendingApprovals,
     scheduler: SchedulerHandle,
     upload_nonces: Arc<std::sync::Mutex<extensions::storage::nonce::NonceStore>>,
+    runtime_url: String,
     resources_dir: PathBuf,
     data_dir: PathBuf,
     bun_bin: PathBuf,
@@ -190,4 +192,5 @@ impl ReadyRuntime {
     pub fn resources_dir(&self) -> &std::path::Path { &self.resources_dir }
     pub fn data_dir(&self) -> &std::path::Path { &self.data_dir }
     pub fn upload_nonces(&self) -> &Arc<std::sync::Mutex<extensions::storage::nonce::NonceStore>> { &self.upload_nonces }
+    pub fn runtime_url(&self) -> &str { &self.runtime_url }
 }
