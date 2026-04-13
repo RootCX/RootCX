@@ -25,6 +25,73 @@ async fn resolve_caller(pool: &PgPool, auth: &AuthConfig, user_id: uuid::Uuid) -
     Some(RpcCaller { user_id: user_id.to_string(), email, auth_token: Some(token) })
 }
 
+async fn dispatch_agent_job(
+    pool: &PgPool,
+    wm: &Arc<WorkerManager>,
+    msg_id: i64,
+    target_app: &str,
+    message: String,
+    label: &'static str,
+) {
+    let llm = crate::routes::llm_models::fetch_default_llm(pool).await
+        .ok().flatten()
+        .map(|(provider, model)| LlmModelRef { provider, model });
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let user_message = message.clone();
+
+    let invoke_payload = AgentInvokePayload {
+        invoke_id: uuid::Uuid::new_v4().to_string(),
+        session_id: session_id.clone(),
+        message,
+        history: vec![],
+        is_sub_invoke: false,
+        llm,
+        invoker_user_id: None,
+        attachments: None,
+    };
+
+    let system_user = uuid::Uuid::nil();
+    let _ = persistence::ensure_session(pool, &session_id, target_app, system_user).await;
+    let _ = persistence::persist_message(pool, &session_id, "user", &user_message, None, false).await;
+
+    match wm.agent_invoke(target_app, invoke_payload).await {
+        Ok(mut rx) => {
+            let pool_c = pool.clone();
+            let target_app_c = target_app.to_string();
+            tokio::spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    match event {
+                        crate::worker::AgentEvent::ToolCallStarted { call_id, tool_name, input } => {
+                            let _ = persistence::persist_tool_call_start(&pool_c, &session_id, &call_id, &tool_name, &input).await;
+                        }
+                        crate::worker::AgentEvent::ToolCallCompleted { call_id, output, error, duration_ms, .. } => {
+                            let _ = persistence::persist_tool_call_end(&pool_c, &call_id, output.as_ref(), error.as_deref(), duration_ms).await;
+                        }
+                        crate::worker::AgentEvent::Done { response, tokens } => {
+                            let _ = persistence::finalize_session(&pool_c, &session_id, &user_message, &response, tokens).await;
+                            let _ = jobs::complete(&pool_c, msg_id).await;
+                            info!(msg_id, app_id = %target_app_c, %session_id, "{label} agent completed");
+                            return;
+                        }
+                        crate::worker::AgentEvent::Error { error } => {
+                            error!(msg_id, app_id = %target_app_c, "{label} agent error: {error}");
+                            let _ = jobs::fail(&pool_c, msg_id).await;
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                let _ = jobs::fail(&pool_c, msg_id).await;
+            });
+        }
+        Err(e) => {
+            warn!(msg_id, "{label} agent dispatch failed: {e}");
+            let _ = jobs::fail(pool, msg_id).await;
+        }
+    }
+}
+
 pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, auth_config: Arc<AuthConfig>) -> SchedulerHandle {
     let wake = Arc::new(Notify::new());
     let cancel = CancellationToken::new();
@@ -41,79 +108,36 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, auth_config: Arc<Au
                     let is_agent = job_msg.payload.get("action_type").and_then(|v| v.as_str()) == Some("agent");
 
                     if is_hook && is_agent {
-                        // Hook-triggered agent invocation
                         let target_app = job_msg.payload.get("action_config")
                             .and_then(|c| c.get("app_id"))
                             .and_then(|v| v.as_str())
                             .unwrap_or(&job_msg.app_id)
                             .to_string();
 
-                        let entity = job_msg.payload.get("entity").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-                        let operation = job_msg.payload.get("operation").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+                        let entity = job_msg.payload.get("entity").and_then(|v| v.as_str()).unwrap_or("unknown");
+                        let operation = job_msg.payload.get("operation").and_then(|v| v.as_str()).unwrap_or("unknown");
                         let record = job_msg.payload.get("record").cloned().unwrap_or_default();
+                        let message = format!("Entity event: {operation} on {entity}\n\nRecord:\n{record}");
 
-                        let message = format!(
-                            "Entity event: {operation} on {entity}\n\nRecord:\n{record}",
-                        );
+                        dispatch_agent_job(&pool, &wm, msg_id, &target_app, message, "hook").await;
+                        continue;
+                    }
 
-                        let llm = crate::routes::llm_models::fetch_default_llm(&pool).await
-                            .ok().flatten()
-                            .map(|(provider, model)| LlmModelRef { provider, model });
+                    // Cron-triggered agent invocation
+                    let is_cron = job_msg.payload.get("cron_id").is_some();
+                    let is_cron_agent = if is_cron {
+                        sqlx::query_scalar::<_, bool>(
+                            "SELECT EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id = $1)"
+                        ).bind(&job_msg.app_id).fetch_one(&pool).await.unwrap_or(false)
+                    } else { false };
 
-                        let session_id = uuid::Uuid::new_v4().to_string();
-                        let user_message = message.clone();
+                    if is_cron_agent {
+                        let message = job_msg.payload.get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Scheduled invocation")
+                            .to_string();
 
-                        let invoke_payload = AgentInvokePayload {
-                            invoke_id: uuid::Uuid::new_v4().to_string(),
-                            session_id: session_id.clone(),
-                            message,
-                            history: vec![],
-                            is_sub_invoke: false,
-                            llm,
-                            invoker_user_id: None,
-                            attachments: None,
-                        };
-
-                        // Create session immediately so the poller can detect it
-                        let system_user = uuid::Uuid::nil();
-                        let _ = persistence::ensure_session(&pool, &session_id, &target_app, system_user).await;
-                        let _ = persistence::persist_message(&pool, &session_id, "user", &user_message, None, false).await;
-
-                        match wm.agent_invoke(&target_app, invoke_payload).await {
-                            Ok(mut rx) => {
-                                let pool_c = pool.clone();
-                                let target_app_c = target_app.clone();
-                                tokio::spawn(async move {
-                                    while let Some(event) = rx.recv().await {
-                                        match event {
-                                            crate::worker::AgentEvent::ToolCallStarted { call_id, tool_name, input } => {
-                                                let _ = persistence::persist_tool_call_start(&pool_c, &session_id, &call_id, &tool_name, &input).await;
-                                            }
-                                            crate::worker::AgentEvent::ToolCallCompleted { call_id, output, error, duration_ms, .. } => {
-                                                let _ = persistence::persist_tool_call_end(&pool_c, &call_id, output.as_ref(), error.as_deref(), duration_ms).await;
-                                            }
-                                            crate::worker::AgentEvent::Done { response, tokens } => {
-                                                let _ = persistence::finalize_session(&pool_c, &session_id, &user_message, &response, tokens).await;
-                                                let _ = jobs::complete(&pool_c, msg_id).await;
-                                                info!(msg_id, app_id = %target_app_c, %session_id, "hook agent completed");
-                                                return;
-                                            }
-                                            crate::worker::AgentEvent::Error { error } => {
-                                                error!(msg_id, app_id = %target_app_c, "hook agent error: {error}");
-                                                let _ = jobs::fail(&pool_c, msg_id).await;
-                                                return;
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    let _ = jobs::fail(&pool_c, msg_id).await;
-                                });
-                            }
-                            Err(e) => {
-                                warn!(msg_id, "hook agent dispatch failed: {e}");
-                                let _ = jobs::fail(&pool, msg_id).await;
-                            }
-                        }
+                        dispatch_agent_job(&pool, &wm, msg_id, &job_msg.app_id, message, "cron").await;
                         continue;
                     }
 
