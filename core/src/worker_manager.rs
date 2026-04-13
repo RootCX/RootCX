@@ -264,6 +264,7 @@ impl AgentDispatcher for SubAgentDispatch {
             is_sub_invoke: true,
             llm,
             invoker_user_id: None,
+            attachments: None,
         };
 
         let app_id = target.to_string();

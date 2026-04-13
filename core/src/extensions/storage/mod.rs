@@ -6,7 +6,7 @@ mod backend_test;
 
 use async_trait::async_trait;
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, Multipart, Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -67,7 +67,9 @@ impl RuntimeExtension for StorageExtension {
             Router::new()
                 // Nonce-authenticated upload for workers (no Identity required)
                 .route("/api/v1/storage/upload/{nonce}", post(upload_via_nonce).layer(DefaultBodyLimit::max(MAX_FILE_BYTES)))
-                // JWT-authenticated endpoints for users/frontend — scoped by app_id
+                // JWT-authenticated upload for users/frontend — scoped by app_id
+                .route("/api/v1/apps/{app_id}/storage/upload", post(upload_file).layer(DefaultBodyLimit::max(MAX_FILE_BYTES)))
+                // JWT-authenticated download/delete — scoped by app_id
                 .route("/api/v1/apps/{app_id}/storage/{file_id}", get(get_file).delete(delete_file))
         )
     }
@@ -104,6 +106,45 @@ async fn upload_via_nonce(
         "file_id": file_id.to_string(),
         "name": upload_nonce.name,
         "size": body.len(),
+    }))))
+}
+
+/// POST /api/v1/apps/:app_id/storage/upload — user file upload (requires JWT, scoped by app).
+/// Accepts multipart/form-data. Stores in BYTEA. Returns { file_id, name, content_type, size }.
+async fn upload_file(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path(app_id): Path<String>,
+    mut multipart: Multipart,
+) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
+    let field = multipart
+        .next_field()
+        .await
+        .map_err(|e| ApiError::BadRequest(e.to_string()))?
+        .ok_or_else(|| ApiError::BadRequest("no file field".into()))?;
+
+    let name = field.file_name().unwrap_or("upload").to_string();
+    let content_type = field.content_type().unwrap_or("application/octet-stream").to_string();
+
+    let data = field.bytes().await.map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if data.is_empty() {
+        return Err(ApiError::BadRequest("empty file".into()));
+    }
+    if data.len() > MAX_FILE_BYTES {
+        return Err(ApiError::BadRequest(format!("file exceeds limit ({MAX_FILE_BYTES} bytes)")));
+    }
+
+    let pool = rt.pool().clone();
+    let file_id = Uuid::new_v4();
+
+    backend().put(&pool, file_id, &app_id, &name, &content_type, &data, Some(identity.user_id)).await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok((StatusCode::CREATED, Json(json!({
+        "file_id": file_id.to_string(),
+        "name": name,
+        "content_type": content_type,
+        "size": data.len(),
     }))))
 }
 
