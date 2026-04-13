@@ -23,6 +23,16 @@ Get a centralized database, SSO, role-based permissions, audit logs, integration
 
 <br />
 
+## The problem
+
+AI app builders can generate internal software in minutes. Then what?
+
+Where does the database live? Who manages auth? How do you enforce permissions? Where are the audit logs? How does your teammate access the app? How do you push an update without breaking production?
+
+Every AI-generated app needs the same boring infrastructure: a database, SSO, role-based access, secrets management, job scheduling, and a deployment target. Today, you either stitch that together yourself or you don't ship.
+
+**RootCX is that infrastructure.** One server, every app and AI agent you build plugs into it. Database, auth, permissions, audit logs, integrations, deployment -- handled. You focus on what the app does, not where it lives.
+
 ## Architecture
 
 <p align="center">
