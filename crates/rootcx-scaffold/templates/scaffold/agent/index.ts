@@ -69,9 +69,45 @@ function boot(m: any) {
     });
 }
 
-async function runAgent(message: string, history: any[], invokeId: string, onChunk?: (text: string) => void): Promise<string> {
+// --- Multimodal helpers ---
+
+type Attachment = { name: string; content_type: string; data: string };
+
+function attachmentToBlocks(att: Attachment): any[] {
+    if (att.content_type.startsWith("image/"))
+        return [{ type: "image_url", image_url: { url: `data:${att.content_type};base64,${att.data}` } }];
+    if (att.content_type === "application/pdf")
+        return [{ type: "file", mimeType: "application/pdf", data: att.data, metadata: { filename: att.name } }];
+    // CSV, TXT, JSON, XML... → decode and inline as text
+    try {
+        const text = Buffer.from(att.data, "base64").toString("utf-8");
+        return [{ type: "text", text: `\n\n--- ${att.name} ---\n${text}\n---` }];
+    } catch {
+        return [{ type: "text", text: `[Attached: ${att.name} (${att.content_type})]` }];
+    }
+}
+
+function attachmentFallbackBlock(att: Attachment): any {
+    // Text-decodable files → inline content; binary files → label only
+    const isTextLike = att.content_type.startsWith("text/") ||
+        ["application/json", "application/xml"].includes(att.content_type);
+    if (isTextLike) {
+        try {
+            const text = Buffer.from(att.data, "base64").toString("utf-8");
+            return { type: "text", text: `\n\n--- ${att.name} ---\n${text}\n---` };
+        } catch {}
+    }
+    return { type: "text", text: `[Attached: ${att.name} (${att.content_type}) — not supported by this provider]` };
+}
+
+function isUnsupportedContentError(e: unknown): boolean {
+    const msg = (e as any)?.message ?? "";
+    return msg.includes("Unsupported content block") || msg.includes("not supported");
+}
+
+async function streamAgent(messages: any[], invokeId: string, onChunk?: (t: string) => void): Promise<string> {
     const stream = await agent.stream(
-        { messages: [...history, { role: "user", content: message }] },
+        { messages },
         { streamMode: "messages" as const, recursionLimit: 150, configurable: { invokeId } },
     );
     let response = "";
@@ -83,14 +119,38 @@ async function runAgent(message: string, history: any[], invokeId: string, onChu
     return response;
 }
 
+async function runAgent(message: string, history: any[], attachments: Attachment[], invokeId: string, onChunk?: (text: string) => void): Promise<string> {
+    const userMessage = attachments.length > 0
+        ? { role: "user", content: [{ type: "text", text: message }, ...attachments.flatMap(attachmentToBlocks)] }
+        : { role: "user", content: message };
+
+    try {
+        return await streamAgent([...history, userMessage], invokeId, onChunk);
+    } catch (e) {
+        if (isUnsupportedContentError(e) && attachments.length > 0) {
+            const fallback = { role: "user", content: [{ type: "text", text: message }, ...attachments.map(attachmentFallbackBlock)] };
+            return await streamAgent([...history, fallback], invokeId, onChunk);
+        }
+        throw e;
+    }
+}
+
+// --- Invoke handlers ---
+
 async function invoke(m: any) {
-    if (!agent || !m.invoke_id || !m.message) {
+    const attachments: Attachment[] = m.attachments ?? [];
+    if (!agent || !m.invoke_id || (!m.message && attachments.length === 0)) {
         write({ type: "agent_error", invoke_id: m.invoke_id ?? "", error: "agent not ready or missing fields" });
         return;
     }
     try {
-        const response = await runAgent(m.message, m.history ?? [], m.invoke_id,
-            (delta) => write({ type: "agent_chunk", invoke_id: m.invoke_id, delta }));
+        const response = await runAgent(
+            m.message ?? "",
+            m.history ?? [],
+            attachments,
+            m.invoke_id,
+            (delta) => write({ type: "agent_chunk", invoke_id: m.invoke_id, delta }),
+        );
         write({ type: "agent_done", invoke_id: m.invoke_id, response });
     } catch (e: any) {
         write({ type: "agent_error", invoke_id: m.invoke_id, error: e.message ?? String(e) });
@@ -104,7 +164,7 @@ async function invokeJob(m: any) {
     }
     try {
         const message = m.payload?.message ?? JSON.stringify(m.payload ?? {});
-        await runAgent(message, [], crypto.randomUUID());
+        await runAgent(message, [], [], crypto.randomUUID());
         write({ type: "job_result", id: m.id });
     } catch (e: any) {
         write({ type: "job_result", id: m.id, error: e.message ?? String(e) });

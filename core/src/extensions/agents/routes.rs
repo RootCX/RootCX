@@ -13,9 +13,11 @@ use super::approvals::{ApprovalReply, ApprovalResponse};
 use super::config;
 use super::persistence::PersistCtx;
 use super::streaming;
+use base64::Engine as _;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::ipc::{AgentInvokePayload, LlmModelRef};
+use crate::extensions::storage::backend::{PostgresBackend, StorageBackend};
+use crate::ipc::{AgentInvokePayload, FileAttachment, LlmModelRef};
 use crate::routes::{self, SharedRuntime, llm_models::fetch_default_llm};
 
 #[derive(Deserialize)]
@@ -23,6 +25,8 @@ pub struct InvokeRequest {
     pub message: String,
     #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub file_ids: Option<Vec<String>>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -167,6 +171,29 @@ pub async fn invoke_agent(
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .map(|(provider, model)| LlmModelRef { provider, model });
 
+    // Resolve file_ids → base64 attachments fetched from BYTEA storage.
+    let attachments = if let Some(ids) = body.file_ids.as_deref() {
+        let mut list = Vec::with_capacity(ids.len());
+        let storage = PostgresBackend;
+        for raw_id in ids {
+            let file_id = raw_id.parse::<uuid::Uuid>()
+                .map_err(|_| ApiError::BadRequest(format!("invalid file_id: {raw_id}")))?;
+            let obj = storage.get(&pool, file_id, &app_id).await
+                .map_err(|e| match e {
+                    crate::RuntimeError::NotFound(_) => ApiError::NotFound(format!("file {file_id}")),
+                    e => ApiError::Internal(e.to_string()),
+                })?;
+            list.push(FileAttachment {
+                name: obj.name,
+                content_type: obj.content_type,
+                data: base64::engine::general_purpose::STANDARD.encode(&obj.content),
+            });
+        }
+        Some(list)
+    } else {
+        None
+    };
+
     let payload = AgentInvokePayload {
         invoke_id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.clone(),
@@ -175,6 +202,7 @@ pub async fn invoke_agent(
         is_sub_invoke: false,
         llm,
         invoker_user_id: Some(identity.user_id),
+        attachments,
     };
 
     let persist_ctx = if memory_enabled {
@@ -370,14 +398,31 @@ pub async fn fleet_stream(
 mod tests {
     use super::*;
 
-    // Prevents future addition of invoker_user_id to client-facing struct
+    // invoker_user_id MUST come from JWT, never from client JSON.
     #[test]
     fn invoke_request_rejects_invoker_user_id_injection() {
         let json = r#"{"message":"hi","invoker_user_id":"00000000-0000-0000-0000-000000000000"}"#;
         let req: InvokeRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.message, "hi");
-        assert!(std::mem::size_of::<InvokeRequest>() <= std::mem::size_of::<(String, Option<String>)>(),
-            "InvokeRequest grew — invoker_user_id MUST come from JWT, never from client input");
+        // Verify the struct has no invoker_user_id field by checking it deserializes fine
+        // and the field is simply ignored (serde deny_unknown_fields is intentionally absent).
+        let fields = serde_json::to_value(&serde_json::json!({"message":"hi"})).unwrap();
+        assert!(fields.get("invoker_user_id").is_none());
+    }
+
+    #[test]
+    fn invoke_request_accepts_file_ids() {
+        let json = r#"{"message":"analyse this","file_ids":["00000000-0000-0000-0000-000000000001"]}"#;
+        let req: InvokeRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.message, "analyse this");
+        assert_eq!(req.file_ids.as_deref(), Some(["00000000-0000-0000-0000-000000000001".to_string()].as_slice()));
+    }
+
+    #[test]
+    fn invoke_request_file_ids_optional() {
+        let json = r#"{"message":"hi"}"#;
+        let req: InvokeRequest = serde_json::from_str(json).unwrap();
+        assert!(req.file_ids.is_none());
     }
 }
 

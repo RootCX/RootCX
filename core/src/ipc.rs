@@ -38,6 +38,15 @@ pub struct LlmModelRef {
     pub model: String,
 }
 
+/// A file attachment forwarded to the agent worker for multimodal LLM input.
+/// `data` is base64-encoded file content.
+#[derive(Debug, Clone, Serialize)]
+pub struct FileAttachment {
+    pub name: String,
+    pub content_type: String,
+    pub data: String, // base64
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentInvokePayload {
     pub invoke_id: String,
@@ -50,6 +59,8 @@ pub struct AgentInvokePayload {
     pub llm: Option<LlmModelRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invoker_user_id: Option<uuid::Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<FileAttachment>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
