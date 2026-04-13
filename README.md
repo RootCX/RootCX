@@ -33,12 +33,6 @@ Get a centralized database, SSO, role-based permissions, audit logs, integration
   </picture>
 </p>
 
-**Core** — Rust daemon (Axum, port 9100). Manages PostgreSQL, spawns isolated Bun workers, exposes REST + SSE APIs. One binary, runs your entire fleet.
-
-**Studio** — Native desktop app (Tauri 2 + React). AI Forge, database browser, SQL editor, RBAC governance, integration catalog, live log streaming.
-
-**CLI + Claude Code** — `rootcx` CLI and 6 official Claude Code skills. Same deploy pipeline as Studio.
-
 ## Features
 
 | Feature | Details |
