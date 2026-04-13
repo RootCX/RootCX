@@ -6,20 +6,21 @@ use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
+use futures::future::join_all;
 use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
 use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 use tracing::{error, info};
 
-use super::types::{ChannelProvider, InboundEvent};
+use super::types::{ChannelProvider, InboundEvent, MediaRef};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::extensions::agents::{self, config as agent_config, persistence};
 use crate::extensions::agents::approvals::ApprovalResponse;
-use crate::ipc::{AgentInvokePayload, LlmModelRef};
+use crate::extensions::storage::backend::{PostgresBackend, StorageBackend};
+use crate::ipc::{AgentInvokePayload, FileAttachment, LlmModelRef};
 use crate::routes::{self, SharedRuntime, llm_models::fetch_default_llm};
-use crate::worker_manager::WorkerManager;
 
 #[derive(Deserialize)]
 pub struct CreateChannel {
@@ -173,7 +174,7 @@ pub async fn webhook(
         InboundEvent::Callback { chat_id, callback_id, data } => {
             handle_callback(&rt, &channel_id, &config, provider.as_ref(), &chat_id, &callback_id, &data).await;
         }
-        InboundEvent::Message { chat_id, text } => {
+        InboundEvent::Message { chat_id, text, media } => {
             if handle_command(&pool, &channel_id, &chat_id, &text, &config, provider.as_ref()).await {
                 return Ok(Json(json!({ "ok": true })));
             }
@@ -186,11 +187,16 @@ pub async fn webhook(
                 return Ok(Json(json!({ "ok": true })));
             }
 
-            let needs_debounce = provider.debounce_ms().filter(|_| text.len() >= 4096);
-            if let Some(ms) = needs_debounce {
-                debounce_and_invoke(rt, channel_id, provider_name, config, chat_id, text, ms);
+            if !media.is_empty() {
+                // Media messages: skip debounce, dispatch immediately with media refs
+                dispatch_invoke(rt, channel_id, provider_name, config, chat_id, text, media);
             } else {
-                flush_and_invoke(rt, channel_id, provider_name, config, chat_id, text);
+                let needs_debounce = provider.debounce_ms().filter(|_| text.len() >= 4096);
+                if let Some(ms) = needs_debounce {
+                    debounce_and_invoke(rt, channel_id, provider_name, config, chat_id, text, ms);
+                } else {
+                    flush_and_invoke(rt, channel_id, provider_name, config, chat_id, text);
+                }
             }
         }
     }
@@ -224,7 +230,7 @@ fn debounce_and_invoke(
                 map.remove(&timer_key).map(|e| e.texts.join("\n")).unwrap_or_default()
             };
             if !combined.is_empty() {
-                dispatch_invoke(timer_rt, timer_key.0, timer_cfg, timer_prov, timer_key.1, combined);
+                dispatch_invoke(timer_rt, timer_key.0, timer_prov, timer_cfg, timer_key.1, combined, vec![]);
             }
         });
 
@@ -251,30 +257,29 @@ fn flush_and_invoke(
             Some(mut p) => { p.push('\n'); p.push_str(&text); p }
             None => text,
         };
-        dispatch_invoke(rt, channel_id, config, provider_name, chat_id, combined);
+        dispatch_invoke(rt, channel_id, provider_name, config, chat_id, combined, vec![]);
     });
 }
 
 fn dispatch_invoke(
-    rt: SharedRuntime, channel_id: String, config: JsonValue,
-    provider_name: String, chat_id: String, text: String,
+    rt: SharedRuntime, channel_id: String, provider_name: String,
+    config: JsonValue, chat_id: String, text: String, media: Vec<MediaRef>,
 ) {
-    let pool = rt.pool().clone();
-    let wm = rt.worker_manager().clone();
-
     tokio::spawn(async move {
-        if let Err(e) = do_invoke(&pool, &wm, &channel_id, &config, &provider_name, &chat_id, &text).await {
+        if let Err(e) = do_invoke(&rt, &channel_id, &config, &provider_name, &chat_id, &text, media).await {
             error!(channel_id, chat_id, "invoke failed: {e}");
         }
     });
 }
 
 async fn do_invoke(
-    pool: &sqlx::PgPool, wm: &Arc<WorkerManager>,
+    rt: &SharedRuntime,
     channel_id: &str, config: &JsonValue, provider_name: &str,
-    chat_id: &str, text: &str,
+    chat_id: &str, text: &str, media: Vec<MediaRef>,
 ) -> Result<(), String> {
     fn e(e: impl std::fmt::Debug) -> String { format!("{e:?}") }
+    let pool = rt.pool();
+    let wm = rt.worker_manager();
     let (app_id, session_id) = resolve_session(pool, channel_id, chat_id).await.map_err(&e)?;
     let invoker_user_id = resolve_invoker(pool, channel_id, chat_id).await;
 
@@ -286,16 +291,36 @@ async fn do_invoke(
     let llm = fetch_default_llm(pool).await.map_err(&e)?
         .map(|(p, m)| LlmModelRef { provider: p, model: m });
 
+    // Download all media in parallel, store in BYTEA, generate nonce download URLs
+    let provider = super::provider(provider_name).unwrap();
+    let storage = PostgresBackend;
+    let downloaded: Vec<_> = join_all(
+        media.iter().map(|m| provider.download_media(config, m))
+    ).await;
+    let mut attachment_list: Vec<FileAttachment> = Vec::new();
+    for result in downloaded.into_iter().flatten() {
+        let (bytes, content_type, name) = result;
+        let file_id = uuid::Uuid::new_v4();
+        if let Err(err) = storage.put(pool, file_id, &app_id, &name, &content_type, &bytes, None).await {
+            error!(channel_id, "failed to store media: {err}");
+            continue;
+        }
+        let nonce = rt.upload_nonces().lock().unwrap_or_else(|e| e.into_inner())
+            .create_download(file_id, &app_id);
+        let url = crate::extensions::storage::download_url(rt.runtime_url(), &nonce);
+        attachment_list.push(FileAttachment { name, content_type, url });
+    }
+    let attachments = if attachment_list.is_empty() { None } else { Some(attachment_list) };
+
     let payload = AgentInvokePayload {
         invoke_id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.clone(),
         message: text.to_string(),
         history, is_sub_invoke: false, llm, invoker_user_id,
-        attachments: None,
+        attachments,
     };
 
     let mut rx = wm.agent_invoke(&app_id, payload).await.map_err(&e)?;
-    let provider = super::provider(provider_name).unwrap();
     let typing = provider.start_typing(config, chat_id);
 
     let mut response = String::new();

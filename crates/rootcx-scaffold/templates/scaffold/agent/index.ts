@@ -71,32 +71,34 @@ function boot(m: any) {
 
 // --- Multimodal helpers ---
 
-type Attachment = { name: string; content_type: string; data: string };
+// Attachment carries a one-time nonce URL — bytes are fetched via HTTP, not passed in IPC.
+type Attachment = { name: string; content_type: string; url: string };
+// Fetched attachment: bytes loaded once, reused across rich and fallback paths.
+type FetchedAttachment = { name: string; content_type: string; buf: ArrayBuffer };
 
-function attachmentToBlocks(att: Attachment): any[] {
-    if (att.content_type.startsWith("image/"))
-        return [{ type: "image_url", image_url: { url: `data:${att.content_type};base64,${att.data}` } }];
-    if (att.content_type === "application/pdf")
-        return [{ type: "file", mimeType: "application/pdf", data: att.data, metadata: { filename: att.name } }];
-    // CSV, TXT, JSON, XML... → decode and inline as text
-    try {
-        const text = Buffer.from(att.data, "base64").toString("utf-8");
-        return [{ type: "text", text: `\n\n--- ${att.name} ---\n${text}\n---` }];
-    } catch {
-        return [{ type: "text", text: `[Attached: ${att.name} (${att.content_type})]` }];
-    }
+async function fetchAttachments(attachments: Attachment[]): Promise<FetchedAttachment[]> {
+    return Promise.all(attachments.map(async att => {
+        const res = await fetch(att.url);
+        if (!res.ok) throw new Error(`Failed to load attachment: ${att.name} (${res.status})`);
+        return { name: att.name, content_type: att.content_type, buf: await res.arrayBuffer() };
+    }));
 }
 
-function attachmentFallbackBlock(att: Attachment): any {
-    // Text-decodable files → inline content; binary files → label only
+function attachmentToBlocks(att: FetchedAttachment): any[] {
+    const data = Buffer.from(att.buf).toString("base64");
+    if (att.content_type.startsWith("image/"))
+        return [{ type: "image_url", image_url: { url: `data:${att.content_type};base64,${data}` } }];
+    if (att.content_type === "application/pdf")
+        return [{ type: "file", mimeType: "application/pdf", data, metadata: { filename: att.name } }];
+    // CSV, TXT, JSON, XML... → decode and inline as text
+    return [{ type: "text", text: `\n\n--- ${att.name} ---\n${Buffer.from(att.buf).toString("utf-8")}\n---` }];
+}
+
+function attachmentFallbackBlock(att: FetchedAttachment): any {
     const isTextLike = att.content_type.startsWith("text/") ||
         ["application/json", "application/xml"].includes(att.content_type);
-    if (isTextLike) {
-        try {
-            const text = Buffer.from(att.data, "base64").toString("utf-8");
-            return { type: "text", text: `\n\n--- ${att.name} ---\n${text}\n---` };
-        } catch {}
-    }
+    if (isTextLike)
+        return { type: "text", text: `\n\n--- ${att.name} ---\n${Buffer.from(att.buf).toString("utf-8")}\n---` };
     return { type: "text", text: `[Attached: ${att.name} (${att.content_type}) — not supported by this provider]` };
 }
 
@@ -120,15 +122,18 @@ async function streamAgent(messages: any[], invokeId: string, onChunk?: (t: stri
 }
 
 async function runAgent(message: string, history: any[], attachments: Attachment[], invokeId: string, onChunk?: (text: string) => void): Promise<string> {
-    const userMessage = attachments.length > 0
-        ? { role: "user", content: [{ type: "text", text: message }, ...attachments.flatMap(attachmentToBlocks)] }
-        : { role: "user", content: message };
+    if (attachments.length === 0)
+        return streamAgent([...history, { role: "user", content: message }], invokeId, onChunk);
+
+    // Fetch all bytes once — nonce URLs are single-use, must not fetch twice.
+    const fetched = await fetchAttachments(attachments);
+    const userMessage = { role: "user", content: [{ type: "text", text: message }, ...fetched.flatMap(attachmentToBlocks)] };
 
     try {
         return await streamAgent([...history, userMessage], invokeId, onChunk);
     } catch (e) {
-        if (isUnsupportedContentError(e) && attachments.length > 0) {
-            const fallback = { role: "user", content: [{ type: "text", text: message }, ...attachments.map(attachmentFallbackBlock)] };
+        if (isUnsupportedContentError(e)) {
+            const fallback = { role: "user", content: [{ type: "text", text: message }, ...fetched.map(attachmentFallbackBlock)] };
             return await streamAgent([...history, fallback], invokeId, onChunk);
         }
         throw e;
