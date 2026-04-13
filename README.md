@@ -23,32 +23,38 @@ Get a centralized database, SSO, role-based permissions, audit logs, integration
 
 <br />
 
-## Table of Contents
+## Architecture
 
-- [What is RootCX?](#what-is-rootcx)
-- [Features](#features)
-- [Quickstart](#quickstart)
-- [Architecture](#architecture)
-- [Development](#development)
-- [Community](#community)
-- [License](#license)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/architecture.svg" />
+    <source media="(prefers-color-scheme: light)" srcset=".github/architecture.svg" />
+    <img src=".github/architecture.svg" alt="RootCX Architecture" width="800" />
+  </picture>
+</p>
 
-## What is RootCX?
+**Core** — Rust daemon (Axum, port 9100). Manages PostgreSQL, spawns isolated Bun workers, exposes REST + SSE APIs. One binary, runs your entire fleet.
 
-RootCX is an open-source\* infrastructure for building internal apps and AI agents. Describe what you want, deploy it the same day. Every app and agent you build shares one database, one auth system, one permission model. Your code, your data, no lock-in.
+**Studio** — Native desktop app (Tauri 2 + React). AI Forge, database browser, SQL editor, RBAC governance, integration catalog, live log streaming.
 
-**Develop locally. Deploy anywhere. Self-host or use our cloud.**
+**CLI + Claude Code** — `rootcx` CLI and 6 official Claude Code skills. Same deploy pipeline as Studio.
 
 ## Features
 
-- **One database, every integration.** All your apps and agents share a single PostgreSQL database. Connect the tools your team already uses: Notion, Gmail, Outlook, Salesforce, Slack, GitHub, Stripe, and more.
-- **AI Agents that do the work, not just the talking.** Built-in tools, session memory, supervision policies, cross-agent delegation. Agents follow the same RBAC rules as real users, with every action logged.
-- **Enterprise security, out of the box.** SSO with any OIDC provider (Okta, Microsoft Entra ID, Google Workspace, Auth0). Role-based access control on every resource. Immutable audit logs. AES-256 encrypted secrets vault.
-- **Global RBAC** with namespaced permissions (`app:crm:contacts.read`) and wildcard matching
-- **Channels** for connecting agents to Slack, Telegram, email, or any messaging platform you configure
-- **Automatic schema sync.** Define your data model, Core creates and migrates the database. No migration files.
-- **Durable background jobs** with automatic retry and cron scheduling
-- **Build from anywhere.** Claude Code, RootCX Studio, or the CLI. Same output, switch tools anytime.
+| Feature | Details |
+|---------|---------|
+| **Database** | Shared PostgreSQL for all apps and agents. Auto-generated CRUD APIs. |
+| **Auth** | OIDC Single Sign-On (Okta, Microsoft Entra ID, Google Workspace, Auth0). One login for every app and agent in your fleet. |
+| **RBAC** | Namespaced permissions, wildcard matching, role inheritance. Same rules for users and agents. |
+| **Audit log** | Database-level audit via PostgreSQL triggers. Every insert, update, and delete captured with before/after JSONB diff. Always on. |
+| **Scheduled jobs** | Cron scheduling via `pg_cron`. |
+| **Message queue** | Durable job queue via `pgmq` with automatic retry. |
+| **Secrets vault** | AES-256 encrypted storage for API keys and credentials. |
+| **Integrations** | Connectors for Notion, Gmail, Outlook, Salesforce, Slack, GitHub, Stripe, and more. Custom connectors supported. |
+| **Tools** | Every app automatically exposes tools (query, mutate, describe). Agents use them out of the box. |
+| **MCP** | Connect any MCP server to give your AI agents access to external tools and data. |
+| **Channels** | Connect agents to Telegram, Slack, email. Webhook-based, supports media, debounced message batching. |
+| **File storage** | Upload and serve files scoped per app. Nonce-authenticated downloads for workers. |
 
 ## Quickstart
 
@@ -107,43 +113,6 @@ See the [Getting Started guide](https://rootcx.com/docs/guides/getting-started) 
 | Windows | [RootCX Studio (.exe)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_x64-setup.exe) |
 | Linux (.deb) | [RootCX Studio (.deb)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_amd64.deb) |
 | Linux (.AppImage) | [RootCX Studio (.AppImage)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_amd64.AppImage) |
-
-## Architecture
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset=".github/architecture.svg" />
-    <source media="(prefers-color-scheme: light)" srcset=".github/architecture.svg" />
-    <img src=".github/architecture.svg" alt="RootCX Architecture" width="800" />
-  </picture>
-</p>
-
-**Core** is a Rust daemon that powers your entire fleet. Every app and agent you deploy inherits the same enterprise primitives:
-
-- PostgreSQL with automatic schema sync, no migration files
-- Automatic CRUD APIs generated from your data model
-- JWT authentication with OIDC SSO (Okta, Microsoft Entra ID, Google Workspace, Auth0)
-- Global RBAC with namespaced permissions, inheritance, and wildcards
-- Immutable audit logs at the database trigger level
-- AES-256 encrypted secrets vault
-- Isolated Bun process supervisor with crash recovery
-- Durable background job queue with automatic retry and cron scheduling
-- Real-time log streaming via SSE
-- Channels for connecting agents to Slack, Telegram, email, and more
-
-**Studio** is a native desktop app built with Tauri. Build apps, AI agents, integrations, and MCP servers. Deploy with a single keystroke.
-
-- AI Forge: describe what you want, get production-ready code
-- Visual database browser and SQL editor
-- Governance UI for RBAC, audit logs, secrets, and auth
-- Integration catalog with one-click connect
-- Live log streaming and process monitoring
-
-**CLI + Claude Code** for developers who prefer the terminal:
-
-- `rootcx` CLI for scaffolding, deploying, and invoking agents
-- Claude Code plugin with 6 official skills for AI-assisted development
-- Same output as Studio. Fully compatible, switch tools anytime
 
 ## Development
 
