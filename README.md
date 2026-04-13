@@ -4,10 +4,10 @@
   </a>
 </p>
 
-<h3 align="center">The secure open-source* foundation for internal software and AI agents</h3>
+<h3 align="center">Ship internal apps and AI agents to production, fast</h3>
 
 <p align="center">
-Build a fleet of interconnected apps and AI agents with managed database, Auth, RBAC, and an AI desktop studio out of the box.<br/>Fully managed, or self-hosted for absolute data sovereignty.
+Get a centralized database, SSO, role-based permissions, audit logs, integrations, and deployment infrastructure out of the box.<br/>Cloud or self-hosted. Your code, your data.
 </p>
 
 <p align="center">
@@ -19,12 +19,6 @@ Build a fleet of interconnected apps and AI agents with managed database, Auth, 
 
 <p align="center">
   <a href="https://rootcx.com">Website</a> · <a href="https://rootcx.com/docs">Docs</a> · <a href="https://discord.gg/rootcx">Community</a> · <a href="https://rootcx.com/docs/guides/getting-started">Get Started</a>
-</p>
-
-<br />
-
-<p align="center">
-  <img src="https://rootcx.com/docs/cloud/crm-desktop.png" alt="RootCX - CRM running on RootCX Cloud" width="800" />
 </p>
 
 <br />
@@ -41,26 +35,20 @@ Build a fleet of interconnected apps and AI agents with managed database, Auth, 
 
 ## What is RootCX?
 
-RootCX is an open-source\* infrastructure for building custom internal software and AI agents. Build a unified fleet of interconnected apps that combines the experience of a modern SaaS with the robustness of an ERP. Full ownership of your code, absolute control over your data.
+RootCX is an open-source\* infrastructure for building internal apps and AI agents. Describe what you want, deploy it the same day. Every app and agent you build shares one database, one auth system, one permission model. Your code, your data, no lock-in.
 
 **Develop locally. Deploy anywhere. Self-host or use our cloud.**
 
 ## Features
 
-- **Fleet of apps** sharing one database, one auth system, one permission model
-- **AI Agents** with built-in tools, session memory, supervision policies, and cross-agent delegation
-- **OIDC Single Sign-On** -- Azure AD, Okta, Google Workspace, Auth0
+- **One database, every integration.** All your apps and agents share a single PostgreSQL database. Connect the tools your team already uses: Notion, Gmail, Outlook, Salesforce, Slack, GitHub, Stripe, and more.
+- **AI Agents that do the work, not just the talking.** Built-in tools, session memory, supervision policies, cross-agent delegation. Agents follow the same RBAC rules as real users, with every action logged.
+- **Enterprise security, out of the box.** SSO with any OIDC provider (Okta, Microsoft Entra ID, Google Workspace, Auth0). Role-based access control on every resource. Immutable audit logs. AES-256 encrypted secrets vault.
 - **Global RBAC** with namespaced permissions (`app:crm:contacts.read`) and wildcard matching
-- **Channels** -- connect agents to Telegram in one click
-- **Integrations** -- Apollo, GitHub, Stripe, Slack, and custom connectors
-- **Automatic schema sync** -- define your data model, Core creates and migrates the database
-- **Immutable audit log** -- every INSERT, UPDATE, DELETE captured at the database trigger level
-- **AES-256 encrypted secret vault** -- API keys and credentials, never stored in plaintext
-- **Build from anywhere** -- Studio (desktop IDE), CLI, or Claude Code
-
-<p align="center">
-  <img src="https://rootcx.com/docs/cloud/fleet-3d.png" alt="Fleet 3D view with AI Agent" width="800" />
-</p>
+- **Channels** for connecting agents to Slack, Telegram, email, or any messaging platform you configure
+- **Automatic schema sync.** Define your data model, Core creates and migrates the database. No migration files.
+- **Durable background jobs** with automatic retry and cron scheduling
+- **Build from anywhere.** Claude Code, RootCX Studio, or the CLI. Same output, switch tools anytime.
 
 ## Quickstart
 
@@ -87,7 +75,7 @@ Core is running at `http://localhost:9100`.
 
 Once you have a running Core, choose your tool:
 
-**Studio** (desktop IDE):
+**Studio** (desktop app):
 1. [Download Studio](#download-studio) and open it.
 2. Select **Connect to a server** and paste your Core URL.
 3. Open AI Forge, describe what you want, hit Run (F5).
@@ -132,48 +120,30 @@ See the [Getting Started guide](https://rootcx.com/docs/guides/getting-started) 
 
 **Core** is a Rust daemon that powers your entire fleet. Every app and agent you deploy inherits the same enterprise primitives:
 
-- PostgreSQL with automatic schema sync -- no migration files
+- PostgreSQL with automatic schema sync, no migration files
 - Automatic CRUD APIs generated from your data model
-- JWT authentication with OIDC SSO (Azure AD, Okta, Google)
+- JWT authentication with OIDC SSO (Okta, Microsoft Entra ID, Google Workspace, Auth0)
 - Global RBAC with namespaced permissions, inheritance, and wildcards
 - Immutable audit logs at the database trigger level
-- AES-256 encrypted secret vault
+- AES-256 encrypted secrets vault
 - Isolated Bun process supervisor with crash recovery
-- Durable background job queue with automatic retry
+- Durable background job queue with automatic retry and cron scheduling
 - Real-time log streaming via SSE
-- Channels for connecting AI agents to messaging platforms (Telegram)
+- Channels for connecting agents to Slack, Telegram, email, and more
 
-<p align="center">
-  <img src="https://rootcx.com/docs/cloud/rbac-roles.png" alt="RBAC with namespaced permissions" width="800" />
-</p>
+**Studio** is a native desktop app built with Tauri. Build apps, AI agents, integrations, and MCP servers. Deploy with a single keystroke.
 
-**Studio** is a native desktop IDE built with Tauri. Build apps, AI agents, integrations, and MCP servers. Deploy with a single keystroke.
-
-- AI Forge: describe intent in plain language, get production-ready code
+- AI Forge: describe what you want, get production-ready code
 - Visual database browser and SQL editor
 - Governance UI for RBAC, audit logs, secrets, and auth
 - Integration catalog with one-click connect
 - Live log streaming and process monitoring
 
-<p align="center">
-  <img src="https://rootcx.com/docs/cloud/tools-catalog.png" alt="Integration and tools catalog" width="800" />
-</p>
-
 **CLI + Claude Code** for developers who prefer the terminal:
 
 - `rootcx` CLI for scaffolding, deploying, and invoking agents
 - Claude Code plugin with 6 official skills for AI-assisted development
-- Same output as Studio -- fully compatible, switch tools anytime
-
-<p align="center">
-  <img src="https://rootcx.com/docs/cloud/database-browser.png" alt="Database browser" width="400" />
-  <img src="https://rootcx.com/docs/cloud/sql-editor.png" alt="SQL editor" width="400" />
-</p>
-
-<p align="center">
-  <img src="https://rootcx.com/docs/cloud/audit-log.png" alt="Audit log with before/after diff" width="400" />
-  <img src="https://rootcx.com/docs/cloud/secrets-vault.png" alt="Encrypted secret vault" width="400" />
-</p>
+- Same output as Studio. Fully compatible, switch tools anytime
 
 ## Development
 
