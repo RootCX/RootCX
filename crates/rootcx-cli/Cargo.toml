@@ -17,7 +17,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "cookies"] }
 tar = "0.4"
 flate2 = "1"
 walkdir = "2"
@@ -28,4 +28,5 @@ zip = "2"
 urlencoding = "2"
 webbrowser = "1"
 rpassword = "7"
+cliclack = "0.3"
 self_update = { version = "0.42", default-features = false, features = ["archive-tar", "compression-flate2", "rustls"] }
