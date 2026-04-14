@@ -9,6 +9,9 @@ mod auth;
 mod bun;
 mod config;
 mod deploy;
+mod docker;
+mod init;
+mod logo;
 mod oidc;
 mod scaffold;
 mod sse;
@@ -25,6 +28,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Quickstart: scaffold, configure LLM, and deploy a new app
+    Init,
     /// Connect to a Core — saves URL, authenticates if needed
     Connect {
         url: String,
@@ -69,6 +74,7 @@ async fn main() -> Result<()> {
         tokio::spawn(upgrade::check_passive());
     }
     match cli.cmd {
+        Cmd::Init => init::run().await,
         Cmd::Connect { url, token } => auth::connect(&url, token).await,
         Cmd::Logout => logout(),
         Cmd::Status => status().await,
