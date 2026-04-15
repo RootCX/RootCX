@@ -146,13 +146,7 @@ fn generate_foreign_keys(app_id: &str, entity: &EntityContract, all_entities: &[
             RefTarget::App { .. } => continue,
         };
 
-        let on_delete = match field.on_delete {
-            Some(rootcx_types::OnDeletePolicy::Cascade)  => "CASCADE",
-            Some(rootcx_types::OnDeletePolicy::Restrict) => "RESTRICT",
-            Some(rootcx_types::OnDeletePolicy::SetNull)  => "SET NULL",
-            None if field.required => "RESTRICT",
-            None                   => "SET NULL",
-        };
+        let on_delete = resolve_on_delete(field);
 
         let fk_name = format!("fk_{}_{}_{}_{}", app_id, entity.entity_name, field.name, fk_suffix);
         stmts.push(format!(
@@ -406,6 +400,16 @@ fn resolve_core_entity(name: &str) -> Option<(&'static str, &'static str, &'stat
     match name {
         "users" => Some(("rootcx_system", "users", "id", "UUID")),
         _ => None,
+    }
+}
+
+pub(crate) fn resolve_on_delete(field: &rootcx_types::FieldContract) -> &'static str {
+    match field.on_delete {
+        Some(rootcx_types::OnDeletePolicy::Cascade)  => "CASCADE",
+        Some(rootcx_types::OnDeletePolicy::Restrict) => "RESTRICT",
+        Some(rootcx_types::OnDeletePolicy::SetNull)  => "SET NULL",
+        None if field.required => "RESTRICT",
+        None                   => "SET NULL",
     }
 }
 

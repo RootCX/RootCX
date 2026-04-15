@@ -4,10 +4,16 @@ use sqlx::{Connection, PgPool};
 use tracing::info;
 
 use crate::RuntimeError;
-use crate::manifest::{identity_index_name, json_to_sql_default, list_identity_indexes, map_field_type, quote_ident};
+use crate::manifest::{identity_index_name, json_to_sql_default, list_identity_indexes, map_field_type, quote_ident, resolve_on_delete};
 use rootcx_types::{EntityContract, FieldContract, SchemaChange, SchemaVerification};
 
 const PROTECTED_COLUMNS: &[&str] = &["id", "created_at", "updated_at"];
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FkInfo {
+    pub constraint_name: String,
+    pub delete_rule: String,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DbColumn {
@@ -16,6 +22,7 @@ pub struct DbColumn {
     pub not_null: bool,
     pub default_expr: Option<String>,
     pub check_constraints: Vec<String>,
+    pub fk: Option<FkInfo>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +36,7 @@ pub enum ColumnDiff {
     DropDefault { column_name: String },
     ReplaceCheckConstraint { column_name: String, old_constraint_names: Vec<String>, new_values: Vec<String> },
     DropCheckConstraint { column_name: String, constraint_names: Vec<String> },
+    ReplaceFkConstraint { column_name: String, old_constraint_name: String, new_constraint_name: String, target_table: String, delete_rule: String },
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +74,15 @@ fn resolve_pg_type(field: &FieldContract, pk_types: &HashMap<String, &'static st
 fn defaults_match(pg_expr: &str, desired: &str) -> bool {
     let normalized = pg_expr.split("::").next().unwrap_or(pg_expr).trim();
     normalized == desired.trim()
+}
+
+fn pg_delete_rule_char_to_str(c: &str) -> &str {
+    match c {
+        "c" => "CASCADE",
+        "r" | "a" => "RESTRICT",
+        "n" => "SET NULL",
+        _ => "RESTRICT",
+    }
 }
 
 pub fn compute_diff(
@@ -154,6 +171,23 @@ pub fn compute_diff(
                         });
                     }
                     (false, false) => {}
+                }
+
+                if field.field_type == "entity_link" {
+                    if let (Some(fk_info), Some(refs)) = (&db_col.fk, &field.references) {
+                        let desired = resolve_on_delete(field);
+                        let current = pg_delete_rule_char_to_str(&fk_info.delete_rule);
+                        if current != desired {
+                            changes.push(ColumnDiff::ReplaceFkConstraint {
+                                column_name: field.name.clone(),
+                                old_constraint_name: fk_info.constraint_name.clone(),
+                                new_constraint_name: format!("fk_{}_{}_{}_{}",
+                                    schema_name, table_name, field.name, refs.entity),
+                                target_table: format!("{}.{}", quote_ident(schema_name), quote_ident(&refs.entity)),
+                                delete_rule: desired.to_string(),
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -250,6 +284,13 @@ fn emit_ddl_phases(fq: &str, table: &str, change: &ColumnDiff, p: &mut [Vec<Stri
             for name in constraint_names {
                 p[0].push(format!("ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS {}", quote_ident(name)));
             }
+        }
+        ColumnDiff::ReplaceFkConstraint { column_name, old_constraint_name, new_constraint_name, target_table, delete_rule } => {
+            p[0].push(format!("ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS {}", quote_ident(old_constraint_name)));
+            p[5].push(format!(
+                "ALTER TABLE {fq} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({}) ON DELETE {delete_rule}",
+                quote_ident(new_constraint_name), quote_ident(column_name), target_table, quote_ident("id")
+            ));
         }
     }
 }
@@ -362,14 +403,33 @@ pub async fn introspect_table(
     .await
     .map_err(RuntimeError::Schema)?;
 
+    let fk_rows: Vec<(String, String, String)> = sqlx::query_as(&format!(
+        "SELECT a.attname, con.conname, con.confdeltype::text \
+         FROM pg_constraint con \
+         JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = ANY(con.conkey) \
+         WHERE con.conrelid = '{fq}'::regclass AND con.contype = 'f'"
+    ))
+    .fetch_all(pool)
+    .await
+    .map_err(RuntimeError::Schema)?;
+
+    let fk_map: HashMap<String, FkInfo> = fk_rows
+        .into_iter()
+        .map(|(col, name, rule)| (col, FkInfo { constraint_name: name, delete_rule: rule }))
+        .collect();
+
     Ok(rows
         .into_iter()
-        .map(|(name, pg_type, not_null, default_expr, checks)| DbColumn {
-            name,
-            pg_type,
-            not_null,
-            default_expr,
-            check_constraints: checks,
+        .map(|(name, pg_type, not_null, default_expr, checks)| {
+            let fk = fk_map.get(&name).cloned();
+            DbColumn {
+                name,
+                pg_type,
+                not_null,
+                default_expr,
+                check_constraints: checks,
+                fk,
+            }
         })
         .collect())
 }
@@ -409,6 +469,9 @@ fn column_diff_to_schema_change(entity: &str, diff: &ColumnDiff) -> SchemaChange
             ("update_enum", column_name, Some(new_values.join(", ")))
         }
         ColumnDiff::DropCheckConstraint { column_name, .. } => ("drop_enum", column_name, None),
+        ColumnDiff::ReplaceFkConstraint { column_name, delete_rule, .. } => {
+            ("alter_fk_delete_rule", column_name, Some(delete_rule.clone()))
+        }
     };
     SchemaChange { entity: entity.to_string(), change_type: change_type.to_string(), column: column.clone(), detail }
 }
@@ -498,6 +561,7 @@ mod tests {
             not_null,
             default_expr: None,
             check_constraints: vec![],
+            fk: None,
         }
     }
 
@@ -508,6 +572,7 @@ mod tests {
             not_null,
             default_expr: Some(default.to_string()),
             check_constraints: vec![],
+            fk: None,
         }
     }
 
@@ -518,6 +583,18 @@ mod tests {
             not_null,
             default_expr: None,
             check_constraints: checks.into_iter().map(String::from).collect(),
+            fk: None,
+        }
+    }
+
+    fn db_col_with_fk(name: &str, pg_type: &str, not_null: bool, fk_name: &str, delete_rule: &str) -> DbColumn {
+        DbColumn {
+            name: name.to_string(),
+            pg_type: pg_type.to_string(),
+            not_null,
+            default_expr: None,
+            check_constraints: vec![],
+            fk: Some(FkInfo { constraint_name: fk_name.to_string(), delete_rule: delete_rule.to_string() }),
         }
     }
 
@@ -956,6 +1033,18 @@ mod tests {
                 "color",
                 None,
             ),
+            (
+                ColumnDiff::ReplaceFkConstraint {
+                    column_name: "list_id".into(),
+                    old_constraint_name: "fk_old".into(),
+                    new_constraint_name: "fk_new".into(),
+                    target_table: "\"app\".\"lists\"".into(),
+                    delete_rule: "CASCADE".into(),
+                },
+                "alter_fk_delete_rule",
+                "list_id",
+                Some("CASCADE"),
+            ),
         ];
 
         for (diff, expected_type, expected_col, expected_detail) in cases {
@@ -999,6 +1088,112 @@ mod tests {
         let entities = vec![mentity("tasks", vec![mfield("name", "text")])];
         let orphans = find_orphaned_tables(&db_tables, &entities);
         assert!(orphans.is_empty());
+    }
+
+    // ── FK delete rule sync ─────────────────────────────────────────
+
+    fn entity_link_field(name: &str, target: &str, required: bool, on_delete: Option<rootcx_types::OnDeletePolicy>) -> FieldContract {
+        FieldContract {
+            name: name.to_string(),
+            field_type: "entity_link".to_string(),
+            required,
+            default_value: None,
+            enum_values: None,
+            references: Some(FieldReference { entity: target.to_string(), field: "id".to_string() }),
+            is_primary_key: None,
+            on_delete,
+        }
+    }
+
+    #[test]
+    fn diff_fk_delete_rule_change() {
+        use rootcx_types::OnDeletePolicy;
+        let cases: Vec<(&str, Option<OnDeletePolicy>, bool, &str)> = vec![
+            ("n", Some(OnDeletePolicy::Cascade),  false, "CASCADE"),
+            ("n", Some(OnDeletePolicy::Restrict), false, "RESTRICT"),
+            ("c", Some(OnDeletePolicy::SetNull),  false, "SET NULL"),
+            ("c", Some(OnDeletePolicy::Restrict), true,  "RESTRICT"),
+            ("r", Some(OnDeletePolicy::Cascade),  true,  "CASCADE"),
+            ("n", None,                           true,  "RESTRICT"),
+            ("r", None,                           false, "SET NULL"),
+        ];
+        for (db_rule, on_delete, required, expected_clause) in &cases {
+            let db = vec![db_col_with_fk("list_id", "uuid", *required, "fk_app_items_list_id_lists", db_rule)];
+            let manifest = vec![entity_link_field("list_id", "lists", *required, *on_delete)];
+            let mut pk = HashMap::new();
+            pk.insert("lists".to_string(), "UUID" as &str);
+            let diff = compute_diff("app", "items", &db, &manifest, &pk);
+            let fk_change = diff.changes.iter().find(|c| matches!(c, ColumnDiff::ReplaceFkConstraint { .. }));
+            assert!(fk_change.is_some(),
+                "db_rule={db_rule}, on_delete={on_delete:?}, required={required}: expected ReplaceFkConstraint");
+            match fk_change.unwrap() {
+                ColumnDiff::ReplaceFkConstraint { delete_rule, old_constraint_name, .. } => {
+                    assert_eq!(delete_rule, *expected_clause,
+                        "db_rule={db_rule}, on_delete={on_delete:?}: expected {expected_clause}");
+                    assert_eq!(old_constraint_name, "fk_app_items_list_id_lists");
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn diff_fk_delete_rule_no_change() {
+        use rootcx_types::OnDeletePolicy;
+        let cases: Vec<(&str, Option<OnDeletePolicy>, bool)> = vec![
+            ("c", Some(OnDeletePolicy::Cascade), true),
+            ("n", Some(OnDeletePolicy::SetNull), false),
+            ("r", Some(OnDeletePolicy::Restrict), true),
+            ("n", None, false),
+            ("r", None, true),
+        ];
+        for (db_rule, on_delete, required) in &cases {
+            let db = vec![db_col_with_fk("list_id", "uuid", *required, "fk_app_items_list_id_lists", db_rule)];
+            let manifest = vec![entity_link_field("list_id", "lists", *required, *on_delete)];
+            let mut pk = HashMap::new();
+            pk.insert("lists".to_string(), "UUID" as &str);
+            let diff = compute_diff("app", "items", &db, &manifest, &pk);
+            let fk_changes: Vec<_> = diff.changes.iter()
+                .filter(|c| matches!(c, ColumnDiff::ReplaceFkConstraint { .. }))
+                .collect();
+            assert!(fk_changes.is_empty(),
+                "db_rule={db_rule}, on_delete={on_delete:?}, required={required}: expected no FK change, got: {fk_changes:?}");
+        }
+    }
+
+    #[test]
+    fn diff_fk_no_existing_fk_skips() {
+        use rootcx_types::OnDeletePolicy;
+        let db = vec![db_col("list_id", "uuid", true)];
+        let manifest = vec![entity_link_field("list_id", "lists", true, Some(OnDeletePolicy::Cascade))];
+        let mut pk = HashMap::new();
+        pk.insert("lists".to_string(), "UUID" as &str);
+        let diff = compute_diff("app", "items", &db, &manifest, &pk);
+        assert!(
+            !diff.changes.iter().any(|c| matches!(c, ColumnDiff::ReplaceFkConstraint { .. })),
+            "no existing FK in DB → should not produce ReplaceFkConstraint"
+        );
+    }
+
+    #[test]
+    fn ddl_replace_fk_constraint() {
+        let diff = TableDiff {
+            schema_name: "app".into(),
+            table_name: "items".into(),
+            changes: vec![ColumnDiff::ReplaceFkConstraint {
+                column_name: "list_id".into(),
+                old_constraint_name: "fk_old".into(),
+                new_constraint_name: "fk_new".into(),
+                target_table: "\"app\".\"lists\"".into(),
+                delete_rule: "CASCADE".into(),
+            }],
+        };
+        let stmts = generate_ddl(&diff);
+        assert_eq!(stmts.len(), 2, "expected DROP + ADD: {stmts:?}");
+        assert!(stmts[0].contains("DROP CONSTRAINT IF EXISTS") && stmts[0].contains("\"fk_old\""),
+            "first stmt should drop old FK: {}", stmts[0]);
+        assert!(stmts[1].contains("ADD CONSTRAINT") && stmts[1].contains("ON DELETE CASCADE"),
+            "second stmt should create new FK: {}", stmts[1]);
     }
 
 }
