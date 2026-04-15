@@ -9,9 +9,13 @@ mod auth;
 mod bun;
 mod config;
 mod deploy;
+mod docker;
+mod init;
+mod logo;
 mod oidc;
 mod scaffold;
 mod sse;
+mod theme;
 mod upgrade;
 #[cfg(test)]
 mod testutil;
@@ -25,6 +29,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Quickstart: scaffold, configure LLM, and deploy a new app
+    Init,
     /// Connect to a Core — saves URL, authenticates if needed
     Connect {
         url: String,
@@ -69,6 +75,7 @@ async fn main() -> Result<()> {
         tokio::spawn(upgrade::check_passive());
     }
     match cli.cmd {
+        Cmd::Init => init::run().await,
         Cmd::Connect { url, token } => auth::connect(&url, token).await,
         Cmd::Logout => logout(),
         Cmd::Status => status().await,
@@ -88,7 +95,7 @@ async fn main() -> Result<()> {
 }
 
 async fn client_from_config() -> Result<RuntimeClient> {
-    let mut cfg = config::load().context("no .rootcx/config.json — run `rootcx connect <url>` first")?;
+    let mut cfg = config::load().context("not connected — run `rootcx connect <url>` or `rootcx init` first")?;
     auth::ensure_valid_token(&mut cfg).await?;
     let client = RuntimeClient::new(&cfg.url);
     if let Some(t) = cfg.token {
@@ -98,7 +105,7 @@ async fn client_from_config() -> Result<RuntimeClient> {
 }
 
 fn logout() -> Result<()> {
-    let mut cfg = config::load().context("no .rootcx/config.json")?;
+    let mut cfg = config::load().context("not connected")?;
     cfg.token = None;
     cfg.refresh_token = None;
     config::save(&cfg)?;
