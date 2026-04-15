@@ -63,12 +63,13 @@ detect_target() {
 
 resolve_version() {
     if [ -n "$1" ]; then
-        echo "$1"
+        echo "cli-v$(echo "$1" | sed 's/^cli-v//; s/^v//')"
     else
         local latest
-        latest=$(fetch "https://api.github.com/repos/${REPO}/releases/latest" \
-            | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
-        [ -n "$latest" ] || error "could not determine latest version"
+        latest=$(fetch "https://api.github.com/repos/${REPO}/releases?per_page=100" \
+            | grep '"tag_name"' | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/' \
+            | grep '^cli-v' | head -1)
+        [ -n "$latest" ] || error "could not determine latest CLI version"
         echo "$latest"
     fi
 }
@@ -144,10 +145,7 @@ main() {
     if ! command -v rootcx >/dev/null 2>&1; then
         info "  source ${rc_file:-~/.profile}"
     fi
-    echo "  rootcx new my-app"
-    echo "  cd my-app"
-    echo "  rootcx connect https://your-core.rootcx.com"
-    echo "  rootcx deploy"
+    echo "  rootcx init"
     echo ""
 }
 
