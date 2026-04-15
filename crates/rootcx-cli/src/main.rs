@@ -50,7 +50,12 @@ enum Cmd {
     /// List installed apps on the Core
     Apps,
     /// Uninstall an app
-    Uninstall { app_id: String },
+    Uninstall {
+        app_id: String,
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
     /// Invoke an agent (streams SSE)
     Invoke {
         app_id: String,
@@ -82,7 +87,7 @@ async fn main() -> Result<()> {
         Cmd::New { name } => scaffold::run(&name, &std::env::current_dir()?).await,
         Cmd::Deploy => run_deploy().await,
         Cmd::Apps => apps().await,
-        Cmd::Uninstall { app_id } => uninstall(&app_id).await,
+        Cmd::Uninstall { app_id, yes } => uninstall(&app_id, yes).await,
         Cmd::Invoke { app_id, message, session } => {
             sse::invoke(&client_from_config().await?, &app_id, &message, session.as_deref()).await
         }
@@ -129,7 +134,17 @@ async fn apps() -> Result<()> {
     Ok(())
 }
 
-async fn uninstall(app_id: &str) -> Result<()> {
+async fn uninstall(app_id: &str, yes: bool) -> Result<()> {
+    if !yes {
+        cliclack::set_theme(theme::RootcxTheme);
+        let confirmed = cliclack::confirm(format!("Uninstall '{app_id}'? This cannot be undone."))
+            .initial_value(false)
+            .interact()?;
+        if !confirmed {
+            println!("Cancelled");
+            return Ok(());
+        }
+    }
     let client = client_from_config().await?;
     client.uninstall_app(app_id).await.context("uninstall failed")?;
     println!("✓ uninstalled {app_id}");
