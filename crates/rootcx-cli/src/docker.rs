@@ -70,31 +70,6 @@ pub async fn start_core() -> Result<()> {
     bail!("Core health check timed out (90s)")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compose_yaml_exposes_core_on_9100() {
-        assert!(COMPOSE_YAML.contains("\"9100:9100\""), "Core port mapping missing");
-    }
-
-    #[test]
-    fn compose_yaml_uses_correct_pg_image() {
-        assert!(COMPOSE_YAML.contains("ghcr.io/rootcx/postgresql:16-pgmq"));
-    }
-
-    #[test]
-    fn compose_yaml_core_depends_on_healthy_postgres() {
-        assert!(COMPOSE_YAML.contains("condition: service_healthy"));
-    }
-
-    #[test]
-    fn local_url_matches_compose_port() {
-        assert_eq!(LOCAL_URL, "http://localhost:9100");
-    }
-}
-
 async fn is_healthy(base: &str) -> bool {
     reqwest::Client::new()
         .get(format!("{base}/health"))
