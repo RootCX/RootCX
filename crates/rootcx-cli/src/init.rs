@@ -309,6 +309,48 @@ mod tests {
         let err = selfhost_auth(&c.http, &c.base_url, "short@test.local", "abc").await.unwrap_err();
         assert!(err.to_string().contains("Invalid email or password"), "got: {err}");
     }
+
+    async fn authed_client(c: &TestCore, email: &str) -> rootcx_client::RuntimeClient {
+        let (_, access, _) = selfhost_auth(&c.http, &c.base_url, email, "Str0ngPass1").await.unwrap();
+        let client = rootcx_client::RuntimeClient::new(&c.base_url);
+        client.set_token(Some(access));
+        client
+    }
+
+    #[tokio::test]
+    async fn runtime_client_me_returns_authenticated_user() {
+        let c = boot_core().await;
+        let email = "me@test.local";
+        let client = authed_client(&c, email).await;
+
+        let user = client.me().await.expect("me() should succeed for authed client");
+
+        assert_eq!(user["email"].as_str(), Some(email));
+        assert!(user["id"].as_str().is_some_and(|s| !s.is_empty()), "id missing: {user}");
+    }
+
+    #[tokio::test]
+    async fn runtime_client_me_rejects_invalid_token() {
+        let c = boot_core().await;
+        let client = rootcx_client::RuntimeClient::new(&c.base_url);
+        client.set_token(Some("not-a-real-token".into()));
+
+        let err = client.me().await.expect_err("me() must reject an invalid token");
+
+        match err {
+            rootcx_client::ClientError::Api { status, .. } => assert_eq!(status, 401),
+            other => panic!("expected 401 Api error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_client_list_apps_and_agents_parse_successfully() {
+        let c = boot_core().await;
+        let client = authed_client(&c, "lists@test.local").await;
+
+        client.list_apps().await.expect("list_apps response must parse");
+        client.list_all_agents().await.expect("list_all_agents response must parse");
+    }
 }
 
 async fn deploy_app(app_dir: &Path, app_id: &str, url: &str, token: &str) -> Result<()> {

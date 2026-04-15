@@ -40,7 +40,6 @@ pub async fn connect(url: &str, token: Option<String>) -> Result<()> {
         return Ok(());
     }
 
-    // If we already have a token, verify it works
     if let Some(ref t) = cfg.token {
         if http.get(format!("{base}/api/v1/status")).bearer_auth(t).send().await.is_ok_and(|r| r.status().is_success()) {
             println!("✓ connected to {base} (authenticated)");
@@ -129,7 +128,7 @@ pub async fn ensure_valid_token(cfg: &mut Config) -> Result<()> {
     let ok = apply_refresh(cfg, new_token);
     config::save(cfg)?;
     if !ok {
-        bail!("session expired — run `rootcx connect {}` to re-authenticate", cfg.url);
+        bail!("session expired. Run `rootcx auth login {}` to re-authenticate", cfg.url);
     }
     Ok(())
 }
