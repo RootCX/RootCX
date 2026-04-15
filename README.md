@@ -14,13 +14,13 @@
 </p>
 
 <div align="center">
+  <a href="https://rootcx.com">Website</a>
+  <span>&nbsp;&nbsp;&bull;&nbsp;&nbsp;</span>
   <a href="https://rootcx.com/docs">Documentation</a>
   <span>&nbsp;&nbsp;&bull;&nbsp;&nbsp;</span>
   <a href="https://discord.gg/rootcx">Discord</a>
   <span>&nbsp;&nbsp;&bull;&nbsp;&nbsp;</span>
   <a href="https://github.com/rootcx/rootcx/issues">Issues</a>
-  <span>&nbsp;&nbsp;&bull;&nbsp;&nbsp;</span>
-  <a href="https://rootcx.com/docs/guides/getting-started">Get Started</a>
 </div>
 
 <br />
