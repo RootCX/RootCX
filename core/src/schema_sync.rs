@@ -530,6 +530,7 @@ mod tests {
             enum_values: None,
             references: None,
             is_primary_key: None,
+            on_delete: None,
         }
     }
 

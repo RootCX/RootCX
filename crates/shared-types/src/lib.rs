@@ -159,6 +159,16 @@ pub struct FieldContract {
     pub references: Option<FieldReference>,
     #[serde(default)]
     pub is_primary_key: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_delete: Option<OnDeletePolicy>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnDeletePolicy {
+    Cascade,
+    Restrict,
+    SetNull,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
