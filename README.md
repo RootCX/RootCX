@@ -92,16 +92,16 @@ Once you have a running Core, choose your tool:
 
 **CLI**:
 ```bash
-rootcx connect http://localhost:9100
-rootcx new agent support_bot
+rootcx auth login http://localhost:9100
+rootcx new support_bot
 # ... build your agent ...
 rootcx deploy
 ```
 
 **Claude Code**:
 ```bash
-/rootcx-connect http://localhost:9100
-/rootcx-new agent support_bot
+/rootcx-login http://localhost:9100
+/rootcx-new support_bot
 # Claude Code builds it using 6 official RootCX skills
 /rootcx-deploy
 ```

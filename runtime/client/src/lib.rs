@@ -61,6 +61,21 @@ impl RuntimeClient {
         check_response(resp).await?.json().await.map_err(Into::into)
     }
 
+    pub async fn me(&self) -> Result<JsonValue, ClientError> {
+        let resp = self.authed(self.client.get(self.api("/auth/me"))).send().await?;
+        check_response(resp).await?.json().await.map_err(Into::into)
+    }
+
+    pub async fn list_all_agents(&self) -> Result<Vec<JsonValue>, ClientError> {
+        let resp = self.authed(self.client.get(self.api("/agents"))).send().await?;
+        check_response(resp).await?.json().await.map_err(Into::into)
+    }
+
+    pub async fn list_agent_sessions(&self, app_id: &str) -> Result<Vec<JsonValue>, ClientError> {
+        let resp = self.authed(self.client.get(self.api(&format!("/apps/{app_id}/agent/sessions")))).send().await?;
+        check_response(resp).await?.json().await.map_err(Into::into)
+    }
+
     pub async fn install_app(&self, manifest: &AppManifest) -> Result<String, ClientError> {
         let resp = self.authed(self.client.post(self.api("/apps"))).json(manifest).send().await?;
         extract_message(resp).await
