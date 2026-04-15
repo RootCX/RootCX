@@ -4,11 +4,7 @@
   </a>
 </p>
 
-<h3 align="center">Ship internal apps and AI agents to production, fast</h3>
-
-<p align="center">
-Get a centralized database, SSO, role-based permissions, audit logs, integrations, and deployment infrastructure out of the box.<br/>Cloud or self-hosted. Your code, your data.
-</p>
+<h1 align="center">RootCX</h1>
 
 <p align="center">
   <a href="https://rootcx.com/docs"><img src="https://img.shields.io/badge/docs-rootcx.com-blue" alt="Documentation" /></a>
@@ -17,21 +13,71 @@ Get a centralized database, SSO, role-based permissions, audit logs, integration
   <a href="https://github.com/rootcx/rootcx/stargazers"><img src="https://img.shields.io/github/stars/rootcx/rootcx?style=social" alt="Stars" /></a>
 </p>
 
-<p align="center">
-  <a href="https://rootcx.com">Website</a> · <a href="https://rootcx.com/docs">Docs</a> · <a href="https://discord.gg/rootcx">Community</a> · <a href="https://rootcx.com/docs/guides/getting-started">Get Started</a>
-</p>
+<div align="center">
+  <a href="https://rootcx.com/docs">Documentation</a>
+  <span>&nbsp;&nbsp;&bull;&nbsp;&nbsp;</span>
+  <a href="https://discord.gg/rootcx">Discord</a>
+  <span>&nbsp;&nbsp;&bull;&nbsp;&nbsp;</span>
+  <a href="https://github.com/rootcx/rootcx/issues">Issues</a>
+  <span>&nbsp;&nbsp;&bull;&nbsp;&nbsp;</span>
+  <a href="https://rootcx.com/docs/guides/getting-started">Get Started</a>
+</div>
 
 <br />
 
-## The problem
+## What is RootCX?
 
-AI app builders can generate internal software in minutes. Then what?
+RootCX is production infrastructure for internal apps and AI agents. It ships as a single server called **Core**, available as a [Docker image](https://github.com/RootCX/RootCX/pkgs/container/core) or through [RootCX Cloud](https://rootcx.com).
 
-Where does the database live? Who manages auth? How do you enforce permissions? Where are the audit logs? How does your teammate access the app? How do you push an update without breaking production?
+You build apps with your favorite AI tools ([skills available](https://skills.sh/rootcx/skills)). Core handles everything else: PostgreSQL database, SSO authentication, role-based permissions, audit logs, secrets vault, job scheduling, message queues, file storage, integrations, and deployment.
 
-Every AI-generated app needs the same boring infrastructure: a database, SSO, role-based access, secrets management, job scheduling, and a deployment target. Today, you either stitch that together yourself or you don't ship.
+Cloud or self-hosted. Your code, your data.
 
-**RootCX is that infrastructure.** One server, every app and AI agent you build plugs into it. Database, auth, permissions, audit logs, integrations, deployment -- handled. You focus on what the app does, not where it lives.
+## Quickstart
+
+```bash
+rootcx init
+```
+
+<p align="center">
+  <img src=".github/demo.gif" alt="rootcx init demo" width="800" />
+</p>
+
+`init` walks you through everything interactively: pick cloud or self-hosted, create an account, name your app, scaffold it, and deploy.
+
+## Installation
+
+```sh
+# macOS / Linux
+curl -fsSL https://rootcx.com/install.sh | sh
+
+# Windows
+powershell -c "irm https://rootcx.com/install.ps1 | iex"
+```
+
+## Claude Code
+
+```bash
+npx skills add rootcx/skills
+claude
+```
+
+## Features
+
+| | |
+|---|---|
+| **Database** | Shared PostgreSQL with auto-generated CRUD APIs |
+| **Auth** | OIDC SSO (Okta, Microsoft Entra ID, Google Workspace, Auth0) |
+| **RBAC** | Namespaced permissions, wildcard matching, role inheritance |
+| **Audit log** | Every insert, update, delete captured with before/after diff |
+| **Scheduled jobs** | Cron scheduling via `pg_cron` |
+| **Message queue** | Durable job queue via `pgmq` with automatic retry |
+| **Secrets vault** | AES-256 encrypted storage for API keys and credentials |
+| **Integrations** | Notion, Gmail, Outlook, Salesforce, Slack, GitHub, Stripe, and more |
+| **Agent tools** | Every app exposes tools (query, mutate, describe) for agents |
+| **MCP** | Connect any MCP server to give agents access to external tools |
+| **Channels** | Connect agents to Telegram, Slack, email |
+| **File storage** | Upload and serve files scoped per app |
 
 ## Architecture
 
@@ -43,96 +89,6 @@ Every AI-generated app needs the same boring infrastructure: a database, SSO, ro
   </picture>
 </p>
 
-## Features
-
-| Feature | Details |
-|---------|---------|
-| **Database** | Shared PostgreSQL for all apps and agents. Auto-generated CRUD APIs. |
-| **Auth** | OIDC Single Sign-On (Okta, Microsoft Entra ID, Google Workspace, Auth0). One login for every app and agent in your fleet. |
-| **RBAC** | Namespaced permissions, wildcard matching, role inheritance. Same rules for users and agents. |
-| **Audit log** | Database-level audit via PostgreSQL triggers. Every insert, update, and delete captured with before/after JSONB diff. Always on. |
-| **Scheduled jobs** | Cron scheduling via `pg_cron`. |
-| **Message queue** | Durable job queue via `pgmq` with automatic retry. |
-| **Secrets vault** | AES-256 encrypted storage for API keys and credentials. |
-| **Integrations** | Connectors for Notion, Gmail, Outlook, Salesforce, Slack, GitHub, Stripe, and more. Custom connectors supported. |
-| **Tools** | Every app automatically exposes tools (query, mutate, describe). Agents use them out of the box. |
-| **MCP** | Connect any MCP server to give your AI agents access to external tools and data. |
-| **Channels** | Connect agents to Telegram, Slack, email. Webhook-based, supports media, debounced message batching. |
-| **File storage** | Upload and serve files scoped per app. Nonce-authenticated downloads for workers. |
-
-## Quickstart
-
-### Option A: RootCX Cloud (fastest)
-
-No installation, no Docker, no infrastructure. A managed Core is provisioned for you in minutes.
-
-1. Sign up at [rootcx.com/app/register](https://rootcx.com/app/register).
-2. Create a project and hit **Launch Project**.
-3. Once active, copy the **API URL** from the project dashboard.
-
-### Option B: Run locally
-
-**Prerequisite:** [Docker Desktop](https://docker.com/get-started) must be installed.
-
-```bash
-git clone https://github.com/rootcx/rootcx.git && cd rootcx
-docker compose up -d
-```
-
-Core is running at `http://localhost:9100`.
-
-### Connect and build
-
-Once you have a running Core, choose your tool:
-
-**Studio** (desktop app):
-1. [Download Studio](#download-studio) and open it.
-2. Select **Connect to a server** and paste your Core URL.
-3. Open AI Forge, describe what you want, hit Run (F5).
-
-**CLI**:
-```bash
-rootcx auth login http://localhost:9100
-rootcx new support_bot
-# ... build your agent ...
-rootcx deploy
-```
-
-**Claude Code**:
-```bash
-/rootcx-login http://localhost:9100
-/rootcx-new support_bot
-# Claude Code builds it using 6 official RootCX skills
-/rootcx-deploy
-```
-
-See the [Getting Started guide](https://rootcx.com/docs/guides/getting-started) for a full walkthrough.
-
-### Download Studio
-
-| Platform | Download |
-|----------|----------|
-| macOS (Apple Silicon) | [RootCX Studio (.dmg)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_aarch64.dmg) |
-| macOS (Intel) | [RootCX Studio (.dmg)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_x86_64.dmg) |
-| Windows | [RootCX Studio (.exe)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_x64-setup.exe) |
-| Linux (.deb) | [RootCX Studio (.deb)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_amd64.deb) |
-| Linux (.AppImage) | [RootCX Studio (.AppImage)](https://github.com/RootCX/RootCX/releases/latest/download/RootCX.Studio_amd64.AppImage) |
-
-## Development
-
-```bash
-# Clone the repo
-git clone https://github.com/rootcx/rootcx.git && cd rootcx
-
-# Download Bun runtime
-make deps
-
-# Start Studio in dev mode (hot reload)
-make dev
-```
-
-**Prerequisites:** Rust (latest stable), Node.js 18+, pnpm
-
 ## Community
 
 - [Discord](https://discord.gg/rootcx) for questions, discussion, and support
@@ -141,10 +97,4 @@ make dev
 
 ## License
 
-RootCX is licensed under the [FSL-1.1-ALv2](LICENSE.md) (Functional Source License). You can use, modify, and redistribute the software for any purpose other than offering a competing product. The license automatically converts to **Apache 2.0** after two years.
-
-We chose FSL because it lets us build in the open. You get the full source, you can self-host, you can extend it, while protecting the project's ability to sustain itself. After two years, every release becomes fully permissive under Apache 2.0, no strings attached.
-
----
-
-\* RootCX is source-available under the [FSL-1.1-ALv2](https://fsl.software/), which converts to Apache 2.0 after two years.
+RootCX is source-available under the [FSL-1.1-ALv2](LICENSE.md) (Functional Source License). Use, modify, and redistribute for any purpose other than offering a competing product. Converts to **Apache 2.0** after two years.
