@@ -30,6 +30,12 @@ impl IntoResponse for ApiError {
 
 impl From<sqlx::Error> for ApiError {
     fn from(e: sqlx::Error) -> Self {
+        if let sqlx::Error::Database(ref db_err) = e {
+            if db_err.code().as_deref() == Some("23503") {
+                let detail = db_err.message();
+                return Self::Conflict(format!("foreign key constraint violated: {detail}"));
+            }
+        }
         tracing::error!("database error: {e}");
         Self::Internal("internal database error".into())
     }

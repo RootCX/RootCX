@@ -146,11 +146,19 @@ fn generate_foreign_keys(app_id: &str, entity: &EntityContract, all_entities: &[
             RefTarget::App { .. } => continue,
         };
 
+        let on_delete = match field.on_delete {
+            Some(rootcx_types::OnDeletePolicy::Cascade)  => "CASCADE",
+            Some(rootcx_types::OnDeletePolicy::Restrict) => "RESTRICT",
+            Some(rootcx_types::OnDeletePolicy::SetNull)  => "SET NULL",
+            None if field.required => "RESTRICT",
+            None                   => "SET NULL",
+        };
+
         let fk_name = format!("fk_{}_{}_{}_{}", app_id, entity.entity_name, field.name, fk_suffix);
         stmts.push(format!(
             "DO $$ BEGIN \
                ALTER TABLE {} ADD CONSTRAINT {} \
-               FOREIGN KEY ({}) REFERENCES {}({}) ON DELETE SET NULL; \
+               FOREIGN KEY ({}) REFERENCES {}({}) ON DELETE {on_delete}; \
              EXCEPTION WHEN duplicate_object THEN NULL; \
              END $$",
             table_name, quote_ident(&fk_name), quote_ident(&field.name), target_table, quote_ident(pk_col)
@@ -503,7 +511,7 @@ async fn register_app(pool: &PgPool, manifest: &AppManifest) -> Result<(), Runti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rootcx_types::{EntityContract, FieldContract, FieldReference};
+    use rootcx_types::{EntityContract, FieldContract, FieldReference, OnDeletePolicy};
     use serde_json::json;
 
     fn field(name: &str, field_type: &str) -> FieldContract {
@@ -515,6 +523,7 @@ mod tests {
             enum_values: None,
             references: None,
             is_primary_key: None,
+            on_delete: None,
         }
     }
 
@@ -663,7 +672,33 @@ mod tests {
         let stmts = generate_foreign_keys("myapp", &tasks, &all);
         assert_eq!(stmts.len(), 2, "expected FK + index for core ref: {stmts:?}");
         assert!(stmts[0].contains("\"rootcx_system\".\"users\""), "FK should target rootcx_system.users: {}", stmts[0]);
-        assert!(stmts[0].contains("ON DELETE SET NULL"), "FK should SET NULL: {}", stmts[0]);
+    }
+
+    #[test]
+    fn generate_foreign_keys_on_delete_policy() {
+        let accounts = entity("accounts", vec![field("name", "text")]);
+        let cases: Vec<(bool, Option<OnDeletePolicy>, &str)> = vec![
+            (false, None,                              "ON DELETE SET NULL"),
+            (true,  None,                              "ON DELETE RESTRICT"),
+            (true,  Some(OnDeletePolicy::Cascade),     "ON DELETE CASCADE"),
+            (false, Some(OnDeletePolicy::Cascade),     "ON DELETE CASCADE"),
+            (true,  Some(OnDeletePolicy::SetNull),     "ON DELETE SET NULL"),
+            (true,  Some(OnDeletePolicy::Restrict),    "ON DELETE RESTRICT"),
+        ];
+        for (required, on_delete, expected_clause) in cases {
+            let mut fk = field("account_id", "entity_link");
+            fk.references = Some(FieldReference { entity: "accounts".into(), field: "id".into() });
+            fk.required = required;
+            fk.on_delete = on_delete;
+            let child = entity("deals", vec![fk]);
+            let all = vec![accounts.clone(), child.clone()];
+            let stmts = generate_foreign_keys("myapp", &child, &all);
+            assert!(
+                stmts[0].contains(expected_clause),
+                "required={required}, on_delete={on_delete:?}: expected '{expected_clause}' in: {}",
+                stmts[0]
+            );
+        }
     }
 
     #[test]

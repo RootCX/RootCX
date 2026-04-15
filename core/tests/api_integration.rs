@@ -2407,3 +2407,59 @@ async fn job_enqueue_with_user_id_requires_admin() {
 
     rt.shutdown().await;
 }
+
+#[tokio::test]
+async fn on_delete_cascade_and_restrict() {
+    let rt = TestRuntime::boot().await;
+
+    let manifest = json!({
+        "appId": "fktest", "name": "FK Test", "version": "1.0.0",
+        "dataContract": [
+            { "entityName": "lists", "fields": [
+                { "name": "name", "type": "text", "required": true }
+            ]},
+            { "entityName": "list_items", "fields": [
+                { "name": "list_id", "type": "entity_link", "required": true, "onDelete": "cascade",
+                  "references": { "entity": "lists", "field": "id" } },
+                { "name": "label", "type": "text" }
+            ]},
+            { "entityName": "comments", "fields": [
+                { "name": "list_id", "type": "entity_link", "required": true,
+                  "references": { "entity": "lists", "field": "id" } },
+                { "name": "body", "type": "text" }
+            ]}
+        ],
+        "permissions": { "permissions": [
+            { "key": "lists.read" }, { "key": "lists.write" }, { "key": "lists.delete" },
+            { "key": "list_items.read" }, { "key": "list_items.write" },
+            { "key": "comments.read" }, { "key": "comments.write" }
+        ]}
+    });
+    rt.install_manifest(&manifest).await;
+
+    let list = rt.create("fktest", "lists", &json!({"name": "My List"})).await;
+    let list_id = list["id"].as_str().unwrap();
+
+    rt.create("fktest", "list_items", &json!({"list_id": list_id, "label": "Item 1"})).await;
+    rt.create("fktest", "comments", &json!({"list_id": list_id, "body": "Nice list"})).await;
+
+    // Cannot delete list: comments has required FK without cascade → RESTRICT
+    let (s, body) = rt.delete_json(&format!("/api/v1/apps/fktest/collections/lists/{list_id}")).await;
+    assert_eq!(s, 409, "RESTRICT should block delete: {body}");
+
+    // Delete the comment first to unblock
+    let (_, comments) = rt.post_json("/api/v1/apps/fktest/collections/comments/query", &json!({"where": {"list_id": list_id}})).await;
+    let comment_id = comments["data"][0]["id"].as_str().unwrap();
+    let s = rt.delete(&format!("/api/v1/apps/fktest/collections/comments/{comment_id}")).await;
+    assert_eq!(s, 200, "delete comment");
+
+    // Now delete the list — list_items should cascade away
+    let s = rt.delete(&format!("/api/v1/apps/fktest/collections/lists/{list_id}")).await;
+    assert_eq!(s, 200, "delete list after removing RESTRICT blocker");
+
+    // Verify list_items were cascade-deleted
+    let (_, items) = rt.post_json("/api/v1/apps/fktest/collections/list_items/query", &json!({"where": {"list_id": list_id}})).await;
+    assert_eq!(items["data"].as_array().unwrap().len(), 0, "list_items should be cascade-deleted");
+
+    rt.shutdown().await;
+}
