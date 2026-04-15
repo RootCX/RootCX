@@ -18,8 +18,19 @@ static LOG_HTTP: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new)
 
 pub fn config_dir() -> Result<PathBuf, String> { rootcx_platform::dirs::config_dir().map_err(|e| e.to_string()) }
 
-pub fn instructions_dir() -> Result<PathBuf, String> {
-    Ok(config_dir()?.join("instructions"))
+pub fn skills_dir() -> Result<PathBuf, String> {
+    Ok(config_dir()?.join("skills"))
+}
+
+pub fn skills_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(d) = skills_dir() {
+        dirs.push(d);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(PathBuf::from(home).join(".agents").join("skills"));
+    }
+    dirs
 }
 
 fn unix_now() -> i64 {

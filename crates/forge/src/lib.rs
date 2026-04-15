@@ -6,6 +6,7 @@ pub mod provider;
 pub mod question;
 pub mod schema;
 pub mod session;
+pub mod skills;
 pub mod tools;
 
 use std::collections::HashMap;
@@ -34,7 +35,8 @@ pub struct ForgeConfig {
     pub api_key: Option<String>,
     pub region: Option<String>,
     pub system_prompt: Option<String>,
-    pub instructions: Vec<String>,
+    #[serde(default)]
+    pub skills_dirs: Vec<PathBuf>,
 }
 
 impl std::fmt::Debug for ForgeConfig {
@@ -56,7 +58,7 @@ impl Default for ForgeConfig {
             api_key: None,
             region: None,
             system_prompt: None,
-            instructions: vec![],
+            skills_dirs: vec![],
         }
     }
 }
@@ -135,12 +137,13 @@ impl ForgeEngine {
         emit_fn: engine::EmitFn,
     ) -> JoinHandle<()> {
         let config = self.config.read().await.clone();
-        let system_prompt = self.build_system_prompt(&config).await;
+        let cwd = self.cwd.read().await.clone();
+        let system_prompt = self.build_system_prompt(&config, &cwd).await;
 
         let ctx = engine::LoopContext {
             pool: self.pool.clone(),
             session_id: session_id.clone(),
-            cwd: self.cwd.read().await.clone(),
+            cwd: cwd.clone(),
             system_prompt,
             provider: provider::build_provider(
                 &config.provider, &config.model, config.api_key.as_deref(), config.region.as_deref(),
@@ -189,18 +192,22 @@ impl ForgeEngine {
         self.questions.reject(id).await;
     }
 
-    async fn build_system_prompt(&self, config: &ForgeConfig) -> String {
+    async fn build_system_prompt(&self, config: &ForgeConfig, cwd: &std::path::Path) -> String {
         let mut prompt = config.system_prompt.clone().unwrap_or_else(|| {
             "You are an expert software engineer. You help users build, debug, and improve code.\n\
              Use the available tools to read, search, and modify files. Always read files before editing.\n\
              Be concise. Focus on what was asked.".into()
         });
-        for pattern in &config.instructions {
-            for entry in glob::glob(pattern).into_iter().flatten().flatten() {
-                if let Ok(content) = tokio::fs::read_to_string(&entry).await {
-                    prompt.push_str("\n\n");
-                    prompt.push_str(&content);
-                }
+        let mut all_dirs = config.skills_dirs.clone();
+        let project_skills = cwd.join(".agents").join("skills");
+        if project_skills.is_dir() {
+            all_dirs.push(project_skills);
+        }
+        if !all_dirs.is_empty() {
+            let entries = skills::discover(&all_dirs).await;
+            let catalog = skills::build_catalog(&entries);
+            if !catalog.is_empty() {
+                prompt.push_str(&catalog);
             }
         }
         prompt

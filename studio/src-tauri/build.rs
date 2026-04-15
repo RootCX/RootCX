@@ -1,4 +1,4 @@
 fn main() {
-    println!("cargo:rerun-if-changed=../../.agents/instructions/rootcx-sdk.md");
+    println!("cargo:rerun-if-changed=skills/rootcx");
     tauri_build::build();
 }

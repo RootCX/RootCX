@@ -21,7 +21,7 @@ fn db_path() -> PathBuf {
 }
 
 pub async fn init(state: &ForgeState, client: RuntimeClient) {
-    ensure_instructions().await;
+    ensure_bundled_skills().await;
     match ForgeEngine::new(&db_path()).await {
         Ok(mut e) => {
             e.set_integration_fetcher(Arc::new(move || {
@@ -35,15 +35,41 @@ pub async fn init(state: &ForgeState, client: RuntimeClient) {
     }
 }
 
-const RUNTIME_INSTRUCTIONS: &str = include_str!("../../../.agents/instructions/rootcx-sdk.md");
+const BUNDLED_SKILLS: &[(&str, &str)] = &[
+    ("rootcx/SKILL.md", include_str!("../skills/rootcx/SKILL.md")),
+    ("rootcx/rules/agent.md", include_str!("../skills/rootcx/rules/agent.md")),
+    ("rootcx/rules/backend-worker.md", include_str!("../skills/rootcx/rules/backend-worker.md")),
+    ("rootcx/rules/manifest.md", include_str!("../skills/rootcx/rules/manifest.md")),
+    ("rootcx/rules/rest-api.md", include_str!("../skills/rootcx/rules/rest-api.md")),
+    ("rootcx/rules/rest-api-collections.md", include_str!("../skills/rootcx/rules/rest-api-collections.md")),
+    ("rootcx/rules/rest-api-integrations.md", include_str!("../skills/rootcx/rules/rest-api-integrations.md")),
+    ("rootcx/rules/rest-api-jobs.md", include_str!("../skills/rootcx/rules/rest-api-jobs.md")),
+    ("rootcx/rules/sdk-hooks.md", include_str!("../skills/rootcx/rules/sdk-hooks.md")),
+    ("rootcx/rules/ui.md", include_str!("../skills/rootcx/rules/ui.md")),
+    ("rootcx/rules/ui-components.md", include_str!("../skills/rootcx/rules/ui-components.md")),
+    ("rootcx/rules/templates/system.md", include_str!("../skills/rootcx/rules/templates/system.md")),
+];
 
-async fn ensure_instructions() {
-    let dir = match crate::state::instructions_dir() {
+async fn ensure_bundled_skills() {
+    let dir = match crate::state::skills_dir() {
         Ok(d) => d,
         Err(_) => return,
     };
-    let _ = tokio::fs::create_dir_all(&dir).await;
-    let _ = tokio::fs::write(dir.join("rootcx-sdk.md"), RUNTIME_INSTRUCTIONS).await;
+    for (rel_path, content) in BUNDLED_SKILLS {
+        let dest = dir.join(rel_path);
+        if let Some(parent) = dest.parent() {
+            let _ = tokio::fs::create_dir_all(parent).await;
+        }
+        let _ = tokio::fs::write(&dest, content).await;
+    }
+    cleanup_legacy_instructions().await;
+}
+
+async fn cleanup_legacy_instructions() {
+    if let Ok(dir) = crate::state::config_dir() {
+        let legacy = dir.join("instructions").join("rootcx-sdk.md");
+        let _ = tokio::fs::remove_file(legacy).await;
+    }
 }
 
 async fn build_config(client: &RuntimeClient) -> Result<ForgeConfig, String> {
@@ -62,10 +88,8 @@ async fn build_config(client: &RuntimeClient) -> Result<ForgeConfig, String> {
     info!("forge: provider={provider:?} model={model} key={}", if api_key.is_some() { "ok" } else { "missing" });
 
     let region = ai.get("region").and_then(|r| r.as_str()).map(String::from);
-    let instructions = crate::state::instructions_dir()
-        .map(|d| vec![format!("{}/*.md", d.display())])
-        .unwrap_or_default();
-    Ok(ForgeConfig { provider, model, api_key, region, system_prompt: None, instructions })
+    let skills_dirs = crate::state::skills_dirs();
+    Ok(ForgeConfig { provider, model, api_key, region, system_prompt: None, skills_dirs })
 }
 
 fn parse_provider_model(s: &str) -> (rootcx_types::ProviderType, String) {

@@ -207,21 +207,14 @@ pub fn get_preset_questions(preset_id: String) -> Result<Vec<crate::scaffold::Qu
 }
 
 #[tauri::command]
-pub async fn resolve_instructions() -> Result<Vec<String>, String> {
-    let dir = crate::state::instructions_dir()?;
-    let mut rd = match tokio::fs::read_dir(&dir).await {
-        Ok(rd) => rd,
-        Err(_) => return Ok(vec![]),
-    };
-    let mut files = Vec::new();
-    while let Ok(Some(entry)) = rd.next_entry().await {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.ends_with(".md") {
-            files.push(name);
-        }
-    }
-    files.sort();
-    Ok(files)
+pub async fn resolve_skills() -> Result<Vec<serde_json::Value>, String> {
+    let dirs = crate::state::skills_dirs();
+    let entries = rootcx_forge::skills::discover(&dirs).await;
+    Ok(entries.iter().map(|s| serde_json::json!({
+        "name": s.name,
+        "description": s.description,
+        "path": s.path.display().to_string(),
+    })).collect())
 }
 
 #[tauri::command]
