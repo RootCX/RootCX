@@ -5724,6 +5724,7 @@ dependencies = [
  "anyhow",
  "clap",
  "cliclack",
+ "console 0.15.11",
  "dirs 5.0.1",
  "flate2",
  "futures-util",
