@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rootcx_client::RuntimeClient;
 use rootcx_types::AppManifest;
