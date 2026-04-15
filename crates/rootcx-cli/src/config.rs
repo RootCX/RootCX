@@ -12,7 +12,11 @@ pub struct Config {
 }
 
 fn config_path() -> PathBuf {
-    std::env::current_dir().unwrap_or_default().join(".rootcx").join("config.json")
+    resolve_config_path(dirs::home_dir())
+}
+
+pub(crate) fn resolve_config_path(home: Option<PathBuf>) -> PathBuf {
+    home.unwrap_or_default().join(".rootcx").join("config.json")
 }
 
 pub fn load() -> Result<Config> {
@@ -182,7 +186,6 @@ mod tests {
 
     #[test]
     fn skills_picks_repo_relative_when_candidate_exists() {
-        // Create a fake layout: <tmp>/bin/rootcx + <tmp>/.agents/skills/
         let base = std::env::temp_dir().join(format!("rootcx-skills-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("bin")).unwrap();
@@ -191,8 +194,21 @@ mod tests {
         std::fs::write(&exe, "").unwrap();
 
         let p = resolve_skills_dir(None, Some(exe), PathBuf::from("/home/u"));
-        // candidate = <tmp>/bin/../.agents/skills — verify it resolves to our fake dir
         assert!(p.ends_with(".agents/skills"));
         assert!(p.exists());
+    }
+
+    use super::resolve_config_path;
+
+    #[test]
+    fn config_path_is_under_home_not_cwd() {
+        let p = resolve_config_path(Some(PathBuf::from("/home/u")));
+        assert_eq!(p, PathBuf::from("/home/u/.rootcx/config.json"));
+    }
+
+    #[test]
+    fn config_path_falls_back_when_no_home() {
+        let p = resolve_config_path(None);
+        assert_eq!(p, PathBuf::from(".rootcx/config.json"));
     }
 }
