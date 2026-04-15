@@ -1,12 +1,12 @@
-name: Release (Full)
+name: Release Studio
 
 on:
   push:
-    tags: ["v[0-9]*"]
+    tags: ["studio-v*"]
   workflow_dispatch:
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-studio-${{ github.ref }}
   cancel-in-progress: true
 
 permissions: {}
@@ -29,7 +29,7 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc,   bundles: nsis,         name: windows-x86_64 }
 
     runs-on: ${{ matrix.os }}
-    name: Build (${{ matrix.name }})
+    name: Studio (${{ matrix.name }})
 
     steps:
       - uses: actions/checkout@v4
@@ -127,63 +127,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  cli:
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: macos-14,       target: aarch64-apple-darwin,      name: cli-macos-arm64 }
-          - { os: macos-15-intel, target: x86_64-apple-darwin,       name: cli-macos-x86_64 }
-          - { os: ubuntu-22.04,   target: x86_64-unknown-linux-gnu,  name: cli-linux-x86_64 }
-          - { os: ubuntu-22.04,   target: aarch64-unknown-linux-gnu, name: cli-linux-arm64 }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,    name: cli-windows-x86_64 }
-
-    runs-on: ${{ matrix.os }}
-    name: CLI (${{ matrix.name }})
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install cross (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: cargo install cross --locked
-
-      - name: Build CLI
-        shell: bash
-        run: |
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            cross build --release --target ${{ matrix.target }} -p rootcx-cli
-          else
-            cargo build --release --target ${{ matrix.target }} -p rootcx-cli
-          fi
-
-      - name: Package
-        shell: bash
-        run: |
-          cd target/${{ matrix.target }}/release
-          bin=rootcx
-          [ "${{ runner.os }}" = "Windows" ] && bin=rootcx.exe
-          tar -czf rootcx-${{ matrix.target }}.tar.gz "$bin"
-          mv rootcx-${{ matrix.target }}.tar.gz "$GITHUB_WORKSPACE/"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.name }}
-          path: rootcx-${{ matrix.target }}.tar.gz
-          if-no-files-found: error
-          retention-days: 7
-
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, cli]
+    if: startsWith(github.ref, 'refs/tags/studio-v')
+    needs: [build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
