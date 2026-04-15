@@ -79,6 +79,16 @@ claude
 | **Channels** | Connect agents to Telegram, Slack, email |
 | **File storage** | Upload and serve files scoped per app |
 
+## Showcase
+
+Production apps built on RootCX:
+
+| App | Description |
+|-----|-------------|
+| [CRM](https://github.com/RootCX/CRM) | Customer relationship management |
+| [Billing](https://github.com/RootCX/Billing) | Invoicing and payment tracking |
+| [Task Manager](https://github.com/RootCX/Task-Manager) | Team task and project management |
+
 ## Architecture
 
 <p align="center">
