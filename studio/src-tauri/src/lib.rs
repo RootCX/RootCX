@@ -40,7 +40,7 @@ pub fn run() {
             commands::deploy_frontend,
             commands::run_app,
             commands::stop_deployed_worker,
-            commands::resolve_instructions,
+            commands::resolve_skills,
             commands::sync_view_menu,
             commands::read_launch_config,
             commands::init_launch_config,
