@@ -40,6 +40,7 @@ impl Layer for CoreLayer {
     "clsx": "^2.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-router-dom": "^7.0.0",
     "tailwind-merge": "^2.5.0",
     "tailwindcss": "^4.0.0",
     "tw-animate-css": "^1.4.0"
