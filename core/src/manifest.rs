@@ -241,7 +241,7 @@ pub fn map_field_type(field_type: &str) -> &'static str {
         "timestamp" => "TIMESTAMPTZ",
         "json" => "JSONB",
         "file" => "TEXT",
-        "entity_link" => "UUID",
+        "uuid" | "entity_link" => "UUID",
         "[text]" => "TEXT[]",
         "[number]" => "DOUBLE PRECISION[]",
         _ => "TEXT",
@@ -291,10 +291,14 @@ pub async fn field_type_map(
     app_id: &str,
     entity: &str,
 ) -> Result<HashMap<String, String>, crate::RuntimeError> {
-    Ok(load_entity(pool, app_id, entity)
+    let mut m: HashMap<String, String> = load_entity(pool, app_id, entity)
         .await?
         .map(|ec| ec.fields.iter().map(|f| (f.name.clone(), f.field_type.clone())).collect())
-        .unwrap_or_default())
+        .unwrap_or_default();
+    m.insert("id".into(), "uuid".into());
+    m.insert("created_at".into(), "timestamp".into());
+    m.insert("updated_at".into(), "timestamp".into());
+    Ok(m)
 }
 
 pub async fn entity_identity(
