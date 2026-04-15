@@ -811,6 +811,9 @@ mod tests {
 
     fn types_fixture() -> HashMap<String, String> {
         [
+            ("id", "uuid"),
+            ("created_at", "timestamp"),
+            ("updated_at", "timestamp"),
             ("status", "text"),
             ("age", "number"),
             ("active", "boolean"),
@@ -1078,9 +1081,26 @@ mod tests {
         assert_eq!(pg_cast_suffix(Some("boolean")), "::boolean");
         assert_eq!(pg_cast_suffix(Some("date")), "::date");
         assert_eq!(pg_cast_suffix(Some("timestamp")), "::timestamptz");
+        assert_eq!(pg_cast_suffix(Some("uuid")), "::uuid");
         assert_eq!(pg_cast_suffix(Some("entity_link")), "::uuid");
         assert_eq!(pg_cast_suffix(Some("text")), "");
         assert_eq!(pg_cast_suffix(None), "");
+    }
+
+    #[test]
+    fn where_id_field_gets_uuid_cast() {
+        let cases = [
+            (json!({"id": {"$eq": "72c32d24-1ff5-491a-9091-3c579a8e6fd5"}}), "\"id\" = $1::uuid"),
+            (json!({"id": {"$in": ["aaa", "bbb"]}}), "\"id\" IN ($1::uuid, $2::uuid)"),
+            (json!({"id": "72c32d24-1ff5-491a-9091-3c579a8e6fd5"}), "\"id\" = $1::uuid"),
+        ];
+        for (input, expected) in &cases {
+            let types = types_fixture();
+            let mut binds = Vec::new();
+            let mut idx = 0;
+            let sql = build_where_clause(input, &types, &mut binds, &mut idx).unwrap();
+            assert_eq!(&sql, expected, "failed for input: {input}");
+        }
     }
 
     #[test]
