@@ -31,3 +31,8 @@ rpassword = "7"
 cliclack = "0.3"
 self_update = { version = "0.42", default-features = false, features = ["archive-tar", "compression-flate2", "rustls"] }
 console = "0.15"
+
+[dev-dependencies]
+rootcx-core = { workspace = true }
+rootcx-platform = { workspace = true }
+testcontainers = "0.27"

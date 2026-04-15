@@ -152,12 +152,17 @@ async fn setup_selfhost() -> Result<(String, String, Option<String>)> {
     let email: String = cliclack::input("Email").interact()?;
     let password: String = cliclack::password("Password").mask('▪').interact()?;
 
-    let reg = http.post(format!("{base}/api/v1/auth/register"))
+    let (is_new, access_token, refresh_token) = selfhost_auth(&http, base, &email, &password).await?;
+    if is_new { cliclack::log::success("Account created")?; }
+    cliclack::log::success(format!("Logged in as {email}"))?;
+    Ok((base.into(), access_token, Some(refresh_token)))
+}
+
+async fn selfhost_auth(http: &reqwest::Client, base: &str, email: &str, password: &str) -> Result<(bool, String, String)> {
+    let is_new = http.post(format!("{base}/api/v1/auth/register"))
         .json(&serde_json::json!({ "email": email, "password": password }))
-        .send().await.context("register")?;
-    if reg.status().is_success() {
-        cliclack::log::success("Account created")?;
-    }
+        .send().await.context("register")?
+        .status().is_success();
 
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -170,9 +175,7 @@ async fn setup_selfhost() -> Result<(String, String, Option<String>)> {
         bail!("Invalid email or password");
     }
     let r: LoginResp = resp.json().await?;
-
-    cliclack::log::success(format!("Logged in as {email}"))?;
-    Ok((base.into(), r.access_token, Some(r.refresh_token)))
+    Ok((is_new, r.access_token, r.refresh_token))
 }
 
 async fn try_existing_session() -> Option<(String, String, Option<String>)> {
@@ -201,7 +204,12 @@ async fn scaffold(dir: &Path, name: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_app_name;
+    use super::*;
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use testcontainers::{GenericImage, ImageExt, runners::AsyncRunner};
+    use testcontainers::core::{IntoContainerPort, WaitFor};
+    use testcontainers::ContainerAsync;
 
     #[test]
     fn app_name_validation() {
@@ -220,6 +228,86 @@ mod tests {
             let result = validate_app_name(input);
             assert_eq!(result.is_ok(), expect_ok, "validate_app_name({input:?}) = {result:?}");
         }
+    }
+
+    struct TestCore {
+        base_url: String,
+        http: reqwest::Client,
+        _container: ContainerAsync<GenericImage>,
+        _tmp: tempfile::TempDir,
+        _rt: Arc<rootcx_core::ReadyRuntime>,
+    }
+
+    async fn boot_core() -> TestCore {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        let core_manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+        let resources = rootcx_platform::dirs::resources_dir(core_manifest.to_str().unwrap())
+            .expect("core/resources not found -- run `make deps` first");
+        let bun_bin = rootcx_platform::bin::binary_path(&resources, "bun");
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+
+        let container = GenericImage::new("ghcr.io/rootcx/postgresql", "16-pgmq-cron")
+            .with_exposed_port(5432_u16.tcp())
+            .with_wait_for(WaitFor::message_on_stderr("database system is ready to accept connections"))
+            .with_entrypoint("/pg-entrypoint.sh")
+            .with_user("root")
+            .with_env_var("POSTGRES_USER", "rootcx")
+            .with_env_var("POSTGRES_PASSWORD", "rootcx")
+            .with_env_var("POSTGRES_DB", "rootcx")
+            .with_env_var("PGDATA", "/tmp/pgdata")
+            .start().await.expect("failed to start postgres");
+
+        let pg_port = container.get_host_port_ipv4(5432).await.unwrap();
+        let db_url = format!("postgresql://rootcx:rootcx@127.0.0.1:{pg_port}/rootcx");
+
+        let rt = Arc::new(
+            rootcx_core::Runtime::new(db_url, data_dir, resources, bun_bin)
+                .boot(port).await.expect("boot failed")
+        );
+        let rt2 = Arc::clone(&rt);
+        tokio::spawn(async move { rootcx_core::server::serve(rt2, port).await.ok(); });
+
+        let base_url = format!("http://127.0.0.1:{port}");
+        let http = reqwest::Client::new();
+        for _ in 0..100 {
+            if http.get(format!("{base_url}/health")).send().await.is_ok() { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        TestCore { base_url, http, _container: container, _tmp: tmp, _rt: rt }
+    }
+
+    #[tokio::test]
+    async fn selfhost_auth_new_user_registers_then_logs_in() {
+        let c = boot_core().await;
+        let (is_new, at, rt) = selfhost_auth(&c.http, &c.base_url, "new@test.local", "Str0ngPass1").await.unwrap();
+        assert!(is_new);
+        assert!(!at.is_empty());
+        assert!(!rt.is_empty());
+    }
+
+    #[tokio::test]
+    async fn selfhost_auth_existing_user_skips_register() {
+        let c = boot_core().await;
+        selfhost_auth(&c.http, &c.base_url, "twice@test.local", "Str0ngPass1").await.unwrap();
+        let (is_new, at, _) = selfhost_auth(&c.http, &c.base_url, "twice@test.local", "Str0ngPass1").await.unwrap();
+        assert!(!is_new);
+        assert!(!at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn selfhost_auth_bad_password_fails() {
+        let c = boot_core().await;
+        selfhost_auth(&c.http, &c.base_url, "bad@test.local", "Str0ngPass1").await.unwrap();
+        let err = selfhost_auth(&c.http, &c.base_url, "bad@test.local", "WrongPass99").await.unwrap_err();
+        assert!(err.to_string().contains("Invalid email or password"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn selfhost_auth_short_password_fails() {
+        let c = boot_core().await;
+        let err = selfhost_auth(&c.http, &c.base_url, "short@test.local", "abc").await.unwrap_err();
+        assert!(err.to_string().contains("Invalid email or password"), "got: {err}");
     }
 }
 
