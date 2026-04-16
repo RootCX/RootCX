@@ -1,4 +1,5 @@
 pub(crate) mod routes;
+mod slack;
 mod telegram;
 pub(crate) mod types;
 
@@ -77,6 +78,7 @@ impl RuntimeExtension for ChannelExtension {
 pub(crate) fn provider(name: &str) -> Option<Box<dyn types::ChannelProvider>> {
     match name {
         "telegram" => Some(Box::new(telegram::TelegramProvider::new())),
+        "slack" => Some(Box::new(slack::SlackProvider::new())),
         _ => None,
     }
 }
