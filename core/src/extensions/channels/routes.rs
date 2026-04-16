@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
 use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use super::types::{ChannelProvider, InboundEvent, MediaRef};
 use crate::api_error::ApiError;
@@ -60,12 +60,8 @@ pub async fn list_channels(
          FROM rootcx_system.channels ORDER BY created_at DESC",
     ).fetch_all(&pool).await?;
 
-    Ok(Json(rows.into_iter().map(|(id, provider, name, mut config, status, ca, ua)| {
-        if let Some(obj) = config.as_object_mut() {
-            obj.remove("bot_token");
-            obj.remove("webhook_secret");
-        }
-        json!({ "id": id, "provider": provider, "name": name, "config": config, "status": status, "createdAt": ca, "updatedAt": ua })
+    Ok(Json(rows.into_iter().map(|(id, provider, name, config, status, ca, ua)| {
+        json!({ "id": id, "provider": provider, "name": name, "config": redact_config(config), "status": status, "createdAt": ca, "updatedAt": ua })
     }).collect()))
 }
 
@@ -109,11 +105,7 @@ pub async fn activate_channel(
     let body = body.map(|b| b.0).unwrap_or_default();
 
     if let Some(patch) = body.config {
-        if let (Some(base), Some(p)) = (cfg.as_object_mut(), patch.as_object()) {
-            for (k, v) in p { base.insert(k.clone(), v.clone()); }
-        }
-        sqlx::query("UPDATE rootcx_system.channels SET config = $1, updated_at = now() WHERE id = $2::uuid")
-            .bind(&cfg).bind(&channel_id).execute(&pool).await?;
+        cfg = apply_config_patch(cfg, patch);
     }
 
     let provider = super::provider(&prov)
@@ -123,22 +115,12 @@ pub async fn activate_channel(
     provider.register_webhook(&cfg, &url).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-    let final_config = match provider.resolve_bot_meta(&cfg).await.and_then(|m| m.as_object().cloned()) {
-        Some(obj) => {
-            let mut merged = cfg.as_object().cloned().unwrap_or_default();
-            merged.extend(obj);
-            Some(JsonValue::Object(merged))
-        }
-        None => None,
-    };
-
-    if let Some(config) = final_config {
-        sqlx::query("UPDATE rootcx_system.channels SET config = $1, status = 'active', updated_at = now() WHERE id = $2::uuid")
-            .bind(config).bind(&channel_id).execute(&pool).await?;
-    } else {
-        sqlx::query("UPDATE rootcx_system.channels SET status = 'active', updated_at = now() WHERE id = $1::uuid")
-            .bind(&channel_id).execute(&pool).await?;
+    if let Some(obj) = provider.resolve_bot_meta(&cfg).await.and_then(|m| m.as_object().cloned()) {
+        if let Some(base) = cfg.as_object_mut() { base.extend(obj); }
     }
+
+    sqlx::query("UPDATE rootcx_system.channels SET config = $1, status = 'active', updated_at = now() WHERE id = $2::uuid")
+        .bind(&cfg).bind(&channel_id).execute(&pool).await?;
     info!(channel_id, "channel activated, webhook: {url}");
     Ok(Json(json!({ "status": "active", "webhook_url": url })))
 }
@@ -196,8 +178,6 @@ pub async fn webhook(
             handle_callback(&rt, &channel_id, &config, provider.as_ref(), &chat_id, &callback_id, &data).await;
         }
         InboundEvent::Message { chat_id, text, media } => {
-            // For slash commands Slack requires an HTTP response within 3 seconds.
-            // Return the ack text directly in the response body and skip further processing.
             if let Some(ack) = handle_command_sync(&pool, &channel_id, &chat_id, &text).await {
                 return Ok(Json(json!({ "response_type": "ephemeral", "text": ack })));
             }
@@ -214,7 +194,6 @@ pub async fn webhook(
             }
 
             if !media.is_empty() {
-                // Media messages: skip debounce, dispatch immediately with media refs
                 dispatch_invoke(rt, channel_id, provider_name, config, chat_id, text, media);
             } else {
                 let needs_debounce = provider.debounce_ms().filter(|_| text.len() >= 4096);
@@ -306,8 +285,10 @@ async fn do_invoke(
     fn e(e: impl std::fmt::Debug) -> String { format!("{e:?}") }
     let pool = rt.pool();
     let wm = rt.worker_manager();
-    let (app_id, session_id) = resolve_session(pool, channel_id, chat_id).await.map_err(&e)?;
-    let invoker_user_id = resolve_invoker(pool, channel_id, chat_id).await;
+    let ((app_id, session_id), invoker_user_id) = tokio::try_join!(
+        resolve_session(pool, channel_id, chat_id),
+        async { Ok(resolve_invoker(pool, channel_id, chat_id).await) },
+    ).map_err(&e)?;
 
     let agent_cfg: JsonValue = sqlx::query_scalar(
         "SELECT config FROM rootcx_system.agents WHERE app_id = $1",
@@ -317,7 +298,6 @@ async fn do_invoke(
     let llm = fetch_default_llm(pool).await.map_err(&e)?
         .map(|(p, m)| LlmModelRef { provider: p, model: m });
 
-    // Download all media in parallel, store in BYTEA, generate nonce download URLs
     let provider = super::provider(provider_name).unwrap();
     let storage = PostgresBackend;
     let downloaded: Vec<_> = join_all(
@@ -383,6 +363,18 @@ async fn do_invoke(
 }
 
 const DEFAULT_AGENT: &str = "assistant";
+const MSG_LINK_OK: &str = "Account linked! Your integrations are now available.";
+const MSG_LINK_INVALID: &str = "Link expired or invalid. Please try again from the dashboard.";
+const ACTION_APPROVE: &str = "approve";
+const ACTION_DENY: &str = "deny";
+const ACTION_AGENT: &str = "agent";
+const PROTECTED_CONFIG_KEYS: &[&str] = &["bot_token", "webhook_secret", "signing_secret"];
+
+fn parse_command(text: &str) -> Option<(&str, Vec<&str>)> {
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    let cmd = parts.first().and_then(|p| p.split('@').next())?;
+    Some((cmd, parts))
+}
 
 async fn all_agents(pool: &sqlx::PgPool) -> Vec<(String, String)> {
     sqlx::query_as(
@@ -426,14 +418,14 @@ async fn handle_callback(
     let (action, payload) = data.split_once(':').unwrap_or(("", ""));
 
     match action {
-        "approve" => {
+        ACTION_APPROVE => {
             handle_approval(rt, config, provider, chat_id, callback_id, payload, ApprovalResponse::Approved, "Approved").await;
         }
-        "deny" => {
+        ACTION_DENY => {
             handle_approval(rt, config, provider, chat_id, callback_id, payload,
                 ApprovalResponse::Rejected { reason: "rejected via chat".into() }, "Denied").await;
         }
-        "agent" => {
+        ACTION_AGENT => {
             let pool = rt.pool();
             let found = all_agents(pool).await
                 .into_iter().find(|(id, _)| id == payload);
@@ -465,20 +457,17 @@ async fn handle_approval(
     }
 }
 
-/// Handle slash commands that require an immediate synchronous HTTP response (Slack 3s limit).
-/// Returns Some(ack_text) if handled, None otherwise.
+// Slack requires a synchronous HTTP response within 3 seconds for slash commands.
 async fn handle_command_sync(
     pool: &sqlx::PgPool, channel_id: &str, chat_id: &str, text: &str,
 ) -> Option<String> {
-    let parts: Vec<&str> = text.split_whitespace().collect();
-    let cmd = parts.first().and_then(|p| p.split('@').next())?;
+    let (cmd, parts) = parse_command(text)?;
     if cmd != "/link" { return None; }
-
     let token = parts.get(1).filter(|t| t.starts_with(LINK_PREFIX))?;
     if try_complete_link(pool, channel_id, chat_id, token).await.is_some() {
-        Some("Account linked! Your integrations are now available.".into())
+        Some(MSG_LINK_OK.into())
     } else {
-        Some("Link expired or invalid. Please try again from the dashboard.".into())
+        Some(MSG_LINK_INVALID.into())
     }
 }
 
@@ -486,8 +475,7 @@ async fn handle_command(
     pool: &sqlx::PgPool, channel_id: &str, chat_id: &str, text: &str,
     config: &JsonValue, provider: &dyn ChannelProvider,
 ) -> bool {
-    let parts: Vec<&str> = text.split_whitespace().collect();
-    let Some(cmd) = parts.first().and_then(|p| p.split('@').next()) else { return false };
+    let Some((cmd, parts)) = parse_command(text) else { return false };
     match cmd {
         "/newsession" => {
             let _ = sqlx::query(
@@ -499,11 +487,12 @@ async fn handle_command(
         }
         "/start" | "/link" => {
             if let Some(token) = parts.get(1).filter(|t| t.starts_with(LINK_PREFIX)) {
-                if let Some(_uid) = try_complete_link(pool, channel_id, chat_id, token).await {
-                    let _ = provider.send_response(config, chat_id, "Account linked! Your integrations are now available.").await;
+                let msg = if try_complete_link(pool, channel_id, chat_id, token).await.is_some() {
+                    MSG_LINK_OK
                 } else {
-                    let _ = provider.send_response(config, chat_id, "Link expired or invalid. Please try again from the dashboard.").await;
-                }
+                    MSG_LINK_INVALID
+                };
+                let _ = provider.send_response(config, chat_id, msg).await;
             } else {
                 let _ = provider.send_response(config, chat_id, "Send me a message.").await;
             }
@@ -524,7 +513,7 @@ async fn handle_command(
                 let _ = provider.send_response(config, chat_id, "No agents available.").await;
             } else {
                 let options: Vec<(String, String)> = agents.into_iter()
-                    .map(|(id, name)| (name, format!("agent:{id}")))
+                    .map(|(id, name)| (name, format!("{ACTION_AGENT}:{id}")))
                     .collect();
                 let _ = provider.send_choice(config, chat_id, "Choose an agent:", &options).await;
             }
@@ -532,6 +521,26 @@ async fn handle_command(
         }
         _ => false,
     }
+}
+
+fn redact_config(mut config: JsonValue) -> JsonValue {
+    if let Some(obj) = config.as_object_mut() {
+        for key in PROTECTED_CONFIG_KEYS { obj.remove(*key); }
+    }
+    config
+}
+
+fn apply_config_patch(mut base: JsonValue, patch: JsonValue) -> JsonValue {
+    if let (Some(b), Some(p)) = (base.as_object_mut(), patch.as_object()) {
+        for (k, v) in p {
+            if PROTECTED_CONFIG_KEYS.contains(&k.as_str()) {
+                warn!(key = k.as_str(), "attempt to overwrite protected config key ignored");
+            } else {
+                b.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    base
 }
 
 fn resolve_public_url(body_url: Option<String>) -> Result<String, ApiError> {
@@ -624,6 +633,48 @@ async fn resolve_invoker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn config_patch_cannot_overwrite_protected_keys() {
+        // Protected keys are system-generated or hold credentials; callers must not overwrite them.
+        let base = json!({
+            "signing_secret": "original_secret",
+            "bot_token": "original_token",
+            "webhook_secret": "original_webhook",
+            "team_id": "T123",
+        });
+        let patch = json!({
+            "signing_secret": "attacker_value",
+            "bot_token": "attacker_token",
+            "webhook_secret": "attacker_webhook",
+            "team_id": "T_EVIL",
+        });
+        let result = apply_config_patch(base, patch);
+        assert_eq!(result["signing_secret"], "original_secret", "signing_secret must not be overwritten");
+        assert_eq!(result["bot_token"], "original_token", "bot_token must not be overwritten");
+        assert_eq!(result["webhook_secret"], "original_webhook", "webhook_secret must not be overwritten");
+        assert_eq!(result["team_id"], "T_EVIL", "non-protected keys must be patched");
+    }
+
+    #[test]
+    fn redact_config_strips_secrets() {
+        let cases: &[(&str, bool)] = &[
+            ("bot_token", false),
+            ("webhook_secret", false),
+            ("signing_secret", false),
+            ("other_field", true),
+        ];
+        for (key, should_remain) in cases {
+            let config = json!({ *key: "secret_value", "unrelated": "keep" });
+            let redacted = redact_config(config);
+            assert_eq!(redacted[key].is_null(), !should_remain, "key '{key}' presence wrong after redact");
+        }
+        // unrelated key is always preserved
+        let config = json!({ "bot_token": "x", "name": "my-channel" });
+        let redacted = redact_config(config);
+        assert_eq!(redacted["name"], "my-channel");
+        assert!(redacted["bot_token"].is_null());
+    }
 
     fn insert_token(map: &mut HashMap<String, PendingLink>, token: &str, channel_id: &str, user_id: uuid::Uuid, age: std::time::Duration) {
         map.insert(token.to_string(), PendingLink {

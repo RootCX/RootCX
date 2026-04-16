@@ -142,6 +142,16 @@ struct User { id: String }
 #[derive(Deserialize)]
 struct Channel { id: String }
 
+fn validate_response_url(url: Option<String>) -> Result<String, ChannelError> {
+    let url = url.unwrap_or_default();
+    if url.is_empty() { return Ok(url); }
+    if url.starts_with("https://hooks.slack.com/") {
+        Ok(url)
+    } else {
+        Err(ChannelError::InvalidWebhook("invalid response_url host".into()))
+    }
+}
+
 fn extract_media(files: Option<Vec<File>>) -> Vec<MediaRef> {
     files.unwrap_or_default().into_iter().map(|f| MediaRef {
         provider_file_id: f.id,
@@ -197,11 +207,8 @@ impl ChannelProvider for SlackProvider {
             let action = payload.actions.into_iter().next()
                 .ok_or_else(|| ChannelError::InvalidWebhook("no actions".into()))?;
             let chat_id = payload.channel.map(|c| c.id).unwrap_or(payload.user.id);
-            return Ok(InboundEvent::Callback {
-                chat_id,
-                callback_id: payload.response_url.unwrap_or_default(),
-                data: action.value,
-            });
+            let callback_id = validate_response_url(payload.response_url)?;
+            return Ok(InboundEvent::Callback { chat_id, callback_id, data: action.value });
         }
 
         let envelope: Envelope = serde_json::from_slice(&body)
@@ -342,6 +349,23 @@ impl ChannelProvider for SlackProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_url_validation() {
+        let cases: &[(&str, bool)] = &[
+            ("https://hooks.slack.com/actions/T/123/xyz", true),
+            ("https://hooks.slack.com/", true),
+            ("", true), // empty = no callback, allowed
+            ("https://evil.com/hooks.slack.com", false),
+            ("http://hooks.slack.com/actions/T/123/xyz", false), // non-HTTPS
+            ("https://hooks.slack.com.evil.com/", false),
+            ("https://169.254.169.254/latest/meta-data/", false),
+        ];
+        for (url, expect_ok) in cases {
+            let result = validate_response_url(if url.is_empty() { None } else { Some(url.to_string()) });
+            assert_eq!(result.is_ok(), *expect_ok, "url '{url}': expected ok={expect_ok}, got {}", result.is_ok());
+        }
+    }
 
     fn signed_headers(secret: &str, body: &[u8], ts: i64) -> HeaderMap {
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
@@ -523,5 +547,29 @@ mod tests {
         assert_eq!(chat_id, "D1");
         assert_eq!(data, "approve:abc123");
         assert!(callback_id.starts_with("https://hooks.slack.com"));
+    }
+
+    #[tokio::test]
+    async fn interactive_payload_with_bad_response_url_rejected() {
+        // Attacker-controlled response_url pointing at internal/SSRF target must be rejected.
+        for bad_url in &[
+            "https://evil.com/steal",
+            "http://hooks.slack.com/actions/x",
+            "https://169.254.169.254/latest/meta-data/",
+        ] {
+            let payload = json!({
+                "actions": [{ "value": "approve:abc123" }],
+                "user": { "id": "U1" },
+                "channel": { "id": "D1" },
+                "response_url": bad_url
+            });
+            let body = format!("payload={}", url::form_urlencoded::byte_serialize(
+                payload.to_string().as_bytes()).collect::<String>());
+            let cfg = json!({ "signing_secret": "s" });
+            let mut headers = signed_headers("s", body.as_bytes(), now());
+            headers.insert("content-type", "application/x-www-form-urlencoded".parse().unwrap());
+            let result = parse_with(cfg, headers, body.into()).await;
+            assert!(matches!(result, Err(ChannelError::InvalidWebhook(_))), "expected rejection for {bad_url}");
+        }
     }
 }
