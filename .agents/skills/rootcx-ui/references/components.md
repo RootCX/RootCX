@@ -28,7 +28,7 @@
 | `AppShell` | `defaultOpen`, `sidebarWidth` — wraps `AppShellSidebar` + `AppShellMain` |
 | `Sidebar` | `header`, `footer` |
 | `SidebarSection` | `title`, `collapsible`, `defaultOpen` |
-| `SidebarItem` | `icon`, `label`, `badge`, `to` (NavLink route), `active` (button-only fallback), `onClick` (actions only) |
+| `SidebarItem` | `icon`, `label`, `badge`, `active`, `onClick` |
 | `PageHeader` | `title`, `description`, `breadcrumbs`, `actions`, `onBack` |
 | `EmptyState` | `icon`, `title`, `description`, `action` |
 | `useSidebar()` | returns `{ open, setOpen, toggle }` |
