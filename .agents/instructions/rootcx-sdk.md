@@ -174,7 +174,6 @@ Stack: **Tailwind CSS v4** + **`@rootcx/ui`** (pre-configured).
 ### Imports
 
 ```tsx
-import { BrowserRouter, Routes, Route, Navigate, useParams, useSearchParams } from "react-router-dom";
 import { Button, Input, Label, Card, CardHeader, CardTitle, CardContent, CardDescription,
   Badge, Select, SelectTrigger, SelectContent, SelectItem, SelectValue,
   Dialog, DialogContent, DialogHeader, DialogFooter, DialogTitle, DialogDescription,
@@ -281,24 +280,9 @@ const columns: ColumnDef<T, unknown>[] = [
 />
 ```
 
-### Routing
-
-`BrowserRouter` wraps the app in `main.tsx` (scaffold does this). Use `react-router-dom` for all navigation.
-
-**Rules:**
-- Use `<SidebarItem to="/path" />` for sidebar navigation (renders `NavLink`, active state automatic)
-- Use `<SidebarItem onClick={...} />` only for actions (theme toggle, logout) -- not navigation
-- Define routes with `<Routes>` + `<Route>` inside `AppShellMain`
-- Use `useParams()` for record detail pages (`/contacts/:id`)
-- Sync list state to URL with `useSearchParams()`: page, sort, filters. Read params on mount, update params on user action. This gives deep linking and back/forward for free.
-- Always add a catch-all `<Route path="*" element={<Navigate to="/" replace />} />`
-
 ### App entry pattern
 
 ```tsx
-// main.tsx wraps with BrowserRouter > RuntimeProvider > ThemeProvider
-
-// App.tsx
 <AuthGate appTitle="<Name>">
   {({ user, logout }) => {
     const { theme, setTheme } = useTheme();
@@ -306,8 +290,7 @@ const columns: ColumnDef<T, unknown>[] = [
       <AppShell>
         <AppShellSidebar>
           <Sidebar header={...} footer={...}>
-            <SidebarItem to="/" icon={...} label="Dashboard" />
-            <SidebarItem to="/contacts" icon={...} label="Contacts" />
+            <SidebarItem icon={...} label="..." active={...} onClick={...} />
             <SidebarItem
               icon={theme === "dark" ? <IconSun /> : <IconMoon />}
               label={theme === "dark" ? "Light mode" : "Dark mode"}
@@ -315,14 +298,7 @@ const columns: ColumnDef<T, unknown>[] = [
             />
           </Sidebar>
         </AppShellSidebar>
-        <AppShellMain>
-          <Routes>
-            <Route path="/" element={<DashboardPage />} />
-            <Route path="/contacts" element={<ContactsPage />} />
-            <Route path="/contacts/:id" element={<ContactDetailPage />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </AppShellMain>
+        <AppShellMain>{/* views */}</AppShellMain>
         <Toaster />
       </AppShell>
     );
