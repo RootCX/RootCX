@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
 use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use super::types::{ChannelProvider, InboundEvent, MediaRef};
 use crate::api_error::ApiError;
@@ -105,7 +105,20 @@ pub async fn activate_channel(
     let body = body.map(|b| b.0).unwrap_or_default();
 
     if let Some(patch) = body.config {
-        cfg = apply_config_patch(cfg, patch);
+        let (mut creds, mut rest) = (serde_json::Map::new(), serde_json::Map::new());
+        if let Some(obj) = patch.as_object() {
+            for (k, v) in obj {
+                if PROTECTED_CONFIG_KEYS.contains(&k.as_str()) { creds.insert(k.clone(), v.clone()); }
+                else { rest.insert(k.clone(), v.clone()); }
+            }
+        }
+        if !creds.is_empty() && write_credentials(&pool, &channel_id, JsonValue::Object(creds.clone())).await? {
+            // Credentials were written — merge into cfg so the rest of the handler sees them.
+            if let Some(base) = cfg.as_object_mut() { base.extend(creds); }
+        }
+        if !rest.is_empty() {
+            cfg = apply_config_patch(cfg, JsonValue::Object(rest));
+        }
     }
 
     let provider = super::provider(&prov)
@@ -533,14 +546,26 @@ fn redact_config(mut config: JsonValue) -> JsonValue {
 fn apply_config_patch(mut base: JsonValue, patch: JsonValue) -> JsonValue {
     if let (Some(b), Some(p)) = (base.as_object_mut(), patch.as_object()) {
         for (k, v) in p {
-            if PROTECTED_CONFIG_KEYS.contains(&k.as_str()) {
-                warn!(key = k.as_str(), "attempt to overwrite protected config key ignored");
-            } else {
+            if !PROTECTED_CONFIG_KEYS.contains(&k.as_str()) {
                 b.insert(k.clone(), v.clone());
             }
         }
     }
     base
+}
+
+// Returns true if credentials were written, false if already set (no-op).
+async fn write_credentials(pool: &sqlx::PgPool, channel_id: &str, credentials: JsonValue) -> Result<bool, ApiError> {
+    let conditions = credentials.as_object()
+        .map(|o| o.keys().map(|k| format!("(config->>'{}') IS NULL", k)).collect::<Vec<_>>().join(" AND "))
+        .unwrap_or_default();
+    if conditions.is_empty() { return Ok(false); }
+    let sql = format!(
+        "UPDATE rootcx_system.channels SET config = config || $1::jsonb, updated_at = now()
+         WHERE id = $2::uuid AND {conditions}"
+    );
+    let rows = sqlx::query(&sql).bind(credentials).bind(channel_id).execute(pool).await?.rows_affected();
+    Ok(rows > 0)
 }
 
 fn resolve_public_url(body_url: Option<String>) -> Result<String, ApiError> {
@@ -635,25 +660,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn config_patch_cannot_overwrite_protected_keys() {
-        // Protected keys are system-generated or hold credentials; callers must not overwrite them.
-        let base = json!({
-            "signing_secret": "original_secret",
-            "bot_token": "original_token",
-            "webhook_secret": "original_webhook",
-            "team_id": "T123",
-        });
+    fn config_patch_strips_protected_keys() {
+        // apply_config_patch never writes credentials — callers must use write_credentials for that.
+        let base = json!({ "team_id": "T123" });
         let patch = json!({
-            "signing_secret": "attacker_value",
-            "bot_token": "attacker_token",
-            "webhook_secret": "attacker_webhook",
+            "signing_secret": "attacker",
+            "bot_token": "attacker",
+            "webhook_secret": "attacker",
             "team_id": "T_EVIL",
         });
         let result = apply_config_patch(base, patch);
-        assert_eq!(result["signing_secret"], "original_secret", "signing_secret must not be overwritten");
-        assert_eq!(result["bot_token"], "original_token", "bot_token must not be overwritten");
-        assert_eq!(result["webhook_secret"], "original_webhook", "webhook_secret must not be overwritten");
-        assert_eq!(result["team_id"], "T_EVIL", "non-protected keys must be patched");
+        for key in &["signing_secret", "bot_token", "webhook_secret"] {
+            assert!(result[key].is_null(), "{key}: protected key must be stripped from patch");
+        }
+        assert_eq!(result["team_id"], "T_EVIL", "non-protected key must be patched");
     }
 
     #[test]
