@@ -530,7 +530,8 @@ async fn supervisor_loop(
                     }
                     None => {
                         if let Some(ref mut c) = child {
-                            let exit = AsyncGroupChild::wait(c).await;
+                            let _ = c.start_kill();
+                            let exit = c.wait().await;
                             warn!(app_id = %app_id, ?exit, "worker exited unexpectedly");
                             emit_log(&log_tx, "system", "worker crashed");
                         }
