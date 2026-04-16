@@ -14,6 +14,9 @@ pub struct MediaRef {
 pub enum InboundEvent {
     Message { chat_id: String, text: String, media: Vec<MediaRef> },
     Callback { chat_id: String, callback_id: String, data: String },
+    /// Synchronous reply body (e.g. Slack URL verification challenge or slash command ack).
+    /// Bypasses the active-channel check and is returned directly as HTTP response.
+    Reply(JsonValue),
     Ignored,
 }
 

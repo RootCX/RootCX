@@ -14,6 +14,10 @@ const PROVIDERS: Provider[] = [
   { id: "telegram", label: "Telegram", fields: [
     { key: "bot_token", placeholder: "Bot token from @BotFather", secret: true },
   ]},
+  { id: "slack", label: "Slack", fields: [
+    { key: "bot_token", placeholder: "xoxb-... (Bot User OAuth Token)", secret: true },
+    { key: "signing_secret", placeholder: "Signing Secret (Basic Information)", secret: true },
+  ]},
 ];
 
 function ChannelCard({ channel }: { channel: Channel }) {

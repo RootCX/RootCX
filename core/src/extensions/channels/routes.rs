@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 use std::time::Instant;
 
 use axum::Json;
@@ -89,20 +89,36 @@ fn load_channel(r: Option<(String, JsonValue)>, id: &str) -> Result<(String, Jso
 }
 
 #[derive(Deserialize, Default)]
-pub struct ActivateChannel { pub public_url: Option<String> }
+pub struct ActivateChannel {
+    pub public_url: Option<String>,
+    /// Optional config patch merged into the channel's existing config before
+    /// activation. Used by the 2-step Slack flow: create channel empty → user
+    /// fills in tokens later → activate with the merged config.
+    pub config: Option<JsonValue>,
+}
 
 pub async fn activate_channel(
     _identity: Identity, State(rt): State<SharedRuntime>, Path(channel_id): Path<String>,
     body: Option<Json<ActivateChannel>>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
-    let (prov, cfg) = load_channel(sqlx::query_as(
+    let (prov, mut cfg) = load_channel(sqlx::query_as(
         "SELECT provider, config FROM rootcx_system.channels WHERE id = $1::uuid",
     ).bind(&channel_id).fetch_optional(&pool).await?, &channel_id)?;
 
+    let body = body.map(|b| b.0).unwrap_or_default();
+
+    if let Some(patch) = body.config {
+        if let (Some(base), Some(p)) = (cfg.as_object_mut(), patch.as_object()) {
+            for (k, v) in p { base.insert(k.clone(), v.clone()); }
+        }
+        sqlx::query("UPDATE rootcx_system.channels SET config = $1, updated_at = now() WHERE id = $2::uuid")
+            .bind(&cfg).bind(&channel_id).execute(&pool).await?;
+    }
+
     let provider = super::provider(&prov)
         .ok_or_else(|| ApiError::Internal(format!("unknown provider: {prov}")))?;
-    let base = resolve_public_url(body.and_then(|b| b.0.public_url))?;
+    let base = resolve_public_url(body.public_url)?;
     let url = format!("{base}/api/v1/channels/{prov}/{channel_id}/webhook");
     provider.register_webhook(&cfg, &url).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -162,19 +178,29 @@ pub async fn webhook(
     ).bind(&channel_id).bind(&provider_name).fetch_optional(&pool).await?
     .ok_or_else(|| ApiError::NotFound("channel not found".into()))?;
 
-    if status != "active" { return Ok(Json(json!({ "ok": true }))); }
-
     let provider = super::provider(&provider_name)
         .ok_or_else(|| ApiError::BadRequest(format!("unknown provider: {provider_name}")))?;
     let event = provider.parse_webhook(&config, body, &headers).await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
 
+    // Sync reply (URL verification etc.) bypasses the active check.
+    if let InboundEvent::Reply(value) = event {
+        return Ok(Json(value));
+    }
+
+    if status != "active" { return Ok(Json(json!({ "ok": true }))); }
+
     match event {
-        InboundEvent::Ignored => {}
+        InboundEvent::Reply(_) | InboundEvent::Ignored => {}
         InboundEvent::Callback { chat_id, callback_id, data } => {
             handle_callback(&rt, &channel_id, &config, provider.as_ref(), &chat_id, &callback_id, &data).await;
         }
         InboundEvent::Message { chat_id, text, media } => {
+            // For slash commands Slack requires an HTTP response within 3 seconds.
+            // Return the ack text directly in the response body and skip further processing.
+            if let Some(ack) = handle_command_sync(&pool, &channel_id, &chat_id, &text).await {
+                return Ok(Json(json!({ "response_type": "ephemeral", "text": ack })));
+            }
             if handle_command(&pool, &channel_id, &chat_id, &text, &config, provider.as_ref()).await {
                 return Ok(Json(json!({ "ok": true })));
             }
@@ -439,6 +465,23 @@ async fn handle_approval(
     }
 }
 
+/// Handle slash commands that require an immediate synchronous HTTP response (Slack 3s limit).
+/// Returns Some(ack_text) if handled, None otherwise.
+async fn handle_command_sync(
+    pool: &sqlx::PgPool, channel_id: &str, chat_id: &str, text: &str,
+) -> Option<String> {
+    let parts: Vec<&str> = text.split_whitespace().collect();
+    let cmd = parts.first().and_then(|p| p.split('@').next())?;
+    if cmd != "/link" { return None; }
+
+    let token = parts.get(1).filter(|t| t.starts_with(LINK_PREFIX))?;
+    if try_complete_link(pool, channel_id, chat_id, token).await.is_some() {
+        Some("Account linked! Your integrations are now available.".into())
+    } else {
+        Some("Link expired or invalid. Please try again from the dashboard.".into())
+    }
+}
+
 async fn handle_command(
     pool: &sqlx::PgPool, channel_id: &str, chat_id: &str, text: &str,
     config: &JsonValue, provider: &dyn ChannelProvider,
@@ -454,7 +497,7 @@ async fn handle_command(
             let _ = provider.send_response(config, chat_id, "New session started.").await;
             true
         }
-        "/start" => {
+        "/start" | "/link" => {
             if let Some(token) = parts.get(1).filter(|t| t.starts_with(LINK_PREFIX)) {
                 if let Some(_uid) = try_complete_link(pool, channel_id, chat_id, token).await {
                     let _ = provider.send_response(config, chat_id, "Account linked! Your integrations are now available.").await;
