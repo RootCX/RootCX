@@ -2,7 +2,7 @@
 const GMAIL_API = "https://www.googleapis.com/gmail/v1/users/me";
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
-const SCOPES = "https://www.googleapis.com/auth/gmail.modify";
+const SCOPES = "https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.readonly";
 
 interface Config {
   clientId?: string;
