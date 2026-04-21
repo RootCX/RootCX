@@ -111,6 +111,30 @@ pub async fn list_apps(
         .collect()))
 }
 
+pub async fn get_app(
+    _identity: Identity,
+    axum::extract::State(rt): axum::extract::State<SharedRuntime>,
+    axum::extract::Path(app_id): axum::extract::Path<String>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let pool = pool(&rt);
+    let row = sqlx::query_as::<_, (String, String, String, String, JsonValue)>(
+        "SELECT id, name, version, status, COALESCE(manifest->'dataContract', '[]'::jsonb) \
+         FROM rootcx_system.apps WHERE id = $1",
+    )
+    .bind(&app_id)
+    .fetch_optional(&pool)
+    .await?
+    .ok_or_else(|| ApiError::NotFound(format!("app '{app_id}' not found")))?;
+    let (id, name, version, status, data_contract) = row;
+    Ok(Json(json!({
+        "id": id,
+        "name": name,
+        "version": version,
+        "status": status,
+        "dataContract": data_contract,
+    })))
+}
+
 pub async fn uninstall_app(
     _identity: Identity,
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,

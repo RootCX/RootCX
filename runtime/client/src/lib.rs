@@ -92,6 +92,20 @@ impl RuntimeClient {
         Ok(())
     }
 
+    pub async fn get_app(&self, app_id: &str) -> Result<JsonValue, ClientError> {
+        let resp = self.authed(self.client.get(self.api(&format!("/apps/{app_id}")))).send().await?;
+        check_response(resp).await?.json().await.map_err(Into::into)
+    }
+
+    pub async fn query_records(&self, app_id: &str, entity: &str, body: &JsonValue) -> Result<JsonValue, ClientError> {
+        let resp = self
+            .authed(self.client.post(self.api(&format!("/apps/{app_id}/collections/{entity}/query"))))
+            .json(body)
+            .send()
+            .await?;
+        check_response(resp).await?.json().await.map_err(Into::into)
+    }
+
     pub async fn list_records(&self, app_id: &str, entity: &str) -> Result<Vec<JsonValue>, ClientError> {
         let resp = self.authed(self.client.get(self.api(&format!("/apps/{app_id}/collections/{entity}")))).send().await?;
         check_response(resp).await?.json().await.map_err(Into::into)
