@@ -20,6 +20,33 @@ pub async fn list(json: bool) -> Result<()> {
     Ok(())
 }
 
+pub async fn describe(app_id: &str, json: bool) -> Result<()> {
+    let client = client_from_config().await?;
+    let app = client.get_app(app_id).await.context("get app failed")?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&app)?);
+        return Ok(());
+    }
+    let name = app["name"].as_str().unwrap_or("");
+    let version = app["version"].as_str().unwrap_or("");
+    println!("{app_id}  {name}  v{version}\n");
+    if let Some(entities) = app["dataContract"].as_array() {
+        for entity in entities {
+            let ename = entity["entityName"].as_str().unwrap_or("?");
+            println!("  {ename}");
+            if let Some(fields) = entity["fields"].as_array() {
+                for field in fields {
+                    let fname = field["name"].as_str().unwrap_or("?");
+                    let ftype = field["type"].as_str().unwrap_or("?");
+                    let req = if field["required"].as_bool().unwrap_or(false) { " *" } else { "" };
+                    println!("    {fname}: {ftype}{req}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn rm(app_id: &str, yes: bool) -> Result<()> {
     if !yes {
         cliclack::set_theme(theme::RootcxTheme);

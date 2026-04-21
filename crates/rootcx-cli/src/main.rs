@@ -11,6 +11,7 @@ mod cmd_agents;
 mod cmd_apps;
 mod cmd_auth;
 mod cmd_completions;
+mod cmd_data;
 mod cmd_status;
 mod config;
 mod deploy;
@@ -52,6 +53,7 @@ CORE COMMANDS
 
 APP MANAGEMENT
   apps         Manage installed apps
+  data         Read and write app data
   agents       Manage agents
 
 AUTHENTICATION
@@ -111,6 +113,9 @@ enum Cmd {
     /// Manage agents
     #[command(subcommand, override_help = AGENTS_HELP, disable_help_subcommand = true)]
     Agents(AgentsCmd),
+    /// Read and write app data
+    #[command(subcommand, override_help = DATA_HELP, disable_help_subcommand = true)]
+    Data(DataCmd),
     /// Manage authentication
     #[command(subcommand, override_help = AUTH_HELP, disable_help_subcommand = true)]
     Auth(AuthCmd),
@@ -157,12 +162,14 @@ USAGE
   rootcx apps <command> [flags]
 
 COMMANDS
-  list  List installed apps (alias: ls)
-  rm    Uninstall an app (requires confirmation)
+  list      List installed apps (alias: ls)
+  describe  Show app structure (entities, fields, types)
+  rm        Uninstall an app (requires confirmation)
 
 EXAMPLES
   $ rootcx apps list
   $ rootcx apps list --json
+  $ rootcx apps describe my_app
   $ rootcx apps rm my_app
   $ rootcx apps rm my_app -y        # skip confirmation
 ";
@@ -270,6 +277,14 @@ enum AppsCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Show app structure (entities, fields, types)
+    Describe {
+        /// App ID to describe
+        app_id: String,
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Uninstall an app
     Rm {
         /// App ID to uninstall
@@ -309,6 +324,107 @@ enum AgentsCmd {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum DataCmd {
+    /// List records in an entity
+    #[command(alias = "ls")]
+    List {
+        /// App ID
+        app_id: String,
+        /// Entity name
+        entity: String,
+        /// Max records to return
+        #[arg(long)]
+        limit: Option<u32>,
+        /// Skip N records
+        #[arg(long)]
+        offset: Option<u32>,
+        /// Sort by field
+        #[arg(long)]
+        sort: Option<String>,
+        /// Sort order (asc/desc)
+        #[arg(long)]
+        order: Option<String>,
+    },
+    /// Query records with filters (body: JSON with where, orderBy, limit, offset)
+    Query {
+        /// App ID
+        app_id: String,
+        /// Entity name
+        entity: String,
+        /// JSON query body (e.g. '{"where":{"status":"active"},"limit":10}')
+        body: String,
+    },
+    /// Get a single record by ID
+    Get {
+        /// App ID
+        app_id: String,
+        /// Entity name
+        entity: String,
+        /// Record UUID
+        id: String,
+    },
+    /// Create a new record
+    Create {
+        /// App ID
+        app_id: String,
+        /// Entity name
+        entity: String,
+        /// JSON body (e.g. '{"name":"Alice","email":"a@b.com"}')
+        #[arg(long)]
+        body: String,
+    },
+    /// Update an existing record
+    Update {
+        /// App ID
+        app_id: String,
+        /// Entity name
+        entity: String,
+        /// Record UUID
+        id: String,
+        /// JSON body with fields to update
+        #[arg(long)]
+        body: String,
+    },
+    /// Delete a record
+    #[command(alias = "rm")]
+    Delete {
+        /// App ID
+        app_id: String,
+        /// Entity name
+        entity: String,
+        /// Record UUID
+        id: String,
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+}
+
+const DATA_HELP: &str = "\
+Read and write app data.
+
+USAGE
+  rootcx data <command> [flags]
+
+COMMANDS
+  list    List records in an entity (alias: ls)
+  query   Query records with filters (JSON body)
+  get     Get a single record by ID
+  create  Create a new record
+  update  Update an existing record
+  delete  Delete a record (alias: rm)
+
+EXAMPLES
+  $ rootcx data list my_app contacts
+  $ rootcx data list my_app contacts --limit 10 --sort name --order asc --json
+  $ rootcx data query my_app contacts '{\"where\":{\"status\":\"active\"},\"limit\":5}'
+  $ rootcx data get my_app contacts 550e8400-...
+  $ rootcx data create my_app contacts --body '{\"name\":\"Alice\"}'
+  $ rootcx data update my_app contacts 550e8400-... --body '{\"name\":\"Bob\"}'
+  $ rootcx data delete my_app contacts 550e8400-...
+";
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -327,6 +443,7 @@ async fn main() -> Result<()> {
         },
         Cmd::Apps(sub) => match sub {
             AppsCmd::List { json } => cmd_apps::list(json).await,
+            AppsCmd::Describe { app_id, json } => cmd_apps::describe(&app_id, json).await,
             AppsCmd::Rm { app_id, yes } => cmd_apps::rm(&app_id, yes).await,
         },
         Cmd::Agents(sub) => match sub {
@@ -335,6 +452,16 @@ async fn main() -> Result<()> {
             }
             AgentsCmd::List { json } => cmd_agents::list(json).await,
             AgentsCmd::Sessions { app_id, json } => cmd_agents::sessions(&app_id, json).await,
+        },
+        Cmd::Data(sub) => match sub {
+            DataCmd::List { app_id, entity, limit, offset, sort, order } => {
+                cmd_data::list(&app_id, &entity, limit, offset, sort.as_deref(), order.as_deref()).await
+            }
+            DataCmd::Query { app_id, entity, body } => cmd_data::query(&app_id, &entity, &body).await,
+            DataCmd::Get { app_id, entity, id } => cmd_data::get(&app_id, &entity, &id).await,
+            DataCmd::Create { app_id, entity, body } => cmd_data::create(&app_id, &entity, &body).await,
+            DataCmd::Update { app_id, entity, id, body } => cmd_data::update(&app_id, &entity, &id, &body).await,
+            DataCmd::Delete { app_id, entity, id, yes } => cmd_data::delete(&app_id, &entity, &id, yes).await,
         },
         Cmd::Completions { shell } => cmd_completions::run(shell),
         Cmd::Upgrade { version } => upgrade::run(version).await,
@@ -458,6 +585,16 @@ mod cli_parse_tests {
             (&["agents", "invoke", "a", "hi"], |c| matches!(c, Cmd::Agents(AgentsCmd::Invoke { app_id, message, session: None }) if app_id == "a" && message == "hi")),
             (&["agents", "invoke", "a", "hi", "--session", "s1"], |c| matches!(c, Cmd::Agents(AgentsCmd::Invoke { session: Some(s), .. }) if s == "s1")),
             (&["agents", "sessions", "a"], |c| matches!(c, Cmd::Agents(AgentsCmd::Sessions { app_id, .. }) if app_id == "a")),
+            (&["apps", "describe", "myapp"], |c| matches!(c, Cmd::Apps(AppsCmd::Describe { app_id, json: false }) if app_id == "myapp")),
+            (&["apps", "describe", "myapp", "--json"], |c| matches!(c, Cmd::Apps(AppsCmd::Describe { json: true, .. }))),
+            (&["data", "list", "a", "contacts"], |c| matches!(c, Cmd::Data(DataCmd::List { app_id, entity, .. }) if app_id == "a" && entity == "contacts")),
+            (&["data", "ls", "a", "contacts"], |c| matches!(c, Cmd::Data(DataCmd::List { .. }))),
+            (&["data", "get", "a", "contacts", "id1"], |c| matches!(c, Cmd::Data(DataCmd::Get { app_id, entity, id }) if app_id == "a" && entity == "contacts" && id == "id1")),
+            (&["data", "create", "a", "contacts", "--body", "{}"], |c| matches!(c, Cmd::Data(DataCmd::Create { app_id, entity, body }) if app_id == "a" && entity == "contacts" && body == "{}")),
+            (&["data", "update", "a", "contacts", "id1", "--body", "{}"], |c| matches!(c, Cmd::Data(DataCmd::Update { id, .. }) if id == "id1")),
+            (&["data", "delete", "a", "contacts", "id1"], |c| matches!(c, Cmd::Data(DataCmd::Delete { id, yes: false, .. }) if id == "id1")),
+            (&["data", "rm", "a", "contacts", "id1", "-y"], |c| matches!(c, Cmd::Data(DataCmd::Delete { yes: true, .. }))),
+            (&["data", "query", "a", "contacts", "{}"], |c| matches!(c, Cmd::Data(DataCmd::Query { app_id, entity, body }) if app_id == "a" && entity == "contacts" && body == "{}")),
         ];
         for (args, check) in cases {
             let parsed = parse(args).unwrap_or_else(|e| panic!("parse {args:?} failed: {e}"));
@@ -484,6 +621,10 @@ mod cli_parse_tests {
         assert!(parse(&["apps", "rm"]).is_err(), "`apps rm` requires an app_id");
         assert!(parse(&["agents", "invoke", "a"]).is_err(), "`agents invoke` requires message");
         assert!(parse(&["agents", "sessions"]).is_err(), "`agents sessions` requires app_id");
+        assert!(parse(&["data", "list", "a"]).is_err(), "`data list` requires entity");
+        assert!(parse(&["data", "get", "a", "e"]).is_err(), "`data get` requires id");
+        assert!(parse(&["data", "create", "a", "e"]).is_err(), "`data create` requires --body");
+        assert!(parse(&["data", "delete", "a", "e"]).is_err(), "`data delete` requires id");
     }
 
     #[test]
