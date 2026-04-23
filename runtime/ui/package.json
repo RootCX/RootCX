@@ -1,6 +1,6 @@
 {
   "name": "@rootcx/ui",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "RootCX shared UI component library",
   "license": "FSL-1.1-ALv2",
   "publishConfig": { "access": "public" },
