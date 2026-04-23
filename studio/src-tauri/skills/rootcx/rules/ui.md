@@ -15,7 +15,7 @@ Stack: **Tailwind CSS v4** + **`@rootcx/ui`** (pre-configured).
 ## Imports
 
 ```tsx
-import { BrowserRouter, Routes, Route, Navigate, useParams, useSearchParams } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, NavLink, useParams, useSearchParams, useLocation } from "react-router-dom";
 import { Button, Input, Label, Card, CardHeader, CardTitle, CardContent, CardDescription,
   Badge, Select, SelectTrigger, SelectContent, SelectItem, SelectValue,
   Dialog, DialogContent, DialogHeader, DialogFooter, DialogTitle, DialogDescription,
@@ -84,12 +84,13 @@ const columns: ColumnDef<T, unknown>[] = [
 `BrowserRouter` wraps the app in `main.tsx` (scaffold does this) with `basename={import.meta.env.BASE_URL}` — required because apps are served under `/apps/<app_id>/` in production. Use `react-router-dom` for all navigation.
 
 **Rules:**
-- Use `<SidebarItem to="/path" />` for sidebar navigation (renders `NavLink`, active state automatic)
-- Use `<SidebarItem onClick={...} />` only for actions (theme toggle, logout) -- not navigation
-- Define routes with `<Routes>` + `<Route>` inside `AppShellMain`
-- Use `useParams()` for record detail pages (`/contacts/:id`)
-- Sync list state to URL with `useSearchParams()`: page, sort, filters. Read params on mount, update params on user action. This gives deep linking and back/forward for free.
-- Always add a catch-all `<Route path="*" element={<Navigate to="/" replace />} />`
+- `@rootcx/ui` is router-agnostic — `SidebarItem` uses the `asChild` slot pattern (shadcn-style). The app provides `NavLink`.
+- Sidebar navigation: `<SidebarItem asChild isActive={...}><NavLink to="/x">…</NavLink></SidebarItem>` — compute `isActive` from `useLocation()`.
+- Sidebar actions (theme toggle, logout): `<SidebarItem onClick={...}>…</SidebarItem>` — plain button, no `asChild`.
+- Define routes with `<Routes>` + `<Route>` inside `AppShellMain`.
+- Use `useParams()` for record detail pages (`/contacts/:id`).
+- Sync list state to URL with `useSearchParams()`: page, sort, filters. Read params on mount, update params on user action — gives deep linking and back/forward for free.
+- Always add a catch-all `<Route path="*" element={<Navigate to="/" replace />} />`.
 
 ## App entry pattern
 
@@ -100,17 +101,21 @@ const columns: ColumnDef<T, unknown>[] = [
 <AuthGate appTitle="<Name>">
   {({ user, logout }) => {
     const { theme, setTheme } = useTheme();
+    const { pathname } = useLocation();
     return (
       <AppShell>
         <AppShellSidebar>
           <Sidebar header={...} footer={...}>
-            <SidebarItem to="/" icon={...} label="Dashboard" />
-            <SidebarItem to="/contacts" icon={...} label="Contacts" />
-            <SidebarItem
-              icon={theme === "dark" ? <IconSun /> : <IconMoon />}
-              label={theme === "dark" ? "Light mode" : "Dark mode"}
-              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-            />
+            <SidebarItem asChild isActive={pathname === "/"}>
+              <NavLink to="/"><IconLayoutDashboard /><span>Dashboard</span></NavLink>
+            </SidebarItem>
+            <SidebarItem asChild isActive={pathname.startsWith("/contacts")}>
+              <NavLink to="/contacts"><IconUsers /><span>Contacts</span></NavLink>
+            </SidebarItem>
+            <SidebarItem onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+              {theme === "dark" ? <IconSun /> : <IconMoon />}
+              <span>{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+            </SidebarItem>
           </Sidebar>
         </AppShellSidebar>
         <AppShellMain>
