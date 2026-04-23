@@ -1,4 +1,6 @@
 import * as React from "react";
+import { NavLink } from "react-router-dom";
+import { cva } from "class-variance-authority";
 import { cn } from "../lib/utils";
 import { IconChevronDown } from "@tabler/icons-react";
 import { useSidebarOptional } from "./app-shell";
@@ -56,37 +58,50 @@ export function SidebarSection({ title, collapsible = false, defaultOpen = true,
   );
 }
 
-interface SidebarItemProps {
-  icon?: React.ReactNode;
-  label: string;
-  badge?: React.ReactNode;
-  active?: boolean;
-  onClick?: () => void;
-  className?: string;
-}
+type SidebarItemBase = { icon?: React.ReactNode; label: string; badge?: React.ReactNode; className?: string };
 
-export function SidebarItem({ icon, label, badge, active = false, onClick, className }: SidebarItemProps) {
+export type SidebarItemProps =
+  | SidebarItemBase & { to: string; active?: never; onClick?: never }
+  | SidebarItemBase & { to?: never; active?: boolean; onClick?: () => void };
+
+const sidebarItemVariants = cva(
+  "flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-sm font-medium transition-colors no-underline",
+  { variants: { active: { true: "bg-sidebar-accent text-sidebar-accent-foreground", false: "text-sidebar-foreground/80 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground" } }, defaultVariants: { active: false } },
+);
+
+export function SidebarItem({ icon, label, badge, active, onClick, to, className }: SidebarItemProps) {
   const sidebar = useSidebarOptional();
-  const handleClick = () => {
-    onClick?.();
-    // Auto-dismiss the mobile drawer after navigation so content is immediately visible.
+  const dismissMobile = () => {
     if (sidebar?.isMobile) sidebar.setOpenMobile(false);
   };
-  return (
-    <button
-      type="button"
-      onClick={handleClick}
-      className={cn(
-        "flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-sm font-medium transition-colors",
-        active
-          ? "bg-sidebar-accent text-sidebar-accent-foreground"
-          : "text-sidebar-foreground/80 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground",
-        className,
-      )}
-    >
+
+  const content = (
+    <>
       {icon && <span className="flex-shrink-0 [&_svg]:h-4 [&_svg]:w-4">{icon}</span>}
       <span className="flex-1 truncate text-left">{label}</span>
       {badge && <span className="flex-shrink-0">{badge}</span>}
+    </>
+  );
+
+  if (to) {
+    return (
+      <NavLink
+        to={to}
+        onClick={dismissMobile}
+        className={({ isActive }) => cn(sidebarItemVariants({ active: isActive }), className)}
+      >
+        {content}
+      </NavLink>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => { onClick?.(); dismissMobile(); }}
+      className={cn(sidebarItemVariants({ active: !!active }), className)}
+    >
+      {content}
     </button>
   );
 }

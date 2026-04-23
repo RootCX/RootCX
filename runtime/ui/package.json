@@ -1,6 +1,6 @@
 {
   "name": "@rootcx/ui",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "RootCX shared UI component library",
   "license": "FSL-1.1-ALv2",
   "publishConfig": { "access": "public" },
@@ -20,7 +20,8 @@
   },
   "peerDependencies": {
     "react": ">=18",
-    "react-dom": ">=18"
+    "react-dom": ">=18",
+    "react-router-dom": ">=6"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.0",
@@ -42,6 +43,7 @@
     "tailwind-merge": "^2.5.0"
   },
   "devDependencies": {
+    "react-router-dom": "^7.0.0",
     "@tailwindcss/vite": "^4.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

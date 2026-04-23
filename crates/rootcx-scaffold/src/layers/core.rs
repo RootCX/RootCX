@@ -34,12 +34,13 @@ impl Layer for CoreLayer {
   "scripts": {{ "dev": "vite", "build": "vite build" }},
   "dependencies": {{
     "@rootcx/sdk": "^0.10.0",
-    "@rootcx/ui": "^0.6.0",
+    "@rootcx/ui": "^0.7.0",
     "@tabler/icons-react": "^3.30.0",
     "@tailwindcss/vite": "^4.0.0",
     "clsx": "^2.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-router-dom": "^7.0.0",
     "tailwind-merge": "^2.5.0",
     "tailwindcss": "^4.0.0",
     "tw-animate-css": "^1.4.0"
