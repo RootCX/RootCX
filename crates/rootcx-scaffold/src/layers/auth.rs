@@ -31,7 +31,8 @@ export default function App() {{
 
 fn auth_app(name: &str) -> String {
     format!(
-        r#"import {{ AuthGate }} from "@rootcx/sdk";
+        r#"import {{ NavLink, useLocation, Routes, Route }} from "react-router-dom";
+import {{ AuthGate }} from "@rootcx/sdk";
 import {{
   AppShell,
   AppShellSidebar,
@@ -48,39 +49,43 @@ import {{ IconLogout, IconHome }} from "@tabler/icons-react";
 export default function App() {{
   return (
     <AuthGate appTitle="{name}">
-      {{({{ user, logout }}) => (
-        <AppShell>
-          <AppShellSidebar>
-            <Sidebar
-              header={{<span className="text-sm font-semibold">{name}</span>}}
-              footer={{
-                <div className="flex items-center justify-between gap-2">
-                  <span className="truncate text-sm text-muted-foreground">{{user.email}}</span>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={{() => logout()}}
-                    aria-label="Sign out"
-                  >
-                    <IconLogout className="h-4 w-4" />
-                  </Button>
-                </div>
-              }}
-            >
-              <SidebarItem icon={{<IconHome />}} label="Home" active />
-            </Sidebar>
-          </AppShellSidebar>
-          <AppShellMain>
-            <AppShellHeader>
-              <SidebarTrigger />
-              <span className="text-sm font-semibold">{name}</span>
-            </AppShellHeader>
-            <div className="mx-auto w-full max-w-5xl p-4 sm:p-6 lg:p-8">
-              <PageHeader title="Home" description="Welcome to {name}" />
-            </div>
-          </AppShellMain>
-        </AppShell>
-      )}}
+      {{({{ user, logout }}) => {{
+        const {{ pathname }} = useLocation();
+        return (
+          <AppShell>
+            <AppShellSidebar>
+              <Sidebar
+                header={{<span className="text-sm font-semibold">{name}</span>}}
+                footer={{
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate text-sm text-muted-foreground">{{user.email}}</span>
+                    <Button variant="ghost" size="icon" onClick={{() => logout()}} aria-label="Sign out">
+                      <IconLogout className="h-4 w-4" />
+                    </Button>
+                  </div>
+                }}
+              >
+                <SidebarItem asChild isActive={{pathname === "/"}}>
+                  <NavLink to="/"><IconHome /><span>Home</span></NavLink>
+                </SidebarItem>
+              </Sidebar>
+            </AppShellSidebar>
+            <AppShellMain>
+              <AppShellHeader>
+                <SidebarTrigger />
+                <span className="text-sm font-semibold">{name}</span>
+              </AppShellHeader>
+              <Routes>
+                <Route path="/" element={{
+                  <div className="mx-auto w-full max-w-5xl p-4 sm:p-6 lg:p-8">
+                    <PageHeader title="Home" description="Welcome to {name}" />
+                  </div>
+                }} />
+              </Routes>
+            </AppShellMain>
+          </AppShell>
+        );
+      }}}}
     </AuthGate>
   );
 }}

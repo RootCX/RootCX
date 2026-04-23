@@ -1,5 +1,5 @@
 import * as React from "react";
-import { NavLink } from "react-router-dom";
+import { Slot } from "@radix-ui/react-slot";
 import { cva } from "class-variance-authority";
 import { cn } from "../lib/utils";
 import { IconChevronDown } from "@tabler/icons-react";
@@ -58,50 +58,41 @@ export function SidebarSection({ title, collapsible = false, defaultOpen = true,
   );
 }
 
-type SidebarItemBase = { icon?: React.ReactNode; label: string; badge?: React.ReactNode; className?: string };
-
-export type SidebarItemProps =
-  | SidebarItemBase & { to: string; active?: never; onClick?: never }
-  | SidebarItemBase & { to?: never; active?: boolean; onClick?: () => void };
-
 const sidebarItemVariants = cva(
-  "flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-sm font-medium transition-colors no-underline",
-  { variants: { active: { true: "bg-sidebar-accent text-sidebar-accent-foreground", false: "text-sidebar-foreground/80 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground" } }, defaultVariants: { active: false } },
+  "flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-sm font-medium transition-colors no-underline [&>svg]:flex-shrink-0 [&>svg]:h-4 [&>svg]:w-4",
+  {
+    variants: {
+      isActive: {
+        true: "bg-sidebar-accent text-sidebar-accent-foreground",
+        false: "text-sidebar-foreground/80 hover:bg-sidebar-accent/50 hover:text-sidebar-foreground",
+      },
+    },
+    defaultVariants: { isActive: false },
+  },
 );
 
-export function SidebarItem({ icon, label, badge, active, onClick, to, className }: SidebarItemProps) {
-  const sidebar = useSidebarOptional();
-  const dismissMobile = () => {
-    if (sidebar?.isMobile) sidebar.setOpenMobile(false);
-  };
-
-  const content = (
-    <>
-      {icon && <span className="flex-shrink-0 [&_svg]:h-4 [&_svg]:w-4">{icon}</span>}
-      <span className="flex-1 truncate text-left">{label}</span>
-      {badge && <span className="flex-shrink-0">{badge}</span>}
-    </>
-  );
-
-  if (to) {
-    return (
-      <NavLink
-        to={to}
-        onClick={dismissMobile}
-        className={({ isActive }) => cn(sidebarItemVariants({ active: isActive }), className)}
-      >
-        {content}
-      </NavLink>
-    );
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={() => { onClick?.(); dismissMobile(); }}
-      className={cn(sidebarItemVariants({ active: !!active }), className)}
-    >
-      {content}
-    </button>
-  );
+export interface SidebarItemProps extends React.HTMLAttributes<HTMLElement> {
+  asChild?: boolean;
+  isActive?: boolean;
 }
+
+export const SidebarItem = React.forwardRef<HTMLElement, SidebarItemProps>(
+  ({ asChild = false, isActive = false, onClick, className, ...props }, ref) => {
+    const sidebar = useSidebarOptional();
+    const handleClick = (e: React.MouseEvent<HTMLElement>) => {
+      onClick?.(e);
+      if (sidebar?.isMobile) sidebar.setOpenMobile(false);
+    };
+    const Comp = asChild ? Slot : "button";
+    return (
+      <Comp
+        ref={ref as React.Ref<HTMLButtonElement>}
+        type={asChild ? undefined : "button"}
+        onClick={handleClick}
+        className={cn(sidebarItemVariants({ isActive }), className)}
+        {...props}
+      />
+    );
+  },
+);
+SidebarItem.displayName = "SidebarItem";
