@@ -2616,3 +2616,36 @@ async fn manifest_icon_replaced_on_redeploy() {
 
     rt.shutdown().await;
 }
+
+#[tokio::test]
+async fn schema_sync_handles_core_users_fk_change() {
+    let rt = TestRuntime::boot().await;
+
+    let v1 = json!({
+        "appId": "coreref", "name": "Core Ref", "version": "1.0.0",
+        "dataContract": [{
+            "entityName": "assignments", "fields": [
+                { "name": "user_id", "type": "entity_link", "required": true,
+                  "references": { "entity": "core:users", "field": "id" } },
+                { "name": "role", "type": "text" }
+            ]
+        }]
+    });
+    let (s, body) = rt.post_json("/api/v1/apps", &v1).await;
+    assert_eq!(s, 200, "initial install: {body}");
+
+    let v2 = json!({
+        "appId": "coreref", "name": "Core Ref", "version": "1.0.1",
+        "dataContract": [{
+            "entityName": "assignments", "fields": [
+                { "name": "user_id", "type": "entity_link", "required": true, "onDelete": "cascade",
+                  "references": { "entity": "core:users", "field": "id" } },
+                { "name": "role", "type": "text" }
+            ]
+        }]
+    });
+    let (s, body) = rt.post_json("/api/v1/apps", &v2).await;
+    assert_eq!(s, 200, "re-install with changed onDelete must not fail: {body}");
+
+    rt.shutdown().await;
+}

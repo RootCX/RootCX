@@ -178,12 +178,21 @@ pub fn compute_diff(
                         let desired = resolve_on_delete(field);
                         let current = pg_delete_rule_char_to_str(&fk_info.delete_rule);
                         if current != desired {
+                            let (target_schema, target_entity) = match crate::manifest::parse_entity_ref(&refs.entity) {
+                                crate::manifest::RefTarget::Core(name) => {
+                                    match crate::manifest::resolve_core_entity(&name) {
+                                        Some((s, t, _, _)) => (s.to_string(), t.to_string()),
+                                        None => continue,
+                                    }
+                                }
+                                _ => (schema_name.to_string(), refs.entity.clone()),
+                            };
                             changes.push(ColumnDiff::ReplaceFkConstraint {
                                 column_name: field.name.clone(),
                                 old_constraint_name: fk_info.constraint_name.clone(),
                                 new_constraint_name: format!("fk_{}_{}_{}_{}",
-                                    schema_name, table_name, field.name, refs.entity),
-                                target_table: format!("{}.{}", quote_ident(schema_name), quote_ident(&refs.entity)),
+                                    schema_name, table_name, field.name, target_entity),
+                                target_table: format!("{}.{}", quote_ident(&target_schema), quote_ident(&target_entity)),
                                 delete_rule: desired.to_string(),
                             });
                         }

@@ -381,13 +381,13 @@ async fn drop_orphaned_identity_indexes(
 // "crm:contacts"  → App    (cross-app, Phase 2)
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum RefTarget {
+pub(crate) enum RefTarget {
     Local(String),
     Core(String),
     App { app: String, entity: String },
 }
 
-fn parse_entity_ref(raw: &str) -> RefTarget {
+pub(crate) fn parse_entity_ref(raw: &str) -> RefTarget {
     match raw.split_once(':') {
         Some(("core", e)) => RefTarget::Core(e.into()),
         Some((app, e)) => RefTarget::App { app: app.into(), entity: e.into() },
@@ -396,7 +396,7 @@ fn parse_entity_ref(raw: &str) -> RefTarget {
 }
 
 /// Resolve a `core:X` name to (schema, table, pk_column, pk_type).
-fn resolve_core_entity(name: &str) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+pub(crate) fn resolve_core_entity(name: &str) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
     match name {
         "users" => Some(("rootcx_system", "users", "id", "UUID")),
         _ => None,
