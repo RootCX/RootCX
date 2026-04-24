@@ -2525,3 +2525,94 @@ async fn schema_sync_updates_fk_delete_rule() {
 
     rt.shutdown().await;
 }
+
+#[tokio::test]
+async fn icon_get_returns_404_when_no_icon() {
+    let rt = TestRuntime::boot().await;
+    rt.install("iconget", "items").await;
+
+    let (s, _, _) = rt.get_raw("/api/v1/apps/iconget/icon").await;
+    assert_eq!(s, 404, "app without icon must return 404");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn icon_rejects_unauthenticated() {
+    let rt = TestRuntime::boot().await;
+    rt.install("iconnoauth", "items").await;
+
+    assert_eq!(rt.get_unauthed("/api/v1/apps/iconnoauth/icon").await, 401);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn manifest_icon_stored_on_deploy() {
+    let rt = TestRuntime::boot().await;
+
+    let png_header = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    let manifest = json!({
+        "appId": "icondep", "name": "Icon Deploy", "version": "1.0.0",
+        "icon": "assets/icon.png",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "label", "type": "text", "required": true }
+        ]}]
+    });
+    rt.install_manifest(&manifest).await;
+
+    let archive = make_tar_gz(&[
+        ("index.ts", b"process.stdin.resume();"),
+        ("assets/icon.png", &png_header),
+    ]);
+    let (s, _) = rt.deploy("icondep", &archive).await;
+    assert_eq!(s, 200);
+
+    let (s, bytes, ct) = rt.get_raw("/api/v1/apps/icondep/icon").await;
+    assert_eq!(s, 200, "icon must be served after deploy");
+    assert_eq!(ct, "image/png");
+    assert_eq!(bytes, png_header);
+
+    let (s, body) = rt.get_json("/api/v1/apps").await;
+    assert_eq!(s, 200);
+    let app = body.as_array().unwrap().iter().find(|a| a["id"] == "icondep").unwrap();
+    assert!(app["icon"].is_string(), "list_apps must include icon field after deploy");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn manifest_icon_replaced_on_redeploy() {
+    let rt = TestRuntime::boot().await;
+
+    let manifest = json!({
+        "appId": "iconredo", "name": "Icon Redeploy", "version": "1.0.0",
+        "icon": "icon.png",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "label", "type": "text", "required": true }
+        ]}]
+    });
+    rt.install_manifest(&manifest).await;
+
+    let v1 = [0x89, 0x50, 0x4E, 0x47, 0x01];
+    let (s, _) = rt.deploy("iconredo", &make_tar_gz(&[
+        ("index.ts", b"process.stdin.resume();"),
+        ("icon.png", &v1),
+    ])).await;
+    assert_eq!(s, 200);
+
+    let (_, bytes1, _) = rt.get_raw("/api/v1/apps/iconredo/icon").await;
+    assert_eq!(bytes1, v1, "first deploy icon");
+
+    let v2 = [0x89, 0x50, 0x4E, 0x47, 0x02];
+    let (s, _) = rt.deploy("iconredo", &make_tar_gz(&[
+        ("index.ts", b"process.stdin.resume();"),
+        ("icon.png", &v2),
+    ])).await;
+    assert_eq!(s, 200);
+
+    let (_, bytes2, _) = rt.get_raw("/api/v1/apps/iconredo/icon").await;
+    assert_eq!(bytes2, v2, "redeploy must replace the icon");
+
+    rt.shutdown().await;
+}

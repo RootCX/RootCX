@@ -2,6 +2,7 @@ pub mod auth;
 mod crons;
 pub(crate) mod crud;
 mod deploy;
+mod icon;
 mod introspection;
 mod jobs;
 pub mod llm_models;
@@ -77,9 +78,10 @@ pub async fn list_apps(
         _ => None,
     });
 
-    let rows = sqlx::query_as::<_, (String, String, String, String, Option<sqlx::types::JsonValue>, bool)>(
+    let rows = sqlx::query_as::<_, (String, String, String, String, Option<sqlx::types::JsonValue>, bool, Option<String>)>(
         "SELECT a.id, a.name, a.version, a.status, a.manifest,
-                EXISTS(SELECT 1 FROM rootcx_system.agents ag WHERE ag.app_id = a.id) AS is_agent
+                EXISTS(SELECT 1 FROM rootcx_system.agents ag WHERE ag.app_id = a.id) AS is_agent,
+                a.icon
          FROM rootcx_system.apps a
          WHERE a.status != 'system'
          ORDER BY a.name",
@@ -90,7 +92,7 @@ pub async fn list_apps(
     let frontends = deploy::list_frontends(&data_dir);
 
     Ok(Json(rows.into_iter()
-        .filter_map(|(id, name, version, status, manifest, is_agent)| {
+        .filter_map(|(id, name, version, status, manifest, is_agent, icon)| {
             let app_type = if is_agent {
                 AppType::Agent
             } else if manifest.as_ref().and_then(|m| m.get("type")).and_then(|t| t.as_str()) == Some("integration") {
@@ -106,7 +108,7 @@ pub async fn list_apps(
                     .map(|a| a.iter().filter_map(|e| e.get("entityName")?.as_str().map(String::from)).collect()))
                 .unwrap_or_default();
             let has_frontend = frontends.contains(&id);
-            Some(InstalledApp { id, name, version, status, app_type, entities, has_frontend })
+            Some(InstalledApp { id, name, version, status, app_type, entities, has_frontend, icon })
         })
         .collect()))
 }
@@ -117,21 +119,22 @@ pub async fn get_app(
     axum::extract::Path(app_id): axum::extract::Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = pool(&rt);
-    let row = sqlx::query_as::<_, (String, String, String, String, JsonValue)>(
-        "SELECT id, name, version, status, COALESCE(manifest->'dataContract', '[]'::jsonb) \
+    let row = sqlx::query_as::<_, (String, String, String, String, JsonValue, Option<String>)>(
+        "SELECT id, name, version, status, COALESCE(manifest->'dataContract', '[]'::jsonb), icon \
          FROM rootcx_system.apps WHERE id = $1",
     )
     .bind(&app_id)
     .fetch_optional(&pool)
     .await?
     .ok_or_else(|| ApiError::NotFound(format!("app '{app_id}' not found")))?;
-    let (id, name, version, status, data_contract) = row;
+    let (id, name, version, status, data_contract, icon) = row;
     Ok(Json(json!({
         "id": id,
         "name": name,
         "version": version,
         "status": status,
         "dataContract": data_contract,
+        "icon": icon,
     })))
 }
 
@@ -174,6 +177,7 @@ pub use upload::upload_file;
 pub use introspection::{execute_query, list_schemas, list_tables};
 pub use crons::{create_cron, delete_cron, list_all_crons, list_cron_runs, list_crons, trigger_cron, update_cron};
 pub use workers::{all_worker_statuses, rpc_proxy, start_worker, stop_worker, worker_status};
+pub use icon::get_icon;
 
 #[cfg(test)]
 mod tests {
