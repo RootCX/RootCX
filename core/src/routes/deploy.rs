@@ -71,6 +71,8 @@ pub async fn deploy_backend(
             .map_err(|e| ApiError::Internal(format!("agent registration: {e}")))?;
     }
 
+    store_manifest_icon(&pool, &app_id, &app_dir).await;
+
     let _ = wm.stop_app(&app_id).await;
     wm.start_app(&pool, &secrets, &app_id).await?;
 
@@ -109,6 +111,77 @@ async fn install_deps(bun_bin: &Path, dir: &Path) -> Result<(), ApiError> {
         )));
     }
     Ok(())
+}
+
+async fn store_manifest_icon(pool: &sqlx::PgPool, app_id: &str, app_dir: &Path) {
+    use crate::extensions::storage::backend::{PostgresBackend, StorageBackend};
+
+    let icon_path: Option<String> = sqlx::query_scalar(
+        "SELECT manifest->>'icon' FROM rootcx_system.apps WHERE id = $1",
+    )
+    .bind(app_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten();
+
+    let icon_path = match icon_path {
+        Some(p) if !p.is_empty() => p,
+        _ => return,
+    };
+
+    let rel = std::path::Path::new(&icon_path);
+    if rel.is_absolute() || rel.components().any(|c| c == std::path::Component::ParentDir) {
+        tracing::warn!(app_id, icon_path, "manifest icon path rejected (unsafe)");
+        return;
+    }
+
+    let file = app_dir.join(rel);
+    let data = match tokio::fs::read(&file).await {
+        Ok(d) if !d.is_empty() => d,
+        _ => {
+            tracing::warn!(app_id, icon_path, "manifest icon file not found or empty");
+            return;
+        }
+    };
+
+    let ct = content_type(&file);
+    if !ct.starts_with("image/") {
+        tracing::warn!(app_id, icon_path, ct, "manifest icon not an image");
+        return;
+    }
+
+    let old_icon: Option<String> = sqlx::query_scalar("SELECT icon FROM rootcx_system.apps WHERE id = $1")
+        .bind(app_id)
+        .fetch_one(pool)
+        .await
+        .ok()
+        .flatten();
+
+    let file_id = uuid::Uuid::new_v4();
+    if let Err(e) = PostgresBackend.put(pool, file_id, app_id, &icon_path, ct, &data, None).await {
+        tracing::error!(app_id, icon_path, %e, "failed to store manifest icon");
+        return;
+    }
+
+    if let Err(e) = sqlx::query("UPDATE rootcx_system.apps SET icon = $1, updated_at = now() WHERE id = $2")
+        .bind(file_id.to_string())
+        .bind(app_id)
+        .execute(pool)
+        .await
+    {
+        tracing::error!(app_id, %e, "failed to update app icon reference");
+        return;
+    }
+
+    if let Some(old_id) = old_icon {
+        if let Ok(old_uuid) = old_id.parse::<uuid::Uuid>() {
+            let _ = PostgresBackend.delete(pool, old_uuid, app_id).await;
+        }
+    }
+
+    tracing::info!(app_id, icon_path, "manifest icon stored");
 }
 
 // ── Frontend deploy & serve ──────────────────────────────────────────

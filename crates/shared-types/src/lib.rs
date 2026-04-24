@@ -101,6 +101,8 @@ pub struct AppManifest {
     /// Declarative cron schedules synced on deploy
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub crons: Vec<CronDefinition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -189,6 +191,8 @@ pub struct InstalledApp {
     pub entities: Vec<String>,
     #[serde(default)]
     pub has_frontend: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -16,6 +16,7 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
             version     TEXT NOT NULL DEFAULT '0.0.1',
             status      TEXT NOT NULL DEFAULT 'installed',
             manifest    JSONB,
+            icon        TEXT,
             created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
             updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
         )
@@ -24,6 +25,11 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
     .execute(pool)
     .await
     .map_err(RuntimeError::Schema)?;
+
+    sqlx::query("ALTER TABLE rootcx_system.apps ADD COLUMN IF NOT EXISTS icon TEXT")
+        .execute(pool)
+        .await
+        .map_err(RuntimeError::Schema)?;
 
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS rootcx_system.config (

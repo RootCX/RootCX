@@ -124,6 +124,14 @@ impl TestRuntime {
         (s, r.json().await.unwrap_or(Value::Null))
     }
 
+    pub async fn get_raw(&self, path: &str) -> (StatusCode, Vec<u8>, String) {
+        let r = self.authed(self.client.get(self.url(path))).send().await.unwrap();
+        let s = r.status();
+        let ct = r.headers().get("content-type").map(|v| v.to_str().unwrap_or("")).unwrap_or("").to_string();
+        let bytes = r.bytes().await.unwrap_or_default().to_vec();
+        (s, bytes, ct)
+    }
+
     pub async fn get_unauthed(&self, path: &str) -> StatusCode {
         self.client.get(self.url(path)).send().await.unwrap().status()
     }
