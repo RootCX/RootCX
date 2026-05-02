@@ -60,6 +60,7 @@ AUTHENTICATION
   auth         Manage authentication (login, logout, whoami)
 
 ADDITIONAL
+  skills       Manage Claude Code skills
   upgrade      Update rootcx to the latest version
   completions  Generate shell completions
 
@@ -132,6 +133,9 @@ enum Cmd {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// Manage Claude Code skills
+    #[command(subcommand)]
+    Skills(SkillsCmd),
     /// Print the path to bundled skills
     #[command(hide = true)]
     SkillsPath,
@@ -401,6 +405,12 @@ enum DataCmd {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum SkillsCmd {
+    /// Pull the latest skills from the remote repository
+    Update,
+}
+
 const DATA_HELP: &str = "\
 Read and write app data.
 
@@ -465,6 +475,21 @@ async fn main() -> Result<()> {
         },
         Cmd::Completions { shell } => cmd_completions::run(shell),
         Cmd::Upgrade { version } => upgrade::run(version).await,
+        Cmd::Skills(sub) => match sub {
+            SkillsCmd::Update => {
+                let skills_dir = scaffold::ensure_skills_cloned().await?;
+                let status = tokio::process::Command::new("git")
+                    .args(["pull", "--ff-only", "-q"])
+                    .current_dir(&skills_dir)
+                    .status()
+                    .await?;
+                if !status.success() {
+                    anyhow::bail!("git pull failed. Check your network connection.");
+                }
+                println!("\u{2713} skills updated");
+                Ok(())
+            }
+        },
         Cmd::SkillsPath => {
             println!("{}", config::skills_dir()?.display());
             Ok(())
@@ -605,6 +630,11 @@ mod cli_parse_tests {
     #[test]
     fn hidden_skills_path_is_still_invokable() {
         assert!(matches!(parse(&["skills-path"]).unwrap(), Cmd::SkillsPath));
+    }
+
+    #[test]
+    fn skills_update_parses() {
+        assert!(matches!(parse(&["skills", "update"]).unwrap(), Cmd::Skills(SkillsCmd::Update)));
     }
 
     #[test]
