@@ -198,13 +198,7 @@ async fn scaffold(dir: &Path, name: &str) -> Result<()> {
     let preset = reg.get("blank").map_err(|e| anyhow::anyhow!(e))?;
     let answers = preset.questions().into_iter()
         .filter_map(|q| q.default.map(|d| (q.key, d))).collect();
-
-    let skills_source = crate::scaffold::ensure_skills().await?;
-    let extra_layers: Vec<Box<dyn rootcx_scaffold::types::Layer>> = vec![
-        Box::new(rootcx_scaffold::layers::SkillLayer::new(dir.to_path_buf(), skills_source)),
-    ];
-
-    rootcx_scaffold::create(dir, name, "blank", answers, extra_layers)
+    rootcx_scaffold::create(dir, name, "blank", answers, vec![])
         .await.map_err(|e| anyhow::anyhow!(e))
 }
 

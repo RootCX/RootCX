@@ -47,32 +47,6 @@ pub fn merge_config(existing: Option<Config>, url: String, token: Option<String>
     }
 }
 
-/// Resolve the bundled skills directory — env override > repo-relative > user config.
-pub fn skills_dir() -> Result<PathBuf> {
-    let exe = std::env::current_exe()?;
-    let home = dirs::home_dir().context("no home dir")?;
-    Ok(resolve_skills_dir(std::env::var("ROOTCX_SKILLS_DIR").ok(), Some(exe), home))
-}
-
-/// Pure resolver, testable in isolation.
-pub(crate) fn resolve_skills_dir(
-    env_override: Option<String>,
-    current_exe: Option<PathBuf>,
-    home: PathBuf,
-) -> PathBuf {
-    if let Some(p) = env_override {
-        return PathBuf::from(p);
-    }
-    if let Some(exe) = current_exe {
-        if let Some(parent) = exe.parent() {
-            let candidate = parent.join("../.agents/skills");
-            if candidate.exists() {
-                return candidate;
-            }
-        }
-    }
-    home.join(".rootcx").join("skills")
-}
 
 #[cfg(test)]
 mod tests {
@@ -159,46 +133,8 @@ mod tests {
         assert!(c.refresh_token.is_none(), "new manual token invalidates refresh");
     }
 
-    // resolve_skills_dir — env > repo-relative > home fallback
-
-    use super::resolve_skills_dir;
-    use std::path::PathBuf;
-
-    #[test]
-    fn skills_env_override_wins() {
-        let p = resolve_skills_dir(
-            Some("/tmp/override".into()),
-            Some(PathBuf::from("/ignored/bin/rootcx")),
-            PathBuf::from("/home/u"),
-        );
-        assert_eq!(p, PathBuf::from("/tmp/override"));
-    }
-
-    #[test]
-    fn skills_falls_back_to_home_when_nothing_matches() {
-        let p = resolve_skills_dir(
-            None,
-            Some(PathBuf::from("/nonexistent/bin/rootcx")),
-            PathBuf::from("/home/u"),
-        );
-        assert_eq!(p, PathBuf::from("/home/u/.rootcx/skills"));
-    }
-
-    #[test]
-    fn skills_picks_repo_relative_when_candidate_exists() {
-        let base = std::env::temp_dir().join(format!("rootcx-skills-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(base.join("bin")).unwrap();
-        std::fs::create_dir_all(base.join(".agents/skills")).unwrap();
-        let exe = base.join("bin/rootcx");
-        std::fs::write(&exe, "").unwrap();
-
-        let p = resolve_skills_dir(None, Some(exe), PathBuf::from("/home/u"));
-        assert!(p.ends_with(".agents/skills"));
-        assert!(p.exists());
-    }
-
     use super::resolve_config_path;
+    use std::path::PathBuf;
 
     #[test]
     fn config_path_is_under_home_not_cwd() {
