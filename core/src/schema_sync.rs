@@ -4,10 +4,8 @@ use sqlx::{Connection, PgPool};
 use tracing::info;
 
 use crate::RuntimeError;
-use crate::manifest::{identity_index_name, json_to_sql_default, list_identity_indexes, map_field_type, quote_ident, resolve_on_delete};
+use crate::manifest::{identity_index_name, is_system_field, json_to_sql_default, list_identity_indexes, map_field_type, quote_ident, resolve_on_delete};
 use rootcx_types::{EntityContract, FieldContract, SchemaChange, SchemaVerification};
-
-const PROTECTED_COLUMNS: &[&str] = &["id", "created_at", "updated_at"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct FkInfo {
@@ -98,7 +96,7 @@ pub fn compute_diff(
     let manifest_names: HashSet<&str> = manifest_fields.iter().map(|f| f.name.as_str()).collect();
 
     for field in manifest_fields {
-        if PROTECTED_COLUMNS.contains(&field.name.as_str()) {
+        if is_system_field(&field.name) {
             continue;
         }
 
@@ -203,7 +201,7 @@ pub fn compute_diff(
     }
 
     for db_col in db_columns {
-        if PROTECTED_COLUMNS.contains(&db_col.name.as_str()) {
+        if is_system_field(&db_col.name) {
             continue;
         }
         if !manifest_names.contains(db_col.name.as_str()) {
