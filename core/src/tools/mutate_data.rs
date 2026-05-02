@@ -4,7 +4,7 @@ use rootcx_types::ToolDescriptor;
 
 use super::{Tool, ToolContext, str_arg, check_permission};
 use crate::manifest::{field_type_map, quote_ident};
-use crate::routes::crud::{bind_typed, bulk_insert, table, MAX_BULK_SIZE};
+use crate::routes::crud::{bind_typed, bulk_insert, filter_writable_fields, table, MAX_BULK_SIZE};
 
 pub struct MutateDataTool;
 
@@ -46,15 +46,20 @@ impl Tool for MutateDataTool {
                     .ok_or("missing or invalid 'data' object")?;
                 let types = field_type_map(&ctx.pool, app, entity).await.map_err(|e| e.to_string())?;
 
-                let cols: Vec<String> = obj.keys().map(|k| quote_ident(k)).collect();
-                let phs: Vec<String> = (1..=obj.len()).map(|i| format!("${i}")).collect();
+                let entries = filter_writable_fields(obj);
+                if entries.is_empty() {
+                    return Err("'data' must contain at least one writable field".into());
+                }
+
+                let cols: Vec<String> = entries.iter().map(|(k, _)| quote_ident(k)).collect();
+                let phs: Vec<String> = (1..=entries.len()).map(|i| format!("${i}")).collect();
 
                 let sql = format!(
                     "INSERT INTO {tbl} ({}) VALUES ({}) RETURNING to_jsonb({tbl}.*) AS row",
                     cols.join(", "), phs.join(", ")
                 );
                 let mut q = sqlx::query_as::<_, (JsonValue,)>(&sql);
-                for (k, v) in obj { q = bind_typed(q, v, types.get(k.as_str())); }
+                for (k, v) in &entries { q = bind_typed(q, v, types.get(*k)); }
                 let (row,) = q.fetch_one(&ctx.pool).await.map_err(|e| e.to_string())?;
                 Ok(row)
             }
@@ -65,17 +70,19 @@ impl Tool for MutateDataTool {
                     .ok_or("missing or invalid 'data' object")?;
                 let types = field_type_map(&ctx.pool, app, entity).await.map_err(|e| e.to_string())?;
 
-                let sets: Vec<String> = obj.keys().enumerate()
-                    .map(|(i, k)| format!("{} = ${}", quote_ident(k), i + 1))
+                let entries = filter_writable_fields(obj);
+                let id_param = entries.len() + 1;
+                let mut sets: Vec<String> = entries.iter().enumerate()
+                    .map(|(i, (k, _))| format!("{} = ${}", quote_ident(k), i + 1))
                     .collect();
-                let id_param = obj.len() + 1;
+                sets.push("\"updated_at\" = now()".to_string());
 
                 let sql = format!(
-                    "UPDATE {tbl} SET {}, \"updated_at\" = now() WHERE id = ${id_param} RETURNING to_jsonb({tbl}.*) AS row",
+                    "UPDATE {tbl} SET {} WHERE id = ${id_param} RETURNING to_jsonb({tbl}.*) AS row",
                     sets.join(", ")
                 );
                 let mut q = sqlx::query_as::<_, (JsonValue,)>(&sql);
-                for (k, v) in obj { q = bind_typed(q, v, types.get(k.as_str())); }
+                for (k, v) in &entries { q = bind_typed(q, v, types.get(*k)); }
                 q = q.bind(uuid);
                 let (row,) = q.fetch_optional(&ctx.pool).await.map_err(|e| e.to_string())?
                     .ok_or_else(|| format!("record '{id}' not found"))?;

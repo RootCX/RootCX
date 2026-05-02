@@ -8,6 +8,13 @@ use crate::RuntimeError;
 use crate::extensions::RuntimeExtension;
 use rootcx_types::{AppManifest, EntityContract};
 
+pub const SYSTEM_FIELDS: &[&str] = &["id", "created_at", "updated_at"];
+
+#[inline]
+pub fn is_system_field(name: &str) -> bool {
+    SYSTEM_FIELDS.contains(&name)
+}
+
 pub async fn install_app(
     pool: &PgPool,
     manifest: &AppManifest,
@@ -739,6 +746,7 @@ mod tests {
             name: "Test".into(),
             version: "1.0.0".into(),
             description: String::new(),
+            icon: None,
             app_type: Default::default(),
             permissions: None,
             data_contract: entities,

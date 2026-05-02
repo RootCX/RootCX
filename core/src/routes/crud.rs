@@ -13,7 +13,7 @@ use super::{SharedRuntime, parse_uuid, pool};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::extensions::rbac::policy::{resolve_permissions, has_permission};
-use crate::manifest::{entity_exists, entity_identity, field_type_map, find_entities_by_identity, map_field_type, quote_ident};
+use crate::manifest::{entity_exists, entity_identity, field_type_map, find_entities_by_identity, is_system_field, map_field_type, quote_ident};
 
 fn check_app_perm(permissions: &[String], app_id: &str, perm: &str) -> Result<(), ApiError> {
     let namespaced = format!("app:{app_id}:{perm}");
@@ -51,6 +51,15 @@ fn require_object(body: &JsonValue) -> Result<&serde_json::Map<String, JsonValue
 }
 
 const RESERVED_PARAMS: &[&str] = &["limit", "offset", "sort", "order", "linked"];
+
+pub(crate) fn filter_writable_fields(
+    obj: &serde_json::Map<String, JsonValue>,
+) -> Vec<(&str, &JsonValue)> {
+    obj.iter()
+        .filter(|(k, _)| !is_system_field(k.as_str()))
+        .map(|(k, v)| (k.as_str(), v))
+        .collect()
+}
 
 fn pg_cast_suffix(manifest_type: Option<&str>) -> &'static str {
     match manifest_type.map(map_field_type) {
@@ -455,15 +464,13 @@ pub async fn create_record(
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
 
-    let mut cols: Vec<String> = Vec::new();
-    let mut phs: Vec<String> = Vec::new();
-    let mut idx = 1usize;
-
-    for k in obj.keys() {
-        cols.push(quote_ident(k));
-        phs.push(format!("${idx}"));
-        idx += 1;
+    let entries = filter_writable_fields(obj);
+    if entries.is_empty() {
+        return Err(ApiError::BadRequest("body must contain at least one writable field".into()));
     }
+
+    let cols: Vec<String> = entries.iter().map(|(k, _)| quote_ident(k)).collect();
+    let phs: Vec<String> = (1..=entries.len()).map(|i| format!("${i}")).collect();
 
     let q = format!(
         "INSERT INTO {tbl} ({}) VALUES ({}) RETURNING to_jsonb({tbl}.*) AS row",
@@ -471,8 +478,8 @@ pub async fn create_record(
         phs.join(", ")
     );
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
-    for (k, v) in obj.iter() {
-        query = bind_typed(query, v, types.get(k.as_str()));
+    for (k, v) in &entries {
+        query = bind_typed(query, v, types.get(*k));
     }
 
     let (row,) = query.fetch_one(&pool).await?;
@@ -484,6 +491,7 @@ fn union_keys(objects: &[&serde_json::Map<String, JsonValue>]) -> Vec<String> {
     let mut keys = Vec::new();
     for obj in objects {
         for k in obj.keys() {
+            if is_system_field(k.as_str()) { continue; }
             if seen.insert(k) {
                 keys.push(k.clone());
             }
@@ -499,6 +507,9 @@ pub(crate) async fn bulk_insert(
     objects: &[&serde_json::Map<String, JsonValue>],
 ) -> Result<Vec<JsonValue>, ApiError> {
     let keys = union_keys(objects);
+    if keys.is_empty() {
+        return Err(ApiError::BadRequest("each record must contain at least one writable field".into()));
+    }
     let total_params = objects.len() * keys.len();
     if total_params > PG_PARAM_LIMIT {
         return Err(ApiError::BadRequest(format!(
@@ -600,12 +611,14 @@ pub async fn update_record(
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
-    let entries: Vec<(&str, &JsonValue)> = obj.iter().map(|(k, v)| (k.as_str(), v)).collect();
-    let sets: Vec<String> =
-        entries.iter().enumerate().map(|(i, (k, _))| format!("{} = ${}", quote_ident(k), i + 1)).collect();
+    let entries = filter_writable_fields(obj);
     let id_param = entries.len() + 1;
+    let mut sets: Vec<String> = entries.iter().enumerate()
+        .map(|(i, (k, _))| format!("{} = ${}", quote_ident(k), i + 1))
+        .collect();
+    sets.push("\"updated_at\" = now()".to_string());
     let q = format!(
-        "UPDATE {tbl} SET {}, \"updated_at\" = now() WHERE id = ${id_param} RETURNING to_jsonb({tbl}.*) AS row",
+        "UPDATE {tbl} SET {} WHERE id = ${id_param} RETURNING to_jsonb({tbl}.*) AS row",
         sets.join(", ")
     );
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
@@ -807,6 +820,25 @@ mod tests {
         {
             assert!(require_object(&input).is_err(), "expected error for {label}");
         }
+    }
+
+    #[test]
+    fn filter_writable_fields_strips_system() {
+        let v = json!({"id": "x", "name": "alice", "updated_at": "ts", "email": "e@x.com"});
+        let entries = filter_writable_fields(v.as_object().unwrap());
+        let mut keys: Vec<&str> = entries.iter().map(|(k, _)| *k).collect();
+        keys.sort();
+        assert_eq!(keys, vec!["email", "name"]);
+    }
+
+    #[test]
+    fn union_keys_strips_system_fields() {
+        let a = json!({"id": "x", "name": "alice", "updated_at": "ts"});
+        let b = json!({"created_at": "ts", "email": "e@x.com"});
+        let map_a = a.as_object().unwrap();
+        let map_b = b.as_object().unwrap();
+        let keys = union_keys(&[map_a, map_b]);
+        assert_eq!(keys, vec!["name".to_string(), "email".to_string()]);
     }
 
     fn types_fixture() -> HashMap<String, String> {
