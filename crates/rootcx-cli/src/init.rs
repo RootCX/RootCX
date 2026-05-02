@@ -199,7 +199,7 @@ async fn scaffold(dir: &Path, name: &str) -> Result<()> {
     let answers = preset.questions().into_iter()
         .filter_map(|q| q.default.map(|d| (q.key, d))).collect();
 
-    let skills_source = config::skills_dir()?.join("rootcx");
+    let skills_source = crate::scaffold::ensure_skills().await?;
     let extra_layers: Vec<Box<dyn rootcx_scaffold::types::Layer>> = vec![
         Box::new(rootcx_scaffold::layers::SkillLayer::new(dir.to_path_buf(), skills_source)),
     ];

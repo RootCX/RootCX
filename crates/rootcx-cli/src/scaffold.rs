@@ -3,6 +3,8 @@ use std::path::Path;
 
 use crate::config;
 
+const SKILLS_REPO: &str = "https://github.com/RootCX/skills.git";
+
 pub async fn run(name: &str, base: &Path) -> Result<()> {
     let dir = base.join(name);
     if dir.exists() {
@@ -16,7 +18,7 @@ pub async fn run(name: &str, base: &Path) -> Result<()> {
         .filter_map(|q| q.default.map(|d| (q.key, d)))
         .collect();
 
-    let skills_source = config::skills_dir()?.join("rootcx");
+    let skills_source = ensure_skills().await?;
     let extra_layers: Vec<Box<dyn rootcx_scaffold::types::Layer>> = vec![
         Box::new(rootcx_scaffold::layers::SkillLayer::new(dir.clone(), skills_source)),
     ];
@@ -28,6 +30,50 @@ pub async fn run(name: &str, base: &Path) -> Result<()> {
     println!("\u{2713} created {name}");
     println!("  cd {name} && rootcx deploy");
     Ok(())
+}
+
+/// Ensures skills repo is cloned to ~/.rootcx/skills. Returns the repo root.
+/// Does NOT pull — callers decide whether to pull (background or foreground).
+pub async fn ensure_skills_cloned() -> Result<std::path::PathBuf> {
+    let skills_dir = config::skills_dir()?;
+    let rootcx_skill = skills_dir.join("rootcx");
+
+    if !rootcx_skill.join("SKILL.md").exists() {
+        if skills_dir.exists() {
+            std::fs::remove_dir_all(&skills_dir)?;
+        }
+        std::fs::create_dir_all(skills_dir.parent().unwrap_or(&skills_dir))?;
+        let status = tokio::process::Command::new("git")
+            .args(["clone", "--depth", "1", "-q", SKILLS_REPO])
+            .arg(&skills_dir)
+            .status()
+            .await?;
+        if !status.success() {
+            bail!("failed to clone skills repository. Make sure git is installed.");
+        }
+    }
+
+    Ok(skills_dir)
+}
+
+/// Ensures skills are cloned, then fires a best-effort background pull.
+/// Returns the skill subdirectory path (~/.rootcx/skills/rootcx).
+pub async fn ensure_skills() -> Result<std::path::PathBuf> {
+    let skills_dir = ensure_skills_cloned().await?;
+
+    let dir = skills_dir.clone();
+    tokio::spawn(async move {
+        tokio::process::Command::new("git")
+            .args(["pull", "--ff-only", "-q"])
+            .current_dir(&dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .ok();
+    });
+
+    Ok(skills_dir.join("rootcx"))
 }
 
 #[cfg(test)]
