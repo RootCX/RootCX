@@ -1,6 +1,8 @@
 use anyhow::{Result, bail};
 use std::path::Path;
 
+use crate::config;
+
 pub async fn run(name: &str, base: &Path) -> Result<()> {
     let dir = base.join(name);
     if dir.exists() {
@@ -14,7 +16,12 @@ pub async fn run(name: &str, base: &Path) -> Result<()> {
         .filter_map(|q| q.default.map(|d| (q.key, d)))
         .collect();
 
-    rootcx_scaffold::create(&dir, name, "blank", answers, vec![])
+    let skills_source = config::skills_dir()?.join("rootcx");
+    let extra_layers: Vec<Box<dyn rootcx_scaffold::types::Layer>> = vec![
+        Box::new(rootcx_scaffold::layers::SkillLayer::new(dir.clone(), skills_source)),
+    ];
+
+    rootcx_scaffold::create(&dir, name, "blank", answers, extra_layers)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 
