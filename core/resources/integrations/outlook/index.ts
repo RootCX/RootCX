@@ -119,11 +119,11 @@ async function graphJson(config: Config, creds: UserCreds, path: string, init?: 
   return res.json();
 }
 
-// --- actions ---
-
 const fmtAddr = (r: any) => r?.emailAddress?.address
   ? (r.emailAddress.name ? `${r.emailAddress.name} <${r.emailAddress.address}>` : r.emailAddress.address)
   : "";
+
+// ─── Actions ────────────────────────────────────────────────────────────────
 
 async function sendEmail(config: Config, creds: UserCreds, input: any, userId?: string) {
   const toList = input.to.split(",").map((a: string) => ({ emailAddress: { address: a.trim() } }));
@@ -141,7 +141,6 @@ async function sendEmail(config: Config, creds: UserCreds, input: any, userId?: 
     body: JSON.stringify({ message, saveToSentItems: input.saveToSentItems ?? true }),
   }, userId);
 
-  // Microsoft Graph sendMail returns 202 Accepted with no body
   if (!res.ok) throw new Error(`sendMail ${res.status}: ${await res.text()}`);
   return { ok: true };
 }
@@ -151,7 +150,7 @@ async function listEmails(config: Config, creds: UserCreds, input: any, userId?:
 
   const params = new URLSearchParams();
   params.set("$top", String(top));
-  params.set("$select", "id,conversationId,subject,from,receivedDateTime,isRead,bodyPreview");
+  params.set("$select", "id,conversationId,internetMessageId,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,bodyPreview");
   params.set("$orderby", "receivedDateTime desc");
   if (filter) params.set("$filter", filter);
   if (search) params.set("$search", `"${search}"`);
@@ -162,8 +161,11 @@ async function listEmails(config: Config, creds: UserCreds, input: any, userId?:
     messages: (data.value ?? []).map((m: any) => ({
       id: m.id,
       conversationId: m.conversationId,
+      internetMessageId: m.internetMessageId ?? null,
       subject: m.subject,
       from: fmtAddr(m.from),
+      to: (m.toRecipients ?? []).map(fmtAddr).join(", "),
+      cc: (m.ccRecipients ?? []).map(fmtAddr).join(", "),
       receivedDateTime: m.receivedDateTime,
       isRead: m.isRead,
       bodyPreview: m.bodyPreview,
@@ -173,21 +175,121 @@ async function listEmails(config: Config, creds: UserCreds, input: any, userId?:
 }
 
 async function getEmail(config: Config, creds: UserCreds, input: any, userId?: string) {
-  const msg = await graphJson(config, creds, `/messages/${input.messageId}`, undefined, userId);
+  const msg = await graphJson(
+    config, creds,
+    `/messages/${input.messageId}?$select=id,conversationId,internetMessageId,subject,from,toRecipients,ccRecipients,receivedDateTime,isRead,importance,hasAttachments,body,flag`,
+    { headers: { "Prefer": 'outlook.body-content-type="text"' } },
+    userId,
+  );
   return {
     id: msg.id,
     conversationId: msg.conversationId,
+    internetMessageId: msg.internetMessageId ?? null,
     subject: msg.subject,
     from: fmtAddr(msg.from),
-    to: (msg.toRecipients ?? []).map(fmtAddr),
-    cc: (msg.ccRecipients ?? []).map(fmtAddr),
+    to: (msg.toRecipients ?? []).map(fmtAddr).join(", "),
+    cc: (msg.ccRecipients ?? []).map(fmtAddr).join(", "),
     receivedDateTime: msg.receivedDateTime,
     isRead: msg.isRead,
     importance: msg.importance,
     hasAttachments: msg.hasAttachments,
-    bodyPreview: msg.bodyPreview,
     body: msg.body?.content ?? "",
     flag: msg.flag ?? null,
+  };
+}
+
+async function batchGetEmails(config: Config, creds: UserCreds, input: any, userId?: string) {
+  const { messageIds } = input;
+  if (!messageIds?.length) return { messages: [] };
+
+  const messages: any[] = [];
+
+  // MS Graph batch max = 20 requests
+  for (let i = 0; i < messageIds.length; i += 20) {
+    const chunk = messageIds.slice(i, i + 20);
+    const token = await getAccessToken(config, creds, userId);
+
+    const batchReq = {
+      requests: chunk.map((id: string, idx: number) => ({
+        id: String(idx),
+        method: "GET",
+        url: `/me/messages/${id}?$select=id,conversationId,internetMessageId,subject,from,toRecipients,ccRecipients,receivedDateTime,body,isRead`,
+        headers: { "Prefer": 'outlook.body-content-type="text"' },
+      })),
+    };
+
+    const res = await fetch("https://graph.microsoft.com/v1.0/$batch", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(batchReq),
+    });
+
+    if (!res.ok) throw new Error(`$batch ${res.status}: ${await res.text()}`);
+    const data = await res.json();
+
+    for (const r of data.responses ?? []) {
+      if (r.status === 200 && r.body) {
+        const m = r.body;
+        messages.push({
+          id: m.id,
+          conversationId: m.conversationId,
+          internetMessageId: m.internetMessageId ?? null,
+          headerMessageId: m.internetMessageId ?? null,
+          subject: m.subject,
+          from: fmtAddr(m.from),
+          to: (m.toRecipients ?? []).map(fmtAddr).join(", "),
+          cc: (m.ccRecipients ?? []).map(fmtAddr).join(", "),
+          date: m.receivedDateTime,
+          body: m.body?.content ?? "",
+          labelIds: m.isRead ? [] : ["UNREAD"],
+          threadId: m.conversationId ?? "",
+        });
+      }
+    }
+  }
+
+  return { messages };
+}
+
+async function deltaList(config: Config, creds: UserCreds, input: any, userId?: string) {
+  const { deltaLink, folder = "Inbox", top = 100 } = input;
+
+  let url: string;
+  if (deltaLink) {
+    url = deltaLink;
+  } else {
+    const params = new URLSearchParams();
+    params.set("$select", "id,internetMessageId,receivedDateTime");
+    params.set("$top", String(top));
+    url = `${GRAPH_API}/mailFolders/${folder}/messages/delta?${params}`;
+  }
+
+  const token = await getAccessToken(config, creds, userId);
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) throw new Error(`delta ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+
+  const messagesAdded: string[] = [];
+  const messagesDeleted: string[] = [];
+
+  for (const item of data.value ?? []) {
+    if (item["@removed"]) {
+      messagesDeleted.push(item.id);
+    } else {
+      messagesAdded.push(item.id);
+    }
+  }
+
+  return {
+    messagesAdded,
+    messagesDeleted,
+    nextLink: data["@odata.nextLink"] ?? null,
+    deltaLink: data["@odata.deltaLink"] ?? null,
   };
 }
 
@@ -207,39 +309,40 @@ async function modifyEmail(config: Config, creds: UserCreds, input: any, userId?
 }
 
 const actions: Record<string, (c: Config, u: UserCreds, i: any, userId?: string) => Promise<any>> = {
-  send_email: sendEmail, list_emails: listEmails, get_email: getEmail, modify_email: modifyEmail,
+  send_email: sendEmail,
+  list_emails: listEmails,
+  get_email: getEmail,
+  batch_get_emails: batchGetEmails,
+  delta_list: deltaList,
+  modify_email: modifyEmail,
 };
 
-// --- RPC handlers ---
+serve({
+  rpc: {
+    __auth_start: authStart,
+    __auth_callback: authCallback,
 
-const rpcHandlers: Record<string, (params: any) => Promise<any>> = {
-  __auth_start: authStart,
-  __auth_callback: authCallback,
+    async __integration(params) {
+      const { action, input, config, userCredentials, userId } = params;
+      const connected = isManaged(config) ? userCredentials?.managed : userCredentials?.refreshToken;
+      if (!connected) throw new Error("user not connected — OAuth required");
+      const handler = actions[action];
+      if (!handler) throw new Error(`unknown action: ${action}`);
+      return handler(config, userCredentials, input, userId);
+    },
 
-  async __integration(params) {
-    const { action, input, config, userCredentials, userId } = params;
-    const connected = isManaged(config) ? userCredentials?.managed : userCredentials?.refreshToken;
-    if (!connected) throw new Error("user not connected — OAuth required");
-    const handler = actions[action];
-    if (!handler) throw new Error(`unknown action: ${action}`);
-    return handler(config, userCredentials, input, userId);
+    async __webhook(params) {
+      const { body } = params;
+      if (!body?.value?.length) return { skipped: true, reason: "no change notifications" };
+      return {
+        event: "mail_notification",
+        changes: body.value.map((n: any) => ({
+          changeType: n.changeType,
+          resource: n.resource,
+          subscriptionId: n.subscriptionId,
+          resourceData: n.resourceData,
+        })),
+      };
+    },
   },
-
-  async __webhook(params) {
-    const { body } = params;
-    if (!body?.value?.length) return { skipped: true, reason: "no change notifications" };
-    return {
-      event: "mail_notification",
-      changes: body.value.map((n: any) => ({
-        changeType: n.changeType,
-        resource: n.resource,
-        subscriptionId: n.subscriptionId,
-        resourceData: n.resourceData,
-      })),
-    };
-  },
-};
-
-// --- IPC protocol ---
-
-serve({ rpc: rpcHandlers });
+});
