@@ -121,7 +121,6 @@
         "type": "object",
         "properties": { "ok": { "type": "boolean" } }
       }
-    }
     },
     {
       "id": "batch_get_emails",
