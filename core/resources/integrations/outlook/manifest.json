@@ -122,8 +122,49 @@
         "properties": { "ok": { "type": "boolean" } }
       }
     }
+    },
+    {
+      "id": "batch_get_emails",
+      "name": "Batch Get Emails",
+      "description": "Get multiple emails by message IDs in batch (max 20 per sub-batch, auto-chunked)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "messageIds": { "type": "array", "items": { "type": "string" }, "description": "Array of message IDs to fetch" }
+        },
+        "required": ["messageIds"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "messages": { "type": "array", "items": { "type": "object" } }
+        }
+      }
+    },
+    {
+      "id": "delta_list",
+      "name": "Delta List",
+      "description": "Get incremental changes (added/deleted messages) using MS Graph delta. First call without deltaLink for full sync, subsequent calls with deltaLink for incremental.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "deltaLink": { "type": "string", "description": "Delta link from previous call (omit for first sync)" },
+          "folder": { "type": "string", "description": "Mail folder (default: Inbox)", "default": "Inbox" },
+          "top": { "type": "integer", "description": "Page size", "default": 100 }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "messagesAdded": { "type": "array", "items": { "type": "string" } },
+          "messagesDeleted": { "type": "array", "items": { "type": "string" } },
+          "nextLink": { "type": "string", "description": "Next page link (null if done)" },
+          "deltaLink": { "type": "string", "description": "Delta link for next incremental sync (only present on last page)" }
+        }
+      }
+    }
   ],
   "webhooks": ["mail_notification"],
-  "instructions": "Outlook integration with OAuth 2.0 per-user auth via Microsoft Entra ID (Azure AD).\n\n`list_emails` returns a summary of messages (id, subject, from, receivedDateTime, isRead, bodyPreview). Use `get_email` for full body content.\n\nThe `folder` param in `list_emails` defaults to \"Inbox\". Other well-known folder names: Drafts, SentItems, DeletedItems, Junk, Archive.\n\nOData `$filter` syntax supported (e.g. `isRead eq false`, `importance eq 'high'`). KQL `$search` syntax also supported (e.g. `from:user@example.com subject:invoice`).\n\n`modify_email` can update: isRead (true/false), flag (flagged/notFlagged/complete), importance (low/normal/high), and categories (array of category names).\n\nMicrosoft Graph sendMail returns 202 Accepted with no body — the output is `{ ok: true }` on success.",
+  "instructions": "Outlook integration with OAuth 2.0 per-user auth via Microsoft Entra ID (Azure AD).\n\n`list_emails` returns a summary of messages (id, subject, from, receivedDateTime, isRead, bodyPreview, internetMessageId). Use `get_email` for full body content.\n\nThe `folder` param defaults to \"Inbox\". Other well-known folder names: Drafts, SentItems, DeletedItems, Junk, Archive.\n\n`batch_get_emails` fetches multiple messages by ID using MS Graph JSON batching (20/batch, auto-chunked). Returns normalized format compatible with Gmail batch_get_emails (headerMessageId, from, to, cc, date, body, threadId, labelIds).\n\n`delta_list` provides incremental sync via MS Graph delta query. First call without deltaLink returns all message IDs. Subsequent calls with the returned deltaLink return only changes. Delta links are long-lived (~30 days). Returns messagesAdded and messagesDeleted arrays.\n\n`get_email` returns body as plain text (via Prefer header). No client-side HTML conversion needed.\n\nOData `$filter` and KQL `$search` supported in `list_emails`.\n\n`modify_email` can update: isRead, flag, importance, categories.",
   "entities": []
 }
