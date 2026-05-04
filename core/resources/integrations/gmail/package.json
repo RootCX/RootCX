@@ -1,5 +1,10 @@
 {
   "name": "@rootcx/integration-gmail",
   "version": "0.1.0",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "html-to-text": "^9.0.5",
+    "googleapis": "105.0.0",
+    "@jrmdayn/googleapis-batcher": "^0.10.1"
+  }
 }

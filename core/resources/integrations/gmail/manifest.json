@@ -47,8 +47,9 @@
         "type": "object",
         "properties": {
           "query": { "type": "string", "description": "Gmail search query" },
-          "maxResults": { "type": "integer", "default": 10 },
-          "labelIds": { "type": "array", "items": { "type": "string" }, "default": ["INBOX"] }
+          "maxResults": { "type": "integer", "default": 10, "description": "Max results per page (max 500)" },
+          "labelIds": { "type": "array", "items": { "type": "string" }, "description": "Filter by label IDs (omit for all)" },
+          "pageToken": { "type": "string", "description": "Pagination token from previous response" }
         }
       },
       "outputSchema": {
@@ -64,6 +65,7 @@
               }
             }
           },
+          "nextPageToken": { "type": "string", "description": "Token for next page, null if done" },
           "resultSizeEstimate": { "type": "integer" }
         }
       }
@@ -82,10 +84,13 @@
         "properties": {
           "id": { "type": "string" },
           "threadId": { "type": "string" },
+          "historyId": { "type": "string", "description": "Gmail historyId — use as cursor for history_list" },
+          "headerMessageId": { "type": "string", "description": "RFC 5322 Message-ID header — globally unique across mailboxes" },
           "from": { "type": "string" },
           "to": { "type": "string" },
+          "cc": { "type": "string" },
           "subject": { "type": "string" },
-          "date": { "type": "string" },
+          "date": { "type": "string", "description": "ISO 8601 date" },
           "snippet": { "type": "string" },
           "labelIds": { "type": "array", "items": { "type": "string" } },
           "body": { "type": "string", "description": "HTML or plain text body, already decoded" }
@@ -109,9 +114,33 @@
         "type": "object",
         "properties": { "ok": { "type": "boolean" } }
       }
+    },
+    {
+      "id": "history_list",
+      "name": "List History",
+      "description": "Get incremental changes (added/deleted messages) since a given historyId",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "startHistoryId": { "type": "string", "description": "Return history after this ID" },
+          "maxResults": { "type": "integer", "default": 100, "description": "Max history records per page (max 500)" },
+          "pageToken": { "type": "string", "description": "Pagination token from previous response" },
+          "historyTypes": { "type": "array", "items": { "type": "string", "enum": ["messageAdded", "messageDeleted", "labelAdded", "labelRemoved"] }, "default": ["messageAdded", "messageDeleted"] }
+        },
+        "required": ["startHistoryId"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "messagesAdded": { "type": "array", "items": { "type": "string" }, "description": "IDs of messages added since startHistoryId" },
+          "messagesDeleted": { "type": "array", "items": { "type": "string" }, "description": "IDs of messages deleted since startHistoryId" },
+          "historyId": { "type": "string", "description": "Current historyId — use as startHistoryId for next call" },
+          "nextPageToken": { "type": "string", "description": "Token for next page, null if done" }
+        }
+      }
     }
   ],
   "webhooks": ["push_notification"],
-  "instructions": "Gmail integration with OAuth 2.0 per-user auth.\n\n`list_emails` returns only message IDs and threadIds (lightweight, single API call). Use `get_email` to fetch full content (from, to, subject, date, body) for a specific message.\n\n`get_email` returns `body` as decoded HTML or plain text — no base64 decoding needed client-side.\n\nGmail search syntax supported in `list_emails` `query` param (e.g. `from:user@example.com OR to:user@example.com`).\n\nCommon label IDs: INBOX, SENT, DRAFT, SPAM, TRASH, UNREAD, STARRED, IMPORTANT.",
+  "instructions": "Gmail integration with OAuth 2.0 per-user auth.\n\n`list_emails` returns only message IDs and threadIds (lightweight, single API call). Use `get_email` to fetch full content (from, to, subject, date, body) for a specific message.\n\n`get_email` returns `body` as decoded HTML or plain text — no base64 decoding needed client-side.\n\nGmail search syntax supported in `list_emails` `query` param (e.g. `from:user@example.com OR to:user@example.com`).\n\n`history_list` returns incremental changes since a given historyId. Use for efficient sync: call `list_emails` for initial sync, then `history_list` for subsequent syncs. If historyId is expired (>1 week), Gmail returns 404 — perform a full resync.\n\nCommon label IDs: INBOX, SENT, DRAFT, SPAM, TRASH, UNREAD, STARRED, IMPORTANT.",
   "entities": []
 }
