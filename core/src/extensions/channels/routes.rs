@@ -191,9 +191,6 @@ pub async fn webhook(
             handle_callback(&rt, &channel_id, &config, provider.as_ref(), &chat_id, &callback_id, &data).await;
         }
         InboundEvent::Message { chat_id, text, media } => {
-            if let Some(ack) = handle_command_sync(&pool, &channel_id, &chat_id, &text).await {
-                return Ok(Json(json!({ "response_type": "ephemeral", "text": ack })));
-            }
             if handle_command(&pool, &channel_id, &chat_id, &text, &config, provider.as_ref()).await {
                 return Ok(Json(json!({ "ok": true })));
             }
@@ -470,19 +467,6 @@ async fn handle_approval(
     }
 }
 
-// Slack requires a synchronous HTTP response within 3 seconds for slash commands.
-async fn handle_command_sync(
-    pool: &sqlx::PgPool, channel_id: &str, chat_id: &str, text: &str,
-) -> Option<String> {
-    let (cmd, parts) = parse_command(text)?;
-    if cmd != "/link" { return None; }
-    let token = parts.get(1).filter(|t| t.starts_with(LINK_PREFIX))?;
-    if try_complete_link(pool, channel_id, chat_id, token).await.is_some() {
-        Some(MSG_LINK_OK.into())
-    } else {
-        Some(MSG_LINK_INVALID.into())
-    }
-}
 
 async fn handle_command(
     pool: &sqlx::PgPool, channel_id: &str, chat_id: &str, text: &str,
