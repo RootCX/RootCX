@@ -1118,6 +1118,155 @@ async fn tools_execute_unknown() {
     rt.shutdown().await;
 }
 
+// ── App Actions (list_actions / call_action tools) ──
+
+fn manifest_with_actions() -> Value {
+    json!({
+        "appId": "actapp", "name": "Action App", "version": "1.0.0",
+        "dataContract": [{ "entityName": "contacts", "fields": [
+            { "name": "name", "type": "text", "required": true }
+        ]}],
+        "actions": [
+            {
+                "id": "greet",
+                "name": "Greet",
+                "description": "Returns a greeting",
+                "inputSchema": { "type": "object", "properties": { "name": { "type": "string" } }, "required": ["name"] }
+            },
+            {
+                "id": "compute",
+                "name": "Compute",
+                "description": "Double a number",
+                "inputSchema": { "type": "object", "properties": { "value": { "type": "number" } }, "required": ["value"] }
+            }
+        ],
+        "instructions": "Use greet to say hello, compute to double numbers."
+    })
+}
+
+#[tokio::test]
+async fn list_actions_empty_when_no_actions() {
+    let rt = TestRuntime::boot().await;
+    rt.install("noact", "items").await;
+    let (s, body) = rt.post_json("/api/v1/tools/list_actions/execute", &json!({
+        "appId": "noact", "args": {}
+    })).await;
+    assert_eq!(s, 200);
+    assert!(body.as_array().unwrap().is_empty());
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn list_actions_returns_declared_actions() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&manifest_with_actions()).await;
+    let (s, body) = rt.post_json("/api/v1/tools/list_actions/execute", &json!({
+        "appId": "actapp", "args": {}
+    })).await;
+    assert_eq!(s, 200);
+    let apps = body.as_array().unwrap();
+    assert_eq!(apps.len(), 1);
+    assert_eq!(apps[0]["appId"], "actapp");
+    assert_eq!(apps[0]["instructions"], "Use greet to say hello, compute to double numbers.");
+    let actions = apps[0]["actions"].as_array().unwrap();
+    assert_eq!(actions.len(), 2);
+    assert!(actions.iter().any(|a| a["id"] == "greet"));
+    assert!(actions.iter().any(|a| a["id"] == "compute"));
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn list_actions_filters_by_app() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&manifest_with_actions()).await;
+    rt.install("other", "items").await;
+    let (s, body) = rt.post_json("/api/v1/tools/list_actions/execute", &json!({
+        "appId": "actapp", "args": { "app": "actapp" }
+    })).await;
+    assert_eq!(s, 200);
+    let apps = body.as_array().unwrap();
+    assert_eq!(apps.len(), 1);
+    assert_eq!(apps[0]["appId"], "actapp");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn list_actions_filter_nonexistent_app() {
+    let rt = TestRuntime::boot().await;
+    let (s, body) = rt.post_json("/api/v1/tools/list_actions/execute", &json!({
+        "appId": "_", "args": { "app": "does_not_exist" }
+    })).await;
+    assert_eq!(s, 200);
+    assert!(body.as_array().unwrap().is_empty());
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn call_action_rejects_unknown_app() {
+    let rt = TestRuntime::boot().await;
+    let (s, body) = rt.post_json("/api/v1/tools/call_action/execute", &json!({
+        "appId": "_", "args": { "app": "ghost", "action": "greet", "input": {} }
+    })).await;
+    assert_eq!(s, 500);
+    assert!(body["error"].as_str().unwrap().contains("not found"));
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn call_action_rejects_unknown_action() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&manifest_with_actions()).await;
+    let (s, body) = rt.post_json("/api/v1/tools/call_action/execute", &json!({
+        "appId": "actapp", "args": { "app": "actapp", "action": "nonexistent", "input": {} }
+    })).await;
+    assert_eq!(s, 500);
+    assert!(body["error"].as_str().unwrap().contains("not found"));
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn call_action_rbac_blocks_unauthorized() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&manifest_with_actions()).await;
+    let restricted_token = rt.register_and_login("restricted@test.local").await;
+    let (s, body) = rt.request_as(
+        Method::POST, "/api/v1/tools/call_action/execute", &restricted_token,
+        Some(&json!({ "appId": "actapp", "args": { "app": "actapp", "action": "greet", "input": { "name": "test" } } })),
+    ).await;
+    assert_eq!(s, 500);
+    assert!(body["error"].as_str().unwrap().contains("permission denied"));
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn call_action_passes_validation_then_hits_dispatch_boundary() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&manifest_with_actions()).await;
+
+    // REST route has action_caller=None — proves all validation passed before dispatch
+    let (s, body) = rt.post_json("/api/v1/tools/call_action/execute", &json!({
+        "appId": "actapp", "args": { "app": "actapp", "action": "greet", "input": { "name": "Agent" } }
+    })).await;
+    assert_eq!(s, 500);
+    assert!(body["error"].as_str().unwrap().contains("action calling unavailable"));
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn action_permissions_synced_at_install() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&manifest_with_actions()).await;
+
+    let (_, perms) = rt.get_json("/api/v1/permissions/available").await;
+    let keys: Vec<&str> = perms.as_array().unwrap().iter()
+        .filter_map(|p| p["key"].as_str())
+        .collect();
+    assert!(keys.contains(&"app:actapp:action:greet"), "greet permission missing: {keys:?}");
+    assert!(keys.contains(&"app:actapp:action:compute"), "compute permission missing: {keys:?}");
+    rt.shutdown().await;
+}
+
 fn typed_manifest() -> Value {
     json!({
         "appId": "typed", "name": "typed", "version": "1.0.0",

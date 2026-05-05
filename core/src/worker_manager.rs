@@ -14,7 +14,7 @@ use crate::extensions::agents::approvals::PendingApprovals;
 use crate::extensions::logs::LogEntry;
 use crate::ipc::{AgentBootConfig, AgentInvokePayload, LlmModelRef, RpcCaller};
 use crate::secrets::SecretManager;
-use crate::tools::{AgentDispatcher, IntegrationCaller, ToolRegistry};
+use crate::tools::{ActionCaller, AgentDispatcher, IntegrationCaller, ToolRegistry};
 use crate::worker::{self, AgentEvent, FleetEvent, SupervisorHandle, WorkerConfig, WorkerStatus};
 
 const BACKEND_PRELUDE: &str = include_str!("backend_prelude.js");
@@ -23,6 +23,7 @@ pub struct WorkerManager {
     workers: Arc<RwLock<HashMap<String, SupervisorHandle>>>,
     dispatch: OnceLock<Arc<dyn AgentDispatcher>>,
     integration_call: OnceLock<Arc<dyn IntegrationCaller>>,
+    action_call: OnceLock<Arc<dyn ActionCaller>>,
     fleet_tx: broadcast::Sender<FleetEvent>,
     apps_dir: PathBuf,
     prelude_path: PathBuf,
@@ -48,6 +49,7 @@ impl WorkerManager {
         Self {
             workers: Arc::new(RwLock::new(HashMap::new())),
             dispatch: OnceLock::new(),
+            action_call: OnceLock::new(),
             integration_call: OnceLock::new(),
             fleet_tx,
             apps_dir, prelude_path, runtime_url, database_url, bun_bin,
@@ -61,6 +63,7 @@ impl WorkerManager {
         let _ = self.integration_call.set(Arc::new(IntegrationCallImpl {
             wm: Arc::clone(self), secrets: Arc::clone(&self.secret_manager),
         }));
+        let _ = self.action_call.set(Arc::new(AppActionCallImpl { wm: Arc::clone(self) }));
     }
 
     async fn build_agent_boot(&self, pool: &PgPool, app_id: &str) -> Option<(AgentBootConfig, Option<rootcx_types::SupervisionConfig>)> {
@@ -126,6 +129,7 @@ impl WorkerManager {
             pending_approvals: self.pending_approvals.clone(),
             agent_dispatch: self.dispatch.get().cloned(),
             integration_caller: self.integration_call.get().cloned(),
+            action_caller: self.action_call.get().cloned(),
             agent_boot_config,
             supervision,
             upload_nonces: Arc::clone(&self.upload_nonces),
@@ -289,6 +293,32 @@ impl AgentDispatcher for SubAgentDispatch {
             }
         }
         if response.is_empty() { Err("no response from agent".into()) } else { Ok(response) }
+    }
+}
+
+// -- App action caller (executes app actions via worker RPC) --
+
+struct AppActionCallImpl {
+    wm: Arc<WorkerManager>,
+}
+
+#[async_trait]
+impl ActionCaller for AppActionCallImpl {
+    async fn call(
+        &self, app_id: &str, action_id: &str, input: JsonValue, user_id: uuid::Uuid,
+    ) -> Result<JsonValue, String> {
+        let caller = Some(RpcCaller {
+            user_id: user_id.to_string(),
+            email: String::new(),
+            auth_token: None,
+        });
+        self.wm.rpc(
+            app_id,
+            uuid::Uuid::new_v4().to_string(),
+            action_id.to_string(),
+            input,
+            caller,
+        ).await.map_err(|e| e.to_string())
     }
 }
 

@@ -1,7 +1,9 @@
+pub mod call_action;
 pub mod call_integration;
 pub mod cli;
 pub mod describe_app;
 pub mod invoke_agent;
+pub mod list_actions;
 pub mod list_apps;
 pub mod list_integrations;
 pub mod mutate_data;
@@ -33,6 +35,13 @@ pub trait IntegrationCaller: Send + Sync {
     ) -> Result<JsonValue, String>;
 }
 
+#[async_trait]
+pub trait ActionCaller: Send + Sync {
+    async fn call(
+        &self, app_id: &str, action_id: &str, input: JsonValue, user_id: Uuid,
+    ) -> Result<JsonValue, String>;
+}
+
 pub struct ToolContext {
     pub pool: PgPool,
     pub app_id: String,
@@ -42,6 +51,7 @@ pub struct ToolContext {
     pub args: JsonValue,
     pub agent_dispatch: Option<Arc<dyn AgentDispatcher>>,
     pub integration_caller: Option<Arc<dyn IntegrationCaller>>,
+    pub action_caller: Option<Arc<dyn ActionCaller>>,
     pub stream_tx: Option<tokio::sync::mpsc::Sender<crate::worker::AgentEvent>>,
 }
 

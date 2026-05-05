@@ -100,6 +100,7 @@ pub struct WorkerConfig {
     pub pending_approvals: PendingApprovals,
     pub agent_dispatch: Option<Arc<dyn AgentDispatcher>>,
     pub integration_caller: Option<Arc<dyn crate::tools::IntegrationCaller>>,
+    pub action_caller: Option<Arc<dyn crate::tools::ActionCaller>>,
     pub agent_boot_config: Option<AgentBootConfig>,
     pub supervision: Option<rootcx_types::SupervisionConfig>,
     pub upload_nonces: Arc<std::sync::Mutex<crate::extensions::storage::nonce::NonceStore>>,
@@ -413,6 +414,7 @@ async fn supervisor_loop(
                             // Nesting guard: sub-agents cannot spawn sub-agents
                             let dispatch = if sub_invocations.contains(&invoke_id) { None } else { config.agent_dispatch.clone() };
                             let int_caller = config.integration_caller.clone();
+                            let act_caller = config.action_caller.clone();
                             let invoker_uid = invoker_user_ids.get(&invoke_id).copied();
                             let out_tx = outbound_tx.clone();
                             let evaluator = policy_evaluators.get(&invoke_id).cloned();
@@ -486,7 +488,7 @@ async fn supervisor_loop(
 
                                 crate::tool_executor::execute(
                                     tool, tool_name, args, aid, agent_uid, invoker_uid,
-                                    permissions, pool, dispatch, int_caller,
+                                    permissions, pool, dispatch, int_caller, act_caller,
                                     out_tx, stream_tx, invoke_id, call_id,
                                 ).await;
                             });
