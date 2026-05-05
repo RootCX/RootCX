@@ -142,7 +142,28 @@ Agents call tools via IPC — Core executes them server-side with RBAC enforceme
 | `mutate_data` | Create, update, or delete records |
 | `list_apps` | Discover installed apps and their entities |
 | `describe_app` | Get full data contract of any app |
-| `browser` | Navigate, click, type, screenshot web pages |
+| `list_actions` | Discover actions exposed by apps |
+| `call_action` | Execute an app action via RPC |
+| `list_integrations` | Discover installed integrations and their actions |
+| `call_integration` | Execute an integration action (Gmail, Stripe, etc.) |
+| `invoke_agent` | Delegate to another agent |
+
+### App Actions
+
+Any app can expose its backend RPC methods as tools for agents by declaring `actions` in `manifest.json`:
+
+```json
+"actions": [
+  { "id": "enrich_company", "name": "Enrich Company", "description": "...", "inputSchema": { ... } }
+],
+"instructions": "Use enrich_company before creating a lead to fill firmographics."
+```
+
+- `id` must match the RPC method name in the worker
+- `inputSchema` (JSON Schema) tells the LLM how to build valid input
+- `instructions` (top-level, optional) guides the LLM on when/how to use actions together
+- RBAC: `app:{appId}:action:{id}` auto-registered at install; agents with `app:{appId}:*` have access by default
+- The worker receives a standard RPC call — no code changes needed
 
 ---
 
