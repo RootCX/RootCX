@@ -73,6 +73,10 @@ pub async fn install_app(
         crate::crons::sync_from_manifest(pool, app_id, &manifest.crons, Some(installed_by)).await?;
     }
 
+    if !manifest.actions.is_empty() {
+        sync_action_permissions(pool, app_id, &manifest.actions).await?;
+    }
+
     for ext in extensions {
         ext.on_app_installed(pool, manifest, installed_by).await?;
     }
@@ -489,6 +493,28 @@ pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
             )));
         }
     }
+    Ok(())
+}
+
+async fn sync_action_permissions(
+    pool: &PgPool,
+    app_id: &str,
+    actions: &[rootcx_types::ActionDefinition],
+) -> Result<(), RuntimeError> {
+    let (keys, descs): (Vec<String>, Vec<String>) = actions.iter().map(|a| (
+        format!("app:{app_id}:action:{}", a.id),
+        format!("{} ({})", a.name, app_id),
+    )).unzip();
+    sqlx::query(
+        "INSERT INTO rootcx_system.rbac_permissions (key, description)
+         SELECT unnest($1::text[]), unnest($2::text[])
+         ON CONFLICT (key) DO UPDATE SET description = EXCLUDED.description",
+    )
+    .bind(&keys)
+    .bind(&descs)
+    .execute(pool)
+    .await
+    .map_err(RuntimeError::Schema)?;
     Ok(())
 }
 
