@@ -90,6 +90,7 @@ impl RuntimeExtension for AgentExtension {
         ] {
             sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
         }
+
         info!("agents extension ready");
         Ok(())
     }
@@ -128,7 +129,7 @@ impl RuntimeExtension for AgentExtension {
     }
 }
 
-pub(crate) async fn register_agent(pool: &PgPool, app_id: &str, def: &AgentDefinition) -> Result<(), RuntimeError> {
+pub async fn register_agent(pool: &PgPool, app_id: &str, def: &AgentDefinition) -> Result<(), RuntimeError> {
     let config = serde_json::json!({
         "systemPrompt": def.system_prompt,
         "memory": def.memory,
@@ -157,46 +158,23 @@ pub(crate) async fn register_agent(pool: &PgPool, app_id: &str, def: &AgentDefin
 }
 
 async fn sync_agent_rbac(pool: &PgPool, app_id: &str) -> Result<(), RuntimeError> {
-    let role_name = format!("agent:{app_id}");
     let agent_uid = agent_user_id(app_id);
 
-    let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
-
-    // Agent role: app data wildcard + all tools
     sqlx::query(
-        "INSERT INTO rootcx_system.rbac_roles (name, description, inherits, permissions)
-         VALUES ($1, $2, '{}', ARRAY[$3, 'tool:*'])
-         ON CONFLICT (name) DO NOTHING"
-    )
-    .bind(&role_name)
-    .bind(format!("Agent role for {app_id}"))
-    .bind(format!("app:{app_id}:*"))
-    .execute(&mut *tx)
-    .await
-    .map_err(RuntimeError::Schema)?;
-
-    sqlx::query(
-        "INSERT INTO rootcx_system.users (id, email, is_system)
-         VALUES ($1, $2, true)
-         ON CONFLICT (id) DO NOTHING"
+        "WITH ensure_user AS (
+            INSERT INTO rootcx_system.users (id, email, is_system)
+            VALUES ($1, $2, true)
+            ON CONFLICT (id) DO NOTHING
+        )
+        INSERT INTO rootcx_system.rbac_assignments (user_id, role)
+        VALUES ($1, 'admin')
+        ON CONFLICT (user_id, role) DO NOTHING"
     )
     .bind(agent_uid)
     .bind(format!("agent+{app_id}@localhost"))
-    .execute(&mut *tx)
+    .execute(pool)
     .await
     .map_err(RuntimeError::Schema)?;
 
-    sqlx::query(
-        "INSERT INTO rootcx_system.rbac_assignments (user_id, role)
-         VALUES ($1, $2)
-         ON CONFLICT (user_id, role) DO NOTHING"
-    )
-    .bind(agent_uid)
-    .bind(&role_name)
-    .execute(&mut *tx)
-    .await
-    .map_err(RuntimeError::Schema)?;
-
-    tx.commit().await.map_err(RuntimeError::Schema)?;
     Ok(())
 }
