@@ -33,6 +33,7 @@ pub(crate) struct AgentRow {
     name: String,
     description: Option<String>,
     config: JsonValue,
+    user_id: uuid::Uuid,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -86,7 +87,10 @@ pub async fn list_agents(
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<AgentRow>>, ApiError> {
     Ok(Json(sqlx::query_as::<_, AgentRow>(
-        "SELECT app_id, name, description, config FROM rootcx_system.agents ORDER BY name",
+        "SELECT a.app_id, a.name, a.description, a.config, u.id as user_id
+         FROM rootcx_system.agents a
+         JOIN rootcx_system.users u ON u.email = 'agent+' || a.app_id || '@localhost'
+         ORDER BY a.name",
     ).fetch_all(&routes::pool(&rt)).await?))
 }
 
