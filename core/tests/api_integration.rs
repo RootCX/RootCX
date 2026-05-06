@@ -2798,3 +2798,48 @@ async fn schema_sync_handles_core_users_fk_change() {
 
     rt.shutdown().await;
 }
+
+// ── Agent RBAC ──
+
+async fn register_test_agent(rt: &TestRuntime, app_id: &str) {
+    rt.install(app_id, "items").await;
+    let def = rootcx_types::AgentDefinition {
+        name: app_id.to_string(),
+        description: None,
+        system_prompt: Some("test".into()),
+        memory: None,
+        limits: None,
+        supervision: None,
+    };
+    rootcx_core::extensions::agents::register_agent(rt.pool(), app_id, &def)
+        .await.expect("register_agent");
+}
+
+#[tokio::test]
+async fn agent_registration_assigns_admin_with_no_per_agent_role() {
+    let rt = TestRuntime::boot().await;
+    let app_id = "agentadmin";
+    register_test_agent(&rt, app_id).await;
+
+    let agent_uid = rootcx_core::extensions::agents::agent_user_id(app_id);
+
+    let admin_assignments: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM rootcx_system.rbac_assignments WHERE user_id = $1 AND role = 'admin'",
+    ).bind(agent_uid).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(admin_assignments, 1, "agent system user must be assigned to 'admin'");
+
+    let per_agent_roles: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM rootcx_system.rbac_roles WHERE name LIKE 'agent:%'",
+    ).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(per_agent_roles, 0, "no per-agent role should be created");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn agent_deletion_unknown_returns_404() {
+    let rt = TestRuntime::boot().await;
+    let s = rt.delete("/api/v1/agents/does-not-exist").await;
+    assert_eq!(s, 404);
+    rt.shutdown().await;
+}
