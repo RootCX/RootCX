@@ -7,17 +7,15 @@ interface Creds {
   imapHost: string;
   imapPort: number;
   smtpHost: string;
-  smtpPort: number;
   username: string;
   password: string;
-  secure?: boolean;
 }
 
 async function withImap<T>(creds: Creds, fn: (client: ImapFlow) => Promise<T>): Promise<T> {
   const client = new ImapFlow({
     host: creds.imapHost,
     port: creds.imapPort,
-    secure: creds.secure ?? true,
+    secure: true,
     auth: { user: creds.username, pass: creds.password },
     logger: false,
     tls: { rejectUnauthorized: false },
@@ -33,12 +31,10 @@ async function withImap<T>(creds: Creds, fn: (client: ImapFlow) => Promise<T>): 
 }
 
 function smtpTransport(creds: Creds) {
-  const port = Number(creds.smtpPort);
-  const secure = port === 465;
   return createTransport({
     host: creds.smtpHost,
-    port,
-    secure,
+    port: 587,
+    secure: false,
     auth: { user: creds.username, pass: creds.password },
     tls: { rejectUnauthorized: false },
     connectionTimeout: 10_000,
@@ -145,7 +141,7 @@ async function batchGetEmails(_config: any, creds: Creds, input: any) {
 
 async function sendEmail(_config: any, creds: Creds, input: any) {
   const { to, subject, body, cc, bcc, html } = input;
-  log.info(`SMTP connecting to ${creds.smtpHost}:${creds.smtpPort} (secure=${creds.secure})`);
+  log.info(`SMTP connecting to ${creds.smtpHost}:587`);
 
   const transport = smtpTransport(creds);
   const mailOptions: any = {
@@ -243,15 +239,13 @@ serve({
         schema: {
           type: "object",
           properties: {
-            imapHost: { type: "string", label: "IMAP Host", placeholder: "imap.gmail.com" },
-            imapPort: { type: "integer", label: "IMAP Port", placeholder: "993", default: 993 },
-            smtpHost: { type: "string", label: "SMTP Host", placeholder: "smtp.gmail.com" },
-            smtpPort: { type: "integer", label: "SMTP Port", placeholder: "465", default: 465 },
             username: { type: "string", label: "Email / Username", placeholder: "you@example.com" },
             password: { type: "string", label: "Password", placeholder: "App-specific password", secret: true },
-            secure: { type: "boolean", label: "Use TLS", default: true },
+            imapHost: { type: "string", label: "IMAP Host", placeholder: "imap.example.com" },
+            imapPort: { type: "integer", label: "IMAP Port", placeholder: "993", default: 993 },
+            smtpHost: { type: "string", label: "SMTP Host", placeholder: "smtp.example.com" },
           },
-          required: ["imapHost", "imapPort", "smtpHost", "smtpPort", "username", "password"],
+          required: ["username", "password", "imapHost", "smtpHost"],
         },
       };
     },
