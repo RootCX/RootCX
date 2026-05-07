@@ -1,0 +1,10 @@
+{
+  "name": "@rootcx/integration-imap-smtp",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": {
+    "imapflow": "^1.2.1",
+    "nodemailer": "^7.0.3",
+    "postal-mime": "^2.6.1"
+  }
+}
