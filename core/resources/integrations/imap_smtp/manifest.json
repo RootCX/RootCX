@@ -16,12 +16,10 @@
         "imapHost": { "type": "string", "description": "IMAP server hostname (e.g. imap.gmail.com)" },
         "imapPort": { "type": "integer", "description": "IMAP port (993 for TLS, 143 for STARTTLS)", "default": 993 },
         "smtpHost": { "type": "string", "description": "SMTP server hostname (e.g. smtp.gmail.com)" },
-        "smtpPort": { "type": "integer", "description": "SMTP port (465 for TLS, 587 for STARTTLS)", "default": 465 },
         "username": { "type": "string", "description": "Email address or username" },
-        "password": { "type": "string", "description": "Password or app-specific password" },
-        "secure": { "type": "boolean", "description": "Use TLS (true for ports 993/465)", "default": true }
+        "password": { "type": "string", "description": "Password or app-specific password" }
       },
-      "required": ["imapHost", "imapPort", "smtpHost", "smtpPort", "username", "password"]
+      "required": ["username", "password", "imapHost", "smtpHost"]
     }
   },
   "actions": [
