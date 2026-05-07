@@ -35,7 +35,7 @@ async function withImap<T>(creds: Creds, fn: (client: ImapFlow) => Promise<T>): 
 
 function smtpTransport(creds: Creds) {
   const port = Number(creds.smtpPort);
-  const secure = creds.secure ?? (port === 465);
+  const secure = port === 465;
   return createTransport({
     host: creds.smtpHost,
     port,
