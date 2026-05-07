@@ -1,0 +1,174 @@
+{
+  "appId": "imap_smtp",
+  "name": "IMAP / SMTP",
+  "version": "0.1.0",
+  "type": "integration",
+  "description": "Send, read and sync emails via generic IMAP and SMTP (works with any mail server)",
+  "configSchema": {
+    "type": "object",
+    "properties": {}
+  },
+  "userAuth": {
+    "type": "credentials",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "imapHost": { "type": "string", "description": "IMAP server hostname (e.g. imap.gmail.com)" },
+        "imapPort": { "type": "integer", "description": "IMAP port (993 for TLS, 143 for STARTTLS)", "default": 993 },
+        "smtpHost": { "type": "string", "description": "SMTP server hostname (e.g. smtp.gmail.com)" },
+        "smtpPort": { "type": "integer", "description": "SMTP port (465 for TLS, 587 for STARTTLS)", "default": 465 },
+        "username": { "type": "string", "description": "Email address or username" },
+        "password": { "type": "string", "description": "Password or app-specific password" },
+        "secure": { "type": "boolean", "description": "Use TLS (true for ports 993/465)", "default": true }
+      },
+      "required": ["imapHost", "imapPort", "smtpHost", "smtpPort", "username", "password"]
+    }
+  },
+  "actions": [
+    {
+      "id": "send_email",
+      "name": "Send Email",
+      "description": "Send an email via SMTP and append to Sent folder",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "to": { "type": "string" },
+          "subject": { "type": "string" },
+          "body": { "type": "string" },
+          "cc": { "type": "string" },
+          "bcc": { "type": "string" },
+          "html": { "type": "boolean", "default": false }
+        },
+        "required": ["to", "subject", "body"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": { "type": "string", "description": "RFC 5322 Message-ID" },
+          "ok": { "type": "boolean" }
+        }
+      }
+    },
+    {
+      "id": "list_emails",
+      "name": "List Emails",
+      "description": "List message UIDs from a folder (lightweight metadata only)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "folder": { "type": "string", "description": "IMAP folder path (default: INBOX)", "default": "INBOX" },
+          "sinceUid": { "type": "integer", "description": "Return messages with UID > sinceUid (incremental sync)" },
+          "maxResults": { "type": "integer", "description": "Max messages to return", "default": 500 }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "uid": { "type": "integer" },
+                "flags": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          },
+          "uidValidity": { "type": "integer" },
+          "highestUid": { "type": "integer" }
+        }
+      }
+    },
+    {
+      "id": "get_email",
+      "name": "Get Email",
+      "description": "Fetch and parse a single email by UID",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "uid": { "type": "integer" },
+          "folder": { "type": "string", "default": "INBOX" }
+        },
+        "required": ["uid"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "uid": { "type": "integer" },
+          "headerMessageId": { "type": "string" },
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "cc": { "type": "string" },
+          "subject": { "type": "string" },
+          "date": { "type": "string" },
+          "body": { "type": "string" },
+          "flags": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    {
+      "id": "batch_get_emails",
+      "name": "Batch Get Emails",
+      "description": "Fetch multiple emails by UID range",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "uids": { "type": "array", "items": { "type": "integer" }, "description": "Array of UIDs to fetch" },
+          "folder": { "type": "string", "default": "INBOX" }
+        },
+        "required": ["uids"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "messages": { "type": "array", "items": { "type": "object" } }
+        }
+      }
+    },
+    {
+      "id": "modify_email",
+      "name": "Modify Email",
+      "description": "Add or remove IMAP flags (\\Seen, \\Flagged, \\Deleted)",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "uid": { "type": "integer" },
+          "folder": { "type": "string", "default": "INBOX" },
+          "addFlags": { "type": "array", "items": { "type": "string" } },
+          "removeFlags": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["uid"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": { "ok": { "type": "boolean" } }
+      }
+    },
+    {
+      "id": "get_folders",
+      "name": "Get Folders",
+      "description": "List all IMAP folders/mailboxes",
+      "inputSchema": { "type": "object", "properties": {} },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "folders": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": { "type": "string" },
+                "name": { "type": "string" },
+                "specialUse": { "type": "string" },
+                "uidValidity": { "type": "integer" }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "webhooks": [],
+  "instructions": "Generic IMAP/SMTP email integration. Works with any mail server (Gmail via app password, Outlook/Hotmail, Yahoo, Fastmail, self-hosted, etc.).\n\nAuth is via credentials form (not OAuth) — user provides IMAP host/port, SMTP host/port, username, and password.\n\n`list_emails` returns UIDs and flags for a given folder. Use `sinceUid` for incremental sync (fetch only messages with UID > cursor). The `uidValidity` field must be tracked — if it changes, the folder was recreated and a full resync is needed.\n\n`get_email` and `batch_get_emails` download full message source and parse via postal-mime. Body is returned as plain text (HTML stripped).\n\n`send_email` sends via SMTP and auto-appends to the Sent folder via IMAP.\n\n`modify_email` adds/removes IMAP flags. Common flags: \\\\Seen (read), \\\\Flagged (starred), \\\\Deleted (trash), \\\\Draft.\n\n`get_folders` discovers all mailboxes with their special-use flags (\\\\Inbox, \\\\Sent, \\\\Drafts, \\\\Trash, \\\\Jstrunk).\n\nCommon server configs:\n- Gmail: imap.gmail.com:993, smtp.gmail.com:465 (requires app password)\n- Outlook: outlook.office365.com:993, smtp.office365.com:587\n- Yahoo: imap.mail.yahoo.com:993, smtp.mail.yahoo.com:465\n- Fastmail: imap.fastmail.com:993, smtp.fastmail.com:465",
+  "entities": []
+}
