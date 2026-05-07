@@ -1,7 +1,6 @@
 /// <reference path="../rootcx-worker.d.ts" />
 import { ImapFlow } from "imapflow";
 import { createTransport } from "nodemailer";
-import MailComposer from "nodemailer/lib/mail-composer";
 import PostalMime from "postal-mime";
 
 interface Creds {
@@ -163,6 +162,7 @@ async function sendEmail(_config: any, creds: Creds, input: any) {
 
   // Append to Sent folder via IMAP
   try {
+    const MailComposer = (await import("nodemailer/lib/mail-composer")).default;
     const composer = new MailComposer(mailOptions);
     const message: Buffer = await new Promise((resolve, reject) => {
       composer.compile().build((err: Error | null, buf: Buffer) => {
