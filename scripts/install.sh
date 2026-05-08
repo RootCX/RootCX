@@ -140,12 +140,7 @@ main() {
     esac
 
     echo ""
-    bold "to get started:"
-    echo ""
-    if ! command -v rootcx >/dev/null 2>&1; then
-        info "  source ${rc_file:-~/.profile}"
-    fi
-    echo "  rootcx init"
+    printf '\033[1;32m✓\033[0m rootcx installed successfully\n'
     echo ""
 }
 

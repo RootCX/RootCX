@@ -120,10 +120,6 @@ if (-not $NoPathUpdate) {
 }
 
 Write-Host ""
-Write-Host "to get started:" -ForegroundColor White
-Write-Host ""
-Write-Host "  rootcx new my-app"
-Write-Host "  cd my-app"
-Write-Host "  rootcx auth login https://your-core.rootcx.com"
-Write-Host "  rootcx deploy"
+Write-Host "✓" -ForegroundColor Green -NoNewline
+Write-Host " rootcx installed successfully"
 Write-Host ""
