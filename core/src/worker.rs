@@ -664,10 +664,43 @@ async fn collection_op(pool: &PgPool, app_id: &str, op: &str, entity: &str, data
     use crate::manifest::{field_type_map, quote_ident};
     use crate::routes::crud::{bind_typed, table};
 
-    let obj = data.as_object().ok_or("data must be a JSON object")?;
     let tbl = table(app_id, entity);
     let types = field_type_map(pool, app_id, entity).await.map_err(|e| e.to_string())?;
 
+    // Read ops use `data` as a where-equality map ({col: value}). Empty {} = full scan.
+    if op == "find" || op == "findOne" || op == "list" {
+        let obj = data.as_object().ok_or("data must be a JSON object (where clause)")?;
+        let mut idx = 1usize;
+        let conds: Vec<String> = obj.keys().map(|k| {
+            let s = format!("{} = ${idx}", quote_ident(k));
+            idx += 1;
+            s
+        }).collect();
+        let where_clause = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
+
+        if op == "findOne" {
+            let sql = format!("SELECT to_jsonb({tbl}.*) AS row FROM {tbl}{where_clause} LIMIT 1");
+            let mut query = sqlx::query_as::<_, (JsonValue,)>(&sql);
+            for (k, v) in obj.iter() {
+                query = bind_typed(query, v, types.get(k.as_str()));
+            }
+            return match query.fetch_optional(pool).await.map_err(|e| e.to_string())? {
+                Some((row,)) => Ok(row),
+                None => Ok(JsonValue::Null),
+            };
+        }
+
+        let sql = format!("SELECT to_jsonb({tbl}.*) AS row FROM {tbl}{where_clause}");
+        let mut query = sqlx::query_as::<_, (JsonValue,)>(&sql);
+        for (k, v) in obj.iter() {
+            query = bind_typed(query, v, types.get(k.as_str()));
+        }
+        let rows: Vec<(JsonValue,)> = query.fetch_all(pool).await.map_err(|e| e.to_string())?;
+        return Ok(JsonValue::Array(rows.into_iter().map(|(r,)| r).collect()));
+    }
+
+    // Write ops below.
+    let obj = data.as_object().ok_or("data must be a JSON object")?;
     let sql = match op {
         "insert" => {
             let cols: Vec<_> = obj.keys().map(|k| quote_ident(k)).collect();

@@ -783,6 +783,7 @@ mod tests {
             instructions: None,
             trigger: None,
             crons: vec![],
+            public: None,
         }
     }
 

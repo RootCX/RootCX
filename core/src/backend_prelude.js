@@ -187,6 +187,9 @@ function _makeCtx(msg) {
       return {
         insert: (data) => _collectionOp("insert", entity, data),
         update: (data) => _collectionOp("update", entity, data),
+        // Read ops use `where` as the equality map ({col: value}). Empty {} = full scan.
+        find: (where = {}) => _collectionOp("find", entity, where),
+        findOne: (where = {}) => _collectionOp("findOne", entity, where),
       };
     },
   };

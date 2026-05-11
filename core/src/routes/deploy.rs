@@ -222,6 +222,39 @@ pub async fn serve_frontend_root(
     serve_frontend(state, AxumPath((app_id, String::new()))).await
 }
 
+/// GET /share/{token} — serves the frontend index.html of the app that owns
+/// the share token. The SPA on the client side then reads the token from the
+/// URL and calls the public API to resolve what to render.
+///
+/// This does NOT verify the token cryptographically (no constant-time hash
+/// check) — it's only used to route to the correct HTML bundle. The real
+/// security enforcement happens on the API call the SPA makes afterwards.
+pub async fn serve_share_frontend(
+    State(rt): State<SharedRuntime>,
+    AxumPath(token): AxumPath<String>,
+) -> impl IntoResponse {
+    use crate::extensions::sharing;
+
+    let pool = rt.pool().clone();
+    let app_id = sharing::resolve_app_id(&pool, &token).await;
+
+    let Some(app_id) = app_id else {
+        return not_found();
+    };
+
+    let frontend_dir = rt.data_dir().join("frontends").join(&app_id);
+    let index = frontend_dir.join("index.html");
+
+    match tokio::fs::read(&index).await {
+        Ok(bytes) => {
+            let ct = "text/html; charset=utf-8".to_string();
+            let cache = "private, no-store".to_string();
+            (StatusCode::OK, [(header::CONTENT_TYPE, ct), (header::CACHE_CONTROL, cache)], bytes)
+        }
+        Err(_) => not_found(),
+    }
+}
+
 pub async fn serve_frontend(
     State(rt): State<SharedRuntime>,
     AxumPath((app_id, path)): AxumPath<(String, String)>,
