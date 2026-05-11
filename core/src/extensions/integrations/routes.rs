@@ -114,7 +114,10 @@ pub async fn execute_action(
             None,
         )
         .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+        .map_err(|e| {
+            tracing::error!(integration = %integration_id, action = %action_id, "action failed: {e}");
+            ApiError::Internal(e.to_string())
+        })?;
 
     Ok(Json(result))
 }
