@@ -116,22 +116,26 @@ async function getEmail(_config: any, creds: Creds, input: any) {
   });
 }
 
+const MAX_BATCH_SIZE = 50;
+
 async function batchGetEmails(_config: any, creds: Creds, input: any) {
   const { uids, folder = "INBOX" } = input;
   if (!uids?.length) return { messages: [] };
+  if (uids.length > MAX_BATCH_SIZE) {
+    throw new Error(`batch too large: ${uids.length} exceeds max ${MAX_BATCH_SIZE}. Split into smaller batches.`);
+  }
 
   return withImap(creds, async (client) => {
     const lock = await client.getMailboxLock(folder);
     try {
       const uidSet = uids.join(",");
-      const raw: Array<{ source: Buffer | Uint8Array; uid: number; flags: string[] }> = [];
+      const messages: Awaited<ReturnType<typeof parseMessage>>[] = [];
 
       for await (const msg of client.fetch(uidSet, { source: true, flags: true, uid: true }, { uid: true })) {
         if (!msg.source) continue;
-        raw.push({ source: msg.source, uid: msg.uid, flags: [...msg.flags] });
+        messages.push(await parseMessage(msg.source, msg.uid, [...msg.flags]));
       }
 
-      const messages = await Promise.all(raw.map(m => parseMessage(m.source, m.uid, m.flags)));
       return { messages };
     } finally {
       lock.release();
