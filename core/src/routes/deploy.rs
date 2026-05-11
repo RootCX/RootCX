@@ -234,24 +234,28 @@ pub async fn serve_share_frontend(
     AxumPath(token): AxumPath<String>,
 ) -> impl IntoResponse {
     use crate::extensions::sharing;
+    use axum::http::HeaderMap;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(header::HeaderName::from_static("x-robots-tag"), "noindex, nofollow".parse().unwrap());
 
     let pool = rt.pool().clone();
-    let app_id = sharing::resolve_app_id(&pool, &token).await;
-
-    let Some(app_id) = app_id else {
-        return not_found();
+    let Some(app_id) = sharing::resolve_app_id(&pool, &token).await else {
+        headers.insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
+        return (StatusCode::NOT_FOUND, headers, b"not found".to_vec());
     };
 
-    let frontend_dir = rt.data_dir().join("frontends").join(&app_id);
-    let index = frontend_dir.join("index.html");
-
+    let index = rt.data_dir().join("frontends").join(&app_id).join("index.html");
     match tokio::fs::read(&index).await {
         Ok(bytes) => {
-            let ct = "text/html; charset=utf-8".to_string();
-            let cache = "private, no-store".to_string();
-            (StatusCode::OK, [(header::CONTENT_TYPE, ct), (header::CACHE_CONTROL, cache)], bytes)
+            headers.insert(header::CONTENT_TYPE, "text/html; charset=utf-8".parse().unwrap());
+            headers.insert(header::CACHE_CONTROL, "private, no-store".parse().unwrap());
+            (StatusCode::OK, headers, bytes)
         }
-        Err(_) => not_found(),
+        Err(_) => {
+            headers.insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
+            (StatusCode::NOT_FOUND, headers, b"not found".to_vec())
+        }
     }
 }
 
