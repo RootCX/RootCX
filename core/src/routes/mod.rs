@@ -43,7 +43,18 @@ fn parse_uuid(id: &str) -> Result<sqlx::types::Uuid, ApiError> {
 }
 
 pub async fn health() -> Json<JsonValue> {
-    Json(json!({ "status": "ok" }))
+    let memory = read_cgroup_memory();
+    Json(json!({ "status": "ok", "memory": memory }))
+}
+
+fn read_cgroup_memory() -> JsonValue {
+    let current = std::fs::read_to_string("/sys/fs/cgroup/memory.current")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    let max = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    json!({ "current": current, "max": max })
 }
 
 pub async fn get_status(
