@@ -8,6 +8,7 @@ pub mod logs;
 pub mod mcp;
 pub mod oidc;
 pub mod rbac;
+pub mod sharing;
 pub mod storage;
 
 use std::sync::Arc;
@@ -55,6 +56,7 @@ pub fn builtin_extensions(auth_config: Arc<AuthConfig>) -> Vec<Box<dyn RuntimeEx
         Box::new(logs::LogsExtension),
         Box::new(auth::AuthExtension { config: auth_config }),
         Box::new(rbac::RbacExtension),
+        Box::new(sharing::SharingExtension),
         Box::new(oidc::OidcExtension),
         Box::new(agents::AgentExtension),
         Box::new(integrations::IntegrationsExtension),

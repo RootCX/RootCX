@@ -1,5 +1,53 @@
 export interface RuntimeClientOptions {
   baseUrl?: string;
+  /**
+   * Initial access token. Pass a share token here for public-share sessions:
+   * `new RuntimeClient({ accessToken: shareToken, persist: false, autoRefresh: false })`
+   */
+  accessToken?: string;
+  /**
+   * If false, the client signals that callers (e.g. RuntimeProvider) must NOT
+   * persist its tokens to localStorage. Public-share sessions should set this
+   * to false so the share token never lands in browser storage.
+   * Default: true (existing behavior).
+   */
+  persist?: boolean;
+  /**
+   * If false, 401 responses are returned to the caller without attempting a
+   * refresh-token round-trip. Required for share-token sessions where
+   * `/auth/refresh` would reject anyway.
+   * Default: true (existing behavior).
+   */
+  autoRefresh?: boolean;
+}
+
+/** Share creation response — token is only returned once at creation. */
+export interface PublicShareInfo {
+  id: string;
+  url: string;
+  /** Raw share token. Empty string when re-fetching an already-active share. */
+  token: string;
+  tokenPrefix: string;
+  context: Record<string, unknown>;
+  createdAt: string;
+  revoked: boolean;
+}
+
+/** Share listing for the owner's UI. Never includes the raw token. */
+export interface PublicShareListing {
+  id: string;
+  appId: string;
+  context: Record<string, unknown>;
+  tokenPrefix: string;
+  createdAt: string;
+  lastAccessedAt: string | null;
+  accessCount: number;
+}
+
+/** Resolved share — what a `/share/:token` frontend needs to render itself. */
+export interface PublicShareLookup {
+  appId: string;
+  context: Record<string, unknown>;
 }
 
 export interface AuthUser {
@@ -186,9 +234,16 @@ export class RuntimeClient {
   private baseUrl: string;
   private accessToken: string | null = null;
   private refreshToken: string | null = null;
+  /** False for public-share sessions — consumers must not persist tokens. */
+  public readonly persist: boolean;
+  /** False for share-token sessions — never call /auth/refresh on 401. */
+  public readonly autoRefresh: boolean;
 
   constructor(opts?: RuntimeClientOptions) {
     this.baseUrl = opts?.baseUrl ?? DEFAULT_BASE_URL;
+    this.accessToken = opts?.accessToken ?? null;
+    this.persist = opts?.persist ?? true;
+    this.autoRefresh = opts?.autoRefresh ?? true;
   }
 
   setTokens(access: string | null, refresh: string | null): void {
@@ -682,6 +737,65 @@ export class RuntimeClient {
     return res.json();
   }
 
+  /**
+   * Create a public share for the given app. `context` is an opaque payload
+   * that the app's public RPC handlers can read (via `identity.share_context`
+   * server-side). The runtime enforces scope match against `context` when the
+   * manifest's `public.rpcs[].scope` lists keys for the called RPC.
+   *
+   * The raw token is returned **once**. Store it in the caller's clipboard /
+   * share modal; the server only retains the SHA-256 hash. If the same caller
+   * already has an active share for the same context, the existing record is
+   * returned with an empty `token` field — revoke and recreate to mint a new
+   * token.
+   */
+  async createPublicShare(
+    appId: string,
+    opts: { context: Record<string, unknown> },
+  ): Promise<PublicShareInfo> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/public-shares`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ context: opts.context }),
+      },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  /** List the caller's active shares for the given app. Never returns raw tokens. */
+  async listPublicShares(appId: string): Promise<PublicShareListing[]> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/public-shares`,
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  /** Revoke a share by id. Filtered by `created_by` server-side — non-owners get 404. */
+  async revokePublicShare(appId: string, shareId: string): Promise<{ message: string }> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/apps/${enc(appId)}/public-shares/${enc(shareId)}`,
+      { method: "DELETE" },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  /**
+   * Look up the share this client's accessToken belongs to. Only meaningful
+   * when the client was constructed with a share token in `accessToken`.
+   * Used by `/share/:token` frontends to discover the app and context the
+   * share grants access to.
+   */
+  async getPublicShareInfo(): Promise<PublicShareLookup> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/public/share/info`);
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
   core(): CoreNamespace {
     return new CoreNamespace(this);
   }
@@ -701,7 +815,7 @@ export class RuntimeClient {
     };
 
     let res = await doFetch(this.accessToken);
-    if (res.status === 401 && this.refreshToken) {
+    if (res.status === 401 && this.refreshToken && this.autoRefresh) {
       try {
         await this.refresh();
         res = await doFetch(this.accessToken);

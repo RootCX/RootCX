@@ -103,6 +103,51 @@ pub struct AppManifest {
     pub crons: Vec<CronDefinition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+    /// Public-access surface. Routes listed here bypass Identity. RPCs that
+    /// declare `scope` additionally require a share token whose context
+    /// matches the request body on the listed keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public: Option<PublicSurface>,
+}
+
+/// Declarative public-access surface for an app.
+///
+/// Anything listed here is reachable without an Authorization header.
+/// Anything **not** listed retains the default JWT-required behavior.
+///
+/// See `core/src/extensions/sharing/` for the runtime enforcement.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicSurface {
+    /// Custom RPCs exposed publicly. If `scope` is non-empty, the request
+    /// must carry a share token whose `context` matches the request body on
+    /// every listed key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rpcs: Vec<PublicRpc>,
+    /// CRUD collections exposed publicly with the listed actions.
+    /// Allowed actions: "list", "read", "create", "update", "delete".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collections: Vec<PublicCollection>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicRpc {
+    pub name: String,
+    /// Keys to enforce-match between the share token's `context` and the
+    /// request body. Empty `scope` means anonymous access (no share token
+    /// required). Non-empty means a share token IS required and the listed
+    /// keys MUST match exactly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scope: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicCollection {
+    pub entity: String,
+    /// Subset of CRUD actions exposed: "list", "read", "create", "update", "delete".
+    pub actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

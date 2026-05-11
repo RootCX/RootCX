@@ -25,6 +25,9 @@ export type {
   CreateCronInput,
   UpdateCronInput,
   OverlapPolicy,
+  PublicShareInfo,
+  PublicShareListing,
+  PublicShareLookup,
 } from "./client";
 
 export { RuntimeProvider, useRuntimeClient } from "./components/RuntimeProvider";

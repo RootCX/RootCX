@@ -22,6 +22,7 @@ async-trait = "0.1"
 aes-gcm = "0.10"
 rand = "0.8"
 hex = "0.4"
+subtle = "2"   # constant-time comparison for share tokens
 
 # Process Supervisor
 command-group = { version = "5", features = ["with-tokio"] }

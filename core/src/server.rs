@@ -55,6 +55,7 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .route("/apps/{app_id}", get(routes::serve_frontend_root))
         .route("/apps/{app_id}/", get(routes::serve_frontend_root))
         .route("/apps/{app_id}/{*path}", get(routes::serve_frontend))
+        .route("/share/{token}", get(routes::serve_share_frontend))
         .route("/api/v1/db/schemas", get(routes::list_schemas))
         .route("/api/v1/db/schemas/{schema}/tables", get(routes::list_tables))
         .route("/api/v1/db/query", post(routes::execute_query))
