@@ -9,6 +9,7 @@ pub mod llm_models;
 pub(crate) mod query_params;
 mod secrets;
 mod upload;
+mod webhooks;
 mod workers;
 
 use std::sync::Arc;
@@ -189,6 +190,7 @@ pub use introspection::{execute_query, list_schemas, list_tables};
 pub use crons::{create_cron, delete_cron, list_all_crons, list_cron_runs, list_crons, trigger_cron, update_cron};
 pub use workers::{all_worker_statuses, rpc_proxy, start_worker, stop_worker, worker_status};
 pub use icon::get_icon;
+pub use webhooks::list_webhooks;
 
 #[cfg(test)]
 mod tests {

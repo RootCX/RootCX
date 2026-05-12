@@ -91,7 +91,7 @@ pub struct AppManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_auth: Option<JsonValue>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub webhooks: Vec<String>,
+    pub webhooks: Vec<WebhookDefinition>,
     /// Free-form usage instructions surfaced to AI via list_integrations tool
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
@@ -163,6 +163,13 @@ pub struct CronDefinition {
     pub payload: Option<JsonValue>,
     #[serde(default = "default_overlap_policy")]
     pub overlap_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebhookDefinition {
+    pub name: String,
+    pub method: String,
 }
 
 fn default_overlap_policy() -> String { "skip".into() }

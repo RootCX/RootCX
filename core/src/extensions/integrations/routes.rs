@@ -131,16 +131,6 @@ pub async fn webhook_ingress(
     let (pool, secrets) = routes::pool_and_secrets(&rt);
     let wm = routes::wm(&rt);
 
-    let integration_id: String = sqlx::query_scalar(
-        "SELECT id FROM rootcx_system.apps WHERE webhook_token = $1",
-    )
-    .bind(&token)
-    .fetch_optional(&pool)
-    .await?
-    .ok_or_else(|| ApiError::NotFound("invalid webhook token".into()))?;
-
-    let config = resolve_config(&pool, &secrets, &integration_id).await?;
-
     let hdr_map: JsonValue = headers
         .iter()
         .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str().to_string(), json!(v))))
@@ -151,6 +141,32 @@ pub async fn webhook_ingress(
         .unwrap_or_else(|_| json!(String::from_utf8_lossy(&body).into_owned()));
 
     let raw_body = base64::engine::general_purpose::STANDARD.encode(&body);
+
+    if let Some(wh) = crate::webhooks::lookup_token(&pool, &token).await? {
+        let result = wm
+            .rpc(
+                &wh.app_id,
+                Uuid::new_v4().to_string(),
+                wh.method.clone(),
+                json!({ "name": wh.name, "headers": hdr_map, "body": payload, "rawBody": raw_body }),
+                None,
+            )
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        return Ok(Json(result));
+    }
+
+    // Legacy: integration webhooks (webhook_token on apps table)
+    let integration_id: String = sqlx::query_scalar(
+        "SELECT id FROM rootcx_system.apps WHERE webhook_token = $1",
+    )
+    .bind(&token)
+    .fetch_optional(&pool)
+    .await?
+    .ok_or_else(|| ApiError::NotFound("invalid webhook token".into()))?;
+
+    let config = resolve_config(&pool, &secrets, &integration_id).await?;
 
     let result = wm
         .rpc(

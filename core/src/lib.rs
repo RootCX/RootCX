@@ -16,6 +16,7 @@ mod seed;
 pub mod server;
 pub mod tools;
 mod tool_executor;
+pub mod webhooks;
 mod worker;
 mod worker_manager;
 

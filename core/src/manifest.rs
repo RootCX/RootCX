@@ -73,6 +73,10 @@ pub async fn install_app(
         crate::crons::sync_from_manifest(pool, app_id, &manifest.crons, Some(installed_by)).await?;
     }
 
+    if !manifest.webhooks.is_empty() {
+        crate::webhooks::sync_webhooks(pool, app_id, &manifest.webhooks).await?;
+    }
+
     if !manifest.actions.is_empty() {
         sync_action_permissions(pool, app_id, &manifest.actions).await?;
     }
