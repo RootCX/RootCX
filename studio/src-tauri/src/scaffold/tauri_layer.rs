@@ -38,7 +38,7 @@ tauri = {{ version = "2", features = [] }}
 tauri-plugin-shell = "2"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
-rootcx-client = {{ version = "0.13", features = ["tauri"] }}
+rootcx-client = {{ version = "0.14", features = ["tauri"] }}
 "#
                 ),
             )
