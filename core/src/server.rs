@@ -42,6 +42,7 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .route("/api/v1/apps/{app_id}/crons/{id}", axum::routing::patch(routes::update_cron).delete(routes::delete_cron))
         .route("/api/v1/apps/{app_id}/crons/{id}/runs", get(routes::list_cron_runs))
         .route("/api/v1/apps/{app_id}/crons/{id}/trigger", post(routes::trigger_cron))
+        .route("/api/v1/apps/{app_id}/webhooks", get(routes::list_webhooks))
         .route("/api/v1/apps/{app_id}/jobs", get(routes::list_jobs).post(routes::enqueue_job))
         .route("/api/v1/apps/{app_id}/upload", post(routes::upload_file).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)))
         .route(

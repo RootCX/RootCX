@@ -146,6 +146,15 @@ export interface UpdateCronInput {
   enabled?: boolean;
 }
 
+export interface Webhook {
+  id: string;
+  name: string;
+  method: string;
+  token: string;
+  url: string;
+  createdAt: string;
+}
+
 export interface IntegrationSummary {
   id: string;
   name: string;
@@ -681,6 +690,12 @@ export class RuntimeClient {
 
   async listCrons(appId: string): Promise<CronSchedule[]> {
     const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/crons`);
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async listWebhooks(appId: string): Promise<Webhook[]> {
+    const res = await this.authFetch(`${this.baseUrl}/api/v1/apps/${enc(appId)}/webhooks`);
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }

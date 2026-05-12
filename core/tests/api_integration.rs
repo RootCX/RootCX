@@ -64,6 +64,7 @@ async fn mgmt_endpoints_reject_unauthenticated() {
     assert_eq!(rt.get_unauthed("/api/v1/apps/authtest/secrets").await, 401);
     assert_eq!(rt.delete_unauthed("/api/v1/apps/authtest/secrets/K").await, 401);
     assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/jobs", &json!({"payload":{}})).await.0, 401);
+    assert_eq!(rt.get_unauthed("/api/v1/apps/authtest/webhooks").await, 401);
     assert_eq!(rt.get_unauthed("/api/v1/apps/authtest/crons").await, 401);
     assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/crons", &json!({"name":"x","schedule":"* * * * *"})).await.0, 401);
     assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/worker/start", &json!({})).await.0, 401);
@@ -2841,5 +2842,92 @@ async fn agent_deletion_unknown_returns_404() {
     let rt = TestRuntime::boot().await;
     let s = rt.delete("/api/v1/agents/does-not-exist").await;
     assert_eq!(s, 404);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn webhook_manifest_sync_and_orphan_deletion() {
+    let rt = TestRuntime::boot().await;
+
+    let manifest = json!({
+        "appId": "whapp", "name": "whapp", "version": "1.0.0",
+        "dataContract": [{ "entityName": "events", "fields": [
+            { "name": "source", "type": "text" }
+        ]}],
+        "webhooks": [
+            { "name": "hubspot", "method": "onHubspot" },
+            { "name": "stripe", "method": "onStripe" }
+        ]
+    });
+    rt.install_manifest(&manifest).await;
+
+    let (s, list) = rt.get_json("/api/v1/apps/whapp/webhooks").await;
+    assert_eq!(s, 200);
+    let arr = list.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "manifest declared 2 webhooks: {list}");
+
+    let hubspot = arr.iter().find(|w| w["name"] == "hubspot").expect("hubspot missing");
+    assert_eq!(hubspot["method"], "onHubspot");
+    assert_eq!(hubspot["token"].as_str().unwrap().len(), 64, "token should be 32 bytes hex");
+    assert!(hubspot["url"].as_str().unwrap().starts_with("/api/v1/hooks/"));
+
+    let stripe = arr.iter().find(|w| w["name"] == "stripe").expect("stripe missing");
+    assert_eq!(stripe["method"], "onStripe");
+
+    // Re-install: remove stripe, update hubspot method
+    let manifest2 = json!({
+        "appId": "whapp", "name": "whapp", "version": "1.0.1",
+        "dataContract": [{ "entityName": "events", "fields": [
+            { "name": "source", "type": "text" }
+        ]}],
+        "webhooks": [
+            { "name": "hubspot", "method": "onHubspotDeal" }
+        ]
+    });
+    rt.install_manifest(&manifest2).await;
+
+    let (_, list2) = rt.get_json("/api/v1/apps/whapp/webhooks").await;
+    let arr2 = list2.as_array().unwrap();
+    assert_eq!(arr2.len(), 1, "orphaned 'stripe' should be deleted: {list2}");
+    assert_eq!(arr2[0]["method"], "onHubspotDeal", "method should be updated");
+    // Token must remain stable across re-deploys
+    assert_eq!(arr2[0]["token"], hubspot["token"], "token must not change on re-deploy");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn webhook_ingress_invalid_token_returns_404() {
+    let rt = TestRuntime::boot().await;
+
+    let (s, _) = rt.post_unauthed("/api/v1/hooks/nonexistent_token_abc123", &json!({"event": "test"})).await;
+    assert_eq!(s, 404);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn webhook_ingress_routes_to_app_worker() {
+    let rt = TestRuntime::boot().await;
+
+    let manifest = json!({
+        "appId": "whroute", "name": "whroute", "version": "1.0.0",
+        "dataContract": [{ "entityName": "logs", "fields": [
+            { "name": "msg", "type": "text" }
+        ]}],
+        "webhooks": [
+            { "name": "external", "method": "onExternal" }
+        ]
+    });
+    rt.install_manifest(&manifest).await;
+
+    let (_, list) = rt.get_json("/api/v1/apps/whroute/webhooks").await;
+    let token = list.as_array().unwrap()[0]["token"].as_str().unwrap().to_string();
+
+    // Call the webhook ingress -- worker is not running so it should fail with 500 (no worker),
+    // but NOT 404 (proving the token resolved correctly)
+    let (s, _) = rt.post_unauthed(&format!("/api/v1/hooks/{token}"), &json!({"deal_id": "123"})).await;
+    assert_ne!(s, 404, "valid token must not return 404");
+
     rt.shutdown().await;
 }
