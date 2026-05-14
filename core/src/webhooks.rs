@@ -47,7 +47,7 @@ pub async fn sync_webhooks(
     app_id: &str,
     webhooks: &[rootcx_types::WebhookDefinition],
 ) -> Result<(), RuntimeError> {
-    let names: Vec<&str> = webhooks.iter().map(|w| w.name.as_str()).collect();
+    let names: Vec<&str> = webhooks.iter().map(|w| w.name()).collect();
 
     sqlx::query(
         "DELETE FROM rootcx_system.webhooks WHERE app_id = $1 AND name != ALL($2)"
@@ -65,8 +65,8 @@ pub async fn sync_webhooks(
             ON CONFLICT (app_id, name) DO UPDATE SET method = EXCLUDED.method
         "#)
         .bind(app_id)
-        .bind(&wh.name)
-        .bind(&wh.method)
+        .bind(wh.name())
+        .bind(wh.method())
         .bind(generate_token())
         .execute(pool)
         .await
