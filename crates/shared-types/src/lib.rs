@@ -166,10 +166,28 @@ pub struct CronDefinition {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WebhookDefinition {
-    pub name: String,
-    pub method: String,
+#[serde(untagged)]
+pub enum WebhookDefinition {
+    Simple(String),
+    #[serde(rename_all = "camelCase")]
+    Full { name: String, #[serde(default = "default_post")] method: String },
+}
+
+fn default_post() -> String { "POST".into() }
+
+impl WebhookDefinition {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Simple(s) => s.as_str(),
+            Self::Full { name, .. } => name.as_str(),
+        }
+    }
+    pub fn method(&self) -> &str {
+        match self {
+            Self::Simple(_) => "POST",
+            Self::Full { method, .. } => method.as_str(),
+        }
+    }
 }
 
 fn default_overlap_policy() -> String { "skip".into() }
