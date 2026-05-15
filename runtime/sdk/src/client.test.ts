@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { RuntimeClient } from "./client";
+import { RuntimeClient, AgentEvent } from "./client";
 
 describe("client.core()", () => {
   let client: RuntimeClient;
@@ -77,5 +77,123 @@ describe("cron methods", () => {
       ok: false, status: 400, text: async () => "bad schedule",
     }));
     await expect(client.createCron("a", { name: "x", schedule: "bad" })).rejects.toThrow("bad schedule");
+  });
+});
+
+function sseStream(chunks: string[]) {
+  const encoder = new TextEncoder();
+  let i = 0;
+  return {
+    getReader: () => ({
+      read: async () => {
+        if (i >= chunks.length) return { done: true, value: undefined };
+        return { done: false, value: encoder.encode(chunks[i++]) };
+      },
+      cancel: async () => {},
+    }),
+  };
+}
+
+function stubFetchSSE(chunks: string[]) {
+  vi.stubGlobal("fetch", async () => ({
+    ok: true,
+    status: 200,
+    body: sseStream(chunks),
+  }));
+}
+
+describe("invokeAgent", () => {
+  let client: RuntimeClient;
+
+  beforeEach(() => {
+    client = new RuntimeClient({ baseUrl: "http://localhost:9100" });
+    client.setTokens("tok", null);
+  });
+
+  it("parses chunk and done events from SSE stream", async () => {
+    stubFetchSSE([
+      'event: chunk\ndata: {"delta":"hello","session_id":"s1"}\n\n',
+      'event: done\ndata: {"response":"hello world","session_id":"s1","tokens":42}\n\n',
+    ]);
+    const events: AgentEvent[] = [];
+    const result = await client.invokeAgent("agent1", { message: "hi" }, (e) => events.push(e));
+
+    expect(events).toHaveLength(2);
+    expect(events[0]).toEqual({ type: "chunk", delta: "hello", sessionId: "s1" });
+    expect(result).toEqual({ type: "done", response: "hello world", sessionId: "s1", tokens: 42 });
+  });
+
+  it("ignores SSE comments and handles multi-line data", async () => {
+    stubFetchSSE([
+      ':keepalive\nevent: done\ndata: {"response":"ok",\ndata: "session_id":"s1","tokens":1}\n\n',
+    ]);
+    const events: AgentEvent[] = [];
+    const result = await client.invokeAgent("agent1", { message: "x" }, (e) => events.push(e));
+
+    expect(result.response).toBe("ok");
+  });
+
+  it("skips malformed JSON data lines without crashing", async () => {
+    stubFetchSSE([
+      'event: chunk\ndata: {broken json\n\nevent: done\ndata: {"response":"r","session_id":"s","tokens":0}\n\n',
+    ]);
+    const events: AgentEvent[] = [];
+    const result = await client.invokeAgent("agent1", { message: "x" }, (e) => events.push(e));
+
+    expect(events).toHaveLength(1);
+    expect(result.type).toBe("done");
+  });
+
+  it("throws error event message when stream ends without done", async () => {
+    stubFetchSSE([
+      'event: error\ndata: {"error":"model overloaded","session_id":"s1"}\n\n',
+    ]);
+    const events: AgentEvent[] = [];
+    await expect(
+      client.invokeAgent("agent1", { message: "x" }, (e) => events.push(e)),
+    ).rejects.toThrow("model overloaded");
+    expect(events[0]).toEqual({ type: "error", error: "model overloaded", sessionId: "s1" });
+  });
+
+  it("throws generic message when stream ends with no events", async () => {
+    stubFetchSSE([""]);
+    await expect(
+      client.invokeAgent("agent1", { message: "x" }, () => {}),
+    ).rejects.toThrow("agent stream ended without done event");
+  });
+
+  it("handles events split across multiple chunks", async () => {
+    stubFetchSSE([
+      'event: chunk\n',
+      'data: {"delta":"hi","session_id":"s1"}\n\n',
+      'event: done\ndata: {"response":"hi","session_id":"s1","tokens":5}\n\n',
+    ]);
+    const events: AgentEvent[] = [];
+    const result = await client.invokeAgent("agent1", { message: "x" }, (e) => events.push(e));
+
+    expect(events).toHaveLength(2);
+    expect(events[0]).toEqual({ type: "chunk", delta: "hi", sessionId: "s1" });
+    expect(result.response).toBe("hi");
+  });
+
+  it("sends sessionId and fileIds when provided (including empty string)", async () => {
+    let sentBody: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", async (_url: string, init?: RequestInit) => {
+      sentBody = JSON.parse(init?.body as string);
+      return {
+        ok: true,
+        status: 200,
+        body: sseStream(['event: done\ndata: {"response":"","session_id":"","tokens":0}\n\n']),
+      };
+    });
+
+    await client.invokeAgent(
+      "agent1",
+      { message: "hi", sessionId: "", fileIds: ["f1"] },
+      () => {},
+    );
+
+    expect(sentBody.session_id).toBe("");
+    expect(sentBody.file_ids).toEqual(["f1"]);
   });
 });
