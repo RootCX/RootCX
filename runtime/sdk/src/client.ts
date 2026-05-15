@@ -155,6 +155,80 @@ export interface Webhook {
   createdAt: string;
 }
 
+export interface InvokeAgentOptions {
+  message: string;
+  sessionId?: string;
+  fileIds?: string[];
+}
+
+export interface AgentChunkEvent {
+  type: "chunk";
+  delta: string;
+  sessionId: string;
+}
+
+export interface AgentDoneEvent {
+  type: "done";
+  response: string;
+  sessionId: string;
+  tokens: number;
+}
+
+export interface AgentErrorEvent {
+  type: "error";
+  error: string;
+  sessionId: string;
+}
+
+export interface AgentToolCallStartedEvent {
+  type: "tool_call_started";
+  callId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  sessionId: string;
+}
+
+export interface AgentToolCallCompletedEvent {
+  type: "tool_call_completed";
+  callId: string;
+  toolName: string;
+  output: unknown;
+  error: string | null;
+  durationMs: number | null;
+  sessionId: string;
+}
+
+export interface AgentApprovalRequiredEvent {
+  type: "approval_required";
+  approvalId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  reason: string;
+  sessionId: string;
+}
+
+export interface AgentSessionCompactedEvent {
+  type: "session_compacted";
+  summary: string;
+  sessionId: string;
+}
+
+export interface AgentSubAgentChunkEvent {
+  type: "sub_agent_chunk";
+  appId: string;
+  delta: string;
+}
+
+export type AgentEvent =
+  | AgentChunkEvent
+  | AgentDoneEvent
+  | AgentErrorEvent
+  | AgentToolCallStartedEvent
+  | AgentToolCallCompletedEvent
+  | AgentApprovalRequiredEvent
+  | AgentSessionCompactedEvent
+  | AgentSubAgentChunkEvent;
+
 export interface IntegrationSummary {
   id: string;
   name: string;
@@ -389,6 +463,100 @@ export class RuntimeClient {
     });
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
+  }
+
+  async invokeAgent(
+    appId: string,
+    opts: InvokeAgentOptions,
+    onEvent: (event: AgentEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<AgentDoneEvent> {
+    const url = `${this.baseUrl}/api/v1/apps/${enc(appId)}/agent/invoke`;
+    const body: Record<string, unknown> = { message: opts.message };
+    if (opts.sessionId != null) body.session_id = opts.sessionId;
+    if (opts.fileIds != null) body.file_ids = opts.fileIds;
+
+    const res = await this.authFetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+
+    const reader = res.body?.getReader();
+    if (!reader) throw new RuntimeApiError(0, "no response body");
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let currentEvent = "";
+    let dataLines: string[] = [];
+    let doneEvent: AgentDoneEvent | null = null;
+    let streamError: string | null = null;
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (line.startsWith(":")) continue;
+          if (line.startsWith("event:")) {
+            currentEvent = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            dataLines.push(line.slice(5).trimStart());
+          } else if (line === "") {
+            if (currentEvent && dataLines.length > 0) {
+              try {
+                const raw = JSON.parse(dataLines.join("\n"));
+                const parsed = this.parseAgentEvent(currentEvent, raw);
+                if (parsed) {
+                  onEvent(parsed);
+                  if (parsed.type === "done") doneEvent = parsed;
+                  if (parsed.type === "error") streamError = parsed.error;
+                }
+              } catch { /* malformed data line — skip */ }
+            }
+            currentEvent = "";
+            dataLines = [];
+          }
+        }
+      }
+    } finally {
+      reader.cancel();
+    }
+
+    if (doneEvent) return doneEvent;
+    if (streamError) throw new RuntimeApiError(0, streamError);
+    throw new RuntimeApiError(0, "agent stream ended without done event");
+  }
+
+  private parseAgentEvent(event: string, raw: Record<string, unknown>): AgentEvent | null {
+    const sid = (raw.session_id as string) ?? "";
+    switch (event) {
+      case "chunk":
+        return { type: "chunk", delta: raw.delta as string, sessionId: sid };
+      case "done":
+        return { type: "done", response: raw.response as string, sessionId: sid, tokens: raw.tokens as number };
+      case "error":
+        return { type: "error", error: raw.error as string, sessionId: sid };
+      case "tool_call_started":
+        return { type: "tool_call_started", callId: raw.call_id as string, toolName: raw.tool_name as string, input: raw.input as Record<string, unknown>, sessionId: sid };
+      case "tool_call_completed":
+        return { type: "tool_call_completed", callId: raw.call_id as string, toolName: raw.tool_name as string, output: raw.output, error: raw.error as string | null, durationMs: raw.duration_ms as number | null, sessionId: sid };
+      case "approval_required":
+        return { type: "approval_required", approvalId: raw.approval_id as string, toolName: raw.tool_name as string, args: raw.args as Record<string, unknown>, reason: raw.reason as string, sessionId: sid };
+      case "session_compacted":
+        return { type: "session_compacted", summary: raw.summary as string, sessionId: sid };
+      case "sub_agent_chunk":
+        return { type: "sub_agent_chunk", appId: raw.app_id as string, delta: raw.delta as string };
+      default:
+        return null;
+    }
   }
 
   async authMode(): Promise<AuthMode> {

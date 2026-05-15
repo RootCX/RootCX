@@ -28,6 +28,16 @@ export type {
   PublicShareInfo,
   PublicShareListing,
   PublicShareLookup,
+  InvokeAgentOptions,
+  AgentEvent,
+  AgentChunkEvent,
+  AgentDoneEvent,
+  AgentErrorEvent,
+  AgentToolCallStartedEvent,
+  AgentToolCallCompletedEvent,
+  AgentApprovalRequiredEvent,
+  AgentSessionCompactedEvent,
+  AgentSubAgentChunkEvent,
 } from "./client";
 
 export { RuntimeProvider, useRuntimeClient } from "./components/RuntimeProvider";
