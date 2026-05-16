@@ -9,6 +9,7 @@ pub mod mcp;
 pub mod oidc;
 pub mod rbac;
 pub mod sharing;
+pub mod platform_storage;
 pub mod storage;
 
 use std::sync::Arc;
@@ -63,5 +64,6 @@ pub fn builtin_extensions(auth_config: Arc<AuthConfig>) -> Vec<Box<dyn RuntimeEx
         Box::new(mcp::McpExtension),
         Box::new(channels::ChannelExtension),
         Box::new(storage::StorageExtension),
+        Box::new(platform_storage::PlatformStorageExtension),
     ]
 }
