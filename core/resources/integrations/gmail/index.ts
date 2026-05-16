@@ -253,11 +253,22 @@ function parseMessage(msg: any) {
 
 function extractBody(payload: any): string {
   if (!payload) return "";
-  if (payload.body?.data) return decodeBase64Url(payload.body.data);
-  if (!payload.parts) return "";
-  const part = payload.parts.find((p: any) => p.mimeType === "text/html")
-    ?? payload.parts.find((p: any) => p.mimeType === "text/plain");
-  return part?.body?.data ? decodeBase64Url(part.body.data) : "";
+  const mime = (payload.mimeType ?? "").toLowerCase();
+
+  if (mime === "text/html" || mime === "text/plain") {
+    return payload.body?.data ? decodeBase64Url(payload.body.data) : "";
+  }
+  if (mime.startsWith("multipart/") && Array.isArray(payload.parts)) {
+    for (const p of payload.parts) {
+      const r = extractBody(p);
+      if (r && (p.mimeType ?? "").toLowerCase() === "text/html") return r;
+    }
+    for (const p of payload.parts) {
+      const r = extractBody(p);
+      if (r) return r;
+    }
+  }
+  return "";
 }
 
 function decodeBase64Url(data: string): string {
