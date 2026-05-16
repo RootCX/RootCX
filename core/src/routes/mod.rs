@@ -43,9 +43,24 @@ fn parse_uuid(id: &str) -> Result<sqlx::types::Uuid, ApiError> {
     id.parse::<sqlx::types::Uuid>().map_err(|_| ApiError::BadRequest(format!("invalid UUID: '{id}'")))
 }
 
-pub async fn health() -> Json<JsonValue> {
-    let memory = read_cgroup_memory();
-    Json(json!({ "status": "ok", "memory": memory }))
+pub async fn health(
+    axum::extract::State(rt): axum::extract::State<SharedRuntime>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<JsonValue> {
+    if params.get("full").is_some() {
+        let memory = read_cgroup_memory();
+        let cpu = read_cgroup_cpu();
+        let disk = read_disk_usage(rt.data_dir());
+        let db_reachable = db_ping(rt.pool()).await;
+        return Json(json!({
+            "status": "ok",
+            "memory": memory,
+            "cpu": cpu,
+            "disk": disk,
+            "database": { "reachable": db_reachable }
+        }));
+    }
+    Json(json!({ "status": "ok" }))
 }
 
 fn read_cgroup_memory() -> JsonValue {
@@ -55,7 +70,67 @@ fn read_cgroup_memory() -> JsonValue {
     let max = std::fs::read_to_string("/sys/fs/cgroup/memory.max")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok());
-    json!({ "current": current, "max": max })
+    json!({ "current_bytes": current, "limit_bytes": max })
+}
+
+fn read_cgroup_cpu() -> JsonValue {
+    let content = match std::fs::read_to_string("/sys/fs/cgroup/cpu.stat") {
+        Ok(c) => c,
+        Err(_) => return json!(null),
+    };
+    let mut usage_usec: Option<u64> = None;
+    let mut nr_periods: Option<u64> = None;
+    let mut nr_throttled: Option<u64> = None;
+    let mut throttled_usec: Option<u64> = None;
+    for line in content.lines() {
+        let mut parts = line.split_whitespace();
+        let key = parts.next().unwrap_or("");
+        let val = parts.next().and_then(|v| v.parse::<u64>().ok());
+        match key {
+            "usage_usec" => usage_usec = val,
+            "nr_periods" => nr_periods = val,
+            "nr_throttled" => nr_throttled = val,
+            "throttled_usec" => throttled_usec = val,
+            _ => {}
+        }
+    }
+    json!({
+        "usage_usec": usage_usec,
+        "periods": nr_periods,
+        "throttled_periods": nr_throttled,
+        "throttled_usec": throttled_usec
+    })
+}
+
+fn read_disk_usage(path: &std::path::Path) -> JsonValue {
+    use std::ffi::CString;
+    use std::mem::MaybeUninit;
+
+    let c_path = match CString::new(path.as_os_str().as_encoded_bytes()) {
+        Ok(p) => p,
+        Err(_) => return json!(null),
+    };
+
+    unsafe {
+        let mut stat = MaybeUninit::<libc::statvfs>::uninit();
+        if libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) != 0 {
+            return json!(null);
+        }
+        let stat = stat.assume_init();
+        let total = stat.f_blocks as u64 * stat.f_frsize as u64;
+        let available = stat.f_bavail as u64 * stat.f_frsize as u64;
+        let used = total.saturating_sub(available);
+        json!({ "total_bytes": total, "used_bytes": used, "available_bytes": available })
+    }
+}
+
+async fn db_ping(pool: &PgPool) -> bool {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        sqlx::query("SELECT 1").execute(pool),
+    )
+    .await
+    .is_ok_and(|r| r.is_ok())
 }
 
 pub async fn get_status(
