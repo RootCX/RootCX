@@ -10,7 +10,8 @@ use hmac::{Hmac, Mac};
 use serde_json::{Value as JsonValue, json};
 use sha2::Sha256;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
+use crate::extensions::rbac::policy::require_admin;
 use uuid::Uuid;
 
 use crate::api_error::ApiError;
@@ -154,28 +155,67 @@ pub async fn callback(
         secrets.set(&pool, &pending.integration_id, &key, &creds.to_string()).await.map_err(|e| ApiError::Internal(e.to_string()))?;
         info!(integration_id = %pending.integration_id, user_id = %pending.user_id, "user credentials stored");
 
-        // Auto-trigger sync_connect after successful OAuth
-        let user_id: uuid::Uuid = pending.user_id.parse().unwrap_or_default();
-        let email: String = sqlx::query_scalar("SELECT email FROM rootcx_system.users WHERE id = $1")
-            .bind(user_id).fetch_optional(&pool).await.ok().flatten().unwrap_or_default();
-        if !email.is_empty() {
-            if let Ok(token) = crate::auth::jwt::encode_access(rt.auth_config(), user_id, &email) {
-                let (user_credentials, effective_uid) = resolve_credentials(&secrets, &pool, &pending.integration_id, &pending.user_id).await;
-                let caller = Some(crate::ipc::RpcCaller { user_id: pending.user_id.clone(), email: email.clone(), auth_token: Some(token) });
-                let config = super::routes::resolve_config(&pool, &secrets, &pending.integration_id).await.unwrap_or(serde_json::Value::Null);
-                let _ = wm.rpc(
-                    &pending.integration_id, Uuid::new_v4().to_string(), "__integration".into(),
-                    serde_json::json!({ "action": "sync_connect", "input": {}, "config": config, "userCredentials": user_credentials, "userId": effective_uid }),
-                    caller,
-                ).await;
-            }
+        if let Some((code, msg)) = try_auto_sync_connect(&rt, &pool, &secrets, &wm, &pending).await {
+            return Ok(Html(callback_html(&pending.integration_id, Some((&code, &msg)))));
         }
     }
 
-    Ok(Html(format!(
-        r#"<!DOCTYPE html><html><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#1a1a1a;color:#fff"><div style="text-align:center"><h2>Connected to {}!</h2><p>You can close this tab.</p></div></body></html>"#,
-        pending.integration_id,
-    )))
+    Ok(Html(callback_html(&pending.integration_id, None)))
+}
+
+async fn try_auto_sync_connect(
+    rt: &SharedRuntime,
+    pool: &sqlx::PgPool,
+    secrets: &crate::secrets::SecretManager,
+    wm: &crate::worker_manager::WorkerManager,
+    pending: &Pending,
+) -> Option<(String, String)> {
+    let user_id: uuid::Uuid = pending.user_id.parse().ok()?;
+    let email: String = sqlx::query_scalar("SELECT email FROM rootcx_system.users WHERE id = $1")
+        .bind(user_id).fetch_optional(pool).await.ok()??;
+    if email.is_empty() { return None; }
+
+    let token = crate::auth::jwt::encode_access(rt.auth_config(), user_id, &email).ok()?;
+    let (user_credentials, effective_uid) = resolve_credentials(secrets, pool, &pending.integration_id, &pending.user_id).await;
+    let caller = Some(crate::ipc::RpcCaller { user_id: pending.user_id.clone(), email: email.clone(), auth_token: Some(token) });
+    let config = super::routes::resolve_config(pool, secrets, &pending.integration_id).await.unwrap_or(serde_json::Value::Null);
+
+    match wm.rpc(
+        &pending.integration_id, Uuid::new_v4().to_string(), "__integration".into(),
+        json!({ "action": "sync_connect", "input": {}, "config": config, "userCredentials": user_credentials, "userId": effective_uid }),
+        caller,
+    ).await {
+        Ok(res) if res.get("ok").and_then(|v| v.as_bool()) == Some(false) => {
+            let err = res.get("error");
+            let code = err.and_then(|e| e.get("code")).and_then(|v| v.as_str()).unwrap_or("UNKNOWN");
+            let msg = err.and_then(|e| e.get("message")).and_then(|v| v.as_str()).unwrap_or("");
+            warn!(integration_id = %pending.integration_id, user_id = %pending.user_id, code, "auto sync_connect failed: {}", msg);
+            Some((code.to_owned(), msg.to_owned()))
+        }
+        Err(e) => {
+            warn!(integration_id = %pending.integration_id, user_id = %pending.user_id, "auto sync_connect rpc error: {}", e);
+            None
+        }
+        _ => None,
+    }
+}
+
+fn callback_html(integration_id: &str, error: Option<(&str, &str)>) -> String {
+    let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;");
+    let body = match error {
+        Some((code, msg)) => format!(
+            r#"<div style="text-align:center;max-width:560px;padding:24px"><h2 style="color:#ff6b6b;margin:0 0 12px">Connected, but sync failed</h2><p style="color:#aaa;margin:0 0 16px">{}</p><p style="font-family:monospace;background:#2a2a2a;padding:12px;border-radius:6px;font-size:13px;text-align:left;color:#ddd;word-break:break-word">[{}] {}</p><p style="color:#888;font-size:13px;margin-top:16px">You can close this tab and retry from the app settings.</p></div>"#,
+            escape(integration_id), escape(code), escape(msg),
+        ),
+        None => format!(
+            r#"<div style="text-align:center"><h2>Connected to {}!</h2><p>You can close this tab.</p></div>"#,
+            escape(integration_id),
+        ),
+    };
+    format!(
+        r#"<!DOCTYPE html><html><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#1a1a1a;color:#fff">{}</body></html>"#,
+        body,
+    )
 }
 
 pub async fn status(
@@ -183,8 +223,11 @@ pub async fn status(
     Path(integration_id): Path<String>,
     axum::extract::Query(qs): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let target_user = resolve_target_user(&identity, &qs);
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
+    if qs.contains_key("agent_app_id") {
+        require_admin(&pool, identity.user_id).await?;
+    }
+    let target_user = resolve_target_user(&identity, &qs);
     let raw = secrets.get(&pool, &integration_id, &iuc_key(&integration_id, &target_user)).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     match raw {
@@ -227,6 +270,7 @@ pub async fn delegate(
     let agent_uid = crate::extensions::agents::agent_user_id(agent_app_id).to_string();
 
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
+    require_admin(&pool, identity.user_id).await?;
 
     let source_key = iuc_key(&integration_id, &source_user);
     if secrets.get(&pool, &integration_id, &source_key).await
@@ -249,8 +293,11 @@ pub async fn disconnect(
     Path(integration_id): Path<String>,
     axum::extract::Query(qs): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let target_user = resolve_target_user(&identity, &qs);
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
+    if qs.contains_key("agent_app_id") {
+        require_admin(&pool, identity.user_id).await?;
+    }
+    let target_user = resolve_target_user(&identity, &qs);
     let _ = secrets.delete(&pool, &integration_id, &iuc_key(&integration_id, &target_user)).await;
     Ok(Json(json!({ "message": "disconnected" })))
 }

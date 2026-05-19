@@ -2931,3 +2931,115 @@ async fn webhook_ingress_routes_to_app_worker() {
 
     rt.shutdown().await;
 }
+
+// ============================================================================
+// Security: integration config and agent credential authorization
+// ============================================================================
+
+#[tokio::test]
+async fn save_platform_config_requires_admin() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&json!({
+        "appId": "integ_sec", "name": "integ_sec", "version": "1.0.0",
+        "type": "integration",
+        "configSchema": {
+            "type": "object",
+            "properties": {
+                "clientId": { "type": "string", "platformSecret": "INTEG_SEC_CID" }
+            }
+        },
+        "dataContract": []
+    })).await;
+
+    let nonadmin = rt.register_and_login("nonadmin@test.local").await;
+
+    // Non-admin MUST be rejected
+    let (s, body) = rt.request_as(
+        Method::PUT, "/api/v1/integrations/integ_sec/config", &nonadmin,
+        Some(&json!({ "clientId": "evil-id" })),
+    ).await;
+    assert_eq!(s, 403, "non-admin must not save integration config: {body}");
+
+    // Admin succeeds
+    let (s, _) = rt.put_json("/api/v1/integrations/integ_sec/config", &json!({ "clientId": "legit" })).await;
+    assert_eq!(s, 200);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn disconnect_agent_requires_admin() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&json!({
+        "appId": "integ_dc", "name": "integ_dc", "version": "1.0.0",
+        "type": "integration",
+        "configSchema": { "type": "object", "properties": {} },
+        "dataContract": []
+    })).await;
+
+    let nonadmin = rt.register_and_login("employee@test.local").await;
+
+    // Non-admin attempting to disconnect an agent's credentials MUST be rejected
+    let (s, body) = rt.request_as(
+        Method::DELETE, "/api/v1/integrations/integ_dc/auth?agent_app_id=crm", &nonadmin, None,
+    ).await;
+    assert_eq!(s, 403, "non-admin must not disconnect agent: {body}");
+
+    // Non-admin can still disconnect their OWN credentials (no agent_app_id)
+    let (s, _) = rt.request_as(
+        Method::DELETE, "/api/v1/integrations/integ_dc/auth", &nonadmin, None,
+    ).await;
+    assert_eq!(s, 200, "user must be able to disconnect themselves");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn status_agent_requires_admin() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&json!({
+        "appId": "integ_st", "name": "integ_st", "version": "1.0.0",
+        "type": "integration",
+        "configSchema": { "type": "object", "properties": {} },
+        "dataContract": []
+    })).await;
+
+    let nonadmin = rt.register_and_login("viewer@test.local").await;
+
+    // Non-admin checking agent status MUST be rejected
+    let (s, body) = rt.request_as(
+        Method::GET, "/api/v1/integrations/integ_st/auth?agent_app_id=crm", &nonadmin, None,
+    ).await;
+    assert_eq!(s, 403, "non-admin must not read agent auth status: {body}");
+
+    // Non-admin CAN check their own status (no agent_app_id)
+    let (s, _) = rt.request_as(
+        Method::GET, "/api/v1/integrations/integ_st/auth", &nonadmin, None,
+    ).await;
+    assert_eq!(s, 200);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn delegate_requires_admin() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&json!({
+        "appId": "integ_del", "name": "integ_del", "version": "1.0.0",
+        "type": "integration",
+        "configSchema": { "type": "object", "properties": {} },
+        "userAuth": { "type": "redirect" },
+        "dataContract": []
+    })).await;
+
+    let nonadmin = rt.register_and_login("attacker@test.local").await;
+
+    // Non-admin attempting delegation MUST be rejected
+    let (s, body) = rt.request_as(
+        Method::POST, "/api/v1/integrations/integ_del/auth/delegate", &nonadmin,
+        Some(&json!({ "agent_app_id": "crm" })),
+    ).await;
+    assert_eq!(s, 403, "non-admin must not delegate to agent: {body}");
+
+    rt.shutdown().await;
+}

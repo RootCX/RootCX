@@ -1,7 +1,7 @@
 {
   "appId": "gmail",
   "name": "Gmail",
-  "version": "1.0.0",
+  "version": "0.3.0",
   "type": "integration",
   "description": "Gmail integration with per-user sync. Owns email data (messages, threads, participants, attachments). Consumer apps read via the collections API.",
   "configSchema": {
