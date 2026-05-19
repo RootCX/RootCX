@@ -153,6 +153,23 @@ pub async fn callback(
         let key = iuc_key(&pending.integration_id, &pending.user_id);
         secrets.set(&pool, &pending.integration_id, &key, &creds.to_string()).await.map_err(|e| ApiError::Internal(e.to_string()))?;
         info!(integration_id = %pending.integration_id, user_id = %pending.user_id, "user credentials stored");
+
+        // Auto-trigger sync_connect after successful OAuth
+        let user_id: uuid::Uuid = pending.user_id.parse().unwrap_or_default();
+        let email: String = sqlx::query_scalar("SELECT email FROM rootcx_system.users WHERE id = $1")
+            .bind(user_id).fetch_optional(&pool).await.ok().flatten().unwrap_or_default();
+        if !email.is_empty() {
+            if let Ok(token) = crate::auth::jwt::encode_access(rt.auth_config(), user_id, &email) {
+                let (user_credentials, effective_uid) = resolve_credentials(&secrets, &pool, &pending.integration_id, &pending.user_id).await;
+                let caller = Some(crate::ipc::RpcCaller { user_id: pending.user_id.clone(), email: email.clone(), auth_token: Some(token) });
+                let config = super::routes::resolve_config(&pool, &secrets, &pending.integration_id).await.unwrap_or(serde_json::Value::Null);
+                let _ = wm.rpc(
+                    &pending.integration_id, Uuid::new_v4().to_string(), "__integration".into(),
+                    serde_json::json!({ "action": "sync_connect", "input": {}, "config": config, "userCredentials": user_credentials, "userId": effective_uid }),
+                    caller,
+                ).await;
+            }
+        }
     }
 
     Ok(Html(format!(
