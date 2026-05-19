@@ -105,13 +105,21 @@ pub async fn execute_action(
         &secrets, &pool, &integration_id, &identity.user_id.to_string(),
     ).await;
 
+    let caller = crate::auth::jwt::encode_access(rt.auth_config(), identity.user_id, &identity.email)
+        .ok()
+        .map(|token| crate::ipc::RpcCaller {
+            user_id: identity.user_id.to_string(),
+            email: identity.email.clone(),
+            auth_token: Some(token),
+        });
+
     let result = wm
         .rpc(
             &integration_id,
             Uuid::new_v4().to_string(),
             "__integration".into(),
             json!({ "action": action_id, "input": input, "config": config, "userCredentials": user_credentials, "userId": effective_uid }),
-            None,
+            caller,
         )
         .await
         .map_err(|e| {
