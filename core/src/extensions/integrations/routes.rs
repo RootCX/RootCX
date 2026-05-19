@@ -9,7 +9,7 @@ use base64::Engine;
 
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::extensions::rbac::policy::resolve_permissions;
+use crate::extensions::rbac::policy::{require_admin, resolve_permissions};
 use crate::routes::{self, SharedRuntime};
 
 const PLATFORM_SCOPE: &str = "_platform";
@@ -60,12 +60,13 @@ pub async fn list_integrations(
 }
 
 pub async fn save_platform_config(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(integration_id): Path<String>,
     Json(config): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, secrets) = routes::pool_and_secrets(&rt);
+    require_admin(&pool, identity.user_id).await?;
     let manifest = get_integration_manifest(&pool, &integration_id).await?;
     let secret_map = platform_secret_map(&manifest);
     save_config_secrets(&pool, &secrets, &secret_map, &config).await?;
