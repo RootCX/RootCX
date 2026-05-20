@@ -101,6 +101,22 @@ pub(crate) async fn resolve_credentials(
     }
 }
 
+/// Resolve credentials via a specific connection_id. Returns (credentials, effective_user_id).
+/// The caller provides `user_id` to avoid an extra DB round-trip.
+pub(crate) async fn resolve_credentials_by_connection(
+    secrets: &crate::secrets::SecretManager, pool: &sqlx::PgPool,
+    integration_id: &str, connection_id: &str, user_id: &str,
+) -> (JsonValue, String) {
+    let conn_key = super::connections::connection_credential_key(connection_id);
+    match secrets.get(pool, integration_id, &conn_key).await {
+        Ok(Some(raw)) => {
+            let creds: JsonValue = serde_json::from_str(&raw).unwrap_or(JsonValue::Null);
+            (creds, user_id.to_string())
+        }
+        _ => (JsonValue::Null, user_id.to_string()),
+    }
+}
+
 pub async fn start(
     identity: Identity,
     State(rt): State<SharedRuntime>,
@@ -151,9 +167,19 @@ pub async fn callback(
     ).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     if let Some(creds) = result.get("credentials") {
+        // Keep legacy _iuc key so existing delegation pointers continue resolving
         let key = iuc_key(&pending.integration_id, &pending.user_id);
         secrets.set(&pool, &pending.integration_id, &key, &creds.to_string()).await.map_err(|e| ApiError::Internal(e.to_string()))?;
-        info!(integration_id = %pending.integration_id, user_id = %pending.user_id, "user credentials stored");
+
+        let label = result.get("email").and_then(|v| v.as_str())
+            .or_else(|| result.get("account").and_then(|v| v.as_str()));
+        let conn_id = super::connections::create_connection(
+            &pool, &pending.integration_id, &pending.user_id, label,
+        ).await?;
+        let conn_key = super::connections::connection_credential_key(&conn_id);
+        secrets.set(&pool, &pending.integration_id, &conn_key, &creds.to_string()).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        info!(integration_id = %pending.integration_id, user_id = %pending.user_id, connection_id = %conn_id, "credentials stored");
 
         if let Some((code, msg)) = try_auto_sync_connect(&rt, &pool, &secrets, &wm, &pending).await {
             return Ok(Html(callback_html(&pending.integration_id, Some((&code, &msg)))));
@@ -254,9 +280,19 @@ pub async fn submit_credentials(
 ) -> Result<Json<JsonValue>, ApiError> {
     let creds = body.get("credentials").ok_or_else(|| ApiError::BadRequest("missing credentials".into()))?;
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
-    secrets.set(&pool, &integration_id, &iuc_key(&integration_id, &identity.user_id.to_string()), &creds.to_string()).await
+    let user_id = identity.user_id.to_string();
+
+    // Legacy key for backward compat
+    secrets.set(&pool, &integration_id, &iuc_key(&integration_id, &user_id), &creds.to_string()).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
-    Ok(Json(json!({ "message": "credentials stored" })))
+
+    let label = body.get("label").and_then(|v| v.as_str());
+    let conn_id = super::connections::create_connection(&pool, &integration_id, &user_id, label).await?;
+    let conn_key = super::connections::connection_credential_key(&conn_id);
+    secrets.set(&pool, &integration_id, &conn_key, &creds.to_string()).await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    Ok(Json(json!({ "message": "credentials stored", "connectionId": conn_id })))
 }
 
 pub async fn delegate(

@@ -250,7 +250,15 @@ export interface ActionDefinition {
 export interface IntegrationBinding {
   integrationId: string;
   enabled: boolean;
-  webhookToken: string | null;
+  connectionId: string | null;
+  createdAt: string;
+}
+
+export interface IntegrationConnection {
+  id: string;
+  integrationId: string;
+  userId: string;
+  label: string | null;
   createdAt: string;
 }
 
@@ -740,31 +748,14 @@ export class RuntimeClient {
   async bindIntegration(
     appId: string,
     integrationId: string,
-    config?: Record<string, unknown>,
-  ): Promise<{ message: string; webhookToken: string }> {
+    connectionId?: string,
+  ): Promise<{ message: string }> {
     const res = await this.authFetch(
       `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ integrationId, config }),
-      },
-    );
-    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
-    return res.json();
-  }
-
-  async updateIntegrationConfig(
-    appId: string,
-    integrationId: string,
-    config: Record<string, unknown>,
-  ): Promise<{ message: string }> {
-    const res = await this.authFetch(
-      `${this.baseUrl}/api/v1/apps/${enc(appId)}/integrations/${enc(integrationId)}`,
-      {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ config }),
+        body: JSON.stringify({ integrationId, connectionId }),
       },
     );
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
@@ -826,6 +817,45 @@ export class RuntimeClient {
     const res = await this.authFetch(
       `${this.baseUrl}/api/v1/integrations/${enc(integrationId)}/auth`,
       { method: "DELETE" },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async listConnections(
+    integrationId: string,
+  ): Promise<IntegrationConnection[]> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/integrations/${enc(integrationId)}/connections`,
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async deleteConnection(
+    integrationId: string,
+    connectionId: string,
+  ): Promise<{ message: string }> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/integrations/${enc(integrationId)}/connections/${enc(connectionId)}`,
+      { method: "DELETE" },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async updateConnection(
+    integrationId: string,
+    connectionId: string,
+    updates: { label?: string },
+  ): Promise<{ message: string }> {
+    const res = await this.authFetch(
+      `${this.baseUrl}/api/v1/integrations/${enc(integrationId)}/connections/${enc(connectionId)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(updates),
+      },
     );
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();

@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogBody, DialogFooter, DialogTi
 import { useProjectContext } from "@/components/layout/app-context";
 import {
   subscribe, getSnapshot, loadProject, refresh, deploy, undeploy, bind, unbind, saveConfig,
+  loadConnections, getConnections,
   type Integration,
 } from "./store";
 
@@ -112,15 +113,68 @@ function BrowseCard({ integration }: { integration: Integration }) {
   );
 }
 
-function InstalledCard({ integration, configured, bound, hasApp }: {
+function ConnectionPicker({ integration, currentConnectionId, onSelect, onCancel }: {
+  integration: Integration;
+  currentConnectionId: string | null;
+  onSelect: (connectionId: string | undefined) => void;
+  onCancel: () => void;
+}) {
+  const connections = getConnections(integration.id);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    loadConnections(integration.id).then(() => { if (!cancelled) setLoaded(true); });
+    return () => { cancelled = true; };
+  }, [integration.id]);
+
+  if (!loaded) return <div className="px-3 py-2 text-[10px] text-muted-foreground">Loading accounts...</div>;
+
+  if (connections.length === 0) {
+    return (
+      <div className="px-3 py-2">
+        <p className="text-[10px] text-muted-foreground mb-1">No accounts connected. Connect one first via Auth.</p>
+        <button className="text-[10px] text-muted-foreground hover:text-foreground" onClick={onCancel}>Cancel</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="px-3 py-1.5 flex flex-col gap-1">
+      <span className="text-[10px] font-medium text-muted-foreground">Select account:</span>
+      {connections.map(c => (
+        <button
+          key={c.id}
+          onClick={() => onSelect(c.id)}
+          className={cn(
+            "text-left px-2 py-1 rounded text-[10px] hover:bg-muted",
+            c.id === currentConnectionId && "bg-muted ring-1 ring-primary",
+          )}
+        >
+          {c.label || c.id}
+        </button>
+      ))}
+      <div className="flex gap-2 mt-1">
+        <button className="text-[10px] text-muted-foreground hover:text-foreground" onClick={() => onSelect(undefined)}>
+          Use default
+        </button>
+        <button className="text-[10px] text-muted-foreground hover:text-foreground" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function InstalledCard({ integration, configured, bound, boundConnectionId, hasApp }: {
   integration: Integration;
   configured: boolean;
   bound: boolean;
+  boundConnectionId: string | null;
   hasApp: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showConfig, setShowConfig] = useState(false);
+  const [showPicker, setShowPicker] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
 
   const secretKeys = platformSecretKeys(integration.configSchema);
@@ -141,12 +195,37 @@ function InstalledCard({ integration, configured, bound, hasApp }: {
     setBusy(true);
     setError(null);
     try {
-      if (bound) await unbind(integration.id);
-      else await bind(integration.id);
+      if (bound) {
+        await unbind(integration.id);
+      } else {
+        // If integration supports user auth, show connection picker
+        if (integration.userAuth) {
+          setShowPicker(true);
+          setBusy(false);
+          return;
+        }
+        await bind(integration.id);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally { setBusy(false); }
   };
+
+  const handleConnectionSelect = async (connectionId: string | undefined) => {
+    setShowPicker(false);
+    setBusy(true);
+    setError(null);
+    try {
+      await bind(integration.id, connectionId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally { setBusy(false); }
+  };
+
+  const connections = getConnections(integration.id);
+  const boundLabel = boundConnectionId
+    ? connections.find(c => c.id === boundConnectionId)?.label ?? boundConnectionId
+    : null;
 
   return (
     <div>
@@ -167,8 +246,16 @@ function InstalledCard({ integration, configured, bound, hasApp }: {
           {integration.description && (
             <p className="text-[10px] text-muted-foreground">{integration.description}</p>
           )}
+          {bound && boundLabel && (
+            <p className="text-[10px] text-blue-400">{boundLabel}</p>
+          )}
         </div>
         <div className="flex items-center gap-1.5">
+          {bound && integration.userAuth && (
+            <button className="text-[10px] text-muted-foreground hover:text-foreground" onClick={() => setShowPicker(true)}>
+              Switch
+            </button>
+          )}
           {integration.configSchema && !showConfig && (
             <button className="text-[10px] text-muted-foreground hover:text-foreground" onClick={() => setShowConfig(true)}>
               {configured ? "Edit" : "Configure"}
@@ -193,7 +280,16 @@ function InstalledCard({ integration, configured, bound, hasApp }: {
         />
       )}
 
-      {configured && hasApp && (
+      {showPicker && (
+        <ConnectionPicker
+          integration={integration}
+          currentConnectionId={boundConnectionId}
+          onSelect={handleConnectionSelect}
+          onCancel={() => setShowPicker(false)}
+        />
+      )}
+
+      {configured && hasApp && !showPicker && (
         <div className="flex items-center justify-between px-3 py-1">
           <span className="text-[10px] text-muted-foreground">Enable for this app</span>
           <Switch size="sm" checked={bound} disabled={busy} onCheckedChange={toggleBind} />
@@ -232,7 +328,8 @@ export default function IntegrationsPanel() {
 
   useEffect(() => { if (projectPath) loadProject(projectPath); }, [projectPath]);
 
-  const boundIds = new Set(bindings.filter(b => b.enabled).map(b => b.integrationId));
+  const bindingMap = new Map(bindings.filter(b => b.enabled).map(b => [b.integrationId, b]));
+  const boundIds = new Set(bindingMap.keys());
   const installedList = catalog.filter(i => installed.has(i.id));
   const browseList = catalog.filter(i => !installed.has(i.id));
 
@@ -281,6 +378,7 @@ export default function IntegrationsPanel() {
                 integration={i}
                 configured={configured.has(i.id)}
                 bound={boundIds.has(i.id)}
+                boundConnectionId={bindingMap.get(i.id)?.connectionId ?? null}
                 hasApp={!!appId}
               />
             ))
