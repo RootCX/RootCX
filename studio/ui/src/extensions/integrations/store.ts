@@ -15,7 +15,15 @@ export interface Integration {
 export interface Binding {
   integrationId: string;
   enabled: boolean;
-  webhookToken: string | null;
+  connectionId: string | null;
+  createdAt: string;
+}
+
+export interface Connection {
+  id: string;
+  integrationId: string;
+  userId: string;
+  label: string | null;
   createdAt: string;
 }
 
@@ -25,11 +33,12 @@ interface State {
   installed: Set<string>;
   configured: Set<string>;
   bindings: Binding[];
+  connections: Map<string, Connection[]>;
   loading: boolean;
   error: string | null;
 }
 
-let state: State = { appId: null, catalog: [], installed: new Set(), configured: new Set(), bindings: [], loading: false, error: null };
+let state: State = { appId: null, catalog: [], installed: new Set(), configured: new Set(), bindings: [], connections: new Map(), loading: false, error: null };
 const listeners = new Set<() => void>();
 let snapshot = state;
 
@@ -103,12 +112,12 @@ export async function saveConfig(integrationId: string, config: Record<string, s
   await refresh();
 }
 
-export async function bind(integrationId: string) {
+export async function bind(integrationId: string, connectionId?: string) {
   if (!state.appId) return;
   await api(`/api/v1/apps/${encodeURIComponent(state.appId)}/integrations`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ integrationId }),
+    body: JSON.stringify({ integrationId, connectionId }),
   });
   await refresh();
 }
@@ -119,4 +128,21 @@ export async function unbind(integrationId: string) {
     method: "DELETE",
   });
   await refresh();
+}
+
+export async function loadConnections(integrationId: string) {
+  const conns = await api<Connection[]>(`/api/v1/integrations/${encodeURIComponent(integrationId)}/connections`);
+  state = { ...state, connections: new Map(state.connections).set(integrationId, conns) };
+  emit();
+}
+
+export async function deleteConnection(integrationId: string, connectionId: string) {
+  await api(`/api/v1/integrations/${encodeURIComponent(integrationId)}/connections/${encodeURIComponent(connectionId)}`, {
+    method: "DELETE",
+  });
+  await loadConnections(integrationId);
+}
+
+export function getConnections(integrationId: string): Connection[] {
+  return snapshot.connections.get(integrationId) ?? [];
 }

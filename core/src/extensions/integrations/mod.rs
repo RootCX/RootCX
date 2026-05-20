@@ -1,5 +1,6 @@
 pub(crate) mod auth;
 mod catalog;
+pub(crate) mod connections;
 pub(crate) mod routes;
 
 use async_trait::async_trait;
@@ -37,6 +38,7 @@ impl RuntimeExtension for IntegrationsExtension {
         ] {
             sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
         }
+        connections::bootstrap(pool).await?;
         info!("integrations extension ready");
         Ok(())
     }
@@ -55,6 +57,15 @@ impl RuntimeExtension for IntegrationsExtension {
             .route("/api/v1/integrations/{integration_id}/auth/credentials", post(auth::submit_credentials))
             .route("/api/v1/integrations/{integration_id}/auth/delegate", post(auth::delegate))
             .route("/api/v1/integrations/auth/callback", get(auth::callback))
-            .route("/api/v1/hooks/{token}", post(routes::webhook_ingress)))
+            .route("/api/v1/hooks/{token}", post(routes::webhook_ingress))
+            // Connections
+            .route("/api/v1/integrations/{integration_id}/connections", get(connections::list_connections))
+            .route("/api/v1/integrations/{integration_id}/connections/{connection_id}",
+                axum::routing::patch(connections::update_connection).delete(connections::delete_connection))
+            // App integration bindings
+            .route("/api/v1/apps/{app_id}/integrations",
+                get(connections::list_app_bindings).post(connections::bind_app))
+            .route("/api/v1/apps/{app_id}/integrations/{integration_id}",
+                axum::routing::delete(connections::unbind_app)))
     }
 }

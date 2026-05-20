@@ -119,9 +119,16 @@ pub async fn execute_action(
 
     let config = resolve_config(&pool, &secrets, &integration_id).await?;
 
-    let (user_credentials, effective_uid) = super::auth::resolve_credentials(
-        &secrets, &pool, &integration_id, &target_user,
-    ).await;
+    let caller_app = headers.get("x-app-id").and_then(|v| v.to_str().ok());
+    let connection_id = super::connections::resolve_connection_for_app(
+        &pool, caller_app, &integration_id, &target_user,
+    ).await?;
+
+    let (user_credentials, effective_uid) = if let Some(ref conn_id) = connection_id {
+        super::auth::resolve_credentials_by_connection(&secrets, &pool, &integration_id, conn_id, &target_user).await
+    } else {
+        super::auth::resolve_credentials(&secrets, &pool, &integration_id, &target_user).await
+    };
 
     let caller_uid = uuid::Uuid::parse_str(&target_user).unwrap_or(identity.user_id);
     let caller_email = if run_as.is_some() {
