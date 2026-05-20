@@ -36,6 +36,11 @@ declare const log: {
 
 declare const emit: (name: string, data?: Record<string, unknown>) => void;
 
+declare const syncAllConnectedUsers: (
+  caller: any,
+  actionName: string,
+) => Promise<{ ok?: boolean; synced?: number; error?: string }>;
+
 declare const uploadFile: (
   content: string | Uint8Array,
   filename: string,

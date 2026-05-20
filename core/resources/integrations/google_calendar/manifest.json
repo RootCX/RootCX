@@ -4,6 +4,12 @@
   "version": "0.1.0",
   "type": "integration",
   "description": "Google Calendar integration with per-user, per-calendar sync. Owns calendar data (calendars, events, attendees, attachments). Consumer apps read via the collections API.",
+  "crons": [{
+    "name": "sync",
+    "schedule": "*/5 * * * *",
+    "payload": { "type": "sync_all" },
+    "overlapPolicy": "skip"
+  }],
   "configSchema": {
     "type": "object",
     "properties": {

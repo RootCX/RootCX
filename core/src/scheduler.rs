@@ -144,7 +144,7 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, auth_config: Arc<Au
                     // Regular job dispatch
                     let caller = match job_msg.user_id {
                         Some(uid) => resolve_caller(&pool, &auth_config, uid).await,
-                        None => None,
+                        None => resolve_caller(&pool, &auth_config, crate::SYSTEM_USER_ID).await,
                     };
                     if let Err(e) = wm.dispatch_job(&job_msg.app_id, msg_id.to_string(), job_msg.payload, caller).await {
                         warn!(msg_id, "dispatch failed: {e}");

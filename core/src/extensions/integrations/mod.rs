@@ -49,6 +49,7 @@ impl RuntimeExtension for IntegrationsExtension {
             .route("/api/v1/integrations/catalog/{id}", axum::routing::delete(catalog::undeploy))
             .route("/api/v1/integrations/{integration_id}/config", put(routes::save_platform_config))
             .route("/api/v1/integrations/{integration_id}/actions/{action_id}", post(routes::execute_action))
+            .route("/api/v1/integrations/{integration_id}/connected-users", get(routes::connected_users))
             .route("/api/v1/integrations/{integration_id}/auth", get(auth::status).delete(auth::disconnect))
             .route("/api/v1/integrations/{integration_id}/auth/start", post(auth::start))
             .route("/api/v1/integrations/{integration_id}/auth/credentials", post(auth::submit_credentials))

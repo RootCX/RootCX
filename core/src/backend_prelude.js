@@ -195,6 +195,34 @@ function _makeCtx(msg) {
   };
 }
 
+// ─── Integration helpers ─────────────────────────────────────────────────────
+
+globalThis.syncAllConnectedUsers = async function syncAllConnectedUsers(caller, actionName) {
+  const token = caller?.authToken;
+  if (!token) return { error: "no token in job caller" };
+  const appId = _ctx.appId;
+  const usersRes = await fetch(`${_ctx.runtimeUrl}/api/v1/integrations/${appId}/connected-users`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!usersRes.ok) return { error: `connected-users: ${usersRes.status}` };
+  const users = await usersRes.json();
+  let synced = 0;
+  for (const userId of users) {
+    try {
+      const r = await fetch(`${_ctx.runtimeUrl}/api/v1/integrations/${appId}/actions/${actionName}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, "X-Run-As": userId },
+        body: "{}",
+      });
+      if (r.ok) synced++;
+      else log.warn(`sync ${userId}: ${r.status}`);
+    } catch (e) {
+      log.warn(`sync ${userId}: ${e.message}`);
+    }
+  }
+  return { ok: true, synced };
+};
+
 // ─── Message dispatch ────────────────────────────────────────────────────────
 
 function _dispatch(msg) {
