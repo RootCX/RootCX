@@ -82,6 +82,17 @@ impl SecretManager {
         Ok(())
     }
 
+    /// Store `plaintext` if non-empty, otherwise delete the secret.
+    /// "Absent" and "empty value" should mean the same thing to consumers
+    /// that gate on key presence (e.g. integration `is_configured`).
+    pub async fn set_or_delete(&self, pool: &PgPool, app_id: &str, key_name: &str, plaintext: &str) -> Result<(), RuntimeError> {
+        if plaintext.is_empty() {
+            self.delete(pool, app_id, key_name).await.map(|_| ())
+        } else {
+            self.set(pool, app_id, key_name, plaintext).await
+        }
+    }
+
     pub async fn get(&self, pool: &PgPool, app_id: &str, key_name: &str) -> Result<Option<String>, RuntimeError> {
         let row: Option<(Vec<u8>, Vec<u8>)> =
             sqlx::query_as("SELECT nonce, ciphertext FROM rootcx_system.secrets WHERE app_id = $1 AND key_name = $2")
