@@ -338,8 +338,8 @@ impl IntegrationCaller for IntegrationCallImpl {
         let config = crate::extensions::integrations::routes::resolve_config(pool, &self.secrets, integration_id)
             .await.map_err(|e| format!("{e:?}"))?;
 
-        let (user_credentials, effective_uid) = crate::extensions::integrations::auth::resolve_credentials(
-            &self.secrets, pool, integration_id, &user_id.to_string(),
+        let (user_credentials, effective_uid) = crate::extensions::integrations::connections::resolve_credentials(
+            &self.secrets, pool, integration_id, &user_id.to_string(), None,
         ).await;
 
         self.wm.rpc(

@@ -105,6 +105,25 @@ async fn connection_ownership_enforced() {
 }
 
 #[tokio::test]
+async fn duplicate_label_reuses_connection() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+
+    let conn1 = create_connection(&rt, &rt.token, "test-integ", "same@example.com").await;
+    let conn2 = create_connection(&rt, &rt.token, "test-integ", "same@example.com").await;
+    assert_eq!(conn1, conn2, "same label should return same connection_id");
+
+    let conn3 = create_connection(&rt, &rt.token, "test-integ", "different@example.com").await;
+    assert_ne!(conn1, conn3, "different label should create new connection");
+
+    let (_, body) = rt.get_json("/api/v1/integrations/test-integ/connections").await;
+    let connections = body.as_array().unwrap();
+    assert_eq!(connections.len(), 2, "should have exactly 2 connections, not 3");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
 async fn app_binding_with_connection_selection() {
     let rt = TestRuntime::boot().await;
     setup_integration(&rt).await;

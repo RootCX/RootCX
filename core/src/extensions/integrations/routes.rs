@@ -120,15 +120,9 @@ pub async fn execute_action(
     let config = resolve_config(&pool, &secrets, &integration_id).await?;
 
     let caller_app = headers.get("x-app-id").and_then(|v| v.to_str().ok());
-    let connection_id = super::connections::resolve_connection_for_app(
-        &pool, caller_app, &integration_id, &target_user,
-    ).await?;
-
-    let (user_credentials, effective_uid) = if let Some(ref conn_id) = connection_id {
-        super::auth::resolve_credentials_by_connection(&secrets, &pool, &integration_id, conn_id, &target_user).await
-    } else {
-        super::auth::resolve_credentials(&secrets, &pool, &integration_id, &target_user).await
-    };
+    let (user_credentials, effective_uid) = super::connections::resolve_credentials(
+        &secrets, &pool, &integration_id, &target_user, caller_app,
+    ).await;
 
     let caller_uid = uuid::Uuid::parse_str(&target_user).unwrap_or(identity.user_id);
     let caller_email = if run_as.is_some() {
@@ -168,21 +162,10 @@ pub async fn connected_users(
     State(rt): State<SharedRuntime>,
     Path(integration_id): Path<String>,
 ) -> Result<Json<Vec<String>>, ApiError> {
-    let (pool, _) = routes::pool_and_secrets(&rt);
+    let pool = routes::pool(&rt);
     require_admin(&pool, identity.user_id).await?;
-    let prefix = format!("_iuc.{}.", integration_id);
-    let keys: Vec<(String,)> = sqlx::query_as(
-        "SELECT key_name FROM rootcx_system.secrets WHERE app_id = $1 AND key_name LIKE $2"
-    )
-    .bind(&integration_id)
-    .bind(format!("{prefix}%"))
-    .fetch_all(&pool).await.map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    let user_ids: Vec<String> = keys.into_iter()
-        .filter_map(|(k,)| k.strip_prefix(&prefix).map(|s| s.to_string()))
-        .filter(|uid| uuid::Uuid::parse_str(uid).is_ok())
-        .collect();
-    Ok(Json(user_ids))
+    let users = super::connections::connected_users(&pool, &integration_id).await?;
+    Ok(Json(users))
 }
 
 pub async fn webhook_ingress(
