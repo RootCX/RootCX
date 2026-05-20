@@ -27,8 +27,14 @@ pub async fn bootstrap(pool: &sqlx::PgPool) -> Result<(), crate::RuntimeError> {
             integration_id TEXT NOT NULL,
             user_id TEXT NOT NULL,
             label TEXT,
+            kind TEXT NOT NULL DEFAULT 'direct',
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )"
+    ).execute(pool).await.map_err(crate::RuntimeError::Schema)?;
+
+    sqlx::query(
+        "ALTER TABLE rootcx_system.integration_connections
+         ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'direct'"
     ).execute(pool).await.map_err(crate::RuntimeError::Schema)?;
 
     sqlx::query(
@@ -52,32 +58,67 @@ pub async fn bootstrap(pool: &sqlx::PgPool) -> Result<(), crate::RuntimeError> {
          ADD COLUMN IF NOT EXISTS connection_id TEXT"
     ).execute(pool).await.map_err(crate::RuntimeError::Schema)?;
 
-    migrate_legacy_credentials(pool).await?;
+    // Migrate old __delegate__ label to kind column
+    sqlx::query(
+        "UPDATE rootcx_system.integration_connections SET kind = 'delegation', label = NULL
+         WHERE label = '__delegate__' AND kind = 'direct'"
+    ).execute(pool).await.map_err(crate::RuntimeError::Schema)?;
+
+    migrate_legacy_iuc_keys(pool).await?;
 
     Ok(())
 }
 
-async fn migrate_legacy_credentials(pool: &sqlx::PgPool) -> Result<(), crate::RuntimeError> {
+async fn migrate_legacy_iuc_keys(pool: &sqlx::PgPool) -> Result<(), crate::RuntimeError> {
+    let has_legacy: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM rootcx_system.secrets WHERE key_name LIKE '_iuc.%' LIMIT 1)"
+    ).fetch_one(pool).await.unwrap_or(false);
+    if !has_legacy { return Ok(()); }
+
     sqlx::query(
-        "DO $$ BEGIN
-           IF EXISTS (SELECT 1 FROM information_schema.tables
-                      WHERE table_schema = 'rootcx_system' AND table_name = 'secrets') THEN
-             INSERT INTO rootcx_system.integration_connections (id, integration_id, user_id, label)
-             SELECT 'legacy-' || s.app_id || '-' || split_part(s.key_name, '.', 3),
-                    s.app_id,
-                    split_part(s.key_name, '.', 3),
-                    s.app_id || ' (migrated)'
-             FROM rootcx_system.secrets s
-             WHERE s.key_name LIKE '_iuc.%'
-               AND split_part(s.key_name, '.', 3) ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-               AND NOT EXISTS (
-                   SELECT 1 FROM rootcx_system.integration_connections ic
-                   WHERE ic.id = 'legacy-' || s.app_id || '-' || split_part(s.key_name, '.', 3)
-               )
-             ON CONFLICT (id) DO NOTHING;
-           END IF;
-         END $$"
+        "INSERT INTO rootcx_system.integration_connections (id, integration_id, user_id, label, kind)
+         SELECT 'legacy-' || s.app_id || '-' || split_part(s.key_name, '.', 3),
+                s.app_id,
+                split_part(s.key_name, '.', 3),
+                a.name,
+                'direct'
+         FROM rootcx_system.secrets s
+         JOIN rootcx_system.apps a ON a.id = s.app_id
+         WHERE s.key_name LIKE '_iuc.%'
+           AND split_part(s.key_name, '.', 3) ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+         ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label"
     ).execute(pool).await.map_err(crate::RuntimeError::Schema)?;
+
+    // Raw copy at encrypted level — no decryption needed
+    sqlx::query(
+        "INSERT INTO rootcx_system.secrets (app_id, key_name, nonce, ciphertext)
+         SELECT s.app_id,
+                '_conn.' || 'legacy-' || s.app_id || '-' || split_part(s.key_name, '.', 3),
+                s.nonce,
+                s.ciphertext
+         FROM rootcx_system.secrets s
+         WHERE s.key_name LIKE '_iuc.%'
+           AND split_part(s.key_name, '.', 3) ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+         ON CONFLICT (app_id, key_name) DO NOTHING"
+    ).execute(pool).await.map_err(crate::RuntimeError::Schema)?;
+
+    sqlx::query(
+        "DELETE FROM rootcx_system.secrets
+         WHERE key_name LIKE '_iuc.%'
+           AND split_part(key_name, '.', 3) ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'"
+    ).execute(pool).await.map_err(crate::RuntimeError::Schema)?;
+
+    // Enrich labels from sync_cursors (gmail stores the email as `handle`)
+    sqlx::query(
+        "UPDATE rootcx_system.integration_connections ic
+         SET label = sc.handle
+         FROM gmail.sync_cursors sc
+         WHERE ic.user_id = sc.user_id
+           AND ic.integration_id = 'gmail'
+           AND sc.handle IS NOT NULL
+           AND (ic.label IS NULL OR ic.label = 'Gmail')"
+    ).execute(pool).await.ok();
+
     Ok(())
 }
 
@@ -86,22 +127,138 @@ pub(crate) async fn create_connection(
     integration_id: &str,
     user_id: &str,
     label: Option<&str>,
+    kind: &str,
 ) -> Result<String, ApiError> {
     let id = Uuid::new_v4().to_string();
     sqlx::query(
-        "INSERT INTO rootcx_system.integration_connections (id, integration_id, user_id, label)
-         VALUES ($1, $2, $3, $4)"
+        "INSERT INTO rootcx_system.integration_connections (id, integration_id, user_id, label, kind)
+         VALUES ($1, $2, $3, $4, $5)"
     )
     .bind(&id)
     .bind(integration_id)
     .bind(user_id)
     .bind(label)
+    .bind(kind)
     .execute(pool).await?;
     Ok(id)
 }
 
-pub(crate) fn connection_credential_key(connection_id: &str) -> String {
+/// Create or reuse a connection. If a direct connection with the same label
+/// already exists for this user+integration, return its id (credentials will be overwritten).
+/// If label is None, always creates a new connection.
+pub(crate) async fn upsert_connection(
+    pool: &sqlx::PgPool,
+    integration_id: &str,
+    user_id: &str,
+    label: Option<&str>,
+) -> Result<String, ApiError> {
+    if let Some(lbl) = label {
+        let existing: Option<(String,)> = sqlx::query_as(
+            "SELECT id FROM rootcx_system.integration_connections
+             WHERE integration_id = $1 AND user_id = $2 AND label = $3 AND kind = 'direct'"
+        )
+        .bind(integration_id)
+        .bind(user_id)
+        .bind(lbl)
+        .fetch_optional(pool).await?;
+
+        if let Some((id,)) = existing {
+            return Ok(id);
+        }
+    }
+
+    create_connection(pool, integration_id, user_id, label, "direct").await
+}
+
+pub(crate) fn credential_key(connection_id: &str) -> String {
     format!("{CONN_PREFIX}.{connection_id}")
+}
+
+/// Find user's first direct (non-delegation) connection for an integration.
+pub(super) async fn first_direct_connection(
+    pool: &sqlx::PgPool, integration_id: &str, user_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM rootcx_system.integration_connections
+         WHERE integration_id = $1 AND user_id = $2 AND kind = 'direct'
+         ORDER BY created_at LIMIT 1"
+    )
+    .bind(integration_id)
+    .bind(user_id)
+    .fetch_optional(pool).await?;
+    Ok(row.map(|(id,)| id))
+}
+
+/// Resolve which credentials to use for an integration action.
+/// Unified entry point: handles app binding lookup, delegation, and direct fallback.
+pub(crate) async fn resolve_credentials(
+    secrets: &crate::secrets::SecretManager, pool: &sqlx::PgPool,
+    integration_id: &str, user_id: &str, app_id: Option<&str>,
+) -> (JsonValue, String) {
+    // 1. Check explicit app binding
+    if let Some(aid) = app_id {
+        let row: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT connection_id FROM rootcx_system.app_integrations
+             WHERE app_id = $1 AND integration_id = $2 AND enabled = true"
+        )
+        .bind(aid)
+        .bind(integration_id)
+        .fetch_optional(pool).await.ok().flatten();
+
+        if let Some((Some(conn_id),)) = row {
+            return resolve_by_connection_id(secrets, pool, integration_id, &conn_id, user_id).await;
+        }
+    }
+
+    // 2. Single query: fetch delegation + direct connections for this user
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, kind FROM rootcx_system.integration_connections
+         WHERE integration_id = $1 AND user_id = $2
+         ORDER BY (kind = 'delegation') DESC, created_at
+         LIMIT 2"
+    )
+    .bind(integration_id)
+    .bind(user_id)
+    .fetch_all(pool).await.unwrap_or_default();
+
+    let delegation_row = rows.iter().find(|(_, k)| k == "delegation");
+    let direct_row = rows.iter().find(|(_, k)| k == "direct");
+
+    // 3. Try delegation
+    if let Some((delegate_conn_id, _)) = delegation_row {
+        let conn_key = credential_key(delegate_conn_id);
+        if let Ok(Some(raw)) = secrets.get(pool, integration_id, &conn_key).await {
+            let val: JsonValue = serde_json::from_str(&raw).unwrap_or(JsonValue::Null);
+            if let Some(source_conn_id) = val.get("_delegate").and_then(|v| v.as_str()) {
+                return resolve_by_connection_id(secrets, pool, integration_id, source_conn_id, user_id).await;
+            }
+        }
+    }
+
+    // 4. Direct connection
+    if let Some((conn_id, _)) = direct_row {
+        return resolve_by_connection_id(secrets, pool, integration_id, conn_id, user_id).await;
+    }
+
+    (JsonValue::Null, user_id.to_string())
+}
+
+async fn resolve_by_connection_id(
+    secrets: &crate::secrets::SecretManager, pool: &sqlx::PgPool,
+    integration_id: &str, connection_id: &str, fallback_user: &str,
+) -> (JsonValue, String) {
+    let conn_key = credential_key(connection_id);
+    match secrets.get(pool, integration_id, &conn_key).await {
+        Ok(Some(raw)) => {
+            let creds: JsonValue = serde_json::from_str(&raw).unwrap_or(JsonValue::Null);
+            let effective_user: String = sqlx::query_scalar(
+                "SELECT user_id FROM rootcx_system.integration_connections WHERE id = $1"
+            ).bind(connection_id).fetch_optional(pool).await.ok().flatten()
+                .unwrap_or_else(|| fallback_user.to_string());
+            (creds, effective_user)
+        }
+        _ => (JsonValue::Null, fallback_user.to_string()),
+    }
 }
 
 async fn verify_owner(
@@ -134,7 +291,7 @@ pub async fn list_connections(
     let rows: Vec<(String, String, String, Option<String>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "SELECT id, integration_id, user_id, label, created_at
          FROM rootcx_system.integration_connections
-         WHERE integration_id = $1 AND user_id = $2
+         WHERE integration_id = $1 AND user_id = $2 AND kind = 'direct'
          ORDER BY created_at"
     )
     .bind(&integration_id)
@@ -156,8 +313,7 @@ pub async fn delete_connection(
     let (pool, secrets) = routes::pool_and_secrets(&rt);
     verify_owner(&pool, &connection_id, &integration_id, &identity).await?;
 
-    let cred_key = connection_credential_key(&connection_id);
-    let _ = secrets.delete(&pool, &integration_id, &cred_key).await;
+    let _ = secrets.delete(&pool, &integration_id, &credential_key(&connection_id)).await;
 
     sqlx::query("DELETE FROM rootcx_system.integration_connections WHERE id = $1")
         .bind(&connection_id)
@@ -275,47 +431,25 @@ pub async fn unbind_app(
     Ok(Json(json!({ "message": "unbound" })))
 }
 
+pub async fn connected_users(
+    pool: &sqlx::PgPool, integration_id: &str,
+) -> Result<Vec<String>, ApiError> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT user_id FROM rootcx_system.integration_connections
+         WHERE integration_id = $1 AND kind = 'direct'"
+    )
+    .bind(integration_id)
+    .fetch_all(pool).await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn credential_key_format_is_stable() {
-        assert_eq!(connection_credential_key("abc-123"), "_conn.abc-123");
-        assert_eq!(connection_credential_key("legacy-gmail-user1"), "_conn.legacy-gmail-user1");
+        assert_eq!(credential_key("abc-123"), "_conn.abc-123");
+        assert_eq!(credential_key("legacy-gmail-user1"), "_conn.legacy-gmail-user1");
     }
-}
-
-/// Resolve which connection an app should use for a given integration + user.
-/// Priority: explicit app binding → user's first connection → None (legacy fallback).
-pub(crate) async fn resolve_connection_for_app(
-    pool: &sqlx::PgPool,
-    app_id: Option<&str>,
-    integration_id: &str,
-    user_id: &str,
-) -> Result<Option<String>, ApiError> {
-    if let Some(aid) = app_id {
-        let row: Option<(Option<String>,)> = sqlx::query_as(
-            "SELECT connection_id FROM rootcx_system.app_integrations
-             WHERE app_id = $1 AND integration_id = $2 AND enabled = true"
-        )
-        .bind(aid)
-        .bind(integration_id)
-        .fetch_optional(pool).await?;
-
-        if let Some((Some(conn_id),)) = row {
-            return Ok(Some(conn_id));
-        }
-    }
-
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT id FROM rootcx_system.integration_connections
-         WHERE integration_id = $1 AND user_id = $2
-         ORDER BY created_at LIMIT 1"
-    )
-    .bind(integration_id)
-    .bind(user_id)
-    .fetch_optional(pool).await?;
-
-    Ok(row.map(|(id,)| id))
 }

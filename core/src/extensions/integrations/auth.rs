@@ -24,6 +24,7 @@ struct Pending { integration_id: String, user_id: String, created: Instant }
 
 static PENDING: LazyLock<Mutex<HashMap<String, Pending>>> = LazyLock::new(Default::default);
 const TTL_SECS: u64 = 600;
+
 fn resolve_callback_url(headers: &HeaderMap) -> String {
     std::env::var("OAUTH_CALLBACK_URL").unwrap_or_else(|_| {
         let host = headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("localhost:9100");
@@ -54,67 +55,10 @@ fn extract_nonce(state: &str) -> &str {
     }
 }
 
-const DELEGATE_KEY: &str = "_delegate";
-
-pub(crate) fn iuc_key(integration_id: &str, user_id: &str) -> String {
-    format!("_iuc.{integration_id}.{user_id}")
-}
-
 fn resolve_target_user(identity: &Identity, qs: &HashMap<String, String>) -> String {
     qs.get("agent_app_id")
         .map(|id| crate::extensions::agents::agent_user_id(id).to_string())
         .unwrap_or_else(|| identity.user_id.to_string())
-}
-
-enum CredentialValue {
-    Direct(JsonValue),
-    Delegated(String),
-}
-
-fn parse_credential_value(raw: &str) -> CredentialValue {
-    let val: JsonValue = serde_json::from_str(raw).unwrap_or(JsonValue::Null);
-    match val.get(DELEGATE_KEY).and_then(|v| v.as_str()) {
-        Some(delegate) => CredentialValue::Delegated(delegate.to_string()),
-        None => CredentialValue::Direct(val),
-    }
-}
-
-/// Resolve credentials, following delegation if present. Returns (credentials, effective_user_id).
-pub(crate) async fn resolve_credentials(
-    secrets: &crate::secrets::SecretManager, pool: &sqlx::PgPool,
-    integration_id: &str, user_id: &str,
-) -> (JsonValue, String) {
-    let key = iuc_key(integration_id, user_id);
-    match secrets.get(pool, integration_id, &key).await {
-        Ok(Some(raw)) => match parse_credential_value(&raw) {
-            CredentialValue::Delegated(delegate) => {
-                let dk = iuc_key(integration_id, &delegate);
-                let creds = match secrets.get(pool, integration_id, &dk).await {
-                    Ok(Some(r)) => serde_json::from_str(&r).unwrap_or(JsonValue::Null),
-                    _ => JsonValue::Null,
-                };
-                (creds, delegate)
-            }
-            CredentialValue::Direct(val) => (val, user_id.to_string()),
-        }
-        _ => (JsonValue::Null, user_id.to_string()),
-    }
-}
-
-/// Resolve credentials via a specific connection_id. Returns (credentials, effective_user_id).
-/// The caller provides `user_id` to avoid an extra DB round-trip.
-pub(crate) async fn resolve_credentials_by_connection(
-    secrets: &crate::secrets::SecretManager, pool: &sqlx::PgPool,
-    integration_id: &str, connection_id: &str, user_id: &str,
-) -> (JsonValue, String) {
-    let conn_key = super::connections::connection_credential_key(connection_id);
-    match secrets.get(pool, integration_id, &conn_key).await {
-        Ok(Some(raw)) => {
-            let creds: JsonValue = serde_json::from_str(&raw).unwrap_or(JsonValue::Null);
-            (creds, user_id.to_string())
-        }
-        _ => (JsonValue::Null, user_id.to_string()),
-    }
 }
 
 pub async fn start(
@@ -167,17 +111,14 @@ pub async fn callback(
     ).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     if let Some(creds) = result.get("credentials") {
-        // Keep legacy _iuc key so existing delegation pointers continue resolving
-        let key = iuc_key(&pending.integration_id, &pending.user_id);
-        secrets.set(&pool, &pending.integration_id, &key, &creds.to_string()).await.map_err(|e| ApiError::Internal(e.to_string()))?;
-
         let label = result.get("email").and_then(|v| v.as_str())
             .or_else(|| result.get("account").and_then(|v| v.as_str()));
-        let conn_id = super::connections::create_connection(
+        let conn_id = super::connections::upsert_connection(
             &pool, &pending.integration_id, &pending.user_id, label,
         ).await?;
-        let conn_key = super::connections::connection_credential_key(&conn_id);
-        secrets.set(&pool, &pending.integration_id, &conn_key, &creds.to_string()).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+        let conn_key = super::connections::credential_key(&conn_id);
+        secrets.set(&pool, &pending.integration_id, &conn_key, &creds.to_string()).await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
 
         info!(integration_id = %pending.integration_id, user_id = %pending.user_id, connection_id = %conn_id, "credentials stored");
 
@@ -202,7 +143,9 @@ async fn try_auto_sync_connect(
     if email.is_empty() { return None; }
 
     let token = crate::auth::jwt::encode_access(rt.auth_config(), user_id, &email).ok()?;
-    let (user_credentials, effective_uid) = resolve_credentials(secrets, pool, &pending.integration_id, &pending.user_id).await;
+    let (user_credentials, effective_uid) = super::connections::resolve_credentials(
+        secrets, pool, &pending.integration_id, &pending.user_id, None,
+    ).await;
     let caller = Some(crate::ipc::RpcCaller { user_id: pending.user_id.clone(), email: email.clone(), auth_token: Some(token) });
     let config = super::routes::resolve_config(pool, secrets, &pending.integration_id).await.unwrap_or(serde_json::Value::Null);
 
@@ -249,27 +192,24 @@ pub async fn status(
     Path(integration_id): Path<String>,
     axum::extract::Query(qs): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
+    let pool = crate::routes::pool(&rt);
     if qs.contains_key("agent_app_id") {
         require_admin(&pool, identity.user_id).await?;
     }
     let target_user = resolve_target_user(&identity, &qs);
-    let raw = secrets.get(&pool, &integration_id, &iuc_key(&integration_id, &target_user)).await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    match raw {
-        Some(val) => {
-            let parsed: JsonValue = serde_json::from_str(&val).unwrap_or(JsonValue::Null);
-            if let Some(delegate_uid) = parsed.get(DELEGATE_KEY).and_then(|v| v.as_str()) {
-                let email: Option<String> = sqlx::query_scalar(
-                    "SELECT email FROM rootcx_system.users WHERE id = $1"
-                ).bind(uuid::Uuid::parse_str(delegate_uid).unwrap_or_default())
-                .fetch_optional(&pool).await.ok().flatten();
-                Ok(Json(json!({ "connected": true, "delegatedFrom": email })))
-            } else {
-                Ok(Json(json!({ "connected": true })))
-            }
-        }
-        None => Ok(Json(json!({ "connected": false }))),
+
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM rootcx_system.integration_connections
+         WHERE integration_id = $1 AND user_id = $2 AND kind = 'direct'"
+    )
+    .bind(&integration_id)
+    .bind(&target_user)
+    .fetch_one(&pool).await.unwrap_or(0);
+
+    if count > 0 {
+        Ok(Json(json!({ "connected": true, "connectionCount": count })))
+    } else {
+        Ok(Json(json!({ "connected": false })))
     }
 }
 
@@ -282,13 +222,9 @@ pub async fn submit_credentials(
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
     let user_id = identity.user_id.to_string();
 
-    // Legacy key for backward compat
-    secrets.set(&pool, &integration_id, &iuc_key(&integration_id, &user_id), &creds.to_string()).await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
     let label = body.get("label").and_then(|v| v.as_str());
-    let conn_id = super::connections::create_connection(&pool, &integration_id, &user_id, label).await?;
-    let conn_key = super::connections::connection_credential_key(&conn_id);
+    let conn_id = super::connections::create_connection(&pool, &integration_id, &user_id, label, "direct").await?;
+    let conn_key = super::connections::credential_key(&conn_id);
     secrets.set(&pool, &integration_id, &conn_key, &creds.to_string()).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -308,16 +244,15 @@ pub async fn delegate(
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
     require_admin(&pool, identity.user_id).await?;
 
-    let source_key = iuc_key(&integration_id, &source_user);
-    if secrets.get(&pool, &integration_id, &source_key).await
-        .map_err(|e| ApiError::Internal(e.to_string()))?.is_none()
-    {
-        return Err(ApiError::BadRequest("you must connect this integration first".into()));
-    }
+    let source_conn_id = super::connections::first_direct_connection(&pool, &integration_id, &source_user).await?
+        .ok_or_else(|| ApiError::BadRequest("you must connect this integration first".into()))?;
 
-    let key = iuc_key(&integration_id, &agent_uid);
-    let delegation = json!({ DELEGATE_KEY: source_user }).to_string();
-    secrets.set(&pool, &integration_id, &key, &delegation).await
+    let delegate_conn_id = super::connections::create_connection(
+        &pool, &integration_id, &agent_uid, None, "delegation",
+    ).await?;
+    let conn_key = super::connections::credential_key(&delegate_conn_id);
+    let delegation = json!({ "_delegate": source_conn_id }).to_string();
+    secrets.set(&pool, &integration_id, &conn_key, &delegation).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     info!(integration_id, agent_app_id, source_user, "credentials delegated to agent");
@@ -334,67 +269,37 @@ pub async fn disconnect(
         require_admin(&pool, identity.user_id).await?;
     }
     let target_user = resolve_target_user(&identity, &qs);
-    let _ = secrets.delete(&pool, &integration_id, &iuc_key(&integration_id, &target_user)).await;
+
+    let conn_ids: Vec<(String,)> = sqlx::query_as(
+        "SELECT id FROM rootcx_system.integration_connections
+         WHERE integration_id = $1 AND user_id = $2"
+    )
+    .bind(&integration_id)
+    .bind(&target_user)
+    .fetch_all(&pool).await?;
+
+    for (conn_id,) in &conn_ids {
+        let _ = secrets.delete(&pool, &integration_id, &super::connections::credential_key(conn_id)).await;
+    }
+    sqlx::query(
+        "DELETE FROM rootcx_system.integration_connections
+         WHERE integration_id = $1 AND user_id = $2"
+    )
+    .bind(&integration_id)
+    .bind(&target_user)
+    .execute(&pool).await?;
+
     Ok(Json(json!({ "message": "disconnected" })))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
     use crate::auth::identity::Identity;
 
     fn identity(id: &str) -> Identity {
         Identity { user_id: Uuid::parse_str(id).unwrap(), email: String::new() }
     }
-
-    // -- parse_credential_value --
-
-    #[test]
-    fn parse_direct_credentials() {
-        let raw = r#"{"accessToken":"tok","refreshToken":"ref"}"#;
-        match parse_credential_value(raw) {
-            CredentialValue::Direct(val) => assert_eq!(val["accessToken"], "tok"),
-            CredentialValue::Delegated(_) => panic!("expected Direct"),
-        }
-    }
-
-    #[test]
-    fn parse_delegation() {
-        let uid = "550e8400-e29b-41d4-a716-446655440000";
-        let raw = format!(r#"{{"_delegate":"{uid}"}}"#);
-        match parse_credential_value(&raw) {
-            CredentialValue::Delegated(id) => assert_eq!(id, uid),
-            CredentialValue::Direct(_) => panic!("expected Delegated"),
-        }
-    }
-
-    #[test]
-    fn parse_managed_credentials_not_delegation() {
-        let raw = r#"{"managed":true}"#;
-        match parse_credential_value(raw) {
-            CredentialValue::Direct(val) => assert_eq!(val["managed"], true),
-            CredentialValue::Delegated(_) => panic!("managed flag should not be treated as delegation"),
-        }
-    }
-
-    #[test]
-    fn parse_invalid_json_falls_back_to_direct_null() {
-        match parse_credential_value("not json") {
-            CredentialValue::Direct(val) => assert!(val.is_null()),
-            CredentialValue::Delegated(_) => panic!("invalid JSON should not delegate"),
-        }
-    }
-
-    #[test]
-    fn parse_empty_string_falls_back_to_direct_null() {
-        match parse_credential_value("") {
-            CredentialValue::Direct(val) => assert!(val.is_null()),
-            CredentialValue::Delegated(_) => panic!("empty should not delegate"),
-        }
-    }
-
-    // -- resolve_target_user --
 
     #[test]
     fn resolve_target_user_no_agent() {
@@ -408,17 +313,8 @@ mod tests {
         let id = identity("550e8400-e29b-41d4-a716-446655440000");
         let qs = HashMap::from([("agent_app_id".into(), "onboarding".into())]);
         let result = resolve_target_user(&id, &qs);
-        assert_ne!(result, "550e8400-e29b-41d4-a716-446655440000", "should use agent UUID, not human");
-        // Deterministic: same input = same output
+        assert_ne!(result, "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(result, resolve_target_user(&id, &qs));
-    }
-
-    #[test]
-    fn resolve_target_user_agent_is_deterministic_across_calls() {
-        let id = identity("00000000-0000-0000-0000-000000000001");
-        let qs1 = HashMap::from([("agent_app_id".into(), "my-agent".into())]);
-        let qs2 = HashMap::from([("agent_app_id".into(), "my-agent".into())]);
-        assert_eq!(resolve_target_user(&id, &qs1), resolve_target_user(&id, &qs2));
     }
 
     #[test]
@@ -427,16 +323,5 @@ mod tests {
         let a = resolve_target_user(&id, &HashMap::from([("agent_app_id".into(), "agent-a".into())]));
         let b = resolve_target_user(&id, &HashMap::from([("agent_app_id".into(), "agent-b".into())]));
         assert_ne!(a, b);
-    }
-
-    // -- delegate writes source_user, not arbitrary user --
-
-    #[test]
-    fn delegate_key_format() {
-        let delegation = json!({ DELEGATE_KEY: "user-123" }).to_string();
-        match parse_credential_value(&delegation) {
-            CredentialValue::Delegated(uid) => assert_eq!(uid, "user-123"),
-            _ => panic!("delegation JSON should parse as Delegated"),
-        }
     }
 }
