@@ -11,7 +11,11 @@
       "clientSecret": { "type": "string", "description": "Microsoft Entra Client Secret", "platformSecret": "OUTLOOK_CLIENT_SECRET" },
       "proxyToken": { "type": "string", "description": "Managed proxy HMAC token (managed mode only)", "platformSecret": "OUTLOOK_PROXY_TOKEN" },
       "baseUrl": { "type": "string", "description": "Managed proxy base URL (managed mode only)", "platformSecret": "OUTLOOK_BASE_URL" }
-    }
+    },
+    "anyOf": [
+      { "required": ["clientId", "clientSecret"] },
+      { "required": ["proxyToken", "baseUrl"] }
+    ]
   },
   "userAuth": { "type": "redirect" },
   "actions": [

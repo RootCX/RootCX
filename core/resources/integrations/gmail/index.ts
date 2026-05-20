@@ -2,8 +2,7 @@
 import { google } from "googleapis";
 import {
   type Config, type UserCreds,
-  isManaged, oauth2ClientFor, managedAccessToken,
-  selfHostedAuthUrl, managedAuthUrl, exchangeCodeForRefreshToken, evictClient,
+  oauth2ClientFor, buildAuthUrl, exchangeCodeForRefreshToken, evictClient,
 } from "./lib/oauth";
 import { type Result, ok, fail, classifyHttp, withRetry } from "./lib/errors";
 import { parseMessage } from "./lib/parse-message";
@@ -30,8 +29,7 @@ serve({
     __auth_callback: authCallback,
     async __integration(params, caller) {
       const { action, input, config, userCredentials, userId } = params;
-      const connected = isManaged(config) ? userCredentials?.managed : userCredentials?.refreshToken;
-      if (!connected) return fail({ code: "INSUFFICIENT_PERMISSIONS", message: "user not connected" });
+      if (!userCredentials?.refreshToken) return fail({ code: "INSUFFICIENT_PERMISSIONS", message: "user not connected" });
       const handler = actions[action];
       if (!handler) return fail({ code: "MISCONFIGURED", message: `unknown action: ${action}` });
       const token = caller?.authToken ?? "";
@@ -63,7 +61,6 @@ async function ensureIndexes() {
 }
 
 async function accessTokenFor(config: Config, creds: UserCreds, userId: string): Promise<string> {
-  if (isManaged(config)) return managedAccessToken(config, userId);
   const access = await oauth2ClientFor(config, creds, userId).getAccessToken();
   if (!access.token) throw new Error("no access token from refresh");
   return access.token;
@@ -89,13 +86,12 @@ const callGmail = (config: Config, creds: UserCreds, path: string, init: Request
   withRetry(() => gmailApi(config, creds, path, init, userId));
 
 async function authStart(params: any) {
-  const { config, callbackUrl, state, userId } = params;
-  return { type: "redirect", url: isManaged(config) ? managedAuthUrl(config, callbackUrl, state, userId) : selfHostedAuthUrl(config, callbackUrl, state) };
+  const { config, callbackUrl, state } = params;
+  return { type: "redirect", url: buildAuthUrl(config, callbackUrl, state) };
 }
 
 async function authCallback(params: any) {
   const { config, query } = params;
-  if (isManaged(config) || query.code === "MANAGED_OK") return { credentials: { managed: true } };
   const refreshToken = await exchangeCodeForRefreshToken(config, query.code, query.redirect_uri ?? params.callbackUrl ?? "");
   return { credentials: { refreshToken } };
 }

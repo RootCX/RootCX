@@ -15,11 +15,10 @@
     "properties": {
       "clientId": { "type": "string", "description": "Google OAuth 2.0 Client ID", "platformSecret": "GMAIL_CLIENT_ID" },
       "clientSecret": { "type": "string", "description": "Google OAuth 2.0 Client Secret", "platformSecret": "GMAIL_CLIENT_SECRET" },
-      "proxyToken": { "type": "string", "description": "Managed proxy HMAC token (managed mode only)", "platformSecret": "GMAIL_PROXY_TOKEN" },
-      "baseUrl": { "type": "string", "description": "Managed proxy base URL (managed mode only)", "platformSecret": "GMAIL_BASE_URL" },
       "enableModifyScope": { "type": "boolean", "description": "Opt in to gmail.modify scope (requires Google security review)", "default": false },
       "pubsubTopicName": { "type": "string", "description": "Cloud Pub/Sub topic for push notifications" }
-    }
+    },
+    "required": ["clientId", "clientSecret"]
   },
   "userAuth": { "type": "redirect" },
   "actions": [

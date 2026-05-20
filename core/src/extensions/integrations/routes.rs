@@ -49,11 +49,17 @@ pub async fn list_integrations(
     _identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<JsonValue>>, ApiError> {
-    let (pool, secrets) = routes::pool_and_secrets(&rt);
+    let pool = routes::pool(&rt);
     let mut items = query_installed_integrations(&pool).await?;
+    let present_keys: std::collections::HashSet<String> =
+        crate::secrets::SecretManager::list_keys(&pool, PLATFORM_SCOPE)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .into_iter()
+            .collect();
     for item in &mut items {
         let map = platform_secret_map(item);
-        let configured = is_configured(&pool, &secrets, item, &map).await?;
+        let configured = is_configured(item, &map, &present_keys);
         item.as_object_mut().unwrap().insert("configured".into(), json!(configured));
     }
     Ok(Json(items))
@@ -249,35 +255,61 @@ async fn save_config_secrets(
     config: &JsonValue,
 ) -> Result<(), ApiError> {
     for (field, secret_key) in secret_map {
-        if let Some(val) = config.get(field).and_then(|v| v.as_str()) {
-            secrets.set(pool, PLATFORM_SCOPE, secret_key, val)
-                .await
-                .map_err(|e| ApiError::Internal(e.to_string()))?;
-        }
+        let Some(val) = config.get(field).and_then(|v| v.as_str()) else { continue };
+        secrets.set_or_delete(pool, PLATFORM_SCOPE, secret_key, val)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
     Ok(())
 }
 
-async fn is_configured(
-    pool: &sqlx::PgPool,
-    secrets: &crate::secrets::SecretManager,
+fn is_configured(
     manifest: &JsonValue,
     secret_map: &[(String, String)],
-) -> Result<bool, ApiError> {
-    if secret_map.is_empty() { return Ok(true); }
+    present_keys: &std::collections::HashSet<String>,
+) -> bool {
+    if secret_map.is_empty() { return true; }
+
+    let field_to_key: std::collections::HashMap<&str, &str> = secret_map
+        .iter()
+        .map(|(f, k)| (f.as_str(), k.as_str()))
+        .collect();
+    let is_set = |key: &str| present_keys.contains(key);
+
+    // JSON Schema `anyOf`: each branch declares its own `required` list.
+    // At least one branch's required fields must all be present.
+    // Used for integrations with multiple valid configuration modes
+    // (e.g. Gmail managed vs self-hosted OAuth).
+    if let Some(branches) = manifest
+        .pointer("/configSchema/anyOf")
+        .and_then(|v| v.as_array())
+    {
+        return branches.iter().any(|branch| {
+            let Some(fields) = branch.pointer("/required").and_then(|v| v.as_array()) else { return false };
+            !fields.is_empty() && fields.iter().all(|f| {
+                f.as_str()
+                    .and_then(|name| field_to_key.get(name))
+                    .map(|key| is_set(key))
+                    .unwrap_or(false)
+            })
+        });
+    }
+
+    // Fallback: required[] — every listed field must be present.
     let required: Vec<&str> = manifest.pointer("/configSchema/required")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
         .unwrap_or_default();
-    for (field, key) in secret_map {
-        if required.contains(&field.as_str()) {
-            if secrets.get(pool, PLATFORM_SCOPE, key).await
-                .map_err(|e| ApiError::Internal(e.to_string()))?.is_none() {
-                return Ok(false);
-            }
-        }
+
+    if required.is_empty() {
+        // No declared requirements → integration has no secrets to gate on.
+        // Only treat as configured if at least one secret is actually set.
+        return secret_map.iter().any(|(_, key)| is_set(key));
     }
-    Ok(true)
+
+    required.iter().all(|field| {
+        field_to_key.get(field).map(|key| is_set(key)).unwrap_or(false)
+    })
 }
 
 pub async fn resolve_config(

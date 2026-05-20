@@ -17,18 +17,13 @@ export const MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify";
 export interface Config {
   clientId?: string;
   clientSecret?: string;
-  proxyToken?: string;
-  baseUrl?: string;
   enableModifyScope?: boolean;
   pubsubTopicName?: string;
 }
 
 export interface UserCreds {
   refreshToken?: string;
-  managed?: boolean;
 }
-
-export const isManaged = (c: Config): boolean => !!(c.proxyToken && c.baseUrl);
 
 export function scopesFor(c: Config): string {
   const scopes = [...BASE_SCOPES];
@@ -49,23 +44,8 @@ export function oauth2ClientFor(config: Config, creds: UserCreds, userId: string
   return client;
 }
 
-/** Managed-mode token fetch. The proxy returns a short-lived access token. */
-export async function managedAccessToken(config: Config, userId: string): Promise<string> {
-  const res = await fetch(`${config.baseUrl}/token`, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${config.proxyToken}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ userId }),
-  });
-  if (!res.ok) throw new Error(`managed token fetch failed: ${await res.text()}`);
-  const data = await res.json();
-  return data.accessToken;
-}
-
-/** Self-hosted OAuth: redirect to Google consent. */
-export function selfHostedAuthUrl(config: Config, callbackUrl: string, state: string): string {
+/** Build Google OAuth consent URL for a given tenant. */
+export function buildAuthUrl(config: Config, callbackUrl: string, state: string): string {
   const url = new URL(GOOGLE_AUTH_URL);
   url.searchParams.set("client_id", config.clientId!);
   url.searchParams.set("redirect_uri", callbackUrl);
@@ -77,19 +57,7 @@ export function selfHostedAuthUrl(config: Config, callbackUrl: string, state: st
   return url.toString();
 }
 
-/** Managed-mode: redirect to proxy. */
-export function managedAuthUrl(config: Config, callbackUrl: string, state: string, userId: string): string {
-  const [tenantRef, ...hmacParts] = config.proxyToken!.split(":");
-  const url = new URL(`${config.baseUrl}/auth/start`);
-  url.searchParams.set("callback_url", callbackUrl);
-  url.searchParams.set("state", state);
-  url.searchParams.set("tenant_ref", tenantRef);
-  url.searchParams.set("user_id", userId);
-  url.searchParams.set("hmac", hmacParts.join(":"));
-  return url.toString();
-}
-
-/** Exchange authorization code for refresh_token (self-hosted only). */
+/** Exchange authorization code for refresh_token. */
 export async function exchangeCodeForRefreshToken(
   config: Config, code: string, redirectUri: string,
 ): Promise<string> {
