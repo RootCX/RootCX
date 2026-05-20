@@ -6,7 +6,7 @@ import {
 import { type Result, ok, fail, classifyHttp, withRetry } from "./lib/errors";
 import { parseEvent, type ParsedEvent } from "./lib/parse-event";
 import { composeEvent, type ComposeInput } from "./lib/compose-event";
-import { cryptoRandomId, cronScheduleForUser, jsonReq, calId, eventsPath, eventPath } from "./lib/util";
+import { cryptoRandomId, jsonReq, calId, eventsPath, eventPath } from "./lib/util";
 
 const CALENDAR_API = "https://www.googleapis.com/calendar/v3";
 const MAX_THROTTLE = 5;
@@ -292,20 +292,12 @@ async function syncConnect(config: Config, creds: UserCreds, _input: any, userId
   `;
   const cursorIds = upserted.map((r: any) => r.id);
 
-  const cronExisting = await db`SELECT cron_id FROM google_calendar.sync_cursors WHERE user_id = ${userId} AND cron_id IS NOT NULL LIMIT 1`;
-  if (!cronExisting.length) {
-    const cronId = await createSyncCron(userId, token);
-    if (cronId) await db`UPDATE google_calendar.sync_cursors SET cron_id = ${cronId} WHERE user_id = ${userId} AND cron_id IS NULL`;
-  }
-
-  await dispatchSyncJob(userId, token);
+  await syncUserNow(userId, token);
   return ok({ cursor_ids: cursorIds, calendars: selected.map((c: any) => ({ id: c.id, summary: c.summary })) });
 }
 
-async function syncDisconnect(_config: Config, _creds: UserCreds, _input: any, userId: string, token: string): Promise<Result<any>> {
-  const rows = await db`SELECT DISTINCT cron_id FROM google_calendar.sync_cursors WHERE user_id = ${userId} AND cron_id IS NOT NULL`;
-  await Promise.all(rows.map((r: any) => deleteSyncCron(r.cron_id, token)));
-  await db`UPDATE google_calendar.sync_cursors SET enabled = false, cron_id = null WHERE user_id = ${userId}`;
+async function syncDisconnect(_config: Config, _creds: UserCreds, _input: any, userId: string, _token: string): Promise<Result<any>> {
+  await db`UPDATE google_calendar.sync_cursors SET enabled = false WHERE user_id = ${userId}`;
   return ok({ ok: true });
 }
 
@@ -317,40 +309,29 @@ async function syncNow(_config: Config, _creds: UserCreds, _input: any, userId: 
     (c.throttle_after && new Date(c.throttle_after).getTime() > Date.now()),
   );
   if (blocked) return ok({ triggered: false });
-  await dispatchSyncJob(userId, token);
+  await syncUserNow(userId, token);
   return ok({ triggered: true });
 }
 
-async function dispatchSyncJob(userId: string, token: string) {
+async function syncUserNow(userId: string, token: string) {
   await db`UPDATE google_calendar.sync_cursors SET status = 'syncing' WHERE user_id = ${userId} AND enabled = true AND status != 'needs_reauth'`;
-  await runtimeFetch("POST", "/api/v1/apps/google_calendar/jobs", token, { payload: { type: "sync", user_id: userId } })
-    .catch(e => log.warn(`job dispatch: ${e.message}`));
-}
-
-async function createSyncCron(userId: string, token: string): Promise<string | null> {
-  try {
-    const res = await runtimeFetch("POST", "/api/v1/apps/google_calendar/crons", token, {
-      name: `sync_gcal_${userId}`,
-      schedule: cronScheduleForUser(userId),
-      payload: { type: "sync", user_id: userId },
-      overlapPolicy: "skip",
-    });
-    return res?.id ?? null;
-  } catch (e: any) {
-    log.warn(`cron create: ${e.message}`);
-    return null;
+  const cursors = await db`SELECT * FROM google_calendar.sync_cursors WHERE user_id = ${userId} AND enabled = true`;
+  for (const sc of cursors) {
+    if (sc.throttle_after && new Date(sc.throttle_after).getTime() > Date.now()) continue;
+    try {
+      await syncCursor(token, userId, sc);
+      await db`UPDATE google_calendar.sync_cursors SET status = 'idle', last_synced_at = NOW(), throttle_count = 0, throttle_after = null WHERE id = ${sc.id}`;
+    } catch (e: any) {
+      log.error(`sync ${userId}/${sc.calendar_external_id}: ${e.message}`);
+      await handleSyncError(sc, e);
+    }
   }
 }
 
-async function deleteSyncCron(cronId: string, token: string) {
-  await runtimeFetch("DELETE", `/api/v1/apps/google_calendar/crons/${cronId}`, token)
-    .catch(e => log.warn(`cron delete: ${e.message}`));
-}
-
-async function runtimeFetch(method: string, path: string, token: string, body?: any): Promise<any> {
+async function runtimeFetch(method: string, path: string, token: string, body?: any, extraHeaders?: Record<string, string>): Promise<any> {
   const res = await fetch(`${ctx.runtimeUrl}${path}`, {
     method,
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...extraHeaders },
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
   if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}`);
@@ -368,24 +349,14 @@ const actions: Record<string, (c: Config, u: UserCreds, i: any, uid: string, tok
 };
 
 async function handleJob(payload: any, caller: any) {
-  if (payload?.type !== "sync") return { skipped: true };
-  const token: string = caller?.authToken;
-  if (!token) return { error: "no auth token in job caller" };
-  const userId = payload.user_id;
-  const cursors = await db`SELECT * FROM google_calendar.sync_cursors WHERE user_id = ${userId} AND enabled = true`;
-  if (!cursors.length) return { skipped: true };
-
-  for (const sc of cursors) {
-    if (sc.throttle_after && new Date(sc.throttle_after).getTime() > Date.now()) continue;
-    try {
-      await syncCursor(token, userId, sc);
-      await db`UPDATE google_calendar.sync_cursors SET status = 'idle', last_synced_at = NOW(), throttle_count = 0, throttle_after = null WHERE id = ${sc.id}`;
-    } catch (e: any) {
-      log.error(`sync ${userId}/${sc.calendar_external_id}: ${e.message}`);
-      await handleSyncError(sc, e);
-    }
+  if (payload?.type === "sync_all") return syncAllConnectedUsers(caller, "sync_now");
+  if (payload?.type === "sync") {
+    const token: string = caller?.authToken;
+    if (!token) return { error: "no auth token in job caller" };
+    await syncUserNow(payload.user_id, token);
+    return { ok: true };
   }
-  return { ok: true };
+  return { skipped: true };
 }
 
 async function selfAction(token: string, action: string, input: any): Promise<any> {

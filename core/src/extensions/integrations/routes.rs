@@ -89,6 +89,7 @@ pub async fn execute_action(
     identity: Identity,
     State(rt): State<SharedRuntime>,
     Path((integration_id, action_id)): Path<(String, String)>,
+    headers: HeaderMap,
     Json(input): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, secrets) = routes::pool_and_secrets(&rt);
@@ -100,17 +101,35 @@ pub async fn execute_action(
         return Err(ApiError::Forbidden(format!("permission denied: {perm}")));
     }
 
+    let run_as = headers.get("x-run-as").and_then(|v| v.to_str().ok());
+    let target_user = if let Some(uid_str) = run_as {
+        if !crate::extensions::rbac::policy::has_permission(&perms, "*") {
+            return Err(ApiError::Forbidden("x-run-as requires admin".into()));
+        }
+        uid_str.to_string()
+    } else {
+        identity.user_id.to_string()
+    };
+
     let config = resolve_config(&pool, &secrets, &integration_id).await?;
 
     let (user_credentials, effective_uid) = super::auth::resolve_credentials(
-        &secrets, &pool, &integration_id, &identity.user_id.to_string(),
+        &secrets, &pool, &integration_id, &target_user,
     ).await;
 
-    let caller = crate::auth::jwt::encode_access(rt.auth_config(), identity.user_id, &identity.email)
+    let caller_uid = uuid::Uuid::parse_str(&target_user).unwrap_or(identity.user_id);
+    let caller_email = if run_as.is_some() {
+        sqlx::query_scalar::<_, String>("SELECT email FROM rootcx_system.users WHERE id = $1")
+            .bind(caller_uid).fetch_optional(&pool).await.ok().flatten().unwrap_or_default()
+    } else {
+        identity.email.clone()
+    };
+
+    let caller = crate::auth::jwt::encode_access(rt.auth_config(), caller_uid, &caller_email)
         .ok()
         .map(|token| crate::ipc::RpcCaller {
-            user_id: identity.user_id.to_string(),
-            email: identity.email.clone(),
+            user_id: target_user.clone(),
+            email: caller_email,
             auth_token: Some(token),
         });
 
@@ -129,6 +148,28 @@ pub async fn execute_action(
         })?;
 
     Ok(Json(result))
+}
+
+pub async fn connected_users(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path(integration_id): Path<String>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let (pool, _) = routes::pool_and_secrets(&rt);
+    require_admin(&pool, identity.user_id).await?;
+    let prefix = format!("_iuc.{}.", integration_id);
+    let keys: Vec<(String,)> = sqlx::query_as(
+        "SELECT key_name FROM rootcx_system.secrets WHERE app_id = $1 AND key_name LIKE $2"
+    )
+    .bind(&integration_id)
+    .bind(format!("{prefix}%"))
+    .fetch_all(&pool).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+
+    let user_ids: Vec<String> = keys.into_iter()
+        .filter_map(|(k,)| k.strip_prefix(&prefix).map(|s| s.to_string()))
+        .filter(|uid| uuid::Uuid::parse_str(uid).is_ok())
+        .collect();
+    Ok(Json(user_ids))
 }
 
 pub async fn webhook_ingress(

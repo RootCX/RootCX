@@ -3022,6 +3022,53 @@ async fn status_agent_requires_admin() {
 }
 
 #[tokio::test]
+async fn x_run_as_requires_admin() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&json!({
+        "appId": "integ_xra", "name": "integ_xra", "version": "1.0.0",
+        "type": "integration",
+        "configSchema": { "type": "object", "properties": {} },
+        "dataContract": []
+    })).await;
+
+    let nonadmin = rt.register_and_login("regular@test.local").await;
+
+    // Non-admin with X-Run-As header MUST be rejected
+    let r = rt.client.post(rt.url("/api/v1/integrations/integ_xra/actions/sync_now"))
+        .bearer_auth(&nonadmin)
+        .header("X-Run-As", "00000000-0000-0000-0000-000000000099")
+        .json(&json!({}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 403, "non-admin must not use X-Run-As");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn connected_users_requires_admin() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&json!({
+        "appId": "integ_cu", "name": "integ_cu", "version": "1.0.0",
+        "type": "integration",
+        "configSchema": { "type": "object", "properties": {} },
+        "dataContract": []
+    })).await;
+
+    let nonadmin = rt.register_and_login("nobody2@test.local").await;
+
+    // Non-admin MUST be rejected
+    let (s, _) = rt.request_as(Method::GET, "/api/v1/integrations/integ_cu/connected-users", &nonadmin, None).await;
+    assert_eq!(s, 403);
+
+    // Admin succeeds (returns empty list)
+    let (s, body) = rt.get_json("/api/v1/integrations/integ_cu/connected-users").await;
+    assert_eq!(s, 200);
+    assert_eq!(body.as_array().unwrap().len(), 0);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
 async fn delegate_requires_admin() {
     let rt = TestRuntime::boot().await;
     rt.install_manifest(&json!({

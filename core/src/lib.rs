@@ -22,6 +22,8 @@ mod worker_manager;
 
 pub use error::RuntimeError;
 
+pub(crate) const SYSTEM_USER_ID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-000000000001");
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

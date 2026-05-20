@@ -4,6 +4,12 @@
   "version": "0.3.0",
   "type": "integration",
   "description": "Gmail integration with per-user sync. Owns email data (messages, threads, participants, attachments). Consumer apps read via the collections API.",
+  "crons": [{
+    "name": "sync",
+    "schedule": "*/5 * * * *",
+    "payload": { "type": "sync_all" },
+    "overlapPolicy": "skip"
+  }],
   "configSchema": {
     "type": "object",
     "properties": {
