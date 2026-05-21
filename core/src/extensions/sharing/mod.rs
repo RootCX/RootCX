@@ -7,7 +7,8 @@
 
 pub mod guard;
 pub mod routes;
-mod tokens;
+
+use crate::auth::secure_tokens as tokens;
 
 #[cfg(test)]
 mod tests;
