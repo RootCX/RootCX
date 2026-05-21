@@ -11,10 +11,9 @@ export interface UseAuthResult {
   register: (data: RegisterInput) => Promise<void>;
   logout: () => Promise<void>;
   oidcLogin: (providerId: string) => Promise<void>;
-  magicLinkConsume: (token: string) => Promise<void>;
 }
 
-function consumeCallbackTokensFromUrl(): { accessToken: string; refreshToken: string } | null {
+function consumeOidcTokensFromUrl(): { accessToken: string; refreshToken: string } | null {
   if (typeof window === "undefined") return null;
   const params = new URLSearchParams(window.location.search);
   const accessToken = params.get("access_token");
@@ -38,11 +37,11 @@ export function useAuth(): UseAuthResult {
   const [authMode, setAuthMode] = useState<AuthMode | null>(null);
 
   useEffect(() => {
-    // Check for redirect callback tokens in URL (OIDC or magic-link browser flow)
-    const callbackTokens = consumeCallbackTokensFromUrl();
-    if (callbackTokens) {
-      client.setTokens(callbackTokens.accessToken, callbackTokens.refreshToken);
-      localStorage.setItem(REFRESH_KEY, callbackTokens.refreshToken);
+    // Check for OIDC callback tokens in URL (browser redirect flow)
+    const oidcTokens = consumeOidcTokensFromUrl();
+    if (oidcTokens) {
+      client.setTokens(oidcTokens.accessToken, oidcTokens.refreshToken);
+      localStorage.setItem(REFRESH_KEY, oidcTokens.refreshToken);
     }
 
     const init = async () => {
@@ -101,15 +100,6 @@ export function useAuth(): UseAuthResult {
     [client, persistTokens],
   );
 
-  const magicLinkConsume = useCallback(
-    async (token: string) => {
-      const res = await client.magicLinkConsume(token);
-      persistTokens();
-      setUser(res.user);
-    },
-    [client, persistTokens],
-  );
-
   return {
     user,
     loading,
@@ -119,6 +109,5 @@ export function useAuth(): UseAuthResult {
     register,
     logout,
     oidcLogin,
-    magicLinkConsume,
   };
 }

@@ -1,7 +1,6 @@
 pub mod identity;
 pub mod jwt;
 pub mod password;
-pub mod secure_tokens;
 
 use std::path::Path;
 use std::sync::Arc;

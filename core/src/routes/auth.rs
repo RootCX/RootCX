@@ -244,21 +244,10 @@ pub async fn auth_mode(State(rt): State<SharedRuntime>) -> Result<Json<JsonValue
     .await
     .unwrap_or_default();
 
-    let magic_link_enabled: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_permissions WHERE key = 'auth.invite')",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap_or_else(|e| {
-        tracing::warn!("magic_link_enabled check failed: {e}");
-        false
-    });
-
     Ok(Json(json!({
         "authRequired": true,
         "setupRequired": setup_required,
         "passwordLoginEnabled": !password_login_disabled() || setup_required,
-        "magicLinkEnabled": magic_link_enabled,
         "providers": providers.iter().map(|(id, name)| json!({ "id": id, "displayName": name })).collect::<Vec<_>>(),
     })))
 }

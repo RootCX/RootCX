@@ -79,7 +79,6 @@ export interface AuthMode {
   authRequired: boolean;
   setupRequired: boolean;
   passwordLoginEnabled: boolean;
-  magicLinkEnabled: boolean;
   providers: OidcProvider[];
 }
 
@@ -587,19 +586,6 @@ export class RuntimeClient {
     // Browser: standard redirect
     const redirectUri = window.location.href.split("?")[0];
     window.location.href = `${this.baseUrl}/api/v1/auth/oidc/${encodeURIComponent(providerId)}/authorize?redirect_uri=${encodeURIComponent(redirectUri)}`;
-  }
-
-  async magicLinkConsume(token: string): Promise<LoginResponse> {
-    const res = await fetch(`${this.baseUrl}/api/v1/auth/magic-link/consume`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token }),
-    });
-    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
-    const data: LoginResponse = await res.json();
-    this.accessToken = data.accessToken;
-    this.refreshToken = data.refreshToken;
-    return data;
   }
 
   async register(data: RegisterInput): Promise<{ user: AuthUser }> {
