@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRuntimeClient } from "../components/RuntimeProvider";
+import type { IntegrationConnection } from "../client";
 
 async function openExternal(url: string): Promise<boolean> {
   const t = (window as any).__TAURI_INTERNALS__;
@@ -10,36 +11,39 @@ async function openExternal(url: string): Promise<boolean> {
     } catch (e) {
       console.warn("[useIntegration] Tauri shell open failed:", e);
     }
-  } else {
-    console.warn("[useIntegration] No __TAURI_INTERNALS__ — not in Tauri webview");
   }
   const w = window.open(url, "_blank");
-  if (!w) console.warn("[useIntegration] window.open blocked");
   return w !== null;
 }
 
 export interface UseIntegrationResult {
   connected: boolean;
+  connections: IntegrationConnection[];
   loading: boolean;
   connect: () => Promise<{ type: string; schema?: Record<string, unknown> } | void>;
   submitCredentials: (credentials: Record<string, string>) => Promise<void>;
-  disconnect: () => Promise<void>;
+  remove: (connectionId: string) => Promise<void>;
   call: (action: string, input?: Record<string, unknown>) => Promise<unknown>;
 }
 
 export function useIntegration(integrationId: string): UseIntegrationResult {
   const client = useRuntimeClient();
-  const [connected, setConnected] = useState(false);
+  const [connections, setConnections] = useState<IntegrationConnection[]>([]);
   const [loading, setLoading] = useState(true);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const checkStatus = useCallback(() =>
-    client.integrationAuthStatus(integrationId)
-      .then(({ connected }) => setConnected(connected))
-      .catch(() => setConnected(false)),
-    [client, integrationId],
-  );
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
-  useEffect(() => { checkStatus().finally(() => setLoading(false)); }, [checkStatus]);
+  const fetchConnections = useCallback(async () => {
+    try {
+      const conns = await client.listConnections(integrationId);
+      setConnections(conns);
+    } catch {
+      setConnections([]);
+    }
+  }, [client, integrationId]);
+
+  useEffect(() => { fetchConnections().finally(() => setLoading(false)); }, [fetchConnections]);
 
   const connect = useCallback(async () => {
     const result = await client.integrationAuthStart(integrationId);
@@ -48,11 +52,16 @@ export function useIntegration(integrationId: string): UseIntegrationResult {
       const url = result.url as string;
       const opened = await openExternal(url);
       if (opened) {
-        const poll = setInterval(async () => {
-          const { connected: c } = await client.integrationAuthStatus(integrationId).catch(() => ({ connected: false }));
-          if (c) { clearInterval(poll); setConnected(true); }
+        const baseline = connections.length;
+        pollRef.current = setInterval(async () => {
+          const conns = await client.listConnections(integrationId).catch(() => []);
+          if (conns.length > baseline) {
+            if (pollRef.current) clearInterval(pollRef.current);
+            pollRef.current = null;
+            setConnections(conns);
+          }
         }, 2000);
-        setTimeout(() => clearInterval(poll), 300_000);
+        setTimeout(() => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } }, 300_000);
       }
       return;
     }
@@ -60,17 +69,17 @@ export function useIntegration(integrationId: string): UseIntegrationResult {
     if (result.type === "credentials") {
       return { type: "credentials", schema: result.schema as Record<string, unknown> | undefined };
     }
-  }, [client, integrationId]);
+  }, [client, integrationId, connections.length]);
 
   const submitCredentials = useCallback(async (credentials: Record<string, string>) => {
     await client.integrationAuthSubmit(integrationId, credentials);
-    await checkStatus();
-  }, [client, integrationId, checkStatus]);
+    await fetchConnections();
+  }, [client, integrationId, fetchConnections]);
 
-  const disconnectFn = useCallback(async () => {
-    await client.integrationAuthDisconnect(integrationId);
-    setConnected(false);
-  }, [client, integrationId]);
+  const remove = useCallback(async (connectionId: string) => {
+    await client.deleteConnection(integrationId, connectionId);
+    await fetchConnections();
+  }, [client, integrationId, fetchConnections]);
 
   const call = useCallback(
     (action: string, input?: Record<string, unknown>) =>
@@ -78,5 +87,13 @@ export function useIntegration(integrationId: string): UseIntegrationResult {
     [client, integrationId],
   );
 
-  return { connected, loading, connect, submitCredentials, disconnect: disconnectFn, call };
+  return {
+    connected: connections.length > 0,
+    connections,
+    loading,
+    connect,
+    submitCredentials,
+    remove,
+    call,
+  };
 }
