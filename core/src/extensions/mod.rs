@@ -5,7 +5,6 @@ pub mod channels;
 pub mod hooks;
 pub mod integrations;
 pub mod logs;
-pub mod magic_link;
 pub mod mcp;
 pub mod oidc;
 pub mod rbac;
@@ -60,7 +59,6 @@ pub fn builtin_extensions(auth_config: Arc<AuthConfig>) -> Vec<Box<dyn RuntimeEx
         Box::new(rbac::RbacExtension),
         Box::new(sharing::SharingExtension),
         Box::new(oidc::OidcExtension),
-        Box::new(magic_link::MagicLinkExtension),
         Box::new(agents::AgentExtension),
         Box::new(integrations::IntegrationsExtension),
         Box::new(mcp::McpExtension),
