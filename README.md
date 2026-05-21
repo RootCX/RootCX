@@ -22,7 +22,7 @@
 
 ## The problem
 
-You build an internal tool with Claude Code, Cursor, or Windsurf. The app takes 5 minutes. Then you spend the next 2 days figuring out:
+You build an internal tool with Claude Code, Codex, Cursor, or your favorite AI coding tool. The app takes 5 minutes. Then you're stuck figuring out:
 
 - Where does it run?
 - Who can access what?
@@ -82,13 +82,13 @@ rootcx init
 npx skills add rootcx/skills
 ```
 
-Works with Claude Code, Cursor, Windsurf, Copilot, or whatever comes next. You don't change how you build. RootCX is where your code lands.
+Works with Claude Code, Codex, Cursor, or your favorite AI coding tool. You don't change how you build. RootCX is where your code lands.
 
 ## How it compares
 
 | | RootCX | DIY (Supabase + Auth0 + ...) | Retool / Airplane |
 |---|---|---|---|
-| You code with AI | First-class (Claude Code, Cursor, any) | Not designed for it | Proprietary builder |
+| You code with AI | First-class (Claude Code, Codex, Cursor, any) | Not designed for it | Proprietary builder |
 | Governance | RBAC + audit log + secrets vault | Build it yourself | Partial |
 | Setup | One server, one command | 5+ services to glue | Hosted only |
 | Self-hosted | Single Docker image | Complex | Enterprise only |
