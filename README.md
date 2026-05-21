@@ -7,37 +7,36 @@
 <h1 align="center">RootCX</h1>
 
 <p align="center">
-  <strong>Secure infrastructure for AI-coded internal apps</strong>
+  <strong>Build internal tools with Claude Code. Ship them with enterprise governance.</strong><br />
+  One server gives you database, auth, RBAC, audit logs, secrets, and deployment<br />
+  for every internal tool you build with AI.
 </p>
 
 <p align="center">
   <a href="https://rootcx.com/docs"><img src="https://img.shields.io/badge/docs-rootcx.com-blue" alt="Documentation" /></a>
   <a href="https://discord.gg/W7sqMYtdws"><img src="https://img.shields.io/discord/1472936179383930950?color=5865F2&label=Discord&logo=discord&logoColor=white" alt="Discord" /></a>
   <a href="https://github.com/rootcx/rootcx/blob/main/LICENSE.md"><img src="https://img.shields.io/badge/license-FSL--1.1--ALv2-blue" alt="License" /></a>
-  <a href="https://github.com/rootcx/rootcx/stargazers"><img src="https://img.shields.io/github/stars/rootcx/rootcx?style=social" alt="Stars" /></a>
 </p>
-
-<div align="center">
-  <a href="https://rootcx.com">Website</a>
-  <span>&nbsp;&nbsp;&bull;&nbsp;&nbsp;</span>
-  <a href="https://rootcx.com/docs">Documentation</a>
-  <span>&nbsp;&nbsp;&bull;&nbsp;&nbsp;</span>
-  <a href="https://discord.gg/rootcx">Discord</a>
-  <span>&nbsp;&nbsp;&bull;&nbsp;&nbsp;</span>
-  <a href="https://github.com/rootcx/rootcx/issues">Issues</a>
-</div>
 
 <br />
 
-## What is RootCX?
+## The problem
 
-RootCX is production infrastructure for internal apps and AI agents. It ships as a single server called **Core**, available as a [Docker image](https://github.com/RootCX/RootCX/pkgs/container/core) or through [RootCX Cloud](https://rootcx.com).
+You build an internal tool with Claude Code, Cursor, or Windsurf. The app takes 5 minutes. Then you spend the next 2 days figuring out:
 
-You build apps with your favorite AI tools ([skills available](https://skills.sh/rootcx/skills)). Core handles everything else: PostgreSQL database, SSO authentication, role-based permissions, audit logs, secrets vault, job scheduling, message queues, file storage, integrations, and deployment.
+- Where does it run?
+- Who can access what?
+- Where's the database?
+- Is there an audit trail?
+- How do I manage secrets, cron jobs, integrations?
 
-Cloud or self-hosted. Your code, your data.
+Every tool you build becomes its own infrastructure project. No central place, no governance, no way to manage them all.
 
-## Quickstart
+## How it works
+
+You keep coding exactly like you do today. Same AI tools, same freedom. RootCX is just the production layer underneath.
+
+Deploy Core once (one Docker image or [Cloud](https://rootcx.com)). Every internal tool you build lands on the same governed platform with everything already wired up.
 
 ```bash
 rootcx init
@@ -47,9 +46,21 @@ rootcx init
   <img src=".github/demo.gif" alt="rootcx init demo" width="800" />
 </p>
 
-`init` walks you through everything interactively: pick cloud or self-hosted, create an account, name your app, scaffold it, and deploy.
+From zero to deployed in one command. Pick cloud or self-hosted, name your app, scaffold, deploy.
 
-## Installation
+## What every app gets for free
+
+**Database** - Shared PostgreSQL. Define a schema, get CRUD APIs automatically. No ORM, no migrations.
+
+**Enterprise auth** - SSO (Okta, Entra ID, Google Workspace, Auth0). Namespaced RBAC with role inheritance. One line to protect a route.
+
+**Governance** - Full audit log (every mutation, who did what, before/after diff). Encrypted secrets vault. Centralized visibility across all your internal tools.
+
+**Infrastructure** - Cron scheduling, durable message queues, file storage, 20+ integrations (Slack, GitHub, Salesforce, Stripe...).
+
+## Get started
+
+### Install the CLI
 
 ```sh
 # macOS / Linux
@@ -59,39 +70,30 @@ curl -fsSL https://rootcx.com/install.sh | sh
 powershell -c "irm https://rootcx.com/install.ps1 | iex"
 ```
 
-## Claude Code
+Then scaffold and deploy your first app:
+
+```bash
+rootcx init
+```
+
+### Install the skill (Claude Code)
 
 ```bash
 npx skills add rootcx/skills
-claude
 ```
 
-## Features
+Works with Claude Code, Cursor, Windsurf, Copilot, or whatever comes next. You don't change how you build. RootCX is where your code lands.
 
-| | |
-|---|---|
-| **Database** | Shared PostgreSQL with auto-generated CRUD APIs |
-| **Auth** | OIDC SSO (Okta, Microsoft Entra ID, Google Workspace, Auth0) |
-| **RBAC** | Namespaced permissions, wildcard matching, role inheritance |
-| **Audit log** | Every insert, update, delete captured with before/after diff |
-| **Scheduled jobs** | Cron scheduling via `pg_cron` |
-| **Message queue** | Durable job queue via `pgmq` with automatic retry |
-| **Secrets vault** | AES-256 encrypted storage for API keys and credentials |
-| **Integrations** | Notion, Gmail, Outlook, Salesforce, Slack, GitHub, Stripe, and more |
-| **Agent tools** | Every app exposes tools (query, mutate, describe) for agents |
-| **MCP** | Connect any MCP server to give agents access to external tools |
-| **Channels** | Connect agents to Telegram, Slack, email |
-| **File storage** | Upload and serve files scoped per app |
+## How it compares
 
-## Showcase
-
-Production apps built on RootCX:
-
-| App | Description |
-|-----|-------------|
-| [CRM](https://github.com/RootCX/CRM) | Customer relationship management |
-| [Billing](https://github.com/RootCX/Billing) | Invoicing and payment tracking |
-| [Task Manager](https://github.com/RootCX/Task-Manager) | Team task and project management |
+| | RootCX | DIY (Supabase + Auth0 + ...) | Retool / Airplane |
+|---|---|---|---|
+| You code with AI | First-class (Claude Code, Cursor, any) | Not designed for it | Proprietary builder |
+| Governance | RBAC + audit log + secrets vault | Build it yourself | Partial |
+| Setup | One server, one command | 5+ services to glue | Hosted only |
+| Self-hosted | Single Docker image | Complex | Enterprise only |
+| You own the code | Yes | Yes | No |
+| All your tools in one place | Yes | Scattered | Yes |
 
 ## Architecture
 
@@ -103,12 +105,29 @@ Production apps built on RootCX:
   </picture>
 </p>
 
+## All features
+
+| | |
+|---|---|
+| **Database** | Shared PostgreSQL with auto-generated CRUD APIs |
+| **Auth** | OIDC SSO (Okta, Microsoft Entra ID, Google Workspace, Auth0) |
+| **RBAC** | Namespaced permissions, wildcard matching, role inheritance |
+| **Audit log** | Every mutation captured with before/after diff |
+| **Scheduled jobs** | Cron scheduling via `pg_cron` |
+| **Message queue** | Durable job queue via `pgmq` with automatic retry |
+| **Secrets vault** | AES-256 encrypted storage for API keys and credentials |
+| **Integrations** | Notion, Gmail, Outlook, Salesforce, Slack, GitHub, Stripe, and more |
+| **Agent tools** | Every app exposes tools (query, mutate, describe) for agents |
+| **MCP** | Connect any MCP server to give agents access to external tools |
+| **Channels** | Connect agents to Telegram, Slack, email |
+| **File storage** | Upload and serve files scoped per app |
+
 ## Community
 
-- [Discord](https://discord.gg/rootcx) for questions, discussion, and support
-- [GitHub Issues](https://github.com/rootcx/rootcx/issues) for bug reports and feature requests
-- [Documentation](https://rootcx.com/docs) for guides, references, and API docs
+- [Discord](https://discord.gg/W7sqMYtdws) - Questions, discussion, support
+- [GitHub Issues](https://github.com/rootcx/rootcx/issues) - Bug reports and feature requests
+- [Docs](https://rootcx.com/docs) - Guides, references, API docs
 
 ## License
 
-RootCX is source-available under the [FSL-1.1-ALv2](LICENSE.md) (Functional Source License). Use, modify, and redistribute for any purpose other than offering a competing product. Converts to **Apache 2.0** after two years.
+Source-available under [FSL-1.1-ALv2](LICENSE.md). Use, modify, and redistribute for any purpose other than offering a competing product. Converts to **Apache 2.0** after two years.
