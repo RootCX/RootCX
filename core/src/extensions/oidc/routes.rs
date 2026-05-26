@@ -428,10 +428,11 @@ pub(crate) async fn callback(
 
     let mut redirect_url = url::Url::parse(&client_redirect_uri)
         .map_err(|_| ApiError::Internal("invalid redirect_uri".into()))?;
-    redirect_url.query_pairs_mut()
-        .append_pair("access_token", &access_token)
-        .append_pair("refresh_token", &refresh_token)
-        .append_pair("expires_in", &auth_config.access_ttl.as_secs().to_string());
+    let fragment = format!(
+        "access_token={}&refresh_token={}&expires_in={}",
+        access_token, refresh_token, auth_config.access_ttl.as_secs()
+    );
+    redirect_url.set_fragment(Some(&fragment));
 
     Ok(Redirect::temporary(redirect_url.as_str()).into_response())
 }

@@ -19,7 +19,7 @@ use crate::auth::identity::Identity;
 use crate::extensions::rbac::policy::{has_permission, resolve_permissions};
 use crate::routes::{SharedRuntime, pool};
 
-use super::tokens;
+use crate::auth::secure_tokens as tokens;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
