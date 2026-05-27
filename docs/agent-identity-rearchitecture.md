@@ -19,7 +19,7 @@ No delegation context = **DENY**. No exceptions. No fallthrough to agent's full 
 ## Compliance references
 
 - **RFC 8693** (Token Exchange): `act` claim semantics, delegation vs impersonation
-- **Red Hat Zero Trust for AI Agents**: effective perms = intersection, agent auth-unaware, policy engine decides
+- **industry zero-trust Zero Trust for AI Agents**: effective perms = intersection, agent auth-unaware, policy engine decides
 - **Okta IGA**: agent = first-class identity, least-privilege, instant revocation, lifecycle governance
 - **RFC 8707**: audience-bound tokens (aud claim)
 - **Scalekit**: 5-15min TTL, deny-by-default, structured audit (performed_by + on_behalf_of)
@@ -119,7 +119,7 @@ let valid = sqlx::query_scalar::<_, bool>(
 if !valid { return Err("no valid standing mandate"); }
 ```
 
-## Security rules (RFC 8693 / Red Hat / Okta-IGA compliant)
+## Security rules (RFC 8693 / industry zero-trust / Okta-IGA compliant)
 
 1. Effective authority = `intersect_permissions(grant, delegator)`, server-side, never in token.
 2. Identity-only token: `sub`=delegator, `act`={sub: agent_uid, act: null}, `aud`='rootcx-core', TTL 120s.
@@ -614,7 +614,7 @@ SQL executes with full audit context
 - Decisions D1-D12 recorded interactively (intersection algorithm, deny-on-None,
   nestable act, SET LOCAL audit, webhook dispatch, cron/hook fix, DB-live authz,
   delegation gate, RBAC invocation ACL, token TTL/aud, DRY fn, full test coverage)
-- Compliance validated against: RFC 8693, RFC 8707, Red Hat Zero Trust for AI Agents,
+- Compliance validated against: RFC 8693, RFC 8707, industry zero-trust Zero Trust for AI Agents,
   Okta IGA, Scalekit, Arcade, Google Cloud IAM, GitGuardian, Gravitee, Strata
 
 ## GSTACK REVIEW REPORT
