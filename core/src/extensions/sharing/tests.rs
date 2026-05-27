@@ -123,7 +123,7 @@ mod guard_tests {
         // mistakenly calls authorize_public_rpc with a User, it should still pass
         // (it's not the guard's job to reject authed users from public RPCs).
         let decl = PublicRpc { name: "list_products".into(), scope: vec![] };
-        let auth = CallerAuth::User(Identity { user_id: Uuid::new_v4(), email: "a@b.com".into() });
+        let auth = CallerAuth::User(Identity { user_id: Uuid::new_v4(), email: "a@b.com".into(), actor: None });
         // User has no share_app_id → None, so the cross-app check is skipped → Ok
         assert!(authorize_public_rpc(&decl, &auth, "shop", &json!({})).is_ok());
     }

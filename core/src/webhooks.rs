@@ -23,10 +23,14 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
             name       TEXT NOT NULL,
             method     TEXT NOT NULL,
             token      TEXT NOT NULL UNIQUE,
+            created_by UUID,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
             UNIQUE (app_id, name)
         )
     "#).execute(pool).await.map_err(err)?;
+
+    sqlx::query("ALTER TABLE rootcx_system.webhooks ADD COLUMN IF NOT EXISTS created_by UUID")
+        .execute(pool).await.map_err(err)?;
 
     Ok(())
 }
@@ -39,6 +43,7 @@ pub struct WebhookRow {
     pub name: String,
     pub method: String,
     pub token: String,
+    pub created_by: Option<Uuid>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -46,6 +51,7 @@ pub async fn sync_webhooks(
     pool: &PgPool,
     app_id: &str,
     webhooks: &[rootcx_types::WebhookDefinition],
+    created_by: Option<Uuid>,
 ) -> Result<(), RuntimeError> {
     let names: Vec<&str> = webhooks.iter().map(|w| w.name()).collect();
 
@@ -59,18 +65,25 @@ pub async fn sync_webhooks(
     .map_err(err)?;
 
     for wh in webhooks {
-        sqlx::query(r#"
-            INSERT INTO rootcx_system.webhooks (app_id, name, method, token)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (app_id, name) DO UPDATE SET method = EXCLUDED.method
+        let (id,): (Uuid,) = sqlx::query_as(r#"
+            INSERT INTO rootcx_system.webhooks (app_id, name, method, token, created_by)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (app_id, name) DO UPDATE SET method = EXCLUDED.method, created_by = COALESCE(EXCLUDED.created_by, rootcx_system.webhooks.created_by)
+            RETURNING id
         "#)
         .bind(app_id)
         .bind(wh.name())
         .bind(wh.method())
         .bind(generate_token())
-        .execute(pool)
+        .bind(created_by)
+        .fetch_one(pool)
         .await
         .map_err(err)?;
+
+        if let Some(owner) = created_by {
+            let agent_uid = crate::extensions::agents::agent_user_id(app_id);
+            let _ = crate::delegations::create(pool, owner, agent_uid, "webhook", Some(id)).await;
+        }
     }
 
     Ok(())
@@ -78,7 +91,7 @@ pub async fn sync_webhooks(
 
 pub async fn list_webhooks(pool: &PgPool, app_id: &str) -> Result<Vec<WebhookRow>, RuntimeError> {
     sqlx::query_as::<_, WebhookRow>(
-        "SELECT id, app_id, name, method, token, created_at FROM rootcx_system.webhooks WHERE app_id = $1 ORDER BY name"
+        "SELECT id, app_id, name, method, token, created_by, created_at FROM rootcx_system.webhooks WHERE app_id = $1 ORDER BY name"
     )
     .bind(app_id)
     .fetch_all(pool)
@@ -88,7 +101,7 @@ pub async fn list_webhooks(pool: &PgPool, app_id: &str) -> Result<Vec<WebhookRow
 
 pub async fn lookup_token(pool: &PgPool, token: &str) -> Result<Option<WebhookRow>, RuntimeError> {
     sqlx::query_as::<_, WebhookRow>(
-        "SELECT id, app_id, name, method, token, created_at FROM rootcx_system.webhooks WHERE token = $1"
+        "SELECT id, app_id, name, method, token, created_by, created_at FROM rootcx_system.webhooks WHERE token = $1"
     )
     .bind(token)
     .fetch_optional(pool)

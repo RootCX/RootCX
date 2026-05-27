@@ -1,10 +1,22 @@
 use async_trait::async_trait;
 use serde_json::{json, Value as JsonValue};
+use uuid::Uuid;
 use rootcx_types::ToolDescriptor;
 
 use super::{Tool, ToolContext, str_arg, check_permission};
 use crate::manifest::{field_type_map, quote_ident};
 use crate::routes::crud::{bind_typed, bulk_insert, filter_writable_fields, table, MAX_BULK_SIZE};
+
+async fn set_audit_context(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, actor: Uuid, delegator: Option<Uuid>) {
+    let _ = sqlx::query(&format!("SET LOCAL rootcx.actor_uid = '{actor}'"))
+        .execute(&mut **tx).await;
+    if let Some(d) = delegator {
+        let _ = sqlx::query(&format!("SET LOCAL rootcx.delegator_uid = '{d}'"))
+            .execute(&mut **tx).await;
+    }
+    let _ = sqlx::query("SET LOCAL rootcx.trigger_ref = 'agent_tool'")
+        .execute(&mut **tx).await;
+}
 
 pub struct MutateDataTool;
 
@@ -58,9 +70,12 @@ impl Tool for MutateDataTool {
                     "INSERT INTO {tbl} ({}) VALUES ({}) RETURNING to_jsonb({tbl}.*) AS row",
                     cols.join(", "), phs.join(", ")
                 );
+                let mut tx = ctx.pool.begin().await.map_err(|e| e.to_string())?;
+                set_audit_context(&mut tx, ctx.user_id, ctx.invoker_user_id).await;
                 let mut q = sqlx::query_as::<_, (JsonValue,)>(&sql);
                 for (k, v) in &entries { q = bind_typed(q, v, types.get(*k)); }
-                let (row,) = q.fetch_one(&ctx.pool).await.map_err(|e| e.to_string())?;
+                let (row,) = q.fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
+                tx.commit().await.map_err(|e| e.to_string())?;
                 Ok(row)
             }
             "update" => {
@@ -81,11 +96,14 @@ impl Tool for MutateDataTool {
                     "UPDATE {tbl} SET {} WHERE id = ${id_param} RETURNING to_jsonb({tbl}.*) AS row",
                     sets.join(", ")
                 );
+                let mut tx = ctx.pool.begin().await.map_err(|e| e.to_string())?;
+                set_audit_context(&mut tx, ctx.user_id, ctx.invoker_user_id).await;
                 let mut q = sqlx::query_as::<_, (JsonValue,)>(&sql);
                 for (k, v) in &entries { q = bind_typed(q, v, types.get(*k)); }
                 q = q.bind(uuid);
-                let (row,) = q.fetch_optional(&ctx.pool).await.map_err(|e| e.to_string())?
+                let (row,) = q.fetch_optional(&mut *tx).await.map_err(|e| e.to_string())?
                     .ok_or_else(|| format!("record '{id}' not found"))?;
+                tx.commit().await.map_err(|e| e.to_string())?;
                 Ok(row)
             }
             "bulk_create" => {
@@ -101,15 +119,18 @@ impl Tool for MutateDataTool {
                     .map(|v| v.as_object().ok_or("each item in 'data' must be an object"))
                     .collect::<Result<_, _>>()?;
                 let types = field_type_map(&ctx.pool, app, entity).await.map_err(|e| e.to_string())?;
-                let rows = bulk_insert(&ctx.pool, &tbl, &types, &objects).await.map_err(|e| format!("{e:?}"))?;
+                let rows = bulk_insert(&ctx.pool, &tbl, &types, &objects, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool").await.map_err(|e| format!("{e:?}"))?;
                 Ok(json!(rows))
             }
             "delete" => {
                 let id = str_arg(&ctx.args, "id")?;
                 let uuid: sqlx::types::Uuid = id.parse().map_err(|_| format!("invalid UUID: '{id}'"))?;
                 let sql = format!("DELETE FROM {tbl} WHERE id = $1");
-                let r = sqlx::query(&sql).bind(uuid).execute(&ctx.pool).await.map_err(|e| e.to_string())?;
+                let mut tx = ctx.pool.begin().await.map_err(|e| e.to_string())?;
+                set_audit_context(&mut tx, ctx.user_id, ctx.invoker_user_id).await;
+                let r = sqlx::query(&sql).bind(uuid).execute(&mut *tx).await.map_err(|e| e.to_string())?;
                 if r.rows_affected() == 0 { return Err(format!("record '{id}' not found")); }
+                tx.commit().await.map_err(|e| e.to_string())?;
                 Ok(json!("Deleted successfully"))
             }
             _ => Err(format!("unknown action: '{action}'")),

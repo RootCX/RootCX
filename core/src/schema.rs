@@ -68,6 +68,7 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
     crate::jobs::bootstrap(pool).await?;
     crate::crons::bootstrap(pool).await?;
     crate::webhooks::bootstrap(pool).await?;
+    crate::delegations::bootstrap(pool).await?;
 
     info!("rootcx_system schema ready");
     Ok(())

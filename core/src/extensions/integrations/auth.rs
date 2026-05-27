@@ -298,7 +298,7 @@ mod tests {
     use crate::auth::identity::Identity;
 
     fn identity(id: &str) -> Identity {
-        Identity { user_id: Uuid::parse_str(id).unwrap(), email: String::new() }
+        Identity { user_id: Uuid::parse_str(id).unwrap(), email: String::new(), actor: None }
     }
 
     #[test]

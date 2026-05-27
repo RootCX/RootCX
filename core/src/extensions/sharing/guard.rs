@@ -81,7 +81,7 @@ impl FromRequestParts<SharedRuntime> for CallerAuth {
             let user_id = claims.sub.parse()
                 .map_err(|_| ApiError::Unauthorized("invalid token subject".into()))?;
 
-            return Ok(CallerAuth::User(Identity { user_id, email: claims.email }));
+            return Ok(CallerAuth::User(Identity { user_id, email: claims.email, actor: claims.act }));
         }
 
         // No dot → either a share token or a malformed Bearer.

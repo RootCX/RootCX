@@ -189,13 +189,51 @@ pub async fn webhook_ingress(
     let raw_body = base64::engine::general_purpose::STANDARD.encode(&body);
 
     if let Some(wh) = crate::webhooks::lookup_token(&pool, &token).await? {
+        // Agent webhook: validate delegation, dispatch as agent invoke
+        let is_agent: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id = $1)"
+        ).bind(&wh.app_id).fetch_one(&pool).await.unwrap_or(false);
+
+        if is_agent {
+            let delegator = wh.created_by
+                .ok_or_else(|| ApiError::Forbidden("webhook has no owner (created_by is NULL)".into()))?;
+            let agent_uid = crate::extensions::agents::agent_user_id(&wh.app_id);
+            if !crate::delegations::is_valid(&pool, delegator, agent_uid).await
+                .map_err(|e| ApiError::Internal(e.to_string()))? {
+                return Err(ApiError::Forbidden("no valid delegation for webhook agent".into()));
+            }
+            let message = format!("Webhook received: {}\n\nPayload:\n{payload}", wh.name);
+            let llm = crate::routes::llm_models::fetch_default_llm(&pool).await
+                .ok().flatten()
+                .map(|(provider, model)| crate::ipc::LlmModelRef { provider, model });
+            let invoke_payload = crate::ipc::AgentInvokePayload {
+                invoke_id: Uuid::new_v4().to_string(),
+                session_id: Uuid::new_v4().to_string(),
+                message,
+                history: vec![],
+                is_sub_invoke: false,
+                llm,
+                invoker_user_id: Some(delegator),
+                attachments: None,
+            };
+            let _ = wm.agent_invoke(&wh.app_id, invoke_payload).await
+                .map_err(|e| ApiError::Internal(e.to_string()))?;
+            return Ok(Json(json!({"status": "accepted"})));
+        }
+
+        // Regular (non-agent) webhook RPC
+        let caller = wh.created_by.map(|uid| crate::ipc::RpcCaller {
+            user_id: uid.to_string(),
+            email: String::new(),
+            auth_token: None,
+        });
         let result = wm
             .rpc(
                 &wh.app_id,
                 Uuid::new_v4().to_string(),
                 wh.method.clone(),
                 json!({ "name": wh.name, "headers": hdr_map, "body": payload, "rawBody": raw_body }),
-                None,
+                caller,
             )
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;

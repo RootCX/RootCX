@@ -5,13 +5,14 @@ use axum::http::request::Parts;
 use uuid::Uuid;
 
 use super::AuthConfig;
-use super::jwt;
+use super::jwt::{self, ActorClaim};
 use crate::api_error::ApiError;
 use crate::routes::SharedRuntime;
 
 pub struct Identity {
     pub user_id: Uuid,
     pub email: String,
+    pub actor: Option<ActorClaim>,
 }
 
 impl FromRequestParts<SharedRuntime> for Identity {
@@ -32,13 +33,14 @@ impl FromRequestParts<SharedRuntime> for Identity {
         let claims = jwt::decode(&auth_config, token)
             .map_err(|_| ApiError::Unauthorized("invalid token".into()))?;
 
-        if claims.email.is_empty() {
+        // Delegated tokens (act present) don't require email -- they're internal
+        if claims.act.is_none() && claims.email.is_empty() {
             return Err(ApiError::Unauthorized("invalid token type".into()));
         }
 
         let user_id: Uuid = claims.sub.parse()
             .map_err(|_| ApiError::Unauthorized("invalid token subject".into()))?;
 
-        Ok(Identity { user_id, email: claims.email })
+        Ok(Identity { user_id, email: claims.email, actor: claims.act })
     }
 }

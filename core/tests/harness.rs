@@ -14,7 +14,7 @@ const PG_TAG: &str = "16-pgmq-cron";
 pub struct TestRuntime {
     base_url: String,
     pub client: Client,
-    runtime: Arc<ReadyRuntime>,
+    pub runtime: Arc<ReadyRuntime>,
     pub token: String,
     _tmp: TempDir,
     _container: ContainerAsync<GenericImage>,

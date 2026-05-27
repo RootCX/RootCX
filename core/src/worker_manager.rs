@@ -58,12 +58,14 @@ impl WorkerManager {
     }
 
     /// Must be called after wrapping in Arc to enable sub-agent dispatch and integration calling.
-    pub fn init_self_ref(self: &Arc<Self>) {
+    pub fn init_self_ref(self: &Arc<Self>, pool: PgPool, auth: Arc<crate::auth::AuthConfig>) {
         let _ = self.dispatch.set(Arc::new(SubAgentDispatch { wm: Arc::clone(self) }));
         let _ = self.integration_call.set(Arc::new(IntegrationCallImpl {
             wm: Arc::clone(self), secrets: Arc::clone(&self.secret_manager),
         }));
-        let _ = self.action_call.set(Arc::new(AppActionCallImpl { wm: Arc::clone(self) }));
+        let _ = self.action_call.set(Arc::new(AppActionCallImpl {
+            wm: Arc::clone(self), pool, auth,
+        }));
     }
 
     async fn build_agent_boot(&self, pool: &PgPool, app_id: &str) -> Option<(AgentBootConfig, Option<rootcx_types::SupervisionConfig>)> {
@@ -253,6 +255,7 @@ impl AgentDispatcher for SubAgentDispatch {
     async fn dispatch(
         &self, pool: &PgPool, caller: &str, target: &str, message: &str,
         parent_tx: Option<mpsc::Sender<AgentEvent>>,
+        invoker_user_id: Option<uuid::Uuid>,
     ) -> Result<String, String> {
         if target == caller { return Err("cannot invoke self".into()); }
 
@@ -267,7 +270,7 @@ impl AgentDispatcher for SubAgentDispatch {
             history: vec![],
             is_sub_invoke: true,
             llm,
-            invoker_user_id: None,
+            invoker_user_id,
             attachments: None,
         };
 
@@ -300,6 +303,9 @@ impl AgentDispatcher for SubAgentDispatch {
 
 struct AppActionCallImpl {
     wm: Arc<WorkerManager>,
+    #[allow(dead_code)]
+    pool: PgPool,
+    auth: Arc<crate::auth::AuthConfig>,
 }
 
 #[async_trait]
@@ -307,10 +313,13 @@ impl ActionCaller for AppActionCallImpl {
     async fn call(
         &self, app_id: &str, action_id: &str, input: JsonValue, user_id: uuid::Uuid,
     ) -> Result<JsonValue, String> {
+        let agent_uid = crate::extensions::agents::agent_user_id(app_id);
+        let token = crate::auth::jwt::mint_delegated(&self.auth, user_id, agent_uid)
+            .map_err(|e| format!("mint token: {e}"))?;
         let caller = Some(RpcCaller {
             user_id: user_id.to_string(),
             email: String::new(),
-            auth_token: None,
+            auth_token: Some(token),
         });
         self.wm.rpc(
             app_id,

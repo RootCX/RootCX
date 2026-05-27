@@ -45,11 +45,14 @@ impl RuntimeExtension for HooksExtension {
                 action_type  TEXT NOT NULL CHECK (action_type IN ('job', 'agent')),
                 action_config JSONB NOT NULL DEFAULT '{}',
                 active       BOOLEAN NOT NULL DEFAULT true,
+                created_by   UUID,
                 created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
             )"#,
         )
         .await?;
+
+        exec(pool, "ALTER TABLE rootcx_system.entity_hooks ADD COLUMN IF NOT EXISTS created_by UUID").await?;
 
         exec(
             pool,
@@ -57,7 +60,7 @@ impl RuntimeExtension for HooksExtension {
         )
         .await?;
 
-        // Trigger function — checks entity_hooks config, enqueues to pgmq if match
+        // Trigger function -- checks entity_hooks config, enqueues to pgmq if match
         exec(
             pool,
             r#"
@@ -68,20 +71,21 @@ impl RuntimeExtension for HooksExtension {
                 rec_id TEXT;
                 record_data JSONB;
                 old_data JSONB;
+                v_msg JSONB;
             BEGIN
                 rec_id := CASE WHEN TG_OP = 'DELETE' THEN OLD.id::TEXT ELSE NEW.id::TEXT END;
                 record_data := CASE WHEN TG_OP IN ('INSERT', 'UPDATE') THEN to_jsonb(NEW) ELSE NULL END;
                 old_data := CASE WHEN TG_OP IN ('UPDATE', 'DELETE') THEN to_jsonb(OLD) ELSE NULL END;
 
                 FOR hook IN
-                    SELECT id, action_type, action_config
+                    SELECT id, action_type, action_config, created_by
                     FROM rootcx_system.entity_hooks
                     WHERE app_id = TG_TABLE_SCHEMA
                       AND entity = TG_TABLE_NAME
                       AND operation = TG_OP
                       AND active = true
                 LOOP
-                    PERFORM pgmq.send('jobs', jsonb_build_object(
+                    v_msg := jsonb_build_object(
                         'app_id', TG_TABLE_SCHEMA,
                         'payload', jsonb_build_object(
                             '_hook', true,
@@ -94,7 +98,11 @@ impl RuntimeExtension for HooksExtension {
                             'action_type', hook.action_type,
                             'action_config', hook.action_config
                         )
-                    ));
+                    );
+                    IF hook.created_by IS NOT NULL THEN
+                        v_msg := v_msg || jsonb_build_object('user_id', hook.created_by::text);
+                    END IF;
+                    PERFORM pgmq.send('jobs', v_msg);
                 END LOOP;
 
                 RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
@@ -242,7 +250,7 @@ async fn list_hooks(
 }
 
 async fn create_hook(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
     Json(body): Json<CreateHookRequest>,
@@ -261,8 +269,8 @@ async fn create_hook(
 
     let (row,): (JsonValue,) = sqlx::query_as(
         r#"
-        INSERT INTO rootcx_system.entity_hooks (app_id, entity, operation, action_type, action_config)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO rootcx_system.entity_hooks (app_id, entity, operation, action_type, action_config, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6)
         RETURNING to_jsonb(rootcx_system.entity_hooks.*)
         "#,
     )
@@ -271,8 +279,17 @@ async fn create_hook(
     .bind(&operation)
     .bind(&body.action_type)
     .bind(&config)
+    .bind(identity.user_id)
     .fetch_one(&pool)
     .await?;
+
+    // Auto-create delegation for hook-triggered agents
+    if body.action_type == "agent" {
+        let hook_id: Option<uuid::Uuid> = row.get("id").and_then(|v| v.as_str()).and_then(|s| s.parse().ok());
+        let target = config.get("app_id").and_then(|v| v.as_str()).unwrap_or(&app_id);
+        let agent_uid = crate::extensions::agents::agent_user_id(target);
+        let _ = crate::delegations::create(&pool, identity.user_id, agent_uid, "hook", hook_id).await;
+    }
 
     Ok(Json(row))
 }
@@ -313,6 +330,10 @@ async fn delete_hook(
 
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound("hook not found".into()));
+    }
+
+    if let Ok(uid) = hook_id.parse::<uuid::Uuid>() {
+        let _ = crate::delegations::revoke_by_trigger(&pool, "hook", uid).await;
     }
 
     Ok(Json(serde_json::json!({ "ok": true })))
