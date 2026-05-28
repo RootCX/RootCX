@@ -12,8 +12,14 @@ use uuid::Uuid;
 use super::{SharedRuntime, parse_uuid, pool};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::extensions::rbac::policy::{resolve_permissions, has_permission};
+use crate::extensions::audit;
+use crate::extensions::rbac::policy::{resolve_effective_permissions, has_permission};
 use crate::manifest::{entity_exists, entity_identity, field_type_map, find_entities_by_identity, is_system_field, map_field_type, quote_ident};
+
+async fn set_audit_context_api(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, identity: &Identity) {
+    let (actor, delegator) = identity.actor_pair();
+    audit::set_context(tx, actor, delegator, "api").await;
+}
 
 fn check_app_perm(permissions: &[String], app_id: &str, perm: &str) -> Result<(), ApiError> {
     let namespaced = format!("app:{app_id}:{perm}");
@@ -303,7 +309,7 @@ pub async fn list_records(
     validate_app_id(&app_id)?;
     let pool = pool(&rt);
     ensure_entity(&pool, &app_id, &entity).await?;
-    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
+    let perms = resolve_effective_permissions(&pool, &identity).await?;
     check_app_perm(&perms, &app_id, &format!("{entity}.read"))?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
@@ -413,7 +419,7 @@ pub async fn query_records(
     validate_app_id(&app_id)?;
     let pool = pool(&rt);
     ensure_entity(&pool, &app_id, &entity).await?;
-    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
+    let perms = resolve_effective_permissions(&pool, &identity).await?;
     check_app_perm(&perms, &app_id, &format!("{entity}.read"))?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
@@ -458,7 +464,7 @@ pub async fn create_record(
     validate_app_id(&app_id)?;
     let pool = pool(&rt);
     ensure_entity(&pool, &app_id, &entity).await?;
-    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
+    let perms = resolve_effective_permissions(&pool, &identity).await?;
     check_app_perm(&perms, &app_id, &format!("{entity}.create"))?;
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
@@ -477,12 +483,14 @@ pub async fn create_record(
         cols.join(", "),
         phs.join(", ")
     );
+    let mut tx = pool.begin().await?;
+    set_audit_context_api(&mut tx, &identity).await;
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
     for (k, v) in &entries {
         query = bind_typed(query, v, types.get(*k));
     }
-
-    let (row,) = query.fetch_one(&pool).await?;
+    let (row,) = query.fetch_one(&mut *tx).await?;
+    tx.commit().await?;
     Ok((StatusCode::CREATED, Json(row)))
 }
 
@@ -505,6 +513,9 @@ pub(crate) async fn bulk_insert(
     tbl: &str,
     types: &HashMap<String, String>,
     objects: &[&serde_json::Map<String, JsonValue>],
+    actor_uid: Option<Uuid>,
+    delegator_uid: Option<Uuid>,
+    trigger_ref: &str,
 ) -> Result<Vec<JsonValue>, ApiError> {
     let keys = union_keys(objects);
     if keys.is_empty() {
@@ -541,6 +552,7 @@ pub(crate) async fn bulk_insert(
     }
 
     let mut tx = pool.begin().await?;
+    audit::set_context(&mut tx, actor_uid, delegator_uid, trigger_ref).await;
     let rows: Vec<(JsonValue,)> = query.fetch_all(&mut *tx).await?;
     tx.commit().await?;
     Ok(rows.into_iter().map(|(r,)| r).collect())
@@ -555,7 +567,7 @@ pub async fn bulk_create_records(
     validate_app_id(&app_id)?;
     let db = pool(&rt);
     ensure_entity(&db, &app_id, &entity).await?;
-    let (_, perms) = resolve_permissions(&db, identity.user_id).await?;
+    let perms = resolve_effective_permissions(&db, &identity).await?;
     check_app_perm(&perms, &app_id, &format!("{entity}.create"))?;
     let records = body.as_array()
         .ok_or_else(|| ApiError::BadRequest("body must be a JSON array".into()))?;
@@ -573,7 +585,8 @@ pub async fn bulk_create_records(
 
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&db, &app_id, &entity).await?;
-    let created = bulk_insert(&db, &tbl, &types, &objects).await?;
+    let (actor, delegator) = identity.actor_pair();
+    let created = bulk_insert(&db, &tbl, &types, &objects, actor, delegator, "api").await?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -585,7 +598,7 @@ pub async fn get_record(
     validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
     ensure_entity(&pool, &app_id, &entity).await?;
-    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
+    let perms = resolve_effective_permissions(&pool, &identity).await?;
     check_app_perm(&perms, &app_id, &format!("{entity}.read"))?;
     let tbl = table(&app_id, &entity);
     let q = format!("SELECT to_jsonb(t.*) AS row FROM {tbl} t WHERE t.id = $1");
@@ -606,7 +619,7 @@ pub async fn update_record(
     validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
     ensure_entity(&pool, &app_id, &entity).await?;
-    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
+    let perms = resolve_effective_permissions(&pool, &identity).await?;
     check_app_perm(&perms, &app_id, &format!("{entity}.update"))?;
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
@@ -621,16 +634,20 @@ pub async fn update_record(
         "UPDATE {tbl} SET {} WHERE id = ${id_param} RETURNING to_jsonb({tbl}.*) AS row",
         sets.join(", ")
     );
+    let mut tx = pool.begin().await?;
+    set_audit_context_api(&mut tx, &identity).await;
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
     for (k, v) in &entries {
         query = bind_typed(query, v, types.get(*k));
     }
     query = query.bind(uuid);
-    query
-        .fetch_optional(&pool)
+    let result = query
+        .fetch_optional(&mut *tx)
         .await?
         .map(|(r,)| Json(r))
-        .ok_or_else(|| ApiError::NotFound(format!("record '{id}' not found")))
+        .ok_or_else(|| ApiError::NotFound(format!("record '{id}' not found")))?;
+    tx.commit().await?;
+    Ok(result)
 }
 
 pub async fn delete_record(
@@ -641,14 +658,17 @@ pub async fn delete_record(
     validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
     ensure_entity(&pool, &app_id, &entity).await?;
-    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
+    let perms = resolve_effective_permissions(&pool, &identity).await?;
     check_app_perm(&perms, &app_id, &format!("{entity}.delete"))?;
     let tbl = table(&app_id, &entity);
     let q = format!("DELETE FROM {tbl} WHERE id = $1");
-    let r = sqlx::query(&q).bind(uuid).execute(&pool).await?;
+    let mut tx = pool.begin().await?;
+    set_audit_context_api(&mut tx, &identity).await;
+    let r = sqlx::query(&q).bind(uuid).execute(&mut *tx).await?;
     if r.rows_affected() == 0 {
         return Err(ApiError::NotFound(format!("record '{id}' not found")));
     }
+    tx.commit().await?;
     Ok(Json(serde_json::json!({ "message": format!("record '{id}' deleted") })))
 }
 
@@ -659,7 +679,7 @@ pub async fn federated_query(
     Json(body): Json<QueryRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = pool(&rt);
-    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
+    let perms = resolve_effective_permissions(&pool, &identity).await?;
     let targets = find_entities_by_identity(&pool, &identity_kind, None)
         .await.map_err(|e| ApiError::Internal(e.to_string()))?;
 

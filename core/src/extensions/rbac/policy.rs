@@ -4,6 +4,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::api_error::ApiError;
+use crate::auth::identity::Identity;
 
 const MAX_ROLE_DEPTH: usize = 64;
 
@@ -108,6 +109,56 @@ pub async fn require_admin(pool: &PgPool, user_id: Uuid) -> Result<(), ApiError>
     else { Err(ApiError::Forbidden("admin access required".into())) }
 }
 
+/// Effective permissions for an authenticated request.
+/// Delegated token (act present): grant(agent) ∩ perms(delegator).
+/// Direct request: the user's own permissions.
+pub async fn resolve_effective_permissions(pool: &PgPool, identity: &Identity) -> Result<Vec<String>, ApiError> {
+    let Some(actor) = &identity.actor else {
+        let (_, perms) = resolve_permissions(pool, identity.user_id).await?;
+        return Ok(perms);
+    };
+    let agent_uid = actor.sub;
+    let (agent_res, delegator_res) = tokio::join!(
+        resolve_permissions(pool, agent_uid),
+        resolve_permissions(pool, identity.user_id),
+    );
+    let (_, agent_perms) = agent_res?;
+    let (_, delegator_perms) = delegator_res?;
+    Ok(intersect_permissions(&agent_perms, &delegator_perms))
+}
+
+/// Effective permissions for an agent invocation with no Identity in scope
+/// (scheduler/worker path). Deny-on-error: a failed RBAC lookup yields no authority.
+pub async fn effective_for_pair(pool: &PgPool, agent_uid: Uuid, delegator_uid: Uuid) -> Vec<String> {
+    let (agent_res, deleg_res) = tokio::join!(
+        resolve_permissions(pool, agent_uid),
+        resolve_permissions(pool, delegator_uid),
+    );
+    let agent_perms = agent_res.map(|(_, p)| p).unwrap_or_default();
+    let deleg_perms = deleg_res.map(|(_, p)| p).unwrap_or_default();
+    intersect_permissions(&agent_perms, &deleg_perms)
+}
+
+/// Compute the intersection of two permission sets.
+/// A permission is in the result IFF both sides grant it.
+/// Handles wildcards: `*` grants everything, `ns:scope:*` grants the subtree.
+pub fn intersect_permissions(a: &[String], b: &[String]) -> Vec<String> {
+    if a.iter().any(|p| p == "*") { return b.to_vec(); }
+    if b.iter().any(|p| p == "*") { return a.to_vec(); }
+    let mut result: Vec<String> = a.iter()
+        .filter(|p| has_permission(b, p))
+        .cloned()
+        .collect();
+    for p in b {
+        if has_permission(a, p) && !result.contains(p) {
+            result.push(p.clone());
+        }
+    }
+    result.sort_unstable();
+    result.dedup();
+    result
+}
+
 /// Check if a user has a specific permission. Supports:
 /// - `*` global admin
 /// - `{namespace}:{scope}:*` scoped wildcard (e.g. `app:crm:*`, `tool:*`, `integration:gmail:*`)
@@ -175,6 +226,63 @@ mod tests {
     #[test]
     fn detect_cycle_disconnected() {
         assert!(detect_cycle(&roles(&[("a", &["b"]), ("b", &[]), ("x", &["y"]), ("y", &[])])).is_none());
+    }
+
+    #[test]
+    fn intersect_both_concrete_overlap() {
+        let a = vec!["app:crm:customer.read".into(), "app:crm:customer.write".into(), "tool:query_data".into()];
+        let b = vec!["app:crm:customer.read".into(), "tool:query_data".into(), "tool:mutate_data".into()];
+        let result = intersect_permissions(&a, &b);
+        assert_eq!(result, vec!["app:crm:customer.read", "tool:query_data"]);
+    }
+
+    #[test]
+    fn intersect_no_overlap_is_empty() {
+        let a = vec!["app:crm:customer.read".into()];
+        let b = vec!["app:support:ticket.read".into()];
+        assert!(intersect_permissions(&a, &b).is_empty());
+    }
+
+    #[test]
+    fn intersect_one_side_global_wildcard() {
+        let a = vec!["*".into()];
+        let b = vec!["app:crm:customer.read".into(), "tool:query_data".into()];
+        assert_eq!(intersect_permissions(&a, &b), b);
+        assert_eq!(intersect_permissions(&b, &a), vec!["app:crm:customer.read", "tool:query_data"]);
+    }
+
+    #[test]
+    fn intersect_both_global_wildcard() {
+        assert_eq!(intersect_permissions(&["*".into()], &["*".into()]), vec!["*"]);
+    }
+
+    #[test]
+    fn intersect_scoped_wildcard_vs_concrete() {
+        let a = vec!["app:crm:*".into()];
+        let b = vec!["app:crm:customer.read".into(), "app:support:ticket.read".into()];
+        let result = intersect_permissions(&a, &b);
+        assert_eq!(result, vec!["app:crm:customer.read"]);
+    }
+
+    #[test]
+    fn intersect_scoped_wildcard_different_ns() {
+        let a = vec!["app:crm:*".into()];
+        let b = vec!["app:support:ticket.read".into()];
+        assert!(intersect_permissions(&a, &b).is_empty());
+    }
+
+    #[test]
+    fn intersect_both_empty() {
+        let empty: Vec<String> = vec![];
+        assert!(intersect_permissions(&empty, &empty).is_empty());
+    }
+
+    #[test]
+    fn intersect_one_empty() {
+        let a = vec!["app:crm:customer.read".into()];
+        let empty: Vec<String> = vec![];
+        assert!(intersect_permissions(&a, &empty).is_empty());
+        assert!(intersect_permissions(&empty, &a).is_empty());
     }
 
     #[test]

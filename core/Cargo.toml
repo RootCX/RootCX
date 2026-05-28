@@ -53,8 +53,9 @@ reqwest = { version = "0.12", features = ["json"] }
 libc = "0.2"
 
 [dev-dependencies]
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
 tokio = { version = "1", features = ["full", "test-util"] }
+futures-util = "0.3"
 serde_json = "1"
 tempfile = "3"
 tar = "0.4"

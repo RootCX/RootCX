@@ -19,6 +19,28 @@ async fn exec(pool: &PgPool, sql: &str) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+/// Set the audit attribution GUCs for the current transaction. The audit trigger
+/// reads `rootcx.{actor_uid,delegator_uid,trigger_ref}`. Parameterized via
+/// `set_config(...)` (no string interpolation) and folded into one round-trip.
+/// Must run inside an open transaction (`set_config(_, _, true)` is local).
+pub(crate) async fn set_context(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor: Option<uuid::Uuid>,
+    delegator: Option<uuid::Uuid>,
+    trigger_ref: &str,
+) {
+    let _ = sqlx::query(
+        "SELECT set_config('rootcx.actor_uid', $1, true), \
+                set_config('rootcx.delegator_uid', $2, true), \
+                set_config('rootcx.trigger_ref', $3, true)",
+    )
+    .bind(actor.map(|u| u.to_string()).unwrap_or_default())
+    .bind(delegator.map(|u| u.to_string()).unwrap_or_default())
+    .bind(trigger_ref)
+    .execute(&mut **tx)
+    .await;
+}
+
 pub struct AuditExtension;
 
 #[async_trait]
@@ -41,10 +63,17 @@ impl RuntimeExtension for AuditExtension {
                 operation    TEXT NOT NULL,
                 old_record   JSONB,
                 new_record   JSONB,
+                actor_uid    UUID,
+                delegator_uid UUID,
+                trigger_ref  TEXT,
                 changed_at   TIMESTAMPTZ NOT NULL DEFAULT now()
             )"#,
         )
         .await?;
+
+        exec(pool, "ALTER TABLE rootcx_system.audit_log ADD COLUMN IF NOT EXISTS actor_uid UUID").await?;
+        exec(pool, "ALTER TABLE rootcx_system.audit_log ADD COLUMN IF NOT EXISTS delegator_uid UUID").await?;
+        exec(pool, "ALTER TABLE rootcx_system.audit_log ADD COLUMN IF NOT EXISTS trigger_ref TEXT").await?;
 
         exec(pool, "CREATE INDEX IF NOT EXISTS idx_audit_id_desc ON rootcx_system.audit_log (id DESC)").await?;
         exec(pool, "CREATE INDEX IF NOT EXISTS idx_audit_ts ON rootcx_system.audit_log (changed_at DESC)").await?;
@@ -56,15 +85,19 @@ impl RuntimeExtension for AuditExtension {
             r#"
             CREATE OR REPLACE FUNCTION rootcx_system.audit_trigger_fn()
             RETURNS TRIGGER AS $$
-            DECLARE rec_id TEXT;
+            DECLARE rec_id TEXT; v_actor UUID; v_delegator UUID; v_trigger TEXT;
             BEGIN
                 rec_id := CASE WHEN TG_OP = 'DELETE' THEN OLD.id::TEXT ELSE NEW.id::TEXT END;
+                v_actor := nullif(current_setting('rootcx.actor_uid', true), '')::UUID;
+                v_delegator := nullif(current_setting('rootcx.delegator_uid', true), '')::UUID;
+                v_trigger := nullif(current_setting('rootcx.trigger_ref', true), '');
                 INSERT INTO rootcx_system.audit_log
-                    (table_schema, table_name, record_id, operation, old_record, new_record)
+                    (table_schema, table_name, record_id, operation, old_record, new_record, actor_uid, delegator_uid, trigger_ref)
                 VALUES (
                     TG_TABLE_SCHEMA, TG_TABLE_NAME, rec_id, TG_OP,
                     CASE WHEN TG_OP IN ('UPDATE','DELETE') THEN to_jsonb(OLD) ELSE NULL END,
-                    CASE WHEN TG_OP IN ('INSERT','UPDATE') THEN to_jsonb(NEW) ELSE NULL END
+                    CASE WHEN TG_OP IN ('INSERT','UPDATE') THEN to_jsonb(NEW) ELSE NULL END,
+                    v_actor, v_delegator, v_trigger
                 );
                 RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
             END;

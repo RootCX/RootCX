@@ -74,7 +74,7 @@ pub async fn install_app(
     }
 
     if !manifest.webhooks.is_empty() {
-        crate::webhooks::sync_webhooks(pool, app_id, &manifest.webhooks).await?;
+        crate::webhooks::sync_webhooks(pool, app_id, &manifest.webhooks, Some(installed_by)).await?;
     }
 
     if !manifest.actions.is_empty() {

@@ -90,7 +90,7 @@ impl RuntimeExtension for RbacExtension {
     async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, installed_by: Uuid) -> Result<(), RuntimeError> {
         let app_id = &manifest.app_id;
 
-        let (keys, descs): (Vec<String>, Vec<String>) = if let Some(c) = &manifest.permissions {
+        let (mut keys, mut descs): (Vec<String>, Vec<String>) = if let Some(c) = &manifest.permissions {
             c.permissions.iter().map(|p| (format!("app:{app_id}:{}", p.key), p.description.clone())).unzip()
         } else {
             manifest.data_contract.iter()
@@ -100,6 +100,10 @@ impl RuntimeExtension for RbacExtension {
                     .map(|a| (format!("app:{app_id}:cron.{a}"), format!("{a} crons"))))
                 .unzip()
         };
+
+        // Always generate the invoke permission so it is grantable per role
+        keys.push(format!("app:{app_id}:invoke"));
+        descs.push("invoke the app's agent".into());
 
         let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
         sqlx::query("DELETE FROM rootcx_system.rbac_permissions WHERE source_app = $1")

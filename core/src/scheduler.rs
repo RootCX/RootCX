@@ -31,8 +31,35 @@ async fn dispatch_agent_job(
     msg_id: i64,
     target_app: &str,
     message: String,
+    invoker_user_id: Option<uuid::Uuid>,
     label: &'static str,
 ) {
+    // Deny-by-default: no delegator = no authority
+    if invoker_user_id.is_none() {
+        error!(msg_id, app_id = %target_app,
+            "{label} agent denied: trigger has no owner (created_by is NULL). \
+             Re-deploy the app or assign an owner to restore automatic execution.");
+        let _ = jobs::fail(pool, msg_id).await;
+        return;
+    }
+
+    // Validate standing mandate (invoker_user_id guaranteed Some after early-return above)
+    let delegator = invoker_user_id.unwrap();
+    let agent_uid = crate::extensions::agents::agent_user_id(target_app);
+    match crate::delegations::is_valid(pool, delegator, agent_uid).await {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!(msg_id, app_id = %target_app, "no valid delegation for {label} agent");
+            let _ = jobs::fail(pool, msg_id).await;
+            return;
+        }
+        Err(e) => {
+            warn!(msg_id, app_id = %target_app, "delegation check failed: {e}");
+            let _ = jobs::fail(pool, msg_id).await;
+            return;
+        }
+    }
+
     let llm = crate::routes::llm_models::fetch_default_llm(pool).await
         .ok().flatten()
         .map(|(provider, model)| LlmModelRef { provider, model });
@@ -47,7 +74,7 @@ async fn dispatch_agent_job(
         history: vec![],
         is_sub_invoke: false,
         llm,
-        invoker_user_id: None,
+        invoker_user_id,
         attachments: None,
     };
 
@@ -119,7 +146,7 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, auth_config: Arc<Au
                         let record = job_msg.payload.get("record").cloned().unwrap_or_default();
                         let message = format!("Entity event: {operation} on {entity}\n\nRecord:\n{record}");
 
-                        dispatch_agent_job(&pool, &wm, msg_id, &target_app, message, "hook").await;
+                        dispatch_agent_job(&pool, &wm, msg_id, &target_app, message, job_msg.user_id, "hook").await;
                         continue;
                     }
 
@@ -137,7 +164,7 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, auth_config: Arc<Au
                             .unwrap_or("Scheduled invocation")
                             .to_string();
 
-                        dispatch_agent_job(&pool, &wm, msg_id, &job_msg.app_id, message, "cron").await;
+                        dispatch_agent_job(&pool, &wm, msg_id, &job_msg.app_id, message, job_msg.user_id, "cron").await;
                         continue;
                     }
 

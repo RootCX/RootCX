@@ -1,0 +1,5 @@
+{
+  "name": "Test Agent",
+  "description": "Integration test agent",
+  "instructions": "You are a test agent."
+}

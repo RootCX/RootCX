@@ -1,6 +1,7 @@
 mod api_error;
 pub mod auth;
 mod crons;
+pub mod delegations;
 mod error;
 pub mod extensions;
 mod ipc;
@@ -99,6 +100,10 @@ impl Runtime {
         }
         crons::add_deferred_constraints(&pool).await?;
 
+        // Backfill delegations for pre-existing triggers (runs after extensions
+        // have added the created_by columns to hooks/webhooks/crons tables).
+        delegations::migrate_existing_triggers(&pool).await?;
+
         extensions::oidc::seed_from_env(&pool, &secret_manager).await?;
 
         let apps_dir = self.data_dir.join("apps");
@@ -111,7 +116,7 @@ impl Runtime {
             Arc::clone(&self.tool_registry), self.pending_approvals.clone(),
             Arc::clone(&secret_manager), Arc::clone(&upload_nonces),
         ));
-        wm.init_self_ref();
+        wm.init_self_ref(pool.clone(), Arc::clone(&self.auth_config));
 
         seed::seed_assistant(&pool, &self.data_dir, &self.bun_bin, &wm, &secret_manager).await?;
         let scheduler = scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm), Arc::clone(&self.auth_config));
