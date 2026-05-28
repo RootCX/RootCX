@@ -309,9 +309,9 @@ struct AppActionCallImpl {
 #[async_trait]
 impl ActionCaller for AppActionCallImpl {
     async fn call(
-        &self, app_id: &str, action_id: &str, input: JsonValue, user_id: uuid::Uuid,
+        &self, app_id: &str, action_id: &str, input: JsonValue, user_id: uuid::Uuid, caller_app_id: &str,
     ) -> Result<JsonValue, String> {
-        let agent_uid = crate::extensions::agents::agent_user_id(app_id);
+        let agent_uid = crate::extensions::agents::agent_user_id(caller_app_id);
         let token = crate::auth::jwt::mint_delegated(&self.auth, user_id, agent_uid)
             .map_err(|e| format!("mint token: {e}"))?;
         let caller = Some(RpcCaller {

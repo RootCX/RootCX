@@ -50,6 +50,6 @@ impl Tool for CallActionTool {
 
         let caller = ctx.action_caller.as_ref().ok_or("action calling unavailable")?;
         let effective_uid = ctx.invoker_user_id.unwrap_or(ctx.user_id);
-        caller.call(app, action, input, effective_uid).await
+        caller.call(app, action, input, effective_uid, &ctx.app_id).await
     }
 }
