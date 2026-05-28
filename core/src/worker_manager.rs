@@ -58,13 +58,13 @@ impl WorkerManager {
     }
 
     /// Must be called after wrapping in Arc to enable sub-agent dispatch and integration calling.
-    pub fn init_self_ref(self: &Arc<Self>, pool: PgPool, auth: Arc<crate::auth::AuthConfig>) {
+    pub fn init_self_ref(self: &Arc<Self>, _pool: PgPool, auth: Arc<crate::auth::AuthConfig>) {
         let _ = self.dispatch.set(Arc::new(SubAgentDispatch { wm: Arc::clone(self) }));
         let _ = self.integration_call.set(Arc::new(IntegrationCallImpl {
             wm: Arc::clone(self), secrets: Arc::clone(&self.secret_manager),
         }));
         let _ = self.action_call.set(Arc::new(AppActionCallImpl {
-            wm: Arc::clone(self), pool, auth,
+            wm: Arc::clone(self), auth,
         }));
     }
 
@@ -303,8 +303,6 @@ impl AgentDispatcher for SubAgentDispatch {
 
 struct AppActionCallImpl {
     wm: Arc<WorkerManager>,
-    #[allow(dead_code)]
-    pool: PgPool,
     auth: Arc<crate::auth::AuthConfig>,
 }
 

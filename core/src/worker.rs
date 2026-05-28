@@ -252,6 +252,7 @@ async fn supervisor_loop(
                             let _ = tx.send(AgentEvent::Error { error: "worker stopped".into() }).await;
                         }
                         policy_evaluators.clear();
+                        effective_permissions.clear();
                         status = WorkerStatus::Stopped;
                         crash_times.clear();
                         info!(app_id = %app_id, "worker stopped");
@@ -560,6 +561,7 @@ async fn supervisor_loop(
                                 error: "worker crashed".into(),
                             }).await;
                         }
+                        effective_permissions.clear();
 
                         let now = Instant::now();
                         crash_times.retain(|t| now.duration_since(*t) < CRASH_WINDOW);

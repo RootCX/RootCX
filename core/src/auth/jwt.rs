@@ -7,7 +7,7 @@ use crate::RuntimeError;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActorClaim {
-    pub sub: String,
+    pub sub: Uuid,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -68,7 +68,7 @@ pub fn mint_delegated(config: &AuthConfig, delegator_uid: Uuid, agent_uid: Uuid)
         sub: delegator_uid.to_string(),
         email: String::new(),
         session_id: None,
-        act: Some(ActorClaim { sub: agent_uid.to_string() }),
+        act: Some(ActorClaim { sub: agent_uid }),
         aud: Some("rootcx-core".into()),
         exp: now + 120,
         iat: now,
@@ -144,7 +144,7 @@ mod tests {
         let claims = decode(&config, &token).unwrap();
         assert_eq!(claims.sub, delegator.to_string());
         let act = claims.act.unwrap();
-        assert_eq!(act.sub, agent.to_string());
+        assert_eq!(act.sub, agent);
         assert_eq!(claims.aud.as_deref(), Some("rootcx-core"));
         assert!(claims.exp - claims.iat <= 120);
     }
@@ -157,7 +157,7 @@ mod tests {
             sub: "user-a".into(),
             email: String::new(),
             session_id: None,
-            act: Some(ActorClaim { sub: "agent-b".into() }),
+            act: Some(ActorClaim { sub: Uuid::nil() }),
             aud: Some("wrong-audience".into()),
             exp: now + 120,
             iat: now,

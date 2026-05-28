@@ -43,21 +43,20 @@ async fn dispatch_agent_job(
         return;
     }
 
-    // Validate standing mandate
+    // Validate standing mandate (invoker_user_id guaranteed Some after early-return above)
+    let delegator = invoker_user_id.unwrap();
     let agent_uid = crate::extensions::agents::agent_user_id(target_app);
-    if let Some(delegator) = invoker_user_id {
-        match crate::delegations::is_valid(pool, delegator, agent_uid).await {
-            Ok(true) => {}
-            Ok(false) => {
-                warn!(msg_id, app_id = %target_app, "no valid delegation for {label} agent");
-                let _ = jobs::fail(pool, msg_id).await;
-                return;
-            }
-            Err(e) => {
-                warn!(msg_id, app_id = %target_app, "delegation check failed: {e}");
-                let _ = jobs::fail(pool, msg_id).await;
-                return;
-            }
+    match crate::delegations::is_valid(pool, delegator, agent_uid).await {
+        Ok(true) => {}
+        Ok(false) => {
+            warn!(msg_id, app_id = %target_app, "no valid delegation for {label} agent");
+            let _ = jobs::fail(pool, msg_id).await;
+            return;
+        }
+        Err(e) => {
+            warn!(msg_id, app_id = %target_app, "delegation check failed: {e}");
+            let _ = jobs::fail(pool, msg_id).await;
+            return;
         }
     }
 

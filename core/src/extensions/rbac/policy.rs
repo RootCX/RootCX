@@ -117,8 +117,7 @@ pub async fn resolve_effective_permissions(pool: &PgPool, identity: &Identity) -
         let (_, perms) = resolve_permissions(pool, identity.user_id).await?;
         return Ok(perms);
     };
-    let agent_uid: Uuid = actor.sub.parse()
-        .map_err(|_| ApiError::Unauthorized("invalid actor subject".into()))?;
+    let agent_uid = actor.sub;
     let (agent_res, delegator_res) = tokio::join!(
         resolve_permissions(pool, agent_uid),
         resolve_permissions(pool, identity.user_id),

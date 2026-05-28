@@ -484,7 +484,7 @@ async fn worker_delegated_token_mint_and_decode_roundtrip() {
     let claims = rootcx_core::auth::jwt::decode(auth, &token).unwrap();
     assert_eq!(claims.sub, admin_uid.to_string());
     let act = claims.act.unwrap();
-    assert_eq!(act.sub, agent_uid.to_string());
+    assert_eq!(act.sub, agent_uid);
     assert_eq!(claims.aud.as_deref(), Some("rootcx-core"));
     assert!(claims.exp - claims.iat <= 120);
 }

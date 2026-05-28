@@ -6,9 +6,6 @@ use crate::RuntimeError;
 fn err(e: sqlx::Error) -> RuntimeError { RuntimeError::Schema(e) }
 
 pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
-    sqlx::query("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\"")
-        .execute(pool).await.map_err(err)?;
-
     sqlx::query(r#"
         CREATE TABLE IF NOT EXISTS rootcx_system.delegations (
             id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -75,14 +72,12 @@ pub async fn create(
     Ok(id)
 }
 
-#[allow(dead_code)]
 pub async fn revoke(pool: &PgPool, delegation_id: Uuid) -> Result<(), RuntimeError> {
     sqlx::query("UPDATE rootcx_system.delegations SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL")
         .bind(delegation_id).execute(pool).await.map_err(err)?;
     Ok(())
 }
 
-#[allow(dead_code)]
 pub async fn revoke_by_trigger(pool: &PgPool, trigger_type: &str, trigger_ref: Uuid) -> Result<(), RuntimeError> {
     sqlx::query(
         "UPDATE rootcx_system.delegations SET revoked_at = now() \
@@ -98,8 +93,8 @@ async fn migrate_existing_crons(pool: &PgPool, fallback_admin: Option<Uuid>) -> 
             .bind(admin).execute(pool).await.map_err(err)?;
     }
 
-    let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT cs.id, cs.app_id FROM rootcx_system.cron_schedules cs \
+    let rows: Vec<(Uuid, String, Uuid)> = sqlx::query_as(
+        "SELECT cs.id, cs.app_id, cs.created_by FROM rootcx_system.cron_schedules cs \
          WHERE cs.created_by IS NOT NULL \
            AND EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id = cs.app_id) \
            AND NOT EXISTS( \
@@ -107,14 +102,9 @@ async fn migrate_existing_crons(pool: &PgPool, fallback_admin: Option<Uuid>) -> 
                WHERE d.trigger_type = 'cron' AND d.trigger_ref = cs.id AND d.revoked_at IS NULL)"
     ).fetch_all(pool).await.map_err(err)?;
 
-    for (cron_id, app_id) in rows {
+    for (cron_id, app_id, delegator) in rows {
         let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
-        let delegator: Option<Uuid> = sqlx::query_scalar(
-            "SELECT created_by FROM rootcx_system.cron_schedules WHERE id = $1"
-        ).bind(cron_id).fetch_optional(pool).await.map_err(err)?.flatten();
-        if let Some(d) = delegator {
-            let _ = create(pool, d, agent_uid, "cron", Some(cron_id)).await;
-        }
+        let _ = create(pool, delegator, agent_uid, "cron", Some(cron_id)).await;
     }
     Ok(())
 }
@@ -126,25 +116,20 @@ async fn migrate_existing_hooks(pool: &PgPool, fallback_admin: Option<Uuid>) -> 
             .bind(admin).execute(pool).await.map_err(err)?;
     }
 
-    let rows: Vec<(Uuid, String, Option<serde_json::Value>)> = sqlx::query_as(
-        "SELECT h.id, h.app_id, h.action_config FROM rootcx_system.entity_hooks h \
+    let rows: Vec<(Uuid, String, Option<serde_json::Value>, Uuid)> = sqlx::query_as(
+        "SELECT h.id, h.app_id, h.action_config, h.created_by FROM rootcx_system.entity_hooks h \
          WHERE h.created_by IS NOT NULL AND h.action_type = 'agent' \
            AND NOT EXISTS( \
                SELECT 1 FROM rootcx_system.delegations d \
                WHERE d.trigger_type = 'hook' AND d.trigger_ref = h.id AND d.revoked_at IS NULL)"
     ).fetch_all(pool).await.map_err(err)?;
 
-    for (hook_id, app_id, config) in rows {
+    for (hook_id, app_id, config, delegator) in rows {
         let target = config.as_ref()
             .and_then(|c| c.get("app_id")).and_then(|v| v.as_str())
             .unwrap_or(&app_id);
         let agent_uid = crate::extensions::agents::agent_user_id(target);
-        let delegator: Option<Uuid> = sqlx::query_scalar(
-            "SELECT created_by FROM rootcx_system.entity_hooks WHERE id = $1"
-        ).bind(hook_id).fetch_optional(pool).await.map_err(err)?.flatten();
-        if let Some(d) = delegator {
-            let _ = create(pool, d, agent_uid, "hook", Some(hook_id)).await;
-        }
+        let _ = create(pool, delegator, agent_uid, "hook", Some(hook_id)).await;
     }
     Ok(())
 }
@@ -167,8 +152,8 @@ async fn migrate_existing_webhooks(pool: &PgPool, fallback_admin: Option<Uuid>) 
            AND EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id = rootcx_system.webhooks.app_id)"
     ).execute(pool).await.map_err(err)?;
 
-    let rows: Vec<(Uuid, String)> = sqlx::query_as(
-        "SELECT w.id, w.app_id FROM rootcx_system.webhooks w \
+    let rows: Vec<(Uuid, String, Uuid)> = sqlx::query_as(
+        "SELECT w.id, w.app_id, w.created_by FROM rootcx_system.webhooks w \
          WHERE w.created_by IS NOT NULL \
            AND EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id = w.app_id) \
            AND NOT EXISTS( \
@@ -176,14 +161,9 @@ async fn migrate_existing_webhooks(pool: &PgPool, fallback_admin: Option<Uuid>) 
                WHERE d.trigger_type = 'webhook' AND d.trigger_ref = w.id AND d.revoked_at IS NULL)"
     ).fetch_all(pool).await.map_err(err)?;
 
-    for (wh_id, app_id) in rows {
+    for (wh_id, app_id, delegator) in rows {
         let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
-        let delegator: Option<Uuid> = sqlx::query_scalar(
-            "SELECT created_by FROM rootcx_system.webhooks WHERE id = $1"
-        ).bind(wh_id).fetch_optional(pool).await.map_err(err)?.flatten();
-        if let Some(d) = delegator {
-            let _ = create(pool, d, agent_uid, "webhook", Some(wh_id)).await;
-        }
+        let _ = create(pool, delegator, agent_uid, "webhook", Some(wh_id)).await;
     }
     Ok(())
 }

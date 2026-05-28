@@ -21,7 +21,7 @@ impl Identity {
     /// Direct request: actor = user, no delegator.
     pub fn actor_pair(&self) -> (Option<Uuid>, Option<Uuid>) {
         match &self.actor {
-            Some(act) => (act.sub.parse().ok(), Some(self.user_id)),
+            Some(act) => (Some(act.sub), Some(self.user_id)),
             None => (Some(self.user_id), None),
         }
     }
