@@ -107,7 +107,25 @@ impl RuntimeExtension for AgentExtension {
 
         if !exists { return Ok(()); }
 
-        sync_agent_rbac(pool, app_id).await?;
+        // Ensure the agent system user exists but don't overwrite an existing
+        // role assignment (register_agent is the authoritative path for permissions)
+        let agent_uid = agent_user_id(app_id);
+        sqlx::query(
+            "INSERT INTO rootcx_system.users (id, email, is_system) \
+             VALUES ($1, $2, true) ON CONFLICT (id) DO NOTHING"
+        ).bind(agent_uid).bind(format!("agent+{app_id}@localhost"))
+        .execute(pool).await.map_err(RuntimeError::Schema)?;
+
+        let has_role: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_assignments WHERE user_id = $1)"
+        ).bind(agent_uid).fetch_one(pool).await.map_err(RuntimeError::Schema)?;
+
+        if !has_role {
+            sqlx::query(
+                "INSERT INTO rootcx_system.rbac_assignments (user_id, role) \
+                 VALUES ($1, 'admin') ON CONFLICT DO NOTHING"
+            ).bind(agent_uid).execute(pool).await.map_err(RuntimeError::Schema)?;
+        }
         info!(app = %app_id, "agent RBAC synced");
         Ok(())
     }
@@ -152,29 +170,59 @@ pub async fn register_agent(pool: &PgPool, app_id: &str, def: &AgentDefinition) 
     .await
     .map_err(RuntimeError::Schema)?;
 
-    sync_agent_rbac(pool, app_id).await?;
+    sync_agent_rbac(pool, app_id, def.permissions.as_deref()).await?;
     info!(app = %app_id, "agent registered from agent.json");
     Ok(())
 }
 
-async fn sync_agent_rbac(pool: &PgPool, app_id: &str) -> Result<(), RuntimeError> {
+/// Sync the agent's RBAC identity. If `grant` is provided, the agent gets
+/// exactly those permissions (least-privilege). If None, falls back to `admin`
+/// for backward compatibility with agents that don't declare permissions.
+async fn sync_agent_rbac(pool: &PgPool, app_id: &str, grant: Option<&[String]>) -> Result<(), RuntimeError> {
     let agent_uid = agent_user_id(app_id);
+    let email = format!("agent+{app_id}@localhost");
 
+    // Ensure the system user exists
     sqlx::query(
-        "WITH ensure_user AS (
-            INSERT INTO rootcx_system.users (id, email, is_system)
-            VALUES ($1, $2, true)
-            ON CONFLICT (id) DO NOTHING
-        )
-        INSERT INTO rootcx_system.rbac_assignments (user_id, role)
-        VALUES ($1, 'admin')
-        ON CONFLICT (user_id, role) DO NOTHING"
-    )
-    .bind(agent_uid)
-    .bind(format!("agent+{app_id}@localhost"))
-    .execute(pool)
-    .await
-    .map_err(RuntimeError::Schema)?;
+        "INSERT INTO rootcx_system.users (id, email, is_system) \
+         VALUES ($1, $2, true) ON CONFLICT (id) DO NOTHING"
+    ).bind(agent_uid).bind(&email).execute(pool).await.map_err(RuntimeError::Schema)?;
+
+    let role_name = match grant {
+        None => {
+            // No explicit grant: clean slate + assign admin (backward-compatible)
+            sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1")
+                .bind(agent_uid).execute(pool).await.map_err(RuntimeError::Schema)?;
+            sqlx::query(
+                "INSERT INTO rootcx_system.rbac_assignments (user_id, role) \
+                 VALUES ($1, 'admin') ON CONFLICT (user_id, role) DO NOTHING"
+            ).bind(agent_uid).execute(pool).await.map_err(RuntimeError::Schema)?;
+            return Ok(());
+        }
+        Some(perms) => {
+            // Explicit grant: create/update a dedicated role for this agent
+            let name = format!("agent:{app_id}");
+            let perm_list: Vec<String> = perms.to_vec();
+            sqlx::query(
+                "INSERT INTO rootcx_system.rbac_roles (name, description, inherits, permissions) \
+                 VALUES ($1, $2, '{}', $3) \
+                 ON CONFLICT (name) DO UPDATE SET permissions = EXCLUDED.permissions"
+            )
+            .bind(&name)
+            .bind(format!("Auto-generated grant for agent {app_id}"))
+            .bind(&perm_list)
+            .execute(pool).await.map_err(RuntimeError::Schema)?;
+            name
+        }
+    };
+
+    // Remove any previous role assignments and assign the agent role
+    sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1")
+        .bind(agent_uid).execute(pool).await.map_err(RuntimeError::Schema)?;
+    sqlx::query(
+        "INSERT INTO rootcx_system.rbac_assignments (user_id, role) \
+         VALUES ($1, $2) ON CONFLICT (user_id, role) DO NOTHING"
+    ).bind(agent_uid).bind(&role_name).execute(pool).await.map_err(RuntimeError::Schema)?;
 
     Ok(())
 }

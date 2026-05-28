@@ -490,6 +490,127 @@ async fn worker_delegated_token_mint_and_decode_roundtrip() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// PER-AGENT GRANT (CRITICAL: bounded authority via agent.json permissions)
+// ═══════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn agent_with_explicit_grant_bounded_below_admin() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+    let pool = rt.pool();
+
+    let app_id = "boundedagent";
+    rt.install(app_id, "tasks").await;
+
+    // Register agent with an EXPLICIT narrow grant
+    let def = rootcx_types::AgentDefinition {
+        name: "Bounded Agent".into(),
+        description: None,
+        system_prompt: None,
+        memory: None,
+        limits: None,
+        supervision: None,
+        permissions: Some(vec![
+            format!("app:{app_id}:tasks.read"),
+            "tool:query_data".into(),
+        ]),
+    };
+    rootcx_core::extensions::agents::register_agent(pool, app_id, &def)
+        .await.unwrap();
+
+    let agent_uid = agent_uid_for(app_id);
+
+    // Verify: agent does NOT have '*' anymore
+    let (_, agent_perms) = rootcx_core::extensions::rbac::policy::resolve_permissions(pool, agent_uid).await.unwrap();
+    assert!(!agent_perms.contains(&"*".to_string()),
+        "agent with explicit grant must NOT have wildcard");
+    assert!(agent_perms.contains(&format!("app:{app_id}:tasks.read")),
+        "agent must have its declared permission");
+
+    // Admin (has '*') invokes this agent
+    let admin_uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
+        .fetch_one(pool).await.unwrap();
+    let (_, admin_perms) = rootcx_core::extensions::rbac::policy::resolve_permissions(pool, admin_uid).await.unwrap();
+    assert!(admin_perms.contains(&"*".to_string()));
+
+    // Effective = intersection(agent_grant, admin) = agent_grant (since admin=*)
+    let effective = rootcx_core::extensions::rbac::policy::intersect_permissions(&agent_perms, &admin_perms);
+
+    // Agent CAN read tasks
+    assert!(rootcx_core::extensions::rbac::policy::has_permission(&effective, &format!("app:{app_id}:tasks.read")));
+    // Agent CAN use query_data tool
+    assert!(rootcx_core::extensions::rbac::policy::has_permission(&effective, "tool:query_data"));
+    // Agent CANNOT write tasks (not in its grant, even though admin can)
+    assert!(!rootcx_core::extensions::rbac::policy::has_permission(&effective, &format!("app:{app_id}:tasks.create")),
+        "CRITICAL: agent must NOT exceed its declared grant, even when triggered by admin");
+    assert!(!rootcx_core::extensions::rbac::policy::has_permission(&effective, &format!("app:{app_id}:tasks.update")),
+        "CRITICAL: bounded authority must restrict write access");
+}
+
+#[tokio::test]
+async fn agent_without_permissions_field_gets_admin_backward_compat() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+    let pool = rt.pool();
+
+    let app_id = "legacyagent";
+    rt.install(app_id, "items").await;
+
+    // Register agent WITHOUT permissions field (legacy/backward-compatible)
+    let def = rootcx_types::AgentDefinition {
+        name: "Legacy Agent".into(),
+        description: None,
+        system_prompt: None,
+        memory: None,
+        limits: None,
+        supervision: None,
+        permissions: None,
+    };
+    rootcx_core::extensions::agents::register_agent(pool, app_id, &def)
+        .await.unwrap();
+
+    let agent_uid = agent_uid_for(app_id);
+    let (_, agent_perms) = rootcx_core::extensions::rbac::policy::resolve_permissions(pool, agent_uid).await.unwrap();
+    assert!(agent_perms.contains(&"*".to_string()),
+        "agent without explicit permissions must get admin/* for backward compat");
+}
+
+#[tokio::test]
+async fn agent_grant_narrows_even_admin_delegator() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+    let pool = rt.pool();
+
+    let app_id = "narrowgrant";
+    rt.install(app_id, "orders").await;
+
+    let def = rootcx_types::AgentDefinition {
+        name: "Orders Reader".into(),
+        description: None,
+        system_prompt: None,
+        memory: None,
+        limits: None,
+        supervision: None,
+        permissions: Some(vec![format!("app:{app_id}:orders.read")]),
+    };
+    rootcx_core::extensions::agents::register_agent(pool, app_id, &def)
+        .await.unwrap();
+
+    let agent_uid = agent_uid_for(app_id);
+    let admin_uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
+        .fetch_one(pool).await.unwrap();
+
+    // Simulate the worker path: effective_for_pair
+    let effective = rootcx_core::extensions::rbac::policy::effective_for_pair(pool, agent_uid, admin_uid).await;
+
+    // Only orders.read passes through
+    assert!(rootcx_core::extensions::rbac::policy::has_permission(&effective, &format!("app:{app_id}:orders.read")));
+    assert!(!rootcx_core::extensions::rbac::policy::has_permission(&effective, &format!("app:{app_id}:orders.create")));
+    assert!(!rootcx_core::extensions::rbac::policy::has_permission(&effective, &format!("app:{app_id}:orders.delete")));
+    assert!(!rootcx_core::extensions::rbac::policy::has_permission(&effective, "tool:mutate_data"));
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // MIGRATION BACKFILL (legacy triggers with NULL created_by)
 // ═══════════════════════════════════════════════════════════════════
 

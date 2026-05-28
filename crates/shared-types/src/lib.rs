@@ -315,6 +315,8 @@ pub struct AgentDefinition {
     pub limits: Option<AgentLimits>,
     #[serde(default)]
     pub supervision: Option<SupervisionConfig>,
+    #[serde(default)]
+    pub permissions: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
