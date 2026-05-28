@@ -159,20 +159,7 @@ pub async fn invoke_agent(
     let wm = rt.worker_manager().clone();
 
     // Invocation ACL: caller must have app:{id}:invoke permission (intersection-aware)
-    let caller_perms = if let Some(ref actor) = identity.actor {
-        let agent_uid: uuid::Uuid = actor.sub.parse()
-            .map_err(|_| ApiError::Unauthorized("invalid actor subject".into()))?;
-        let (agent_res, delegator_res) = tokio::join!(
-            crate::extensions::rbac::policy::resolve_permissions(&pool, agent_uid),
-            crate::extensions::rbac::policy::resolve_permissions(&pool, identity.user_id),
-        );
-        let (_, agent_perms) = agent_res?;
-        let (_, delegator_perms) = delegator_res?;
-        crate::extensions::rbac::policy::intersect_permissions(&agent_perms, &delegator_perms)
-    } else {
-        let (_, p) = crate::extensions::rbac::policy::resolve_permissions(&pool, identity.user_id).await?;
-        p
-    };
+    let caller_perms = crate::extensions::rbac::policy::resolve_effective_permissions(&pool, &identity).await?;
     let invoke_perm = format!("app:{app_id}:invoke");
     if !crate::extensions::rbac::policy::has_permission(&caller_perms, &invoke_perm) {
         return Err(ApiError::Forbidden(format!("permission denied: {invoke_perm}")));

@@ -15,6 +15,18 @@ pub struct Identity {
     pub actor: Option<ActorClaim>,
 }
 
+impl Identity {
+    /// Audit attribution pair `(actor, delegator)`.
+    /// Delegated token: actor = agent (act.sub), delegator = human (user_id).
+    /// Direct request: actor = user, no delegator.
+    pub fn actor_pair(&self) -> (Option<Uuid>, Option<Uuid>) {
+        match &self.actor {
+            Some(act) => (act.sub.parse().ok(), Some(self.user_id)),
+            None => (Some(self.user_id), None),
+        }
+    }
+}
+
 impl FromRequestParts<SharedRuntime> for Identity {
     type Rejection = ApiError;
 

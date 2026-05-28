@@ -37,23 +37,23 @@ async fn setup_agent_app(rt: &harness::TestRuntime) -> String {
 
 async fn create_user_with_perms(rt: &harness::TestRuntime, email: &str, perms: &[&str]) -> String {
     let pool = rt.pool();
-    let uid = Uuid::new_v4();
-    sqlx::query("INSERT INTO rootcx_system.users (id, email, password_hash) VALUES ($1, $2, '$argon2id$v=19$m=4096,t=3,p=1$c29tZXNhbHQ$hash')")
-        .bind(uid).bind(email).execute(pool).await.unwrap();
+    let token = rt.register_and_login(email).await;
+
+    let uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = $1")
+        .bind(email).fetch_one(pool).await.unwrap();
+
+    // Remove default admin assignment (register auto-promotes first user)
+    sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1")
+        .bind(uid).execute(pool).await.unwrap();
 
     let role_name = format!("role_{}", uid.simple());
     let perm_list: Vec<String> = perms.iter().map(|s| s.to_string()).collect();
-    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, inherits, permissions) VALUES ($1, '{}', $2)")
+    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, inherits, permissions) VALUES ($1, '{}', $2) ON CONFLICT (name) DO NOTHING")
         .bind(&role_name).bind(&perm_list).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, $2)")
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING")
         .bind(uid).bind(&role_name).execute(pool).await.unwrap();
 
-    let (_, body) = rt.post_unauthed("/api/v1/auth/login", &json!({"email": email, "password": "Str0ngPass1"})).await;
-    // If login fails (password mismatch with dummy hash), use register+login
-    if let Some(t) = body.get("accessToken").and_then(|v| v.as_str()) {
-        return t.to_string();
-    }
-    rt.register_and_login(email).await
+    token
 }
 
 fn agent_uid_for(app_id: &str) -> Uuid {
@@ -191,7 +191,7 @@ async fn webhook_agent_no_owner_403() {
     let app_id = setup_agent_app(&rt).await;
     let pool = rt.pool();
 
-    sqlx::query("INSERT INTO rootcx_system.webhooks (app_id, name, method, token) VALUES ($1, 'noowner', 'handle', 'tok-noowner')")
+    sqlx::query("INSERT INTO rootcx_system.webhooks (app_id, name, method, token) VALUES ($1, 'noowner', 'agent', 'tok-noowner')")
         .bind(&app_id).execute(pool).await.unwrap();
 
     let res = rt.client.post(rt.url("/api/v1/hooks/tok-noowner"))
@@ -209,7 +209,7 @@ async fn webhook_agent_revoked_delegation_403() {
         .fetch_one(pool).await.unwrap();
 
     let (wh_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO rootcx_system.webhooks (app_id, name, method, token, created_by) VALUES ($1, 'revoked', 'h', 'tok-revoked', $2) RETURNING id"
+        "INSERT INTO rootcx_system.webhooks (app_id, name, method, token, created_by) VALUES ($1, 'revoked', 'agent', 'tok-revoked', $2) RETURNING id"
     ).bind(&app_id).bind(uid).fetch_one(pool).await.unwrap();
 
     let agent = agent_uid_for(&app_id);
@@ -231,7 +231,7 @@ async fn webhook_agent_valid_delegation_accepted() {
         .fetch_one(pool).await.unwrap();
 
     let (wh_id,): (Uuid,) = sqlx::query_as(
-        "INSERT INTO rootcx_system.webhooks (app_id, name, method, token, created_by) VALUES ($1, 'valid', 'h', 'tok-valid', $2) RETURNING id"
+        "INSERT INTO rootcx_system.webhooks (app_id, name, method, token, created_by) VALUES ($1, 'valid', 'agent', 'tok-valid', $2) RETURNING id"
     ).bind(&app_id).bind(uid).fetch_one(pool).await.unwrap();
 
     let agent = agent_uid_for(&app_id);
@@ -487,4 +487,142 @@ async fn worker_delegated_token_mint_and_decode_roundtrip() {
     assert_eq!(act.sub, agent_uid.to_string());
     assert_eq!(claims.aud.as_deref(), Some("rootcx-core"));
     assert!(claims.exp - claims.iat <= 120);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// MIGRATION BACKFILL (legacy triggers with NULL created_by)
+// ═══════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn legacy_cron_backfilled_to_admin() {
+    let rt = harness::TestRuntime::boot().await;
+    let pool = rt.pool();
+    let app_id = setup_agent_app(&rt).await;
+
+    // Insert a legacy cron with created_by = NULL (pre-upgrade state)
+    sqlx::query(
+        "INSERT INTO rootcx_system.cron_schedules (id, app_id, name, schedule, payload, overlap_policy) \
+         VALUES ($1, $2, 'legacy', '0 0 * * *', '{}', 'skip')"
+    ).bind(Uuid::new_v4()).bind(&app_id).execute(pool).await.unwrap();
+
+    // Re-run the migration (simulates next boot)
+    rootcx_core::delegations::migrate_existing_triggers(pool).await.unwrap();
+
+    // The cron should now have created_by set to admin
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        "SELECT created_by FROM rootcx_system.cron_schedules WHERE app_id = $1 AND name = 'legacy'"
+    ).bind(&app_id).fetch_one(pool).await.unwrap();
+    assert!(owner.is_some(), "legacy cron should be backfilled with admin owner");
+
+    // A delegation should exist
+    let agent = agent_uid_for(&app_id);
+    assert!(rootcx_core::delegations::is_valid(pool, owner.unwrap(), agent).await.unwrap(),
+        "delegation should be created for backfilled cron");
+}
+
+#[tokio::test]
+async fn legacy_webhook_backfilled_to_admin() {
+    let rt = harness::TestRuntime::boot().await;
+    let pool = rt.pool();
+    let app_id = setup_agent_app(&rt).await;
+
+    // Insert a legacy webhook with created_by = NULL
+    sqlx::query(
+        "INSERT INTO rootcx_system.webhooks (app_id, name, method, token) VALUES ($1, 'legacy-wh', 'agent', 'tok-legacy')"
+    ).bind(&app_id).execute(pool).await.unwrap();
+
+    rootcx_core::delegations::migrate_existing_triggers(pool).await.unwrap();
+
+    let owner: Option<Uuid> = sqlx::query_scalar(
+        "SELECT created_by FROM rootcx_system.webhooks WHERE app_id = $1 AND name = 'legacy-wh'"
+    ).bind(&app_id).fetch_one(pool).await.unwrap();
+    assert!(owner.is_some(), "legacy webhook should be backfilled with admin owner");
+
+    let agent = agent_uid_for(&app_id);
+    assert!(rootcx_core::delegations::is_valid(pool, owner.unwrap(), agent).await.unwrap(),
+        "delegation should be created for backfilled webhook");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// INVOKE PERMISSION GRANTABLE
+// ═══════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn invoke_permission_generated_on_install() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+
+    let app_id = "invpermtest";
+    rt.install(app_id, "items").await;
+
+    let pool = rt.pool();
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_permissions WHERE key = $1)"
+    ).bind(format!("app:{app_id}:invoke")).fetch_one(pool).await.unwrap();
+
+    assert!(exists, "app:invpermtest:invoke permission should be auto-generated on install");
+}
+
+#[tokio::test]
+async fn invoke_granted_via_role_allows_access() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+    let pool = rt.pool();
+
+    // Install app via manifest (seeds permissions including invoke)
+    let app_id = "invgranttest";
+    rt.install(app_id, "tasks").await;
+
+    // Register as agent
+    sqlx::query("INSERT INTO rootcx_system.agents (app_id, name, config) VALUES ($1, 'Test Agent', '{}') ON CONFLICT DO NOTHING")
+        .bind(app_id).execute(pool).await.unwrap();
+    let agent_uid = agent_uid_for(app_id);
+    sqlx::query("INSERT INTO rootcx_system.users (id, email, is_system) VALUES ($1, $2, true) ON CONFLICT DO NOTHING")
+        .bind(agent_uid).bind(format!("agent+{app_id}@localhost")).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, 'admin') ON CONFLICT DO NOTHING")
+        .bind(agent_uid).execute(pool).await.unwrap();
+
+    // Create a non-admin user with the invoke permission
+    let invoke_perm = format!("app:{app_id}:invoke");
+    let token = create_user_with_perms(&rt, "invoker@test.local", &[&invoke_perm]).await;
+
+    let (status, _) = rt.request_as(
+        Method::POST,
+        &format!("/api/v1/apps/{app_id}/agent/invoke"),
+        &token,
+        Some(&serde_json::json!({"message": "test"})),
+    ).await;
+
+    // Should pass ACL (may fail later because no worker, but NOT 403)
+    assert_ne!(status, StatusCode::FORBIDDEN,
+        "user with app:{{id}}:invoke should pass invocation ACL");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// WEBHOOK ROUTING: method-based dispatch
+// ═══════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn webhook_rpc_method_not_routed_to_agent() {
+    let rt = harness::TestRuntime::boot().await;
+    let app_id = setup_agent_app(&rt).await;
+    let pool = rt.pool();
+
+    let admin_uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
+        .fetch_one(pool).await.unwrap();
+
+    // Insert a webhook with a real RPC method (not "agent")
+    sqlx::query(
+        "INSERT INTO rootcx_system.webhooks (app_id, name, method, token, created_by) \
+         VALUES ($1, 'stripe', 'handleStripe', 'tok-rpc', $2)"
+    ).bind(&app_id).bind(admin_uid).execute(pool).await.unwrap();
+
+    let res = rt.client.post(rt.url("/api/v1/hooks/tok-rpc"))
+        .json(&serde_json::json!({"event": "charge.succeeded"})).send().await.unwrap();
+
+    // Should NOT be 403 (agent delegation check). It hits the RPC path,
+    // which may fail with 500 (no worker running) but not 403.
+    let s = res.status();
+    assert_ne!(s, StatusCode::FORBIDDEN,
+        "webhook with RPC method should route to RPC, not agent delegation check; got {s}");
 }

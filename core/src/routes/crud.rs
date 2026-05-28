@@ -12,42 +12,13 @@ use uuid::Uuid;
 use super::{SharedRuntime, parse_uuid, pool};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::extensions::rbac::policy::{resolve_permissions, has_permission, intersect_permissions};
+use crate::extensions::audit;
+use crate::extensions::rbac::policy::{resolve_effective_permissions, has_permission};
 use crate::manifest::{entity_exists, entity_identity, field_type_map, find_entities_by_identity, is_system_field, map_field_type, quote_ident};
 
 async fn set_audit_context_api(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, identity: &Identity) {
-    if let Some(ref act) = identity.actor {
-        // Delegated: actor = agent, delegator = human (identity.user_id = sub = delegator)
-        if let Ok(agent_uid) = act.sub.parse::<Uuid>() {
-            let _ = sqlx::query(&format!("SET LOCAL rootcx.actor_uid = '{agent_uid}'"))
-                .execute(&mut **tx).await;
-        }
-        let _ = sqlx::query(&format!("SET LOCAL rootcx.delegator_uid = '{}'", identity.user_id))
-            .execute(&mut **tx).await;
-    } else {
-        // Direct user request: actor = user, no delegator
-        let _ = sqlx::query(&format!("SET LOCAL rootcx.actor_uid = '{}'", identity.user_id))
-            .execute(&mut **tx).await;
-    }
-    let _ = sqlx::query("SET LOCAL rootcx.trigger_ref = 'api'")
-        .execute(&mut **tx).await;
-}
-
-async fn resolve_effective_permissions(pool: &PgPool, identity: &Identity) -> Result<Vec<String>, ApiError> {
-    if let Some(ref actor) = identity.actor {
-        let agent_uid: Uuid = actor.sub.parse()
-            .map_err(|_| ApiError::Unauthorized("invalid actor subject".into()))?;
-        let (agent_res, delegator_res) = tokio::join!(
-            resolve_permissions(pool, agent_uid),
-            resolve_permissions(pool, identity.user_id),
-        );
-        let (_, agent_perms) = agent_res?;
-        let (_, delegator_perms) = delegator_res?;
-        Ok(intersect_permissions(&agent_perms, &delegator_perms))
-    } else {
-        let (_, perms) = resolve_permissions(pool, identity.user_id).await?;
-        Ok(perms)
-    }
+    let (actor, delegator) = identity.actor_pair();
+    audit::set_context(tx, actor, delegator, "api").await;
 }
 
 fn check_app_perm(permissions: &[String], app_id: &str, perm: &str) -> Result<(), ApiError> {
@@ -581,13 +552,7 @@ pub(crate) async fn bulk_insert(
     }
 
     let mut tx = pool.begin().await?;
-    if let Some(actor) = actor_uid {
-        let _ = sqlx::query(&format!("SET LOCAL rootcx.actor_uid = '{actor}'")).execute(&mut *tx).await;
-    }
-    if let Some(delegator) = delegator_uid {
-        let _ = sqlx::query(&format!("SET LOCAL rootcx.delegator_uid = '{delegator}'")).execute(&mut *tx).await;
-    }
-    let _ = sqlx::query(&format!("SET LOCAL rootcx.trigger_ref = '{trigger_ref}'")).execute(&mut *tx).await;
+    audit::set_context(&mut tx, actor_uid, delegator_uid, trigger_ref).await;
     let rows: Vec<(JsonValue,)> = query.fetch_all(&mut *tx).await?;
     tx.commit().await?;
     Ok(rows.into_iter().map(|(r,)| r).collect())
@@ -620,11 +585,7 @@ pub async fn bulk_create_records(
 
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&db, &app_id, &entity).await?;
-    let (actor, delegator) = if let Some(ref act) = identity.actor {
-        (act.sub.parse::<Uuid>().ok(), Some(identity.user_id))
-    } else {
-        (Some(identity.user_id), None)
-    };
+    let (actor, delegator) = identity.actor_pair();
     let created = bulk_insert(&db, &tbl, &types, &objects, actor, delegator, "api").await?;
     Ok((StatusCode::CREATED, Json(created)))
 }

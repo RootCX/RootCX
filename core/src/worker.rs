@@ -310,13 +310,7 @@ async fn supervisor_loop(
                         let perms = match payload.invoker_user_id {
                             Some(uid) => {
                                 let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
-                                let (agent_res, invoker_res) = tokio::join!(
-                                    crate::extensions::rbac::policy::resolve_permissions(&config.pool, agent_uid),
-                                    crate::extensions::rbac::policy::resolve_permissions(&config.pool, uid),
-                                );
-                                let agent_perms = agent_res.map(|(_, p)| p).unwrap_or_default();
-                                let invoker_perms = invoker_res.map(|(_, p)| p).unwrap_or_default();
-                                crate::extensions::rbac::policy::intersect_permissions(&agent_perms, &invoker_perms)
+                                crate::extensions::rbac::policy::effective_for_pair(&config.pool, agent_uid, uid).await
                             }
                             None => vec![],
                         };

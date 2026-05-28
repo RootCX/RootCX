@@ -4,6 +4,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::api_error::ApiError;
+use crate::auth::identity::Identity;
 
 const MAX_ROLE_DEPTH: usize = 64;
 
@@ -106,6 +107,37 @@ pub async fn require_admin(pool: &PgPool, user_id: Uuid) -> Result<(), ApiError>
     let (_, perms) = resolve_permissions(pool, user_id).await?;
     if perms.iter().any(|p| p == "*") { Ok(()) }
     else { Err(ApiError::Forbidden("admin access required".into())) }
+}
+
+/// Effective permissions for an authenticated request.
+/// Delegated token (act present): grant(agent) ∩ perms(delegator).
+/// Direct request: the user's own permissions.
+pub async fn resolve_effective_permissions(pool: &PgPool, identity: &Identity) -> Result<Vec<String>, ApiError> {
+    let Some(actor) = &identity.actor else {
+        let (_, perms) = resolve_permissions(pool, identity.user_id).await?;
+        return Ok(perms);
+    };
+    let agent_uid: Uuid = actor.sub.parse()
+        .map_err(|_| ApiError::Unauthorized("invalid actor subject".into()))?;
+    let (agent_res, delegator_res) = tokio::join!(
+        resolve_permissions(pool, agent_uid),
+        resolve_permissions(pool, identity.user_id),
+    );
+    let (_, agent_perms) = agent_res?;
+    let (_, delegator_perms) = delegator_res?;
+    Ok(intersect_permissions(&agent_perms, &delegator_perms))
+}
+
+/// Effective permissions for an agent invocation with no Identity in scope
+/// (scheduler/worker path). Deny-on-error: a failed RBAC lookup yields no authority.
+pub async fn effective_for_pair(pool: &PgPool, agent_uid: Uuid, delegator_uid: Uuid) -> Vec<String> {
+    let (agent_res, deleg_res) = tokio::join!(
+        resolve_permissions(pool, agent_uid),
+        resolve_permissions(pool, delegator_uid),
+    );
+    let agent_perms = agent_res.map(|(_, p)| p).unwrap_or_default();
+    let deleg_perms = deleg_res.map(|(_, p)| p).unwrap_or_default();
+    intersect_permissions(&agent_perms, &deleg_perms)
 }
 
 /// Compute the intersection of two permission sets.

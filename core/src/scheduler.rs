@@ -36,7 +36,9 @@ async fn dispatch_agent_job(
 ) {
     // Deny-by-default: no delegator = no authority
     if invoker_user_id.is_none() {
-        warn!(msg_id, app_id = %target_app, "{label} agent denied: no delegator (invoker_user_id = None)");
+        error!(msg_id, app_id = %target_app,
+            "{label} agent denied: trigger has no owner (created_by is NULL). \
+             Re-deploy the app or assign an owner to restore automatic execution.");
         let _ = jobs::fail(pool, msg_id).await;
         return;
     }

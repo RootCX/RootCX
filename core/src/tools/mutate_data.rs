@@ -1,22 +1,11 @@
 use async_trait::async_trait;
 use serde_json::{json, Value as JsonValue};
-use uuid::Uuid;
 use rootcx_types::ToolDescriptor;
 
 use super::{Tool, ToolContext, str_arg, check_permission};
+use crate::extensions::audit;
 use crate::manifest::{field_type_map, quote_ident};
 use crate::routes::crud::{bind_typed, bulk_insert, filter_writable_fields, table, MAX_BULK_SIZE};
-
-async fn set_audit_context(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, actor: Uuid, delegator: Option<Uuid>) {
-    let _ = sqlx::query(&format!("SET LOCAL rootcx.actor_uid = '{actor}'"))
-        .execute(&mut **tx).await;
-    if let Some(d) = delegator {
-        let _ = sqlx::query(&format!("SET LOCAL rootcx.delegator_uid = '{d}'"))
-            .execute(&mut **tx).await;
-    }
-    let _ = sqlx::query("SET LOCAL rootcx.trigger_ref = 'agent_tool'")
-        .execute(&mut **tx).await;
-}
 
 pub struct MutateDataTool;
 
@@ -71,7 +60,7 @@ impl Tool for MutateDataTool {
                     cols.join(", "), phs.join(", ")
                 );
                 let mut tx = ctx.pool.begin().await.map_err(|e| e.to_string())?;
-                set_audit_context(&mut tx, ctx.user_id, ctx.invoker_user_id).await;
+                audit::set_context(&mut tx, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool").await;
                 let mut q = sqlx::query_as::<_, (JsonValue,)>(&sql);
                 for (k, v) in &entries { q = bind_typed(q, v, types.get(*k)); }
                 let (row,) = q.fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
@@ -97,7 +86,7 @@ impl Tool for MutateDataTool {
                     sets.join(", ")
                 );
                 let mut tx = ctx.pool.begin().await.map_err(|e| e.to_string())?;
-                set_audit_context(&mut tx, ctx.user_id, ctx.invoker_user_id).await;
+                audit::set_context(&mut tx, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool").await;
                 let mut q = sqlx::query_as::<_, (JsonValue,)>(&sql);
                 for (k, v) in &entries { q = bind_typed(q, v, types.get(*k)); }
                 q = q.bind(uuid);
@@ -127,7 +116,7 @@ impl Tool for MutateDataTool {
                 let uuid: sqlx::types::Uuid = id.parse().map_err(|_| format!("invalid UUID: '{id}'"))?;
                 let sql = format!("DELETE FROM {tbl} WHERE id = $1");
                 let mut tx = ctx.pool.begin().await.map_err(|e| e.to_string())?;
-                set_audit_context(&mut tx, ctx.user_id, ctx.invoker_user_id).await;
+                audit::set_context(&mut tx, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool").await;
                 let r = sqlx::query(&sql).bind(uuid).execute(&mut *tx).await.map_err(|e| e.to_string())?;
                 if r.rows_affected() == 0 { return Err(format!("record '{id}' not found")); }
                 tx.commit().await.map_err(|e| e.to_string())?;

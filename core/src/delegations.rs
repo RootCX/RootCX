@@ -32,10 +32,25 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
          ON rootcx_system.delegations (trigger_type, trigger_ref) WHERE revoked_at IS NULL AND trigger_ref IS NOT NULL"
     ).execute(pool).await.map_err(err)?;
 
-    migrate_existing_crons(pool).await?;
-    migrate_existing_hooks(pool).await?;
-
     Ok(())
+}
+
+/// Backfill delegations for existing triggers. Must run AFTER extension bootstrap
+/// has added `created_by` columns to crons/hooks/webhooks tables.
+pub async fn migrate_existing_triggers(pool: &PgPool) -> Result<(), RuntimeError> {
+    let fallback_admin = resolve_primary_admin(pool).await;
+    migrate_existing_crons(pool, fallback_admin).await?;
+    migrate_existing_hooks(pool, fallback_admin).await?;
+    migrate_existing_webhooks(pool, fallback_admin).await?;
+    Ok(())
+}
+
+async fn resolve_primary_admin(pool: &PgPool) -> Option<Uuid> {
+    sqlx::query_scalar::<_, Uuid>(
+        "SELECT user_id FROM rootcx_system.rbac_assignments \
+         WHERE role = 'admin' \
+         ORDER BY assigned_at ASC LIMIT 1"
+    ).fetch_optional(pool).await.ok().flatten()
 }
 
 pub async fn is_valid(pool: &PgPool, delegator: Uuid, agent: Uuid) -> Result<bool, RuntimeError> {
@@ -76,42 +91,99 @@ pub async fn revoke_by_trigger(pool: &PgPool, trigger_type: &str, trigger_ref: U
     Ok(())
 }
 
-async fn migrate_existing_crons(pool: &PgPool) -> Result<(), RuntimeError> {
-    sqlx::query(r#"
-        INSERT INTO rootcx_system.delegations (delegator_uid, agent_uid, trigger_type, trigger_ref)
-        SELECT cs.created_by,
-               uuid_generate_v5('9a3b4c5d-6e7f-4001-8293-a4b5c6d7e8f9'::uuid, 'agent:' || cs.app_id),
-               'cron', cs.id
-        FROM rootcx_system.cron_schedules cs
-        WHERE cs.created_by IS NOT NULL
-          AND NOT EXISTS (
-              SELECT 1 FROM rootcx_system.delegations d
-              WHERE d.trigger_type = 'cron' AND d.trigger_ref = cs.id AND d.revoked_at IS NULL
-          )
-    "#).execute(pool).await.map_err(err)?;
+async fn migrate_existing_crons(pool: &PgPool, fallback_admin: Option<Uuid>) -> Result<(), RuntimeError> {
+    // Backfill created_by for orphan crons (pre-upgrade rows)
+    if let Some(admin) = fallback_admin {
+        sqlx::query("UPDATE rootcx_system.cron_schedules SET created_by = $1 WHERE created_by IS NULL")
+            .bind(admin).execute(pool).await.map_err(err)?;
+    }
+
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT cs.id, cs.app_id FROM rootcx_system.cron_schedules cs \
+         WHERE cs.created_by IS NOT NULL \
+           AND EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id = cs.app_id) \
+           AND NOT EXISTS( \
+               SELECT 1 FROM rootcx_system.delegations d \
+               WHERE d.trigger_type = 'cron' AND d.trigger_ref = cs.id AND d.revoked_at IS NULL)"
+    ).fetch_all(pool).await.map_err(err)?;
+
+    for (cron_id, app_id) in rows {
+        let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
+        let delegator: Option<Uuid> = sqlx::query_scalar(
+            "SELECT created_by FROM rootcx_system.cron_schedules WHERE id = $1"
+        ).bind(cron_id).fetch_optional(pool).await.map_err(err)?.flatten();
+        if let Some(d) = delegator {
+            let _ = create(pool, d, agent_uid, "cron", Some(cron_id)).await;
+        }
+    }
     Ok(())
 }
 
-async fn migrate_existing_hooks(pool: &PgPool) -> Result<(), RuntimeError> {
-    let has_column: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM information_schema.columns \
-         WHERE table_schema = 'rootcx_system' AND table_name = 'entity_hooks' AND column_name = 'created_by')"
-    ).fetch_one(pool).await.map_err(err)?;
-    if !has_column { return Ok(()); }
+async fn migrate_existing_hooks(pool: &PgPool, fallback_admin: Option<Uuid>) -> Result<(), RuntimeError> {
+    // Backfill created_by for orphan hooks
+    if let Some(admin) = fallback_admin {
+        sqlx::query("UPDATE rootcx_system.entity_hooks SET created_by = $1 WHERE created_by IS NULL AND action_type = 'agent'")
+            .bind(admin).execute(pool).await.map_err(err)?;
+    }
 
-    sqlx::query(r#"
-        INSERT INTO rootcx_system.delegations (delegator_uid, agent_uid, trigger_type, trigger_ref)
-        SELECT h.created_by,
-               uuid_generate_v5('9a3b4c5d-6e7f-4001-8293-a4b5c6d7e8f9'::uuid,
-                   'agent:' || COALESCE(h.action_config->>'app_id', h.app_id)),
-               'hook', h.id
-        FROM rootcx_system.entity_hooks h
-        WHERE h.created_by IS NOT NULL
-          AND h.action_type = 'agent'
-          AND NOT EXISTS (
-              SELECT 1 FROM rootcx_system.delegations d
-              WHERE d.trigger_type = 'hook' AND d.trigger_ref = h.id AND d.revoked_at IS NULL
-          )
-    "#).execute(pool).await.map_err(err)?;
+    let rows: Vec<(Uuid, String, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT h.id, h.app_id, h.action_config FROM rootcx_system.entity_hooks h \
+         WHERE h.created_by IS NOT NULL AND h.action_type = 'agent' \
+           AND NOT EXISTS( \
+               SELECT 1 FROM rootcx_system.delegations d \
+               WHERE d.trigger_type = 'hook' AND d.trigger_ref = h.id AND d.revoked_at IS NULL)"
+    ).fetch_all(pool).await.map_err(err)?;
+
+    for (hook_id, app_id, config) in rows {
+        let target = config.as_ref()
+            .and_then(|c| c.get("app_id")).and_then(|v| v.as_str())
+            .unwrap_or(&app_id);
+        let agent_uid = crate::extensions::agents::agent_user_id(target);
+        let delegator: Option<Uuid> = sqlx::query_scalar(
+            "SELECT created_by FROM rootcx_system.entity_hooks WHERE id = $1"
+        ).bind(hook_id).fetch_optional(pool).await.map_err(err)?.flatten();
+        if let Some(d) = delegator {
+            let _ = create(pool, d, agent_uid, "hook", Some(hook_id)).await;
+        }
+    }
+    Ok(())
+}
+
+async fn migrate_existing_webhooks(pool: &PgPool, fallback_admin: Option<Uuid>) -> Result<(), RuntimeError> {
+    // Backfill created_by for orphan webhooks on agent apps
+    if let Some(admin) = fallback_admin {
+        sqlx::query(
+            "UPDATE rootcx_system.webhooks SET created_by = $1 \
+             WHERE created_by IS NULL \
+               AND EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id = rootcx_system.webhooks.app_id)"
+        ).bind(admin).execute(pool).await.map_err(err)?;
+    }
+
+    // Migrate legacy webhooks on agent apps to the "agent" method convention.
+    // The old code routed ALL webhooks on agent-apps to the agent; preserve that behavior.
+    sqlx::query(
+        "UPDATE rootcx_system.webhooks SET method = 'agent' \
+         WHERE method != 'agent' \
+           AND EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id = rootcx_system.webhooks.app_id)"
+    ).execute(pool).await.map_err(err)?;
+
+    let rows: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT w.id, w.app_id FROM rootcx_system.webhooks w \
+         WHERE w.created_by IS NOT NULL \
+           AND EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id = w.app_id) \
+           AND NOT EXISTS( \
+               SELECT 1 FROM rootcx_system.delegations d \
+               WHERE d.trigger_type = 'webhook' AND d.trigger_ref = w.id AND d.revoked_at IS NULL)"
+    ).fetch_all(pool).await.map_err(err)?;
+
+    for (wh_id, app_id) in rows {
+        let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
+        let delegator: Option<Uuid> = sqlx::query_scalar(
+            "SELECT created_by FROM rootcx_system.webhooks WHERE id = $1"
+        ).bind(wh_id).fetch_optional(pool).await.map_err(err)?.flatten();
+        if let Some(d) = delegator {
+            let _ = create(pool, d, agent_uid, "webhook", Some(wh_id)).await;
+        }
+    }
     Ok(())
 }

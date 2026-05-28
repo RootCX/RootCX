@@ -189,12 +189,11 @@ pub async fn webhook_ingress(
     let raw_body = base64::engine::general_purpose::STANDARD.encode(&body);
 
     if let Some(wh) = crate::webhooks::lookup_token(&pool, &token).await? {
-        // Agent webhook: validate delegation, dispatch as agent invoke
-        let is_agent: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id = $1)"
-        ).bind(&wh.app_id).fetch_one(&pool).await.unwrap_or(false);
+        // Route by webhook method: "agent" dispatches to the app's agent;
+        // anything else is a standard RPC call to the app worker.
+        let is_agent_webhook = wh.method == "agent";
 
-        if is_agent {
+        if is_agent_webhook {
             let delegator = wh.created_by
                 .ok_or_else(|| ApiError::Forbidden("webhook has no owner (created_by is NULL)".into()))?;
             let agent_uid = crate::extensions::agents::agent_user_id(&wh.app_id);
@@ -221,7 +220,7 @@ pub async fn webhook_ingress(
             return Ok(Json(json!({"status": "accepted"})));
         }
 
-        // Regular (non-agent) webhook RPC
+        // Standard webhook: dispatch to app RPC handler
         let caller = wh.created_by.map(|uid| crate::ipc::RpcCaller {
             user_id: uid.to_string(),
             email: String::new(),

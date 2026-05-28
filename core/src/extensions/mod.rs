@@ -1,5 +1,5 @@
 pub mod agents;
-mod audit;
+pub(crate) mod audit;
 pub mod auth;
 pub mod channels;
 pub mod hooks;

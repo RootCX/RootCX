@@ -100,6 +100,10 @@ impl Runtime {
         }
         crons::add_deferred_constraints(&pool).await?;
 
+        // Backfill delegations for pre-existing triggers (runs after extensions
+        // have added the created_by columns to hooks/webhooks/crons tables).
+        delegations::migrate_existing_triggers(&pool).await?;
+
         extensions::oidc::seed_from_env(&pool, &secret_manager).await?;
 
         let apps_dir = self.data_dir.join("apps");

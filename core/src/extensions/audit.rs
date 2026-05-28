@@ -19,6 +19,28 @@ async fn exec(pool: &PgPool, sql: &str) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+/// Set the audit attribution GUCs for the current transaction. The audit trigger
+/// reads `rootcx.{actor_uid,delegator_uid,trigger_ref}`. Parameterized via
+/// `set_config(...)` (no string interpolation) and folded into one round-trip.
+/// Must run inside an open transaction (`set_config(_, _, true)` is local).
+pub(crate) async fn set_context(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    actor: Option<uuid::Uuid>,
+    delegator: Option<uuid::Uuid>,
+    trigger_ref: &str,
+) {
+    let _ = sqlx::query(
+        "SELECT set_config('rootcx.actor_uid', $1, true), \
+                set_config('rootcx.delegator_uid', $2, true), \
+                set_config('rootcx.trigger_ref', $3, true)",
+    )
+    .bind(actor.map(|u| u.to_string()).unwrap_or_default())
+    .bind(delegator.map(|u| u.to_string()).unwrap_or_default())
+    .bind(trigger_ref)
+    .execute(&mut **tx)
+    .await;
+}
+
 pub struct AuditExtension;
 
 #[async_trait]
