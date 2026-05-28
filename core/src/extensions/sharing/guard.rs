@@ -74,7 +74,7 @@ impl FromRequestParts<SharedRuntime> for CallerAuth {
             let claims = jwt::decode(&auth_config, &bearer)
                 .map_err(|_| ApiError::Unauthorized("invalid token".into()))?;
 
-            if claims.email.is_empty() {
+            if claims.act.is_none() && claims.email.is_empty() {
                 return Err(ApiError::Unauthorized("invalid token type".into()));
             }
 

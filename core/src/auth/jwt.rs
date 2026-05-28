@@ -8,8 +8,6 @@ use crate::RuntimeError;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActorClaim {
     pub sub: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub act: Option<Box<ActorClaim>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -70,7 +68,7 @@ pub fn mint_delegated(config: &AuthConfig, delegator_uid: Uuid, agent_uid: Uuid)
         sub: delegator_uid.to_string(),
         email: String::new(),
         session_id: None,
-        act: Some(ActorClaim { sub: agent_uid.to_string(), act: None }),
+        act: Some(ActorClaim { sub: agent_uid.to_string() }),
         aud: Some("rootcx-core".into()),
         exp: now + 120,
         iat: now,
@@ -83,9 +81,14 @@ pub fn decode(config: &AuthConfig, token: &str) -> Result<Claims, RuntimeError> 
     let mut validation = Validation::new(jsonwebtoken::Algorithm::HS256);
     validation.validate_exp = true;
     validation.validate_aud = false;
-    jsonwebtoken::decode::<Claims>(token, &config.decoding_key, &validation)
+    let claims = jsonwebtoken::decode::<Claims>(token, &config.decoding_key, &validation)
         .map(|d| d.claims)
-        .map_err(|e| RuntimeError::Auth(e.to_string()))
+        .map_err(|e| RuntimeError::Auth(e.to_string()))?;
+    // Delegated tokens must have the correct audience
+    if claims.act.is_some() && claims.aud.as_deref() != Some("rootcx-core") {
+        return Err(RuntimeError::Auth("invalid audience for delegated token".into()));
+    }
+    Ok(claims)
 }
 
 #[cfg(test)]
@@ -142,9 +145,25 @@ mod tests {
         assert_eq!(claims.sub, delegator.to_string());
         let act = claims.act.unwrap();
         assert_eq!(act.sub, agent.to_string());
-        assert!(act.act.is_none());
         assert_eq!(claims.aud.as_deref(), Some("rootcx-core"));
         assert!(claims.exp - claims.iat <= 120);
+    }
+
+    #[test]
+    fn delegated_token_wrong_aud_rejected() {
+        let config = test_config();
+        let now = chrono::Utc::now().timestamp();
+        let claims = Claims {
+            sub: "user-a".into(),
+            email: String::new(),
+            session_id: None,
+            act: Some(ActorClaim { sub: "agent-b".into() }),
+            aud: Some("wrong-audience".into()),
+            exp: now + 120,
+            iat: now,
+        };
+        let token = jsonwebtoken::encode(&Header::default(), &claims, &config.encoding_key).unwrap();
+        assert!(decode(&config, &token).is_err(), "delegated token with wrong aud must be rejected");
     }
 
     #[test]
@@ -155,30 +174,5 @@ mod tests {
         let claims = decode(&config, &token).unwrap();
         assert!(claims.act.is_none());
         assert!(claims.aud.is_none());
-    }
-
-    #[test]
-    fn nested_act_claim() {
-        let config = test_config();
-        let now = chrono::Utc::now().timestamp();
-        let claims = Claims {
-            sub: "user-a".into(),
-            email: String::new(),
-            session_id: None,
-            act: Some(ActorClaim {
-                sub: "agent-b".into(),
-                act: Some(Box::new(ActorClaim { sub: "agent-c".into(), act: None })),
-            }),
-            aud: Some("rootcx-core".into()),
-            exp: now + 120,
-            iat: now,
-        };
-        let token = jsonwebtoken::encode(&Header::default(), &claims, &config.encoding_key).unwrap();
-        let decoded = decode(&config, &token).unwrap();
-        let act = decoded.act.unwrap();
-        assert_eq!(act.sub, "agent-b");
-        let inner = act.act.unwrap();
-        assert_eq!(inner.sub, "agent-c");
-        assert!(inner.act.is_none());
     }
 }
