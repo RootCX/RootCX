@@ -71,7 +71,8 @@ pub async fn create_cron(
     let payload = body.get("payload").cloned().unwrap_or(json!({}));
     let overlap = body.get("overlapPolicy").and_then(|v| v.as_str()).unwrap_or("skip");
 
-    let row = crons::create(&pool(&rt), &app_id, CreateCron {
+    let db = pool(&rt);
+    let row = crons::create(&db, &app_id, CreateCron {
         name: name.into(),
         schedule: schedule.into(),
         timezone,
@@ -79,6 +80,10 @@ pub async fn create_cron(
         overlap_policy: overlap.into(),
         created_by: Some(identity.user_id),
     }).await?;
+
+    // Auto-create standing delegation for agent crons
+    let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
+    let _ = crate::delegations::create(&db, identity.user_id, agent_uid, "cron", Some(row.id)).await;
 
     rt.scheduler_wake().notify_one();
     Ok((StatusCode::CREATED, Json(serde_json::to_value(row).unwrap())))
@@ -135,6 +140,7 @@ pub async fn delete_cron(
     let existing = crons::get(&db, &app_id, cron_id).await?;
     require_owner(&perms, &app_id, existing.created_by, identity.user_id)?;
     crons::delete(&db, &app_id, cron_id).await?;
+    let _ = crate::delegations::revoke_by_trigger(&db, "cron", cron_id).await;
     Ok(Json(json!({ "message": "cron deleted" })))
 }
 

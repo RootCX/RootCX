@@ -5786,6 +5786,7 @@ dependencies = [
  "command-group",
  "flate2",
  "futures",
+ "futures-util",
  "hex",
  "hmac",
  "jsonwebtoken",

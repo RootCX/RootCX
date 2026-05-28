@@ -157,24 +157,30 @@ pub async fn register_agent(pool: &PgPool, app_id: &str, def: &AgentDefinition) 
     Ok(())
 }
 
+/// Ensure the agent has a system user identity and a default role assignment.
+/// Permissions are governed via the standard RBAC API (same as humans).
+/// Does not overwrite existing role assignments (admin may have already scoped the agent).
 async fn sync_agent_rbac(pool: &PgPool, app_id: &str) -> Result<(), RuntimeError> {
     let agent_uid = agent_user_id(app_id);
 
     sqlx::query(
-        "WITH ensure_user AS (
-            INSERT INTO rootcx_system.users (id, email, is_system)
-            VALUES ($1, $2, true)
-            ON CONFLICT (id) DO NOTHING
-        )
-        INSERT INTO rootcx_system.rbac_assignments (user_id, role)
-        VALUES ($1, 'admin')
-        ON CONFLICT (user_id, role) DO NOTHING"
-    )
-    .bind(agent_uid)
-    .bind(format!("agent+{app_id}@localhost"))
-    .execute(pool)
-    .await
-    .map_err(RuntimeError::Schema)?;
+        "INSERT INTO rootcx_system.users (id, email, is_system) \
+         VALUES ($1, $2, true) ON CONFLICT (id) DO NOTHING"
+    ).bind(agent_uid).bind(format!("agent+{app_id}@localhost"))
+    .execute(pool).await.map_err(RuntimeError::Schema)?;
+
+    // Only assign admin if the agent has no role yet (first deploy).
+    // After that, the admin governs the agent's role via the RBAC API.
+    let has_role: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_assignments WHERE user_id = $1)"
+    ).bind(agent_uid).fetch_one(pool).await.map_err(RuntimeError::Schema)?;
+
+    if !has_role {
+        sqlx::query(
+            "INSERT INTO rootcx_system.rbac_assignments (user_id, role) \
+             VALUES ($1, 'admin') ON CONFLICT DO NOTHING"
+        ).bind(agent_uid).execute(pool).await.map_err(RuntimeError::Schema)?;
+    }
 
     Ok(())
 }

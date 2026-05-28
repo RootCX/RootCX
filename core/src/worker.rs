@@ -185,6 +185,7 @@ async fn supervisor_loop(
     let mut policy_evaluators: HashMap<String, Arc<TokioMutex<PolicyEvaluator>>> = HashMap::new();
     let mut sub_invocations: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut invoker_user_ids: HashMap<String, uuid::Uuid> = HashMap::new();
+    let mut effective_permissions: HashMap<String, Vec<String>> = HashMap::new();
     let pending_approvals = config.pending_approvals.clone();
     let mut crash_times: Vec<Instant> = Vec::new();
     let mut restart_count: u32 = 0;
@@ -251,6 +252,7 @@ async fn supervisor_loop(
                             let _ = tx.send(AgentEvent::Error { error: "worker stopped".into() }).await;
                         }
                         policy_evaluators.clear();
+                        effective_permissions.clear();
                         status = WorkerStatus::Stopped;
                         crash_times.clear();
                         info!(app_id = %app_id, "worker stopped");
@@ -304,6 +306,16 @@ async fn supervisor_loop(
                         }
                         if payload.is_sub_invoke { sub_invocations.insert(invoke_id.clone()); }
                         if let Some(uid) = payload.invoker_user_id { invoker_user_ids.insert(invoke_id.clone(), uid); }
+
+                        // Pre-compute effective permissions (intersection) once per invoke
+                        let perms = match payload.invoker_user_id {
+                            Some(uid) => {
+                                let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
+                                crate::extensions::rbac::policy::effective_for_pair(&config.pool, agent_uid, uid).await
+                            }
+                            None => vec![],
+                        };
+                        effective_permissions.insert(invoke_id.clone(), perms);
 
                         pending_agent_streams.insert(invoke_id.clone(), stream_tx);
                         if let Some(ref mut w) = ipc_writer {
@@ -387,6 +399,7 @@ async fn supervisor_loop(
                             policy_evaluators.remove(&invoke_id);
                             sub_invocations.remove(&invoke_id);
                             invoker_user_ids.remove(&invoke_id);
+                            effective_permissions.remove(&invoke_id);
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Done { response, tokens }).await;
                             }
@@ -395,6 +408,7 @@ async fn supervisor_loop(
                             policy_evaluators.remove(&invoke_id);
                             sub_invocations.remove(&invoke_id);
                             invoker_user_ids.remove(&invoke_id);
+                            effective_permissions.remove(&invoke_id);
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Error { error }).await;
                             }
@@ -416,6 +430,7 @@ async fn supervisor_loop(
                             let int_caller = config.integration_caller.clone();
                             let act_caller = config.action_caller.clone();
                             let invoker_uid = invoker_user_ids.get(&invoke_id).copied();
+                            let cached_perms = effective_permissions.get(&invoke_id).cloned();
                             let out_tx = outbound_tx.clone();
                             let evaluator = policy_evaluators.get(&invoke_id).cloned();
                             let approvals_ref = pending_approvals.clone();
@@ -483,8 +498,7 @@ async fn supervisor_loop(
                                 }
 
                                 let agent_uid = crate::extensions::agents::agent_user_id(&aid);
-                                let permissions = crate::extensions::rbac::policy::resolve_permissions(&pool, agent_uid)
-                                    .await.map(|(_, p)| p).unwrap_or_default();
+                                let permissions = cached_perms.unwrap_or_default();
 
                                 crate::tool_executor::execute(
                                     tool, tool_name, args, aid, agent_uid, invoker_uid,
@@ -547,6 +561,7 @@ async fn supervisor_loop(
                                 error: "worker crashed".into(),
                             }).await;
                         }
+                        effective_permissions.clear();
 
                         let now = Instant::now();
                         crash_times.retain(|t| now.duration_since(*t) < CRASH_WINDOW);

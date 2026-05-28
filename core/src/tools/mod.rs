@@ -24,6 +24,7 @@ pub trait AgentDispatcher: Send + Sync {
     async fn dispatch(
         &self, pool: &PgPool, caller: &str, target: &str, message: &str,
         parent_tx: Option<tokio::sync::mpsc::Sender<crate::worker::AgentEvent>>,
+        invoker_user_id: Option<Uuid>,
     ) -> Result<String, String>;
 }
 

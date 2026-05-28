@@ -158,6 +158,13 @@ pub async fn invoke_agent(
     let pool = rt.pool().clone();
     let wm = rt.worker_manager().clone();
 
+    // Invocation ACL: caller must have app:{id}:invoke permission (intersection-aware)
+    let caller_perms = crate::extensions::rbac::policy::resolve_effective_permissions(&pool, &identity).await?;
+    let invoke_perm = format!("app:{app_id}:invoke");
+    if !crate::extensions::rbac::policy::has_permission(&caller_perms, &invoke_perm) {
+        return Err(ApiError::Forbidden(format!("permission denied: {invoke_perm}")));
+    }
+
     let agent_config_json: JsonValue = sqlx::query_scalar(
         "SELECT config FROM rootcx_system.agents WHERE app_id = $1",
     ).bind(&app_id).fetch_optional(&pool).await?
