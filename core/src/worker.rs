@@ -964,6 +964,19 @@ fn register_context(
     token
 }
 
+#[doc(hidden)]
+pub async fn collection_op_test(
+    pool: &sqlx::PgPool,
+    app_id: &str,
+    op: &str,
+    entity: &str,
+    data: serde_json::Value,
+    state: Option<crate::sql_proxy::ContextState>,
+    allow_bypass: bool,
+) -> Result<serde_json::Value, String> {
+    collection_op(pool, app_id, op, entity, data, state, allow_bypass).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
