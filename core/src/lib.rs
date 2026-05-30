@@ -90,13 +90,9 @@ impl Runtime {
 
         let pool = PgPool::connect(&self.database_url).await.map_err(RuntimeError::Database)?;
 
-        // Phase 0d (defense-in-depth): once the pool holds the connection,
-        // scrub the secrets from the core's own environment so a worker that
-        // somehow reads /proc/<core>/environ finds nothing.
-        unsafe {
-            std::env::remove_var("DATABASE_URL");
-            std::env::remove_var("ROOTCX_JWT_SECRET");
-        }
+        // Phase 0d: env_clear() on spawn + setuid(1001) already prevent workers
+        // from reading core secrets. remove_var was here as belt-and-suspenders
+        // but is UB in edition 2024 (not thread-safe with tokio running).
 
         schema::bootstrap(&pool).await?;
         sqlx::migrate!("./migrations").run(&pool).await.map_err(|e| RuntimeError::Schema(e.into()))?;

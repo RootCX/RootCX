@@ -155,6 +155,79 @@ grep -rE "databaseUrl|postgres\(|authToken|syncAllConnectedUsers" backend/ --inc
 
 Must return nothing (ignore `node_modules/`).
 
+## Behavioral changes (exhaustive)
+
+Every change below was verified against the codebase. Admins (role with `*`
+permission) are unaffected; all breaking changes apply to non-admin users
+and apps.
+
+### Permission gates added (previously open to any authenticated user)
+
+| Action | Before (v0.18) | After (v0.19) | Required permission |
+|--------|---------------|---------------|---------------------|
+| Install app | Any user | Admin only (except first-boot) | `admin:apps.install` |
+| Uninstall app | Any user | Admin only | `admin:apps.install` |
+| Deploy backend | Any user | Admin only | `admin:apps.deploy` |
+| Deploy frontend | Any user | Admin only | `admin:apps.deploy` |
+| Call an app RPC | Any user | Requires invoke permission | `app:{id}:invoke` |
+| View system schema structure | Any user | Admin only | `admin:db.query` |
+| Execute admin SQL | Any user | Admin only + read-only enforced | `admin:db.query` |
+| Manage app secrets | Any user | Admin only | `admin:secrets.manage` |
+| Manage platform secrets | System-user check only | Admin only | `admin:secrets.manage` |
+| List/view MCP servers | Any user | Admin only | `admin:mcp.manage` |
+| Manage agent config | No check | Admin only | `admin:agents.manage` |
+
+### Data access behavior changes
+
+| Scenario | Before (v0.18) | After (v0.19) |
+|----------|---------------|---------------|
+| User reads data without permission | HTTP 403 error | 200 with 0 rows (RLS silent filter) |
+| User writes data without permission | HTTP 403 error | Postgres error (RLS WITH CHECK) |
+| Cross-app linked/federated query | Silently skipped by Rust | 0 rows for unauthorized schemas (RLS) |
+| Public/share-token RPC reads data | Had full DB access via app | ctx.sql returns 0 rows (no identity = deny-all) |
+
+### App sandbox (breaking for app code)
+
+| Capability | Before (v0.18) | After (v0.19) |
+|-----------|---------------|---------------|
+| Direct DB connection | App receives `DATABASE_URL` in Discover IPC | Removed; use `ctx.sql()` |
+| User JWT token | App receives `caller.authToken` | Removed; never exposed |
+| Direct TCP to Postgres | Possible (app had credentials) | Blocked (pg_hba + no credentials) |
+| DDL in app code (CREATE INDEX, etc.) | Allowed | Blocked (restricted role, no DDL) |
+| Read system tables | Possible | Blocked (REVOKE on rootcx_system/pgmq/cron) |
+| SET/RESET/DO commands in SQL | Possible | Blocked (validate_sql + set_config revoked) |
+
+### Automated job behavior changes
+
+| Scenario | Before (v0.18) | After (v0.19) |
+|----------|---------------|---------------|
+| Cron agent job without owner (created_by NULL) | Falls back to SYSTEM_USER (runs as admin) | Refused (deny-by-default) |
+| Regular job without owner | Falls back to SYSTEM_USER (runs as admin) | Refused (deny-by-default) |
+| Channel message (Slack/Telegram) | No delegation check | Requires valid delegation; revoked = agent mute |
+| Webhook agent without delegation | Already checked | Still checked (unchanged) |
+
+### Unchanged behaviors (no migration needed)
+
+- Agent invoke gate (`app:{id}:invoke`) was already enforced
+- Cron creation requires `app:{id}:cron.write` (unchanged)
+- Hook creation open to authenticated users (unchanged)
+- Integration actions require `integration:{id}:{action}` (unchanged)
+- Worker start/stop requires admin (unchanged)
+- Agent intersection logic (unchanged, now enforced by RLS instead of Rust)
+
+### What to do after upgrading the core
+
+1. **Assign roles**: ensure non-admin users have roles with the appropriate
+   permissions (`app:{id}:invoke` for each app they should access, entity
+   read/write permissions for data access).
+2. **Check crons/hooks**: any cron or hook with `created_by = NULL` will stop
+   executing. Re-create them with an authenticated user or backfill the owner.
+3. **Channel links**: users must have a valid delegation to the agent. Linking
+   via `/link` creates it automatically; existing links from before v0.19 need
+   a one-time re-link or manual delegation backfill.
+
+---
+
 ## Why this change
 
 The direct DB connection gave apps a master password to the database. Any app
