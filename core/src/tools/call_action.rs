@@ -50,6 +50,8 @@ impl Tool for CallActionTool {
 
         let caller = ctx.action_caller.as_ref().ok_or("action calling unavailable")?;
         let effective_uid = ctx.invoker_user_id.unwrap_or(ctx.user_id);
-        caller.call(app, action, input, effective_uid, &ctx.app_id).await
+        // Propagate the agent's pre-computed intersection so the target app's
+        // RLS bounds the cross-app hop to grant(agent)∩perms(human) (Phase 6a).
+        caller.call(app, action, input, effective_uid, &ctx.app_id, Some(ctx.permissions.clone())).await
     }
 }

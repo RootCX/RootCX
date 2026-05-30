@@ -20,6 +20,16 @@ async fn exec(pool: &PgPool, sql: &str) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+/// True until the first non-system user is assigned any role. The seeded
+/// system user holds admin for RLS, so it is excluded. Drives the one-time
+/// "first install promotes admin" bootstrap and the install/uninstall gate.
+pub async fn is_first_boot(pool: &PgPool) -> Result<bool, crate::api_error::ApiError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT NOT EXISTS(SELECT 1 FROM rootcx_system.rbac_assignments a \
+         JOIN rootcx_system.users u ON u.id = a.user_id WHERE NOT u.is_system)",
+    ).fetch_one(pool).await?)
+}
+
 #[async_trait]
 impl RuntimeExtension for RbacExtension {
     fn name(&self) -> &str { "rbac" }
@@ -72,6 +82,8 @@ impl RuntimeExtension for RbacExtension {
              ON CONFLICT (name) DO NOTHING",
         ).await?;
 
+        self.bootstrap_governance(pool).await?;
+
         // ── Migration: namespace permission keys ───────────────────────
         // Detect old-format keys (tool.X, integration.X.Y, app keys without app: prefix)
         let has_old_keys: bool = sqlx::query_scalar(
@@ -115,12 +127,27 @@ impl RuntimeExtension for RbacExtension {
             .execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
         tx.commit().await.map_err(RuntimeError::Schema)?;
 
-        sqlx::query(
-            "INSERT INTO rootcx_system.rbac_assignments (user_id, role)
-             VALUES ($1, 'admin') ON CONFLICT DO NOTHING",
-        ).bind(installed_by).execute(pool).await.map_err(RuntimeError::Schema)?;
-        info!(app = %app_id, user = %installed_by, "installer promoted to admin");
+        // First-boot only: promote the very first installer to admin. After an
+        // admin exists, installs no longer escalate (the HTTP gate also blocks
+        // non-admins at the door — this is defense-in-depth).
+        if is_first_boot(pool).await.unwrap_or(false) {
+            sqlx::query(
+                "INSERT INTO rootcx_system.rbac_assignments (user_id, role)
+                 VALUES ($1, 'admin') ON CONFLICT DO NOTHING",
+            ).bind(installed_by).execute(pool).await.map_err(RuntimeError::Schema)?;
+            info!(app = %app_id, user = %installed_by, "first-boot: installer promoted to admin");
+        }
         Ok(())
+    }
+
+    async fn on_table_created(
+        &self,
+        pool: &PgPool,
+        _manifest: &AppManifest,
+        schema: &str,
+        table: &str,
+    ) -> Result<(), RuntimeError> {
+        apply_table_rls(pool, schema, table).await
     }
 
     fn routes(&self) -> Option<Router<SharedRuntime>> {
@@ -265,4 +292,221 @@ impl RbacExtension {
         info!("permission keys migrated to namespaced format");
         Ok(())
     }
+
+    /// Bootstrap the governance DB layer: the restricted `rootcx_app_executor`
+    /// role, the plpgsql RBAC functions (single source of truth for RLS and
+    /// Rust), the system-schema lockdowns, and a retroactive RLS pass over
+    /// pre-existing app tables. Idempotent.
+    async fn bootstrap_governance(&self, pool: &PgPool) -> Result<(), RuntimeError> {
+        info!("bootstrapping governance (role + plpgsql RBAC + RLS)");
+
+        // Every app table gets FORCE ROW LEVEL SECURITY, which filters even the
+        // table owner. Core operations (schema sync, collection_op onStart
+        // bypass, retroactive migration) run on this pool connection and rely on
+        // it bypassing RLS. Assert that up front — a misconfigured non-superuser
+        // role without BYPASSRLS would otherwise silently lose rows / writes.
+        let pool_bypasses_rls: bool = sqlx::query_scalar(
+            "SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname = current_user",
+        ).fetch_one(pool).await.map_err(RuntimeError::Schema)?;
+        if !pool_bypasses_rls {
+            return Err(RuntimeError::Schema(sqlx::Error::Protocol(
+                "the core database role must be a SUPERUSER or have the BYPASSRLS \
+                 attribute; otherwise FORCE ROW LEVEL SECURITY filters core operations"
+                    .into(),
+            )));
+        }
+
+        // Note: the system user (...0001) is intentionally NOT seeded with an
+        // admin role. Internal operations run on the superuser pool (BYPASSRLS),
+        // never through the executor role, so no system identity needs to pass
+        // RLS. Seeding it would also defeat the "first registered user becomes
+        // admin" bootstrap (the register guard checks for any existing admin).
+
+        // Restricted role used via `SET LOCAL ROLE` for every app query. No
+        // login, no RLS bypass — the antithesis of the pool's superuser role.
+        exec(pool,
+            "DO $$ BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rootcx_app_executor') THEN
+                    CREATE ROLE rootcx_app_executor NOLOGIN NOBYPASSRLS;
+                END IF;
+            END $$",
+        ).await?;
+
+        // The executor must call the SECURITY DEFINER RBAC functions (USAGE on
+        // the schema) but must NOT read system tables (no table grants).
+        exec(pool, "REVOKE ALL ON SCHEMA rootcx_system FROM PUBLIC").await?;
+        exec(pool, "GRANT USAGE ON SCHEMA rootcx_system TO rootcx_app_executor").await?;
+
+        // The app must never rewrite its identity GUCs from inside its SQL.
+        exec(pool, "REVOKE EXECUTE ON FUNCTION pg_catalog.set_config(text, text, boolean) FROM PUBLIC").await?;
+        exec(pool, "REVOKE EXECUTE ON FUNCTION pg_catalog.set_config(text, text, boolean) FROM rootcx_app_executor").await?;
+
+        // pgmq/cron carry cross-app job payloads and schedules. Lock them down
+        // (guarded — the extensions may not be present in every deployment).
+        for schema in ["pgmq", "cron"] {
+            exec(pool, &format!(
+                "DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = '{schema}') THEN
+                        EXECUTE 'REVOKE ALL ON SCHEMA {schema} FROM PUBLIC';
+                        EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA {schema} FROM PUBLIC';
+                    END IF;
+                END $$",
+            )).await?;
+        }
+
+        // ── plpgsql RBAC: the single implementation shared by RLS and Rust ──
+        // Each function is SECURITY DEFINER with a frozen search_path to block
+        // hijack via a conflicting object in a higher-priority schema.
+        exec(pool,
+            "CREATE OR REPLACE FUNCTION rootcx_system.expand_roles(assigned TEXT[])
+             RETURNS TEXT[] AS $$
+             DECLARE
+                 expanded TEXT[] := '{}';
+                 stack TEXT[] := COALESCE(assigned, '{}');
+                 cur TEXT; parents TEXT[]; p TEXT; depth INT := 0;
+             BEGIN
+                 WHILE COALESCE(array_length(stack, 1), 0) > 0 AND depth < 64 LOOP
+                     cur := stack[array_upper(stack, 1)];
+                     stack := stack[1:array_upper(stack, 1) - 1];
+                     depth := depth + 1;
+                     IF NOT (cur = ANY(expanded)) THEN
+                         expanded := array_append(expanded, cur);
+                         SELECT inherits INTO parents FROM rootcx_system.rbac_roles WHERE name = cur;
+                         IF parents IS NOT NULL THEN
+                             FOREACH p IN ARRAY parents LOOP
+                                 IF NOT (p = ANY(expanded)) THEN stack := array_append(stack, p); END IF;
+                             END LOOP;
+                         END IF;
+                     END IF;
+                 END LOOP;
+                 RETURN expanded;
+             END;
+             $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, rootcx_system",
+        ).await?;
+
+        exec(pool,
+            "CREATE OR REPLACE FUNCTION rootcx_system.resolve_permissions(p_user_id UUID)
+             RETURNS TEXT[] AS $$
+             DECLARE assigned TEXT[]; all_roles TEXT[]; perms TEXT[];
+             BEGIN
+                 SELECT array_agg(role) INTO assigned
+                     FROM rootcx_system.rbac_assignments WHERE user_id = p_user_id;
+                 IF assigned IS NULL OR array_length(assigned, 1) IS NULL THEN RETURN '{}'; END IF;
+                 all_roles := rootcx_system.expand_roles(assigned);
+                 SELECT array_agg(DISTINCT perm) INTO perms
+                     FROM rootcx_system.rbac_roles r, unnest(r.permissions) AS perm
+                     WHERE r.name = ANY(all_roles);
+                 RETURN COALESCE(perms, '{}');
+             END;
+             $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, rootcx_system",
+        ).await?;
+
+        exec(pool,
+            "CREATE OR REPLACE FUNCTION rootcx_system.match_permission(p_perms TEXT[], p_required TEXT)
+             RETURNS BOOLEAN AS $$
+             DECLARE p TEXT; prefix TEXT;
+             BEGIN
+                 IF p_perms IS NULL THEN RETURN FALSE; END IF;
+                 FOREACH p IN ARRAY p_perms LOOP
+                     IF p = '*' THEN RETURN TRUE; END IF;
+                     IF p = p_required THEN RETURN TRUE; END IF;
+                     IF right(p, 2) = ':*' THEN
+                         prefix := left(p, length(p) - 2);
+                         IF left(p_required, length(prefix)) = prefix
+                            AND substr(p_required, length(prefix) + 1, 1) = ':' THEN
+                             RETURN TRUE;
+                         END IF;
+                     END IF;
+                 END LOOP;
+                 RETURN FALSE;
+             END;
+             $$ LANGUAGE plpgsql IMMUTABLE SECURITY DEFINER SET search_path = pg_catalog, rootcx_system",
+        ).await?;
+
+        exec(pool,
+            "CREATE OR REPLACE FUNCTION rootcx_system.has_permission(p_user_id UUID, p_required TEXT)
+             RETURNS BOOLEAN AS $$
+             BEGIN
+                 IF p_user_id IS NULL THEN RETURN FALSE; END IF;
+                 RETURN rootcx_system.match_permission(
+                     rootcx_system.resolve_permissions(p_user_id), p_required);
+             END;
+             $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, rootcx_system",
+        ).await?;
+
+        // The function RLS policies call. Reads the 3 identity GUCs posed by
+        // the core. is_delegated='1' → check the pre-computed intersection
+        // (empty intersection = deny all); else resolve the user from the DB.
+        exec(pool,
+            "CREATE OR REPLACE FUNCTION rootcx_system.check_access(p_required TEXT)
+             RETURNS BOOLEAN AS $$
+             DECLARE v_user_id UUID; v_delegated TEXT; v_perms TEXT;
+             BEGIN
+                 v_user_id := nullif(current_setting('rootcx.user_id', true), '')::uuid;
+                 IF v_user_id IS NULL THEN RETURN FALSE; END IF;
+                 v_delegated := current_setting('rootcx.is_delegated', true);
+                 IF v_delegated = '1' THEN
+                     v_perms := current_setting('rootcx.effective_perms', true);
+                     IF v_perms IS NULL OR v_perms = '' THEN RETURN FALSE; END IF;
+                     RETURN rootcx_system.match_permission(string_to_array(v_perms, ','), p_required);
+                 END IF;
+                 RETURN rootcx_system.has_permission(v_user_id, p_required);
+             END;
+             $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, rootcx_system",
+        ).await?;
+
+        // Retroactive RLS over tables that predate this refactor.
+        let tables: Vec<(String, String)> = sqlx::query_as(
+            "SELECT schemaname, tablename FROM pg_tables
+             WHERE schemaname IN (SELECT id FROM rootcx_system.apps WHERE id <> 'core')",
+        ).fetch_all(pool).await.map_err(RuntimeError::Schema)?;
+        for (schema, table) in tables {
+            apply_table_rls(pool, &schema, &table).await?;
+        }
+
+        info!("governance ready");
+        Ok(())
+    }
+}
+
+/// Enable + FORCE RLS on an app table, grant the restricted executor CRUD on
+/// it, and (re)create the four permission-gated policies. Idempotent: safe to
+/// call on every install and on the retroactive boot pass. `schema`/`table`
+/// are validated snake_case identifiers (see `manifest::validate_manifest`).
+pub(crate) async fn apply_table_rls(pool: &PgPool, schema: &str, table: &str) -> Result<(), RuntimeError> {
+    use crate::manifest::{quote_ident, quote_literal};
+    let qt = format!("{}.{}", quote_ident(schema), quote_ident(table));
+
+    exec(pool, &format!("GRANT USAGE ON SCHEMA {} TO rootcx_app_executor", quote_ident(schema))).await?;
+    exec(pool, &format!("GRANT SELECT, INSERT, UPDATE, DELETE ON {qt} TO rootcx_app_executor")).await?;
+    exec(pool, &format!(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA {} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO rootcx_app_executor",
+        quote_ident(schema),
+    )).await?;
+    exec(pool, &format!("ALTER TABLE {qt} ENABLE ROW LEVEL SECURITY")).await?;
+    exec(pool, &format!("ALTER TABLE {qt} FORCE ROW LEVEL SECURITY")).await?;
+
+    // The `(SELECT ...)` wrapper makes the planner evaluate check_access once
+    // per query (constant args) instead of once per row — mandatory for perf.
+    for (policy, kind, action) in [
+        ("rootcx_rls_select", "FOR SELECT USING", "read"),
+        ("rootcx_rls_insert", "FOR INSERT WITH CHECK", "create"),
+        ("rootcx_rls_delete", "FOR DELETE USING", "delete"),
+    ] {
+        let req = quote_literal(&format!("app:{schema}:{table}.{action}"));
+        exec(pool, &format!("DROP POLICY IF EXISTS {policy} ON {qt}")).await?;
+        exec(pool, &format!(
+            "CREATE POLICY {policy} ON {qt} {kind} ((SELECT rootcx_system.check_access({req})))",
+        )).await?;
+    }
+    // UPDATE needs both USING (visible rows) and WITH CHECK (new rows).
+    let upd = quote_literal(&format!("app:{schema}:{table}.update"));
+    exec(pool, &format!("DROP POLICY IF EXISTS rootcx_rls_update ON {qt}")).await?;
+    exec(pool, &format!(
+        "CREATE POLICY rootcx_rls_update ON {qt} FOR UPDATE \
+         USING ((SELECT rootcx_system.check_access({upd}))) \
+         WITH CHECK ((SELECT rootcx_system.check_access({upd})))",
+    )).await?;
+
+    Ok(())
 }

@@ -4,18 +4,30 @@
 // so integrations can call `serve()`, `log.*`, `emit()` etc. without
 // per-file `declare const` hacks.
 
+interface RootCxSqlResult {
+  columns: string[];
+  rows: unknown[][];
+  rowCount: number;
+}
+
 interface RootCxCtx {
   readonly appId: string;
   readonly runtimeUrl: string;
-  readonly databaseUrl: string;
   readonly credentials: Record<string, string>;
   readonly agentConfig: unknown;
   readonly log: typeof log;
   readonly emit: typeof emit;
+  // Run SQL through the core under the caller's RLS identity. The app holds
+  // no DB connection; params are positional ($1, $2, …).
+  sql(text: string, params?: unknown[]): Promise<RootCxSqlResult>;
+  // Privileged self-action over IPC (integrations) — no token replay.
+  selfAction(action: string, params?: Record<string, unknown>): Promise<any>;
   uploadFile(content: string | Uint8Array, filename: string, contentType: string): Promise<string>;
   collection(entity: string): {
     insert(data: Record<string, unknown>): Promise<any>;
     update(data: Record<string, unknown>): Promise<any>;
+    find(where?: Record<string, unknown>): Promise<any[]>;
+    findOne(where?: Record<string, unknown>): Promise<any>;
   };
 }
 
@@ -35,11 +47,6 @@ declare const log: {
 };
 
 declare const emit: (name: string, data?: Record<string, unknown>) => void;
-
-declare const syncAllConnectedUsers: (
-  caller: any,
-  actionName: string,
-) => Promise<{ ok?: boolean; synced?: number; error?: string }>;
 
 declare const uploadFile: (
   content: string | Uint8Array,

@@ -103,28 +103,32 @@ pub async fn resolve_permissions(
     Ok((roles, permissions))
 }
 
+/// Single-source RBAC check delegating to the plpgsql `has_permission`
+/// (Phase 1). Used by the HTTP control-plane PEP gates.
+pub async fn has_permission_db(pool: &PgPool, user_id: Uuid, required: &str) -> Result<bool, ApiError> {
+    Ok(sqlx::query_scalar::<_, bool>("SELECT rootcx_system.has_permission($1, $2)")
+        .bind(user_id).bind(required).fetch_one(pool).await?)
+}
+
+/// Control-plane PEP gate: require a specific permission (or admin `*`).
+/// Single source of truth via the plpgsql `has_permission`.
+pub async fn require_perm(pool: &PgPool, user_id: Uuid, perm: &str) -> Result<(), ApiError> {
+    if has_permission_db(pool, user_id, perm).await? { Ok(()) }
+    else { Err(ApiError::Forbidden(format!("permission denied: {perm}"))) }
+}
+
 pub async fn require_admin(pool: &PgPool, user_id: Uuid) -> Result<(), ApiError> {
     let (_, perms) = resolve_permissions(pool, user_id).await?;
     if perms.iter().any(|p| p == "*") { Ok(()) }
     else { Err(ApiError::Forbidden("admin access required".into())) }
 }
 
-/// Effective permissions for an authenticated request.
-/// Delegated token (act present): grant(agent) ∩ perms(delegator).
-/// Direct request: the user's own permissions.
+/// Effective permissions for an authenticated request. HTTP requests are
+/// always direct (delegation is carried via RpcCaller / pre-computed
+/// intersection, never the JWT), so this returns the user's own permissions.
 pub async fn resolve_effective_permissions(pool: &PgPool, identity: &Identity) -> Result<Vec<String>, ApiError> {
-    let Some(actor) = &identity.actor else {
-        let (_, perms) = resolve_permissions(pool, identity.user_id).await?;
-        return Ok(perms);
-    };
-    let agent_uid = actor.sub;
-    let (agent_res, delegator_res) = tokio::join!(
-        resolve_permissions(pool, agent_uid),
-        resolve_permissions(pool, identity.user_id),
-    );
-    let (_, agent_perms) = agent_res?;
-    let (_, delegator_perms) = delegator_res?;
-    Ok(intersect_permissions(&agent_perms, &delegator_perms))
+    let (_, perms) = resolve_permissions(pool, identity.user_id).await?;
+    Ok(perms)
 }
 
 /// Effective permissions for an agent invocation with no Identity in scope

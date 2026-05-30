@@ -2,11 +2,12 @@ use async_trait::async_trait;
 use serde_json::{json, Value as JsonValue};
 use rootcx_types::ToolDescriptor;
 
-use super::{Tool, ToolContext, str_arg, check_permission};
+use super::{Tool, ToolContext, str_arg};
 use crate::manifest::field_type_map;
 use crate::routes::crud::{
     build_where_clause, join_where, table, validate_order, validate_sort_field,
 };
+use crate::sql_proxy::{self, ContextState};
 
 pub struct QueryDataTool;
 
@@ -46,15 +47,24 @@ impl Tool for QueryDataTool {
         let entity = str_arg(&ctx.args, "entity")?;
         let app = ctx.args.get("app").and_then(|v| v.as_str()).unwrap_or(&ctx.app_id);
 
-        check_permission(&ctx.permissions, &format!("app:{app}:{entity}.read"))?;
-
         let types = field_type_map(&ctx.pool, app, entity).await.map_err(|e| e.to_string())?;
         let tbl = table(app, entity);
+
+        // The agent runs on the owner pool (BYPASSRLS); without SET LOCAL ROLE
+        // + GUCs there would be NO enforcement after Phase 4b. user_id is the
+        // responsible human; effective_perms is the pre-computed intersection.
+        let state = ContextState {
+            user_id: ctx.invoker_user_id,
+            is_delegated: true,
+            effective_perms: ctx.permissions.clone(),
+        };
+        let mut tx = sql_proxy::begin_app_tx(&ctx.pool, app, &state, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool")
+            .await.map_err(|e| e.to_string())?;
 
         let query_keys = ["where", "orderBy", "order", "limit", "offset"];
         let has_query = query_keys.iter().any(|k| ctx.args.get(*k).is_some());
 
-        if has_query {
+        let result = if has_query {
             let (mut binds, mut idx) = (Vec::new(), 0usize);
             let mut conditions = Vec::new();
 
@@ -81,18 +91,20 @@ impl Tool for QueryDataTool {
             );
             let mut q = sqlx::query_as::<_, (JsonValue, i64)>(&sql);
             for b in &binds { q = q.bind(b.as_str()); }
-            let rows: Vec<(JsonValue, i64)> = q.fetch_all(&ctx.pool).await.map_err(|e| e.to_string())?;
+            let rows: Vec<(JsonValue, i64)> = q.fetch_all(&mut *tx).await.map_err(|e| e.to_string())?;
 
             let total = rows.first().map(|(_, t)| *t).unwrap_or(0);
             let data: Vec<JsonValue> = rows.into_iter().map(|(r, _)| r).collect();
-            Ok(json!({ "data": data, "total": total }))
+            json!({ "data": data, "total": total })
         } else {
             let sql = format!(
                 "SELECT to_jsonb(t.*) AS row FROM {tbl} t ORDER BY \"created_at\" DESC"
             );
             let rows: Vec<(JsonValue,)> = sqlx::query_as(&sql)
-                .fetch_all(&ctx.pool).await.map_err(|e| e.to_string())?;
-            Ok(JsonValue::Array(rows.into_iter().map(|(r,)| r).collect()))
-        }
+                .fetch_all(&mut *tx).await.map_err(|e| e.to_string())?;
+            JsonValue::Array(rows.into_iter().map(|(r,)| r).collect())
+        };
+        tx.commit().await.map_err(|e| e.to_string())?;
+        Ok(result)
     }
 }

@@ -12,6 +12,46 @@ use tracing::info;
 use super::RuntimeExtension;
 use crate::RuntimeError;
 use crate::routes::SharedRuntime;
+use crate::tools::IntegrationCaller;
+
+/// Privileged self-action dispatched over IPC by an integration worker (no
+/// token replay). Replaces the old `syncAllConnectedUsers` HTTP callback that
+/// required forwarding the user's JWT. The core runs the action with the
+/// context it already owns.
+pub async fn execute_self_action(
+    pool: &PgPool,
+    caller: &dyn IntegrationCaller,
+    app_id: &str,
+    action: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    match action {
+        "syncConnectedUsers" => {
+            let action_name = params.get("actionName").and_then(|v| v.as_str())
+                .ok_or("syncConnectedUsers: missing actionName")?;
+            let users = connections::connected_users(pool, app_id).await.map_err(|e| format!("{e:?}"))?;
+            let mut synced = 0u64;
+            for uid in users {
+                if let Ok(user_uuid) = uid.parse::<uuid::Uuid>()
+                    && caller.call(pool, user_uuid, app_id, action_name, serde_json::json!({})).await.is_ok()
+                {
+                    synced += 1;
+                }
+            }
+            Ok(serde_json::json!({ "ok": true, "synced": synced }))
+        }
+        "triggerAction" => {
+            let action_name = params.get("actionName").and_then(|v| v.as_str())
+                .ok_or("triggerAction: missing actionName")?;
+            let user_id = params.get("userId").and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<uuid::Uuid>().ok())
+                .ok_or("triggerAction: missing/invalid userId")?;
+            let input = params.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            caller.call(pool, user_id, app_id, action_name, input).await
+        }
+        other => Err(format!("unknown self_action: {other}")),
+    }
+}
 
 pub struct IntegrationsExtension;
 

@@ -6,7 +6,6 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::auth::{AuthConfig, jwt};
 use crate::extensions::agents::persistence;
 use crate::ipc::{AgentInvokePayload, LlmModelRef, RpcCaller};
 use crate::{jobs, worker_manager::WorkerManager};
@@ -18,11 +17,10 @@ pub struct SchedulerHandle {
     pub cancel: CancellationToken,
 }
 
-async fn resolve_caller(pool: &PgPool, auth: &AuthConfig, user_id: uuid::Uuid) -> Option<RpcCaller> {
+async fn resolve_caller(pool: &PgPool, user_id: uuid::Uuid) -> Option<RpcCaller> {
     let (email,): (String,) = sqlx::query_as("SELECT email FROM rootcx_system.users WHERE id = $1")
         .bind(user_id).fetch_optional(pool).await.ok()??;
-    let token = jwt::encode_access(auth, user_id, &email).ok()?;
-    Some(RpcCaller { user_id: user_id.to_string(), email, auth_token: Some(token) })
+    Some(RpcCaller { user_id: user_id.to_string(), email, effective_perms: None })
 }
 
 async fn dispatch_agent_job(
@@ -76,6 +74,7 @@ async fn dispatch_agent_job(
         llm,
         invoker_user_id,
         attachments: None,
+        context_token: None,
     };
 
     let system_user = uuid::Uuid::nil();
@@ -119,7 +118,7 @@ async fn dispatch_agent_job(
     }
 }
 
-pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, auth_config: Arc<AuthConfig>) -> SchedulerHandle {
+pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>) -> SchedulerHandle {
     let wake = Arc::new(Notify::new());
     let cancel = CancellationToken::new();
     let w = Arc::clone(&wake);
@@ -168,11 +167,16 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, auth_config: Arc<Au
                         continue;
                     }
 
-                    // Regular job dispatch
-                    let caller = match job_msg.user_id {
-                        Some(uid) => resolve_caller(&pool, &auth_config, uid).await,
-                        None => resolve_caller(&pool, &auth_config, crate::SYSTEM_USER_ID).await,
+                    // Regular job dispatch. Deny-by-default: a job with no owner
+                    // (created_by NULL) has no responsible human, so RLS would
+                    // see no identity. Refuse rather than fall back to admin.
+                    let Some(uid) = job_msg.user_id else {
+                        warn!(msg_id, app_id = %job_msg.app_id,
+                            "job denied: no owner (created_by is NULL)");
+                        let _ = jobs::fail(&pool, msg_id).await;
+                        continue;
                     };
+                    let caller = resolve_caller(&pool, uid).await;
                     if let Err(e) = wm.dispatch_job(&job_msg.app_id, msg_id.to_string(), job_msg.payload, caller).await {
                         warn!(msg_id, "dispatch failed: {e}");
                         let _ = jobs::fail(&pool, msg_id).await;

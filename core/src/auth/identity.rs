@@ -5,25 +5,21 @@ use axum::http::request::Parts;
 use uuid::Uuid;
 
 use super::AuthConfig;
-use super::jwt::{self, ActorClaim};
+use super::jwt;
 use crate::api_error::ApiError;
 use crate::routes::SharedRuntime;
 
 pub struct Identity {
     pub user_id: Uuid,
     pub email: String,
-    pub actor: Option<ActorClaim>,
 }
 
 impl Identity {
-    /// Audit attribution pair `(actor, delegator)`.
-    /// Delegated token: actor = agent (act.sub), delegator = human (user_id).
-    /// Direct request: actor = user, no delegator.
+    /// Audit attribution pair `(actor, delegator)`. HTTP requests are always
+    /// direct now (delegation is carried out-of-band via RpcCaller, not the
+    /// JWT), so the actor is the user and there is no delegator.
     pub fn actor_pair(&self) -> (Option<Uuid>, Option<Uuid>) {
-        match &self.actor {
-            Some(act) => (Some(act.sub), Some(self.user_id)),
-            None => (Some(self.user_id), None),
-        }
+        (Some(self.user_id), None)
     }
 }
 
@@ -45,14 +41,14 @@ impl FromRequestParts<SharedRuntime> for Identity {
         let claims = jwt::decode(&auth_config, token)
             .map_err(|_| ApiError::Unauthorized("invalid token".into()))?;
 
-        // Delegated tokens (act present) don't require email -- they're internal
-        if claims.act.is_none() && claims.email.is_empty() {
+        // Access tokens carry an email; refresh/other tokens are not accepted here.
+        if claims.email.is_empty() {
             return Err(ApiError::Unauthorized("invalid token type".into()));
         }
 
         let user_id: Uuid = claims.sub.parse()
             .map_err(|_| ApiError::Unauthorized("invalid token subject".into()))?;
 
-        Ok(Identity { user_id, email: claims.email, actor: claims.act })
+        Ok(Identity { user_id, email: claims.email })
     }
 }

@@ -259,60 +259,6 @@ async fn crud_legacy_token_works_unchanged() {
     assert_eq!(status, StatusCode::OK, "legacy token (no act) must work as before");
 }
 
-#[tokio::test]
-async fn crud_delegated_token_intersection() {
-    let rt = harness::TestRuntime::boot().await;
-    ensure_admin(&rt).await;
-    let pool = rt.pool();
-
-    let app_id = "delegcrudtest";
-    rt.install(app_id, "records").await;
-    let app_id = app_id.to_string();
-
-    // Register an agent user for this app (like setup_agent_app does)
-    let agent_uid = agent_uid_for(&app_id);
-    sqlx::query("INSERT INTO rootcx_system.users (id, email, is_system) VALUES ($1, $2, true) ON CONFLICT DO NOTHING")
-        .bind(agent_uid).bind(format!("agent+{app_id}@localhost")).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, 'admin') ON CONFLICT DO NOTHING")
-        .bind(agent_uid).execute(pool).await.unwrap();
-
-    // Use admin uid for the delegator (has '*') -- verifies delegated token works at all
-    let admin_uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
-        .fetch_one(pool).await.unwrap();
-    let auth = rt.runtime.auth_config();
-    let admin_delegated = rootcx_core::auth::jwt::mint_delegated(auth, admin_uid, agent_uid).unwrap();
-
-    // Verify token decodes correctly
-    let decoded = rootcx_core::auth::jwt::decode(auth, &admin_delegated).unwrap();
-    assert_eq!(decoded.sub, admin_uid.to_string());
-    assert!(decoded.act.is_some());
-
-    // Admin delegated token can read (intersection of * and * = *)
-    let (status, body) = rt.request_as(Method::GET, &format!("/api/v1/apps/{app_id}/collections/records"), &admin_delegated, None).await;
-    assert_eq!(status, StatusCode::OK, "admin delegated token should read, got: {body}");
-
-    // Now create a no-perm user
-    let noperm_uid = Uuid::new_v4();
-    sqlx::query("INSERT INTO rootcx_system.users (id, email) VALUES ($1, 'noperm@t.local')")
-        .bind(noperm_uid).execute(pool).await.unwrap();
-    // No roles assigned -- empty permissions
-
-    let noperm_delegated = rootcx_core::auth::jwt::mint_delegated(auth, noperm_uid, agent_uid).unwrap();
-
-    // No-perm delegated token DENIED on read (intersection of * and [] = [])
-    let (status, _) = rt.request_as(Method::GET, &format!("/api/v1/apps/{app_id}/collections/records"), &noperm_delegated, None).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "no-perm delegated token should be denied");
-
-    // No-perm delegated token DENIED on create
-    let (status, _) = rt.request_as(
-        Method::POST,
-        &format!("/api/v1/apps/{app_id}/collections/records"),
-        &noperm_delegated,
-        Some(&json!({"first_name":"x","last_name":"y"})),
-    ).await;
-    assert_eq!(status, StatusCode::FORBIDDEN, "delegated token without create perm should be denied");
-}
-
 // ═══════════════════════════════════════════════════════════════════
 // AUDIT CONTEXT CAPTURE
 // ═══════════════════════════════════════════════════════════════════
@@ -464,29 +410,6 @@ async fn worker_permission_lowpriv_invoker_restricts_agent() {
     let denied_perm = format!("app:{app_id}:tasks.write");
     assert!(!rootcx_core::extensions::rbac::policy::has_permission(&effective, &denied_perm),
         "effective must NOT include perms the invoker lacks (CRITICAL: escalation prevention)");
-}
-
-#[tokio::test]
-async fn worker_delegated_token_mint_and_decode_roundtrip() {
-    let rt = harness::TestRuntime::boot().await;
-    let pool = rt.pool();
-    let app_id = setup_agent_app(&rt).await;
-
-    let admin_uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
-        .fetch_one(pool).await.unwrap();
-    let agent_uid = agent_uid_for(&app_id);
-    let auth = rt.runtime.auth_config();
-
-    // Mint (same as worker_manager does)
-    let token = rootcx_core::auth::jwt::mint_delegated(auth, admin_uid, agent_uid).unwrap();
-
-    // Decode (same as identity extractor does)
-    let claims = rootcx_core::auth::jwt::decode(auth, &token).unwrap();
-    assert_eq!(claims.sub, admin_uid.to_string());
-    let act = claims.act.unwrap();
-    assert_eq!(act.sub, agent_uid);
-    assert_eq!(claims.aud.as_deref(), Some("rootcx-core"));
-    assert!(claims.exp - claims.iat <= 120);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -710,55 +633,3 @@ async fn webhook_rpc_method_not_routed_to_agent() {
 // ═══════════════════════════════════════════════════════════════════
 // CROSS-APP ACTION CALLBACK: caller identity, not target identity
 // ═══════════════════════════════════════════════════════════════════
-
-#[tokio::test]
-async fn cross_app_action_callback_uses_caller_identity() {
-    let rt = harness::TestRuntime::boot().await;
-    ensure_admin(&rt).await;
-    let pool = rt.pool();
-
-    // 1. Set up an agent app (the caller)
-    let caller_app_id = setup_agent_app(&rt).await;
-
-    // 2. Set up a regular (non-agent) app with an entity
-    let target_app_id = "content_queue";
-    rt.install(target_app_id, "draft").await;
-
-    // 3. Mint a delegated token using the CALLER agent's identity (the fix)
-    let admin_uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
-        .fetch_one(pool).await.unwrap();
-    let auth = rt.runtime.auth_config();
-    let caller_agent_uid = agent_uid_for(&caller_app_id);
-    let token = rootcx_core::auth::jwt::mint_delegated(auth, admin_uid, caller_agent_uid).unwrap();
-
-    // 4. Use that token to query the TARGET app's data -- should succeed
-    let (status, body) = rt.request_as(
-        Method::POST,
-        &format!("/api/v1/apps/{target_app_id}/collections/draft/query"),
-        &token,
-        Some(&json!({"filters": []})),
-    ).await;
-    assert_ne!(status, StatusCode::FORBIDDEN,
-        "delegated token minted with CALLER agent identity must not 403 on target app; got {status}: {body}");
-    assert_eq!(status, StatusCode::OK,
-        "query should succeed with caller agent delegated token; got {status}: {body}");
-
-    // 5. Negative: mint with TARGET app identity (non-agent, has no role) -- should fail
-    let target_fake_agent_uid = agent_uid_for(target_app_id);
-    // Ensure this user exists but has NO roles (non-agent app has no agent user row)
-    sqlx::query("INSERT INTO rootcx_system.users (id, email, is_system) VALUES ($1, $2, true) ON CONFLICT DO NOTHING")
-        .bind(target_fake_agent_uid).bind(format!("agent+{target_app_id}@localhost")).execute(pool).await.unwrap();
-    // Explicitly ensure no roles
-    sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1")
-        .bind(target_fake_agent_uid).execute(pool).await.unwrap();
-
-    let bad_token = rootcx_core::auth::jwt::mint_delegated(auth, admin_uid, target_fake_agent_uid).unwrap();
-    let (status, _) = rt.request_as(
-        Method::POST,
-        &format!("/api/v1/apps/{target_app_id}/collections/draft/query"),
-        &bad_token,
-        Some(&json!({"filters": []})),
-    ).await;
-    assert_eq!(status, StatusCode::FORBIDDEN,
-        "delegated token minted with TARGET (non-agent) identity must be denied; the old bug minted with target identity");
-}

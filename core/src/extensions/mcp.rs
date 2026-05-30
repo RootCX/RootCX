@@ -129,11 +129,12 @@ struct RegisterRequest {
 }
 
 async fn register_server(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Json(body): Json<RegisterRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
+    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:mcp.manage").await?;
     let name = &body.config.name;
     let config_val = serde_json::to_value(&body.config).map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -162,11 +163,12 @@ async fn register_server(
 }
 
 async fn remove_server(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(name): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = crate::routes::pool(&rt);
+    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:mcp.manage").await?;
     let mcp = rt.mcp_manager().clone();
     mcp.stop_server(&name).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     sync_tools(&pool, &mcp).await;
@@ -176,11 +178,12 @@ async fn remove_server(
 }
 
 async fn start_server(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(name): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
+    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:mcp.manage").await?;
     let mcp = rt.mcp_manager().clone();
 
     if mcp.is_running(&name).await {
@@ -203,11 +206,12 @@ async fn start_server(
 }
 
 async fn stop_server(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(name): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = crate::routes::pool(&rt);
+    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:mcp.manage").await?;
     let mcp = rt.mcp_manager().clone();
     mcp.stop_server(&name).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     set_status(&pool, &name, "stopped").await;

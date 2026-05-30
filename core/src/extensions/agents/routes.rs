@@ -115,12 +115,13 @@ pub struct UpdateAgent {
 }
 
 pub async fn update_agent(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
     Json(body): Json<UpdateAgent>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
+    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:agents.manage").await?;
     let result = sqlx::query(
         "UPDATE rootcx_system.agents SET
             name = COALESCE($2, name),
@@ -136,11 +137,12 @@ pub async fn update_agent(
 }
 
 pub async fn delete_agent(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
+    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:agents.manage").await?;
     let result = sqlx::query("DELETE FROM rootcx_system.agents WHERE app_id = $1")
         .bind(&app_id).execute(&pool).await?;
     if result.rows_affected() == 0 {
@@ -158,7 +160,7 @@ pub async fn invoke_agent(
     let pool = rt.pool().clone();
     let wm = rt.worker_manager().clone();
 
-    // Invocation ACL: caller must have app:{id}:invoke permission (intersection-aware)
+    // Invocation ACL: caller must have app:{id}:invoke permission.
     let caller_perms = crate::extensions::rbac::policy::resolve_effective_permissions(&pool, &identity).await?;
     let invoke_perm = format!("app:{app_id}:invoke");
     if !crate::extensions::rbac::policy::has_permission(&caller_perms, &invoke_perm) {
@@ -210,6 +212,7 @@ pub async fn invoke_agent(
         llm,
         invoker_user_id: Some(identity.user_id),
         attachments,
+        context_token: None,
     };
 
     let persist_ctx = if memory_enabled {
@@ -236,12 +239,13 @@ pub struct PaginationParams {
 fn default_limit() -> i64 { 100 }
 
 pub async fn list_sessions(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
     Query(p): Query<PaginationParams>,
 ) -> Result<Json<Vec<SessionRow>>, ApiError> {
     let pool = routes::pool(&rt);
+    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:agents.manage").await?;
     let limit = p.limit.clamp(1, 1000);
     let offset = p.offset.max(0);
     let rows = sqlx::query_as::<_, SessionRow>(
@@ -254,11 +258,12 @@ pub async fn list_sessions(
 }
 
 pub async fn get_session(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path((app_id, session_id)): Path<(String, String)>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
+    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:agents.manage").await?;
     let session = sqlx::query_as::<_, SessionRow>(
         "SELECT id::text, messages, created_at::text, updated_at::text,
                 title, status, total_tokens, turn_count

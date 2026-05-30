@@ -92,7 +92,6 @@ pub struct WorkerConfig {
     pub working_dir: PathBuf,
     pub credentials: HashMap<String, String>,
     pub runtime_url: String,
-    pub database_url: String,
     pub pool: PgPool,
     pub js_runtime: PathBuf,
     pub prelude_path: PathBuf,
@@ -186,6 +185,17 @@ async fn supervisor_loop(
     let mut sub_invocations: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut invoker_user_ids: HashMap<String, uuid::Uuid> = HashMap::new();
     let mut effective_permissions: HashMap<String, Vec<String>> = HashMap::new();
+    // context_token → (resolved identity, created). The worker echoes the token
+    // on ctx.sql()/ctx.collection() so we resolve the RLS identity here. Tokens
+    // are 256-bit random (not the message id) and pruned on completion/timeout.
+    let mut context_states: HashMap<String, (crate::sql_proxy::ContextState, Instant)> = HashMap::new();
+    let mut msg_tokens: HashMap<String, String> = HashMap::new();
+    // Per-worker SQL-proxy rate limiter (best-effort DoS guard).
+    let mut sql_query_times: Vec<Instant> = Vec::new();
+    // Once the first Rpc/Job/AgentInvoke is dispatched the onStart phase is
+    // over; after that a CollectionOp without a valid token is denied (no
+    // implicit BYPASSRLS). Before it, onStart self-schema access is allowed.
+    let mut onstart_done = false;
     let pending_approvals = config.pending_approvals.clone();
     let mut crash_times: Vec<Instant> = Vec::new();
     let mut restart_count: u32 = 0;
@@ -229,6 +239,11 @@ async fn supervisor_loop(
                                 output_handles.push(spawn_output_reader(stderr, "stderr", log_tx.clone()));
                                 status = WorkerStatus::Running;
                                 restart_count = 0;
+                                // Fresh process: onStart may BYPASSRLS again, and
+                                // any tokens from a previous instance are stale.
+                                onstart_done = false;
+                                context_states.clear();
+                                msg_tokens.clear();
                                 info!(app_id = %app_id, "worker started");
                                 emit_log(&log_tx, "system", "worker started");
                             }
@@ -253,6 +268,8 @@ async fn supervisor_loop(
                         }
                         policy_evaluators.clear();
                         effective_permissions.clear();
+                        context_states.clear();
+                        msg_tokens.clear();
                         status = WorkerStatus::Stopped;
                         crash_times.clear();
                         info!(app_id = %app_id, "worker stopped");
@@ -265,9 +282,12 @@ async fn supervisor_loop(
                             let _ = reply.send(Err("worker not running".into()));
                             continue;
                         }
+                        onstart_done = true;
+                        let token = register_context(&mut context_states, &mut msg_tokens, &id,
+                            crate::sql_proxy::ContextState::from_caller(caller.as_ref()));
                         let rx = pending_rpcs.register(id.clone());
                         if let Some(ref mut w) = ipc_writer
-                            && let Err(e) = w.send(&OutboundMessage::Rpc { id: id.clone(), method, params, caller }).await {
+                            && let Err(e) = w.send(&OutboundMessage::Rpc { id: id.clone(), method, params, caller, context_token: Some(token) }).await {
                                 pending_rpcs.resolve(&id, Err(e.to_string()));
                             }
                         tokio::spawn(async move {
@@ -285,19 +305,23 @@ async fn supervisor_loop(
                             warn!(app_id = %app_id, job_id = %id, "worker not running");
                             continue;
                         }
+                        onstart_done = true;
+                        let token = register_context(&mut context_states, &mut msg_tokens, &id,
+                            crate::sql_proxy::ContextState::from_caller(caller.as_ref()));
                         if let Some(ref mut w) = ipc_writer
-                            && let Err(e) = w.send(&OutboundMessage::Job { id: id.clone(), payload, caller }).await {
+                            && let Err(e) = w.send(&OutboundMessage::Job { id: id.clone(), payload, caller, context_token: Some(token) }).await {
                                 error!(app_id = %app_id, job_id = %id, "send failed: {e}");
                             }
                     }
 
-                    SupervisorCommand::AgentInvoke { payload, stream_tx } => {
+                    SupervisorCommand::AgentInvoke { mut payload, stream_tx } => {
                         if status != WorkerStatus::Running {
                             let _ = stream_tx.send(AgentEvent::Error {
                                 error: "worker not running".into(),
                             }).await;
                             continue;
                         }
+                        onstart_done = true;
                         let invoke_id = payload.invoke_id.clone();
 
                         if let Some(ref supervision) = config.supervision {
@@ -315,7 +339,19 @@ async fn supervisor_loop(
                             }
                             None => vec![],
                         };
-                        effective_permissions.insert(invoke_id.clone(), perms);
+                        effective_permissions.insert(invoke_id.clone(), perms.clone());
+
+                        // Register the agent's delegated identity so any
+                        // ctx.sql()/ctx.collection() the agent JS issues runs
+                        // under RLS with the pre-computed intersection.
+                        payload.context_token = Some(register_context(
+                            &mut context_states, &mut msg_tokens, &invoke_id,
+                            crate::sql_proxy::ContextState {
+                                user_id: payload.invoker_user_id,
+                                is_delegated: true,
+                                effective_perms: perms,
+                            },
+                        ));
 
                         pending_agent_streams.insert(invoke_id.clone(), stream_tx);
                         if let Some(ref mut w) = ipc_writer {
@@ -364,8 +400,10 @@ async fn supervisor_loop(
                                 Some(e) => Err(e),
                                 None => Ok(result.unwrap_or(JsonValue::Null)),
                             });
+                            if let Some(tok) = msg_tokens.remove(&id) { context_states.remove(&tok); }
                         }
                         InboundMessage::JobResult { id, error } => {
+                            if let Some(tok) = msg_tokens.remove(&id) { context_states.remove(&tok); }
                             if let Ok(msg_id) = id.parse::<i64>() {
                                 if let Some(e) = error {
                                     warn!(app_id = %app_id, msg_id, "job failed: {e}");
@@ -400,6 +438,7 @@ async fn supervisor_loop(
                             sub_invocations.remove(&invoke_id);
                             invoker_user_ids.remove(&invoke_id);
                             effective_permissions.remove(&invoke_id);
+                            if let Some(tok) = msg_tokens.remove(&invoke_id) { context_states.remove(&tok); }
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Done { response, tokens }).await;
                             }
@@ -409,6 +448,7 @@ async fn supervisor_loop(
                             sub_invocations.remove(&invoke_id);
                             invoker_user_ids.remove(&invoke_id);
                             effective_permissions.remove(&invoke_id);
+                            if let Some(tok) = msg_tokens.remove(&invoke_id) { context_states.remove(&tok); }
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Error { error }).await;
                             }
@@ -513,16 +553,74 @@ async fn supervisor_loop(
                             }
                             info!(app_id = %app_id, "agent session compacted");
                         }
-                        InboundMessage::CollectionOp { id, op, entity, data } => {
+                        InboundMessage::CollectionOp { id, op, entity, data, context_token } => {
                             let pool = config.pool.clone();
                             let aid = config.app_id.clone();
                             let tx = outbound_tx.clone();
+                            // RLS applies when a user context is resolvable.
+                            // Fail-closed: an unknown token after onStart is a
+                            // deny, NOT an implicit BYPASSRLS.
+                            let state = context_token.as_ref()
+                                .and_then(|t| context_states.get(t))
+                                .map(|(s, _)| s.clone());
+                            let allow_bypass = !onstart_done;
                             tokio::spawn(async move {
-                                let (result, error) = match collection_op(&pool, &aid, &op, &entity, data).await {
+                                let (result, error) = match collection_op(&pool, &aid, &op, &entity, data, state, allow_bypass).await {
                                     Ok(v) => (Some(v), None),
                                     Err(e) => (None, Some(e)),
                                 };
                                 let _ = tx.send(OutboundMessage::CollectionOpResult { id, result, error }).await;
+                            });
+                        }
+                        InboundMessage::SqlQuery { id, context_token, sql, params } => {
+                            // Per-worker rate limit (best-effort DoS guard).
+                            let now = Instant::now();
+                            sql_query_times.retain(|t| now.duration_since(*t) < Duration::from_secs(1));
+                            if sql_query_times.len() >= 100 {
+                                let _ = outbound_tx.send(OutboundMessage::SqlQueryResult {
+                                    id, columns: None, rows: None, row_count: None,
+                                    error: Some("rate limited (100 queries/s)".into()),
+                                }).await;
+                                continue;
+                            }
+                            sql_query_times.push(now);
+                            // Unknown/absent token → default ContextState (user_id
+                            // None) → check_access denies every row. Fail-closed.
+                            let state = context_token.as_ref()
+                                .and_then(|t| context_states.get(t))
+                                .map(|(s, _)| s.clone())
+                                .unwrap_or_default();
+                            let pool = config.pool.clone();
+                            let aid = config.app_id.clone();
+                            let tx = outbound_tx.clone();
+                            tokio::spawn(async move {
+                                let msg = match crate::sql_proxy::run_sql(&pool, &aid, &state, &sql, &params).await {
+                                    Ok(ok) => OutboundMessage::SqlQueryResult {
+                                        id, columns: Some(ok.columns), rows: Some(ok.rows),
+                                        row_count: Some(ok.row_count), error: None,
+                                    },
+                                    Err(e) => OutboundMessage::SqlQueryResult {
+                                        id, columns: None, rows: None, row_count: None, error: Some(e),
+                                    },
+                                };
+                                let _ = tx.send(msg).await;
+                            });
+                        }
+                        InboundMessage::SelfAction { id, action, params } => {
+                            let pool = config.pool.clone();
+                            let aid = config.app_id.clone();
+                            let tx = outbound_tx.clone();
+                            let int_caller = config.integration_caller.clone();
+                            tokio::spawn(async move {
+                                let result = match int_caller {
+                                    Some(c) => crate::extensions::integrations::execute_self_action(&pool, c.as_ref(), &aid, &action, params).await,
+                                    None => Err("self_action unavailable".into()),
+                                };
+                                let msg = match result {
+                                    Ok(v) => OutboundMessage::SelfActionResult { id, result: Some(v), error: None },
+                                    Err(e) => OutboundMessage::SelfActionResult { id, result: None, error: Some(e) },
+                                };
+                                let _ = tx.send(msg).await;
                             });
                         }
                         InboundMessage::Event { name, data } => {
@@ -561,7 +659,12 @@ async fn supervisor_loop(
                                 error: "worker crashed".into(),
                             }).await;
                         }
+                        // The process is gone: every in-flight context is dead.
+                        // The respawned worker re-runs onStart from scratch.
                         effective_permissions.clear();
+                        context_states.clear();
+                        msg_tokens.clear();
+                        onstart_done = false;
 
                         let now = Instant::now();
                         crash_times.retain(|t| now.duration_since(*t) < CRASH_WINDOW);
@@ -648,7 +751,10 @@ async fn spawn_worker(
     info!(app_id = %config.app_id, bin = %bin.display(), entry = %config.entry_point.display(), "spawning worker");
 
     let mut cmd = Command::new(bin);
-    cmd.arg("--preload").arg(&config.prelude_path)
+    // Phase 0a: empty the environment, then add back ONLY the strict allow-list.
+    // The worker must never inherit DATABASE_URL / ROOTCX_JWT_SECRET / etc.
+    cmd.env_clear()
+        .arg("--preload").arg(&config.prelude_path)
         .arg(&config.entry_point)
         .current_dir(&config.working_dir)
         .stdin(Stdio::piped())
@@ -656,6 +762,23 @@ async fn spawn_worker(
         .stderr(Stdio::piped())
         .env("ROOTCX_APP_ID", &config.app_id)
         .env("ROOTCX_RUNTIME_URL", &config.runtime_url);
+    // PATH (bun resolves deps) + HOME/TMPDIR (temp filesystem) are required for
+    // the runtime itself; pass them through if present, nothing else.
+    for key in ["PATH", "HOME", "TMPDIR"] {
+        if let Ok(val) = std::env::var(key) {
+            cmd.env(key, val);
+        }
+    }
+    // The app's own credentials are injected explicitly (never the core's env).
+    for (k, v) in &config.credentials {
+        cmd.env(k, v);
+    }
+
+    // Phase 0d: drop to the dedicated worker UID on Unix so the worker cannot
+    // read /proc/<core>/environ. Best-effort: only when the core runs as root
+    // (production containers) and the user exists; harmless no-op otherwise.
+    #[cfg(unix)]
+    apply_worker_uid(&mut cmd);
 
     let mut child = cmd.group_spawn().map_err(|e| RuntimeError::Worker(format!("spawn failed: {e}")))?;
 
@@ -667,7 +790,6 @@ async fn spawn_worker(
     writer.send(&OutboundMessage::Discover {
         app_id: config.app_id.clone(),
         runtime_url: config.runtime_url.clone(),
-        database_url: config.database_url.clone(),
         credentials: config.credentials.clone(),
         agent_config: config.agent_boot_config.clone(),
     }).await?;
@@ -675,12 +797,82 @@ async fn spawn_worker(
     Ok((child, writer, IpcReader::new(stdout), stderr))
 }
 
-async fn collection_op(pool: &PgPool, app_id: &str, op: &str, entity: &str, data: JsonValue) -> Result<JsonValue, String> {
-    use crate::manifest::{field_type_map, quote_ident};
+/// Dedicated worker UID/GID (matches the `rootcx-worker` user the Dockerfile
+/// creates). Setting these requires the core to run as root; otherwise the
+/// `pre_exec` setuid fails and we skip it (dev/local runs as a normal user).
+#[cfg(unix)]
+const WORKER_UID: u32 = 1001;
+
+#[cfg(unix)]
+fn apply_worker_uid(cmd: &mut Command) {
+    // Only attempt when running as root; a non-root core cannot setuid and
+    // would otherwise fail every spawn (local dev, tests).
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setgid(WORKER_UID) != 0 || libc::setuid(WORKER_UID) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+/// `ctx.collection()` op. With a resolved user context it runs inside an RLS
+/// transaction under `rootcx_app_executor` (filtered by the caller); during
+/// onStart (no context, `allow_bypass`) it runs on the owner pool (BYPASSRLS,
+/// self-schema only). No context after onStart → deny.
+async fn collection_op(
+    pool: &PgPool,
+    app_id: &str,
+    op: &str,
+    entity: &str,
+    data: JsonValue,
+    state: Option<crate::sql_proxy::ContextState>,
+    allow_bypass: bool,
+) -> Result<JsonValue, String> {
+    use crate::manifest::field_type_map;
+
+    // Metadata always via the superuser pool (the RLS executor role cannot read
+    // rootcx_system).
+    let types = field_type_map(pool, app_id, entity).await.map_err(|e| e.to_string())?;
+
+    match state {
+        // RLS-governed path: a real sqlx transaction. It rolls back on drop, and
+        // a failed COMMIT surfaces as an error instead of silently dropping the
+        // write or leaking an open transaction back to the pool.
+        Some(st) => {
+            let mut tx = crate::sql_proxy::begin_app_tx(pool, app_id, &st, st.user_id, None, "collection")
+                .await.map_err(|e| e.to_string())?;
+            match collection_exec(&mut tx, &types, app_id, op, entity, data).await {
+                Ok(v) => { tx.commit().await.map_err(|e| e.to_string())?; Ok(v) }
+                Err(e) => { let _ = tx.rollback().await; Err(e) }
+            }
+        }
+        // onStart self-schema access (no user context): owner pool, BYPASSRLS.
+        None if allow_bypass => {
+            let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
+            collection_exec(&mut conn, &types, app_id, op, entity, data).await
+        }
+        // After onStart, a missing/unknown context is a hard deny (fail-closed).
+        None => Err("collection access denied: no active user context".into()),
+    }
+}
+
+async fn collection_exec(
+    conn: &mut sqlx::PgConnection,
+    types: &std::collections::HashMap<String, String>,
+    app_id: &str,
+    op: &str,
+    entity: &str,
+    data: JsonValue,
+) -> Result<JsonValue, String> {
+    use crate::manifest::quote_ident;
     use crate::routes::crud::{bind_typed, table};
 
     let tbl = table(app_id, entity);
-    let types = field_type_map(pool, app_id, entity).await.map_err(|e| e.to_string())?;
 
     // Read ops use `data` as a where-equality map ({col: value}). Empty {} = full scan.
     if op == "find" || op == "findOne" || op == "list" {
@@ -699,7 +891,7 @@ async fn collection_op(pool: &PgPool, app_id: &str, op: &str, entity: &str, data
             for (k, v) in obj.iter() {
                 query = bind_typed(query, v, types.get(k.as_str()));
             }
-            return match query.fetch_optional(pool).await.map_err(|e| e.to_string())? {
+            return match query.fetch_optional(&mut *conn).await.map_err(|e| e.to_string())? {
                 Some((row,)) => Ok(row),
                 None => Ok(JsonValue::Null),
             };
@@ -710,7 +902,7 @@ async fn collection_op(pool: &PgPool, app_id: &str, op: &str, entity: &str, data
         for (k, v) in obj.iter() {
             query = bind_typed(query, v, types.get(k.as_str()));
         }
-        let rows: Vec<(JsonValue,)> = query.fetch_all(pool).await.map_err(|e| e.to_string())?;
+        let rows: Vec<(JsonValue,)> = query.fetch_all(&mut *conn).await.map_err(|e| e.to_string())?;
         return Ok(JsonValue::Array(rows.into_iter().map(|(r,)| r).collect()));
     }
 
@@ -740,12 +932,31 @@ async fn collection_op(pool: &PgPool, app_id: &str, op: &str, entity: &str, data
         let id = obj.get("id").and_then(|v| v.as_str()).ok_or("id required for update")?;
         query = query.bind(id);
     }
-    let (row,) = query.fetch_one(pool).await.map_err(|e| e.to_string())?;
+    let (row,) = query.fetch_one(&mut *conn).await.map_err(|e| e.to_string())?;
     Ok(row)
 }
 
 fn backoff_delay(restart_count: u32) -> Duration {
     if restart_count <= 1 { Duration::ZERO } else { BACKOFF_BASE * 2u32.saturating_pow(restart_count - 2) }
+}
+
+/// Register a unit of work's resolved identity and return its context token
+/// (echoed by the worker on ctx.sql/ctx.collection). Stale entries are pruned
+/// first — dropping states older than the RPC timeout window and any orphaned
+/// `msg_token` — which reclaims tokens for requests that timed out without ever
+/// sending a completion message (otherwise `msg_tokens` would leak unboundedly).
+fn register_context(
+    states: &mut HashMap<String, (crate::sql_proxy::ContextState, Instant)>,
+    msg_tokens: &mut HashMap<String, String>,
+    msg_id: &str,
+    state: crate::sql_proxy::ContextState,
+) -> String {
+    states.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(60));
+    msg_tokens.retain(|_, tok| states.contains_key(tok));
+    let token = crate::sql_proxy::new_context_token();
+    states.insert(token.clone(), (state, Instant::now()));
+    msg_tokens.insert(msg_id.to_string(), token.clone());
+    token
 }
 
 #[cfg(test)]

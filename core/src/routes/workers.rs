@@ -55,7 +55,7 @@ pub async fn rpc_proxy(
     auth: CallerAuth,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
-    headers: HeaderMap,
+    _headers: HeaderMap,
     Json(body): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let method = body
@@ -71,20 +71,26 @@ pub async fn rpc_proxy(
         .map(String::from)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    let raw_token = headers.get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer ").map(String::from));
-
     let caller = match &auth {
-        CallerAuth::User(identity) => Some(RpcCaller {
-            user_id: identity.user_id.to_string(),
-            email: identity.email.clone(),
-            auth_token: raw_token,
-        }),
+        CallerAuth::User(identity) => {
+            // PEP-hop (Phase 6): the caller must be allowed to invoke this app
+            // before we forward. Core + RLS enforce governance downstream; the
+            // worker is untrusted and never receives a token.
+            let pool = pool(&rt);
+            if !crate::extensions::rbac::policy::has_permission_db(
+                &pool, identity.user_id, &format!("app:{app_id}:invoke"),
+            ).await? {
+                return Err(ApiError::Forbidden(format!("permission denied: app:{app_id}:invoke")));
+            }
+            Some(RpcCaller {
+                user_id: identity.user_id.to_string(),
+                email: identity.email.clone(),
+                effective_perms: None,
+            })
+        }
         CallerAuth::ShareToken(_) | CallerAuth::Anonymous => {
-            // Anonymous / share-scoped call. Require explicit opt-in via
-            // the app's `public` manifest. Authed callers (User) keep the
-            // normal flow — the worker layer enforces RBAC.
+            // Anonymous / share-scoped call. Require explicit opt-in via the
+            // app's `public` manifest; the invoke gate above does not apply.
             let pool = pool(&rt);
             let decl = find_public_rpc(&pool, &app_id, &method).await?.ok_or_else(|| {
                 if matches!(auth, CallerAuth::Anonymous) {
@@ -96,13 +102,10 @@ pub async fn rpc_proxy(
 
             authorize_public_rpc(&decl, &auth, &app_id, &params)?;
 
-            // Pass an anonymous caller down to the worker. The share token
-            // (if any) is forwarded so the RPC code can still inspect it
-            // via the SDK's request context if it wants extra checks.
             Some(RpcCaller {
                 user_id: String::new(),
                 email: String::new(),
-                auth_token: raw_token,
+                effective_perms: None,
             })
         }
     };

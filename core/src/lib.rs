@@ -13,6 +13,7 @@ mod scheduler;
 mod schema;
 mod schema_sync;
 mod secrets;
+mod sql_proxy;
 mod seed;
 pub mod server;
 pub mod tools;
@@ -22,8 +23,6 @@ mod worker;
 mod worker_manager;
 
 pub use error::RuntimeError;
-
-pub(crate) const SYSTEM_USER_ID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-000000000001");
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -90,6 +89,15 @@ impl Runtime {
         info!("runtime boot sequence starting");
 
         let pool = PgPool::connect(&self.database_url).await.map_err(RuntimeError::Database)?;
+
+        // Phase 0d (defense-in-depth): once the pool holds the connection,
+        // scrub the secrets from the core's own environment so a worker that
+        // somehow reads /proc/<core>/environ finds nothing.
+        unsafe {
+            std::env::remove_var("DATABASE_URL");
+            std::env::remove_var("ROOTCX_JWT_SECRET");
+        }
+
         schema::bootstrap(&pool).await?;
         sqlx::migrate!("./migrations").run(&pool).await.map_err(|e| RuntimeError::Schema(e.into()))?;
 
@@ -112,14 +120,14 @@ impl Runtime {
         let runtime_url = format!("http://127.0.0.1:{api_port}");
         let upload_nonces = Arc::new(std::sync::Mutex::new(extensions::storage::nonce::NonceStore::default()));
         let wm = Arc::new(WorkerManager::new(
-            apps_dir, runtime_url.clone(), self.database_url.clone(), self.bun_bin.clone(),
+            apps_dir, runtime_url.clone(), self.bun_bin.clone(),
             Arc::clone(&self.tool_registry), self.pending_approvals.clone(),
             Arc::clone(&secret_manager), Arc::clone(&upload_nonces),
         ));
-        wm.init_self_ref(pool.clone(), Arc::clone(&self.auth_config));
+        wm.init_self_ref();
 
         seed::seed_assistant(&pool, &self.data_dir, &self.bun_bin, &wm, &secret_manager).await?;
-        let scheduler = scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm), Arc::clone(&self.auth_config));
+        let scheduler = scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm));
 
         wm.start_deployed_apps(&pool, &secret_manager).await;
 
