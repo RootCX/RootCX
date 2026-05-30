@@ -1625,7 +1625,7 @@ async fn regression_agent_tool_delegated_context_blocks_excess_perms() {
         is_delegated: true,
         effective_perms: agent_intersection,
     };
-    let mut tx = rootcx_core::sql_proxy::begin_app_tx(pool, "crm", &state, Some(jean), None, "test")
+    let mut tx = rootcx_core::sql_proxy::begin_app_tx(pool, "crm", &state, Some(jean), None, "test", rootcx_core::sql_proxy::TIMEOUT_INTERACTIVE_MS)
         .await.unwrap();
     let contacts: i64 = sqlx::query_scalar("SELECT count(*) FROM crm.contacts")
         .fetch_one(&mut *tx).await.unwrap();
@@ -1731,6 +1731,323 @@ async fn governance_model_integration_action_requires_permission() {
     // Should be 403 (or 404 if integration not installed, both are "denied")
     assert!(status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
         "user without integration permission must be denied, got {status}");
+
+    rt.shutdown().await;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SQL PROXY SAFETY — timeout, row cap, atomicity
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn sql_proxy_timeout_kills_long_running_query() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let (_, uid) = user_with(&rt, "timeout@t.local", &["app:crm:contacts.read"]).await;
+
+    let state = rootcx_core::sql_proxy::ContextState {
+        user_id: Some(uid),
+        is_delegated: false,
+        effective_perms: vec!["app:crm:contacts.read".into()],
+    };
+
+    // Use a 1-second timeout (minimum practical). pg_sleep(5) must be cancelled.
+    let err_msg = {
+        let mut tx = rootcx_core::sql_proxy::begin_app_tx(
+            rt.pool(), "crm", &state, Some(uid), None, "test", 1000,
+        ).await.unwrap();
+        let result = sqlx::query("SELECT pg_sleep(5)")
+            .execute(&mut *tx).await;
+        assert!(result.is_err(), "statement_timeout must cancel pg_sleep");
+        result.unwrap_err().to_string()
+    };
+    assert!(
+        err_msg.contains("cancel") || err_msg.contains("timeout"),
+        "error should mention cancellation: {err_msg}"
+    );
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn sql_proxy_oversized_result_rolls_back() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let (_, uid) = user_with(&rt, "rowcap@t.local", &[
+        "app:crm:contacts.read", "app:crm:contacts.create",
+    ]).await;
+
+    let state = rootcx_core::sql_proxy::ContextState {
+        user_id: Some(uid),
+        is_delegated: false,
+        effective_perms: vec![
+            "app:crm:contacts.read".into(),
+            "app:crm:contacts.create".into(),
+        ],
+    };
+
+    // Insert 1001 rows via generate_series RETURNING. Must exceed MAX_ROWS=1000.
+    let sql = concat!(
+        "INSERT INTO crm.contacts (first_name, last_name, email) ",
+        "SELECT 'bulk', 'test', 'b' || g || '@x.com' ",
+        "FROM generate_series(1,1001) g ",
+        "RETURNING id"
+    );
+    let result = rootcx_core::sql_proxy::run_sql(rt.pool(), "crm", &state, sql, &[]).await;
+    assert!(result.is_err(), "over-limit result must error");
+    assert!(result.unwrap_err().contains("exceeds limit"));
+
+    // Verify rollback: no rows committed (table should be empty).
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM crm.contacts")
+        .fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(count, 0, "over-limit DML RETURNING must roll back, not commit");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn sql_proxy_row_cap_boundary_1000_succeeds() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let (_, uid) = user_with(&rt, "boundary@t.local", &[
+        "app:crm:contacts.read", "app:crm:contacts.create",
+    ]).await;
+
+    let state = rootcx_core::sql_proxy::ContextState {
+        user_id: Some(uid),
+        is_delegated: false,
+        effective_perms: vec![
+            "app:crm:contacts.read".into(),
+            "app:crm:contacts.create".into(),
+        ],
+    };
+
+    // Exactly 1000 rows: must succeed.
+    let sql = concat!(
+        "INSERT INTO crm.contacts (first_name, last_name, email) ",
+        "SELECT 'ok', 'test', 'ok' || g || '@x.com' ",
+        "FROM generate_series(1,1000) g ",
+        "RETURNING id"
+    );
+    let result = rootcx_core::sql_proxy::run_sql(rt.pool(), "crm", &state, sql, &[]).await;
+    assert!(result.is_ok(), "exactly 1000 rows must succeed: {:?}", result.err());
+    assert_eq!(result.unwrap().row_count, 1000);
+
+    // Verify committed.
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM crm.contacts")
+        .fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(count, 1000, "1000 rows must be committed");
+    rt.shutdown().await;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CHANNEL DELEGATION REVOCATION
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn t3_11b_channel_unlink_revokes_delegation() {
+    let rt = harness::TestRuntime::boot().await;
+    let pool = rt.pool();
+    let user_id = create_user(pool, "chan-unlink@t.local").await;
+    register_agent(pool, "support").await;
+    let agent_uid = rootcx_core::extensions::agents::agent_user_id("support");
+
+    let channel_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let trigger_ref = rootcx_core::extensions::channels::channel_delegation_ref(channel_id, user_id);
+
+    // Simulate link: create delegation with deterministic trigger_ref (same as try_complete_link)
+    rootcx_core::delegations::create(pool, user_id, agent_uid, "channel", Some(trigger_ref)).await.unwrap();
+    assert!(rootcx_core::delegations::is_valid(pool, user_id, agent_uid).await.unwrap(),
+        "delegation must be valid after channel link");
+
+    // Simulate unlink: revoke_by_trigger with the same deterministic ref
+    rootcx_core::delegations::revoke_by_trigger(pool, "channel", trigger_ref).await.unwrap();
+    assert!(!rootcx_core::delegations::is_valid(pool, user_id, agent_uid).await.unwrap(),
+        "delegation must be invalid after channel unlink (revoke_by_trigger)");
+
+    rt.shutdown().await;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// UNDOCUMENTED BEHAVIORS — now documented and tested
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn public_caller_deny_all_on_data() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    rt.create("crm", "contacts", &rec()).await;
+    let pool = rt.pool();
+
+    // Simulate the exact ContextState a public/share-token caller produces:
+    // user_id="" parses to None, is_delegated=false, effective_perms=[]
+    let public_state = rootcx_core::sql_proxy::ContextState {
+        user_id: "".parse().ok(), // None (empty string fails UUID parse)
+        is_delegated: false,
+        effective_perms: vec![],
+    };
+    assert!(public_state.user_id.is_none(), "precondition: empty string must parse to None");
+
+    // ctx.sql: RLS denies all rows (check_access sees NULL user_id -> FALSE)
+    let result = rootcx_core::sql_proxy::run_sql(
+        pool, "crm", &public_state, "SELECT * FROM crm.contacts", &[],
+    ).await;
+    assert!(result.is_ok(), "query executes without error");
+    assert_eq!(result.unwrap().row_count, 0, "public caller must see 0 rows via ctx.sql");
+
+    // ctx.collection after onStart: state=Some but user_id=None -> RLS tx denies
+    let coll_result = rootcx_core::worker::collection_op_test(
+        pool, "crm", "find", "contacts", json!({}), Some(public_state), false,
+    ).await;
+    assert!(coll_result.is_ok(), "collection_op executes");
+    let rows = coll_result.unwrap();
+    assert_eq!(rows.as_array().map(|a| a.len()), Some(0),
+        "public caller must see 0 rows via ctx.collection after onStart");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn integration_worker_deny_all_on_sql_but_onstart_bypass_works() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    rt.create("crm", "contacts", &rec()).await;
+    let pool = rt.pool();
+
+    // Integration caller: None -> ContextState::default()
+    let integration_state = rootcx_core::sql_proxy::ContextState::from_caller(None);
+    assert!(integration_state.user_id.is_none(), "precondition: None caller -> None user_id");
+    assert!(!integration_state.is_delegated, "precondition: not delegated");
+
+    // ctx.sql with integration identity: deny-all (0 rows)
+    let sql_result = rootcx_core::sql_proxy::run_sql(
+        pool, "crm", &integration_state, "SELECT * FROM crm.contacts", &[],
+    ).await;
+    assert!(sql_result.is_ok(), "query executes without error");
+    assert_eq!(sql_result.unwrap().row_count, 0,
+        "integration worker (caller: None) must see 0 rows via ctx.sql");
+
+    // ctx.collection after onStart with no state: hard deny
+    let denied = rootcx_core::worker::collection_op_test(
+        pool, "crm", "find", "contacts", json!({}), None, false,
+    ).await;
+    assert!(denied.is_err(), "collection without context after onStart must deny");
+
+    // ctx.collection DURING onStart (allow_bypass=true): BYPASSRLS, full access
+    let bypass = rootcx_core::worker::collection_op_test(
+        pool, "crm", "find", "contacts", json!({}), None, true,
+    ).await;
+    assert!(bypass.is_ok(), "onStart collection must succeed with BYPASSRLS");
+    assert_eq!(bypass.unwrap().as_array().map(|a| a.len()), Some(1),
+        "onStart BYPASSRLS sees all rows");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn rls_per_entity_not_per_row_same_perm_same_rows() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let pool = rt.pool();
+
+    // Insert 3 rows (as superuser/owner pool)
+    for name in ["Alice", "Bob", "Carol"] {
+        rt.create("crm", "contacts", &json!({
+            "first_name": name, "last_name": "Test", "email": format!("{name}@t.local")
+        })).await;
+    }
+
+    // Two distinct users, both with contacts.read
+    let alice_uid = db_user(pool, "alice-b3@t.local", &["app:crm:contacts.read"]).await;
+    let bob_uid = db_user(pool, "bob-b3@t.local", &["app:crm:contacts.read"]).await;
+    assert_ne!(alice_uid, bob_uid, "precondition: different users");
+
+    // Both must see the same row count (all 3 rows, no ownership filter)
+    let alice_count = count_as(pool, Some(alice_uid), false, "").await;
+    let bob_count = count_as(pool, Some(bob_uid), false, "").await;
+    assert_eq!(alice_count, 3, "alice with contacts.read sees all 3 rows");
+    assert_eq!(bob_count, 3, "bob with contacts.read sees all 3 rows");
+    assert_eq!(alice_count, bob_count,
+        "per-entity RLS: same permission = same rows regardless of user identity");
+
+    rt.shutdown().await;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// READ-SURFACE HARDENING
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn introspection_system_schemas_require_admin() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+
+    let (tok, _) = user_with(&rt, "nonadmin-intro@t.local", &["app:crm:contacts.read"]).await;
+
+    // Non-admin: system schema tables -> 403
+    let system_schemas = &[
+        ("/api/v1/db/schemas/rootcx_system/tables", "rootcx_system"),
+        ("/api/v1/db/schemas/pg_catalog/tables", "pg_catalog"),
+        ("/api/v1/db/schemas/information_schema/tables", "information_schema"),
+    ];
+    for (path, schema) in system_schemas {
+        let (status, _) = rt.request_as(Method::GET, path, &tok, None).await;
+        assert_eq!(status, StatusCode::FORBIDDEN,
+            "non-admin must be denied list_tables for {schema}, got {status}");
+    }
+
+    // Non-admin: list_schemas must NOT include rootcx_system
+    let (status, body) = rt.request_as(Method::GET, "/api/v1/db/schemas", &tok, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let schemas: Vec<&str> = body.as_array().unwrap().iter()
+        .filter_map(|v| v.get("schema_name").and_then(|s| s.as_str()))
+        .collect();
+    assert!(!schemas.contains(&"rootcx_system"),
+        "non-admin list_schemas must filter rootcx_system, got: {schemas:?}");
+    assert!(schemas.contains(&"crm"),
+        "non-admin must still see app schemas, got: {schemas:?}");
+
+    // Admin: system schemas accessible + rootcx_system visible in list
+    let (status, _) = rt.request_as(Method::GET,
+        "/api/v1/db/schemas/rootcx_system/tables", &rt.token, None).await;
+    assert_eq!(status, StatusCode::OK,
+        "admin must access rootcx_system tables");
+
+    let (_, body) = rt.request_as(Method::GET, "/api/v1/db/schemas", &rt.token, None).await;
+    let schemas: Vec<&str> = body.as_array().unwrap().iter()
+        .filter_map(|v| v.get("schema_name").and_then(|s| s.as_str()))
+        .collect();
+    assert!(schemas.contains(&"rootcx_system"),
+        "admin list_schemas must include rootcx_system, got: {schemas:?}");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_read_endpoints_require_admin() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+
+    let (tok, _) = user_with(&rt, "nonadmin-mcp@t.local", &["app:crm:contacts.read"]).await;
+
+    // Non-admin: list + get -> 403
+    let (status, _) = rt.request_as(Method::GET, "/api/v1/mcp-servers", &tok, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN,
+        "non-admin must be denied MCP list_servers, got {status}");
+
+    let (status, _) = rt.request_as(Method::GET, "/api/v1/mcp-servers/nonexistent", &tok, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN,
+        "non-admin must be denied MCP get_server, got {status}");
+
+    // Admin: list succeeds (empty list is fine)
+    let (status, _) = rt.request_as(Method::GET, "/api/v1/mcp-servers", &rt.token, None).await;
+    assert_eq!(status, StatusCode::OK,
+        "admin must access MCP list_servers");
 
     rt.shutdown().await;
 }

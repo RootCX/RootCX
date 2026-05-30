@@ -3090,3 +3090,33 @@ async fn delegate_requires_admin() {
 
     rt.shutdown().await;
 }
+
+#[tokio::test]
+async fn db_query_search_path_does_not_leak_across_pool() {
+    let rt = TestRuntime::boot().await;
+    rt.install("sptest", "items").await;
+
+    // Run a query targeting the app schema to set search_path
+    let (s, _) = rt.post_json("/api/v1/db/query", &json!({
+        "sql": "SELECT current_setting('search_path') AS sp",
+        "schema": "app_sptest"
+    })).await;
+    assert_eq!(s, 200);
+
+    // Subsequent query without schema must see default search_path (no leak).
+    // With the pool size typically small in tests, we'd reuse the same connection.
+    // Run several times to increase probability of hitting the same connection.
+    for _ in 0..5 {
+        let (s, body) = rt.post_json("/api/v1/db/query", &json!({
+            "sql": "SELECT current_setting('search_path') AS sp"
+        })).await;
+        assert_eq!(s, 200);
+        let sp = body["rows"][0][0].as_str().unwrap_or("");
+        assert!(
+            !sp.contains("app_sptest"),
+            "search_path leaked across pool connections: {sp}"
+        );
+    }
+
+    rt.shutdown().await;
+}

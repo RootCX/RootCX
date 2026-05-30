@@ -14,7 +14,15 @@ use uuid::Uuid;
 use crate::manifest::quote_ident;
 use crate::routes::introspection::pg_val;
 
-const MAX_ROWS: usize = 10_000;
+const MAX_ROWS: usize = 1_000;
+
+/// Timeout tiers (milliseconds). Postgres cancels the statement at the limit.
+/// - INTERACTIVE: ctx.sql, HTTP CRUD, worker collection ops (user-facing, fast)
+/// - AGENT_TOOL: AI agent tool calls (complex joins, larger scans)
+/// Citation: Supabase uses 8s for API, 60s for functions; PostgREST default 10s.
+/// We use 8s/30s to match Supabase API/function pattern.
+pub const TIMEOUT_INTERACTIVE_MS: u32 = 8_000;
+pub const TIMEOUT_AGENT_TOOL_MS: u32 = 30_000;
 
 /// Resolved identity for a unit of work, looked up from a `context_token`.
 #[derive(Debug, Clone, Default)]
@@ -70,10 +78,11 @@ pub async fn set_rls_context(
 }
 
 /// Open a transaction primed for RLS-governed app access: scoped search_path,
-/// the RLS identity GUCs, the audit attribution GUCs, then a drop to the
-/// non-superuser executor role. Every set_config runs while still superuser
-/// (the executor has it revoked). Callers run their statements on the returned
-/// tx and commit.
+/// the RLS identity GUCs, the audit attribution GUCs, statement_timeout,
+/// idle_in_transaction_session_timeout, then a drop to the non-superuser
+/// executor role. Every SET LOCAL runs while still superuser (the executor has
+/// set_config revoked). Callers run their statements on the returned tx and
+/// commit.
 pub async fn begin_app_tx<'a>(
     pool: &'a PgPool,
     app_schema: &str,
@@ -81,12 +90,18 @@ pub async fn begin_app_tx<'a>(
     audit_actor: Option<Uuid>,
     audit_delegator: Option<Uuid>,
     trigger_ref: &str,
+    timeout_ms: u32,
 ) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query(&format!("SET LOCAL search_path TO {}, public", quote_ident(app_schema)))
         .execute(&mut *tx).await?;
+    // Timeout + zombie tx protection. SET LOCAL scopes to this tx only.
+    sqlx::query(&format!("SET LOCAL statement_timeout = '{timeout_ms}'"))
+        .execute(&mut *tx).await?;
+    sqlx::query("SET LOCAL idle_in_transaction_session_timeout = '30000'")
+        .execute(&mut *tx).await?;
     set_rls_context(&mut tx, state).await?;
-    crate::extensions::audit::set_context(&mut tx, audit_actor, audit_delegator, trigger_ref).await;
+    crate::extensions::audit::set_context(&mut tx, audit_actor, audit_delegator, trigger_ref).await?;
     sqlx::query("SET LOCAL ROLE rootcx_app_executor").execute(&mut *tx).await?;
     Ok(tx)
 }
@@ -98,16 +113,23 @@ pub async fn begin_app_tx<'a>(
 /// no `set_config`. A real query never starts with these keywords, so there are
 /// no false positives.
 const BLOCKED_PREFIXES: &[&str] =
-    &["CREATE", "DROP", "ALTER", "TRUNCATE", "GRANT", "REVOKE", "REINDEX", "VACUUM", "COPY", "SET ", "RESET", "DO "];
+    &["CREATE", "DROP", "ALTER", "TRUNCATE", "GRANT", "REVOKE", "REINDEX", "VACUUM", "COPY", "SET", "RESET", "DO"];
 
 fn validate_sql(sql: &str) -> Result<(), String> {
     let head = sql.trim_start().to_ascii_uppercase();
-    match BLOCKED_PREFIXES.iter().find(|kw| head.starts_with(*kw)) {
-        Some(kw) => Err(format!("statement not allowed: {}", kw.trim())),
-        None => Ok(()),
+    for kw in BLOCKED_PREFIXES {
+        if head.starts_with(kw) {
+            let rest = &head[kw.len()..];
+            // Match keyword alone or followed by whitespace/dollar (DO$$...)
+            if rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace()) || rest.starts_with('$') {
+                return Err(format!("statement not allowed: {kw}"));
+            }
+        }
     }
+    Ok(())
 }
 
+#[derive(Debug)]
 pub struct SqlOk {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<JsonValue>>,
@@ -125,9 +147,7 @@ pub async fn run_sql(
 ) -> Result<SqlOk, String> {
     validate_sql(sql)?;
 
-    // rootcx_system is excluded from the search_path: the app cannot reach
-    // system tables by unqualified name, and the role lacks SELECT on them.
-    let mut tx = begin_app_tx(pool, app_schema, state, state.user_id, None, "app_sql")
+    let mut tx = begin_app_tx(pool, app_schema, state, state.user_id, None, "app_sql", TIMEOUT_INTERACTIVE_MS)
         .await.map_err(|e| e.to_string())?;
 
     let mut q = sqlx::query(sql);
@@ -145,14 +165,14 @@ pub async fn run_sql(
     }
 
     let rows = q.fetch_all(&mut *tx).await.map_err(|e| e.to_string())?;
-    tx.commit().await.map_err(|e| e.to_string())?;
 
     if rows.is_empty() {
+        tx.commit().await.map_err(|e| e.to_string())?;
         return Ok(SqlOk { columns: vec![], rows: vec![], row_count: 0 });
     }
-    // Never silently truncate: an over-large result is an explicit error so the
-    // app paginates rather than processing a partial set as if complete.
+    // Row cap BEFORE commit: over-large DML RETURNING rolls back, not commit+error.
     if rows.len() > MAX_ROWS {
+        let _ = tx.rollback().await;
         return Err(format!("query returned {} rows, exceeds limit {MAX_ROWS}; add LIMIT or paginate", rows.len()));
     }
     let columns: Vec<String> = rows[0].columns().iter().map(|c: &PgColumn| c.name().to_string()).collect();
@@ -160,6 +180,7 @@ pub async fn run_sql(
         .iter()
         .map(|row| row.columns().iter().enumerate().map(|(i, col)| pg_val(row, i, col.type_info())).collect())
         .collect();
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(SqlOk { row_count: json_rows.len(), columns, rows: json_rows })
 }
 
@@ -178,7 +199,10 @@ mod tests {
             "ALTER TABLE x ADD c int",
             "TRUNCATE contacts",
             "DO $$ BEGIN PERFORM 1; END $$",
+            "DO$$BEGIN PERFORM 1; END$$",
             "SET ROLE rootcx_owner",
+            "SET\tLOCAL statement_timeout = '0'",
+            "SET\nROLE postgres",
             "RESET ROLE",
         ] {
             assert!(validate_sql(bad).is_err(), "should reject: {bad}");
@@ -195,6 +219,8 @@ mod tests {
             "WITH c AS (SELECT 1) SELECT * FROM c",
             "SELECT * FROM t WHERE name = 'a;b'",     // ';' in a literal: not our concern
             "SELECT ';' AS x FROM t",                  // and never a false positive
+            "SELECT * FROM settings WHERE key = $1",   // "SET" prefix in table name
+            "SELECT * FROM resets",                     // "RESET" prefix in table name
         ] {
             assert!(validate_sql(ok).is_ok(), "should allow: {ok}");
         }

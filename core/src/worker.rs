@@ -849,7 +849,7 @@ async fn collection_op(
         // a failed COMMIT surfaces as an error instead of silently dropping the
         // write or leaking an open transaction back to the pool.
         Some(st) => {
-            let mut tx = crate::sql_proxy::begin_app_tx(pool, app_id, &st, st.user_id, None, "collection")
+            let mut tx = crate::sql_proxy::begin_app_tx(pool, app_id, &st, st.user_id, None, "collection", crate::sql_proxy::TIMEOUT_INTERACTIVE_MS)
                 .await.map_err(|e| e.to_string())?;
             match collection_exec(&mut tx, &types, app_id, op, entity, data).await {
                 Ok(v) => { tx.commit().await.map_err(|e| e.to_string())?; Ok(v) }

@@ -93,10 +93,11 @@ pub async fn start_registered_servers(pool: &PgPool, secrets: &SecretManager, mc
 }
 
 async fn list_servers(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<JsonValue>>, ApiError> {
     let pool = crate::routes::pool(&rt);
+    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:mcp.manage").await?;
     let rows: Vec<(String, JsonValue, String)> = sqlx::query_as(
         "SELECT name, config, status FROM rootcx_system.mcp_servers ORDER BY name"
     ).fetch_all(&pool).await?;
@@ -107,11 +108,12 @@ async fn list_servers(
 }
 
 async fn get_server(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(name): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = crate::routes::pool(&rt);
+    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:mcp.manage").await?;
     let (name, config, status): (String, JsonValue, String) = sqlx::query_as(
         "SELECT name, config, status FROM rootcx_system.mcp_servers WHERE name = $1"
     ).bind(&name).fetch_optional(&pool).await?
