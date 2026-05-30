@@ -304,6 +304,84 @@ async fn db_rls_filters_by_guc_identity() {
     rt.shutdown().await;
 }
 
+// ── Cross-agent invoke gate (TEST 3.13) ───────────────────────────────
+
+#[tokio::test]
+async fn sub_agent_invoke_requires_invoke_perm() {
+    let rt = harness::TestRuntime::boot().await;
+    // Effective authority (grant∩human) lacks app:billing:invoke → the agent
+    // must NOT be able to invoke the billing agent. The gate fires before any
+    // dispatch or I/O.
+    let ctx = rootcx_core::tools::ToolContext {
+        pool: rt.pool().clone(),
+        app_id: "crm".into(),
+        user_id: Uuid::new_v4(),
+        invoker_user_id: Some(Uuid::new_v4()),
+        permissions: vec!["app:crm:contacts.read".into()],
+        args: json!({"app_id": "billing", "message": "hi"}),
+        agent_dispatch: None,
+        integration_caller: None,
+        action_caller: None,
+        stream_tx: None,
+    };
+    let tool = rootcx_core::tools::invoke_agent::InvokeAgentTool;
+    let err = rootcx_core::tools::Tool::execute(&tool, &ctx).await.unwrap_err();
+    assert!(err.contains("app:billing:invoke"), "sub-agent invoke must require invoke perm: {err}");
+    rt.shutdown().await;
+}
+
+// ── SelfAction scope (P0 checklist: no arbitrary user targeting) ───────
+
+struct RecordingCaller {
+    last_user: std::sync::Mutex<Option<Uuid>>,
+}
+
+#[async_trait::async_trait]
+impl rootcx_core::tools::IntegrationCaller for RecordingCaller {
+    async fn call(
+        &self, _pool: &sqlx::PgPool, user_id: Uuid,
+        _integration_id: &str, _action_id: &str, _input: Value,
+    ) -> Result<Value, String> {
+        *self.last_user.lock().unwrap() = Some(user_id);
+        Ok(json!({"ok": true}))
+    }
+}
+
+#[tokio::test]
+async fn self_action_is_scoped_to_requester() {
+    let rt = harness::TestRuntime::boot().await;
+    let pool = rt.pool();
+    let caller = RecordingCaller { last_user: std::sync::Mutex::new(None) };
+
+    let jean = Uuid::new_v4();
+    sqlx::query("INSERT INTO rootcx_system.users (id, email) VALUES ($1, 'jean-sa@t.local')")
+        .bind(jean).execute(pool).await.unwrap();
+    let victim = Uuid::new_v4();
+
+    // triggerAction acts as the REQUESTER, ignoring any userId in params.
+    let r = rootcx_core::extensions::integrations::execute_self_action(
+        pool, &caller, "gmail", "triggerAction",
+        json!({"actionName": "x", "userId": victim.to_string()}), Some(jean),
+    ).await;
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(*caller.last_user.lock().unwrap(), Some(jean),
+        "must act as the requester, never the arbitrary params.userId");
+
+    // No requester (absent/unknown context token) → hard deny.
+    let r = rootcx_core::extensions::integrations::execute_self_action(
+        pool, &caller, "gmail", "triggerAction", json!({"actionName": "x"}), None,
+    ).await;
+    assert!(r.is_err(), "no context → deny");
+
+    // syncConnectedUsers is admin-only (matches the old x-run-as admin gate).
+    let r = rootcx_core::extensions::integrations::execute_self_action(
+        pool, &caller, "gmail", "syncConnectedUsers", json!({"actionName": "x"}), Some(jean),
+    ).await;
+    assert!(r.is_err() && r.as_ref().unwrap_err().contains("admin"),
+        "non-admin syncConnectedUsers must be refused: {r:?}");
+    rt.shutdown().await;
+}
+
 /// Count crm.contacts as a given RLS identity by posing the GUCs + executor role.
 async fn count_as(pool: &sqlx::PgPool, user: Option<Uuid>, delegated: bool, perms: &str) -> i64 {
     let mut tx = pool.begin().await.unwrap();

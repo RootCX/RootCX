@@ -242,9 +242,13 @@ pub enum InboundMessage {
         params: Vec<JsonValue>,
     },
     /// Privileged self-action a worker can invoke without holding a token
-    /// (replaces the old token-bearing HTTP callbacks for integrations).
+    /// (replaces the old token-bearing HTTP callbacks for integrations). The
+    /// `context_token` identifies the requesting user so the core can scope the
+    /// action to them (no arbitrary cross-user targeting).
     SelfAction {
         id: String,
+        #[serde(default)]
+        context_token: Option<String>,
         action: String,
         #[serde(default)]
         params: JsonValue,

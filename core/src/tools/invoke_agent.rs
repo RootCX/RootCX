@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value as JsonValue};
 use rootcx_types::ToolDescriptor;
 
-use super::{Tool, ToolContext, str_arg};
+use super::{Tool, ToolContext, check_permission, str_arg};
 
 pub struct InvokeAgentTool;
 
@@ -26,6 +26,10 @@ impl Tool for InvokeAgentTool {
     async fn execute(&self, ctx: &ToolContext) -> Result<JsonValue, String> {
         let target = str_arg(&ctx.args, "app_id")?;
         let message = str_arg(&ctx.args, "message")?;
+        // PEP-hop: the effective authority (grant(agent) ∩ perms(human)) must
+        // include invoke rights on the target, else the human could trigger an
+        // agent they cannot invoke. ctx.permissions is that intersection.
+        check_permission(&ctx.permissions, &format!("app:{target}:invoke"))?;
         let dispatch = ctx.agent_dispatch.as_ref().ok_or("sub-agent dispatch unavailable")?;
         let response = dispatch.dispatch(&ctx.pool, &ctx.app_id, target, message, ctx.stream_tx.clone(), ctx.invoker_user_id).await?;
         Ok(json!({ "agent": target, "response": response }))

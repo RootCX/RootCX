@@ -24,9 +24,18 @@ pub async fn execute_self_action(
     app_id: &str,
     action: &str,
     params: serde_json::Value,
+    requester: Option<uuid::Uuid>,
 ) -> Result<serde_json::Value, String> {
+    // The requester is resolved from the IPC context_token. It is the only
+    // identity an action may act as — a worker can never name an arbitrary user.
+    let requester = requester.ok_or("self_action requires an authenticated context")?;
     match action {
         "syncConnectedUsers" => {
+            // Acting for ALL connected users is privileged. The old HTTP path
+            // gated this on admin (connected-users + x-run-as both admin-only);
+            // preserve that exactly via the shared require_admin helper.
+            crate::extensions::rbac::policy::require_admin(pool, requester)
+                .await.map_err(|_| "syncConnectedUsers requires admin".to_string())?;
             let action_name = params.get("actionName").and_then(|v| v.as_str())
                 .ok_or("syncConnectedUsers: missing actionName")?;
             let users = connections::connected_users(pool, app_id).await.map_err(|e| format!("{e:?}"))?;
@@ -41,13 +50,11 @@ pub async fn execute_self_action(
             Ok(serde_json::json!({ "ok": true, "synced": synced }))
         }
         "triggerAction" => {
+            // Scoped to the requester: runs the action for themselves only.
             let action_name = params.get("actionName").and_then(|v| v.as_str())
                 .ok_or("triggerAction: missing actionName")?;
-            let user_id = params.get("userId").and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<uuid::Uuid>().ok())
-                .ok_or("triggerAction: missing/invalid userId")?;
             let input = params.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
-            caller.call(pool, user_id, app_id, action_name, input).await
+            caller.call(pool, requester, app_id, action_name, input).await
         }
         other => Err(format!("unknown self_action: {other}")),
     }
