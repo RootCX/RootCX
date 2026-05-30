@@ -561,8 +561,8 @@ async fn supervisor_loop(
                             // Fail-closed: an unknown token after onStart is a
                             // deny, NOT an implicit BYPASSRLS.
                             let state = context_token.as_ref()
-                                .and_then(|t| context_states.get(t))
-                                .map(|(s, _)| s.clone());
+                                .and_then(|t| context_states.get_mut(t))
+                                .map(|(s, ts)| { *ts = Instant::now(); s.clone() });
                             let allow_bypass = !onstart_done;
                             tokio::spawn(async move {
                                 let (result, error) = match collection_op(&pool, &aid, &op, &entity, data, state, allow_bypass).await {
@@ -587,8 +587,8 @@ async fn supervisor_loop(
                             // Unknown/absent token → default ContextState (user_id
                             // None) → check_access denies every row. Fail-closed.
                             let state = context_token.as_ref()
-                                .and_then(|t| context_states.get(t))
-                                .map(|(s, _)| s.clone())
+                                .and_then(|t| context_states.get_mut(t))
+                                .map(|(s, ts)| { *ts = Instant::now(); s.clone() })
                                 .unwrap_or_default();
                             let pool = config.pool.clone();
                             let aid = config.app_id.clone();
