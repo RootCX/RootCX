@@ -792,6 +792,17 @@ async fn db_query_rejects_dml() {
     rt.shutdown().await;
 }
 
+#[tokio::test]
+async fn db_query_rejects_writable_cte() {
+    let rt = TestRuntime::boot().await;
+    rt.install("wctx", "targets").await;
+    let sql = "WITH x AS (INSERT INTO wctx.targets (id) VALUES (gen_random_uuid()) RETURNING *) SELECT * FROM x";
+    let (s, body) = rt.post_json("/api/v1/db/query", &json!({"sql": sql})).await;
+    assert_eq!(s, 400, "writable CTE must be rejected: {body}");
+    assert!(body["error"].as_str().unwrap().contains("read-only"), "expected read-only error, got: {body}");
+    rt.shutdown().await;
+}
+
 // ── Query Records ──
 
 #[tokio::test]

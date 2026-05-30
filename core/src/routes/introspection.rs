@@ -147,7 +147,7 @@ pub async fn execute_query(
     }
 
     let mut tx = pool.begin().await.map_err(|e| ApiError::Internal(e.to_string()))?;
-    sqlx::query("SET LOCAL default_transaction_read_only = ON").execute(&mut *tx).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    sqlx::query("SET TRANSACTION READ ONLY").execute(&mut *tx).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     sqlx::query("SET LOCAL statement_timeout = '120000'").execute(&mut *tx).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     sqlx::query("SET LOCAL idle_in_transaction_session_timeout = '120000'").execute(&mut *tx).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
