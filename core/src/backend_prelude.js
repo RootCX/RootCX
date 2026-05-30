@@ -195,8 +195,9 @@ function _sqlQuery(contextToken, sql, params) {
   });
 }
 
-// Privileged self-action over IPC (integrations). No token replay.
-function _selfAction(action, params) {
+// Privileged self-action over IPC (integrations). No token replay; the
+// contextToken lets the core scope the action to the requesting user.
+function _selfAction(contextToken, action, params) {
   const id = `sa_${++_saSeq}`;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -206,7 +207,7 @@ function _selfAction(action, params) {
       }
     }, 30_000);
     _pendingSelf.set(id, { resolve, reject, timer });
-    _transport.send({ type: "self_action", id, action, params: params ?? {} });
+    _transport.send({ type: "self_action", id, context_token: contextToken, action, params: params ?? {} });
   });
 }
 
@@ -223,7 +224,7 @@ function _makeCtx(contextToken) {
     emit: globalThis.emit,
     uploadFile: _uploadFile,
     sql: (sql, params = []) => _sqlQuery(contextToken, sql, params),
-    selfAction: (action, params = {}) => _selfAction(action, params),
+    selfAction: (action, params = {}) => _selfAction(contextToken, action, params),
     collection(entity) {
       return {
         insert: (data) => _collectionOp(contextToken, "insert", entity, data),

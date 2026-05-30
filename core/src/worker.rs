@@ -606,14 +606,19 @@ async fn supervisor_loop(
                                 let _ = tx.send(msg).await;
                             });
                         }
-                        InboundMessage::SelfAction { id, action, params } => {
+                        InboundMessage::SelfAction { id, context_token, action, params } => {
                             let pool = config.pool.clone();
                             let aid = config.app_id.clone();
                             let tx = outbound_tx.clone();
                             let int_caller = config.integration_caller.clone();
+                            // The requesting user is resolved from the token, so
+                            // the action is scoped to them (never an arbitrary user).
+                            let requester = context_token.as_ref()
+                                .and_then(|t| context_states.get(t))
+                                .and_then(|(s, _)| s.user_id);
                             tokio::spawn(async move {
                                 let result = match int_caller {
-                                    Some(c) => crate::extensions::integrations::execute_self_action(&pool, c.as_ref(), &aid, &action, params).await,
+                                    Some(c) => crate::extensions::integrations::execute_self_action(&pool, c.as_ref(), &aid, &action, params, requester).await,
                                     None => Err("self_action unavailable".into()),
                                 };
                                 let msg = match result {
