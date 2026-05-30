@@ -188,7 +188,7 @@ async fn store_manifest_icon(pool: &sqlx::PgPool, app_id: &str, app_dir: &Path) 
 // ── Frontend deploy & serve ──────────────────────────────────────────
 
 pub async fn deploy_frontend(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     AxumPath(app_id): AxumPath<String>,
     mut multipart: Multipart,
@@ -196,6 +196,7 @@ pub async fn deploy_frontend(
     if app_id == "core" {
         return Err(ApiError::BadRequest("reserved app_id".into()));
     }
+    crate::extensions::rbac::policy::require_perm(rt.pool(), identity.user_id, "admin:apps.deploy").await?;
 
     let frontend_dir = rt.data_dir().join("frontends").join(&app_id);
     let bytes = read_archive(&mut multipart).await?;
