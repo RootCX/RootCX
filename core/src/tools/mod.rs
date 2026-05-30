@@ -39,7 +39,8 @@ pub trait IntegrationCaller: Send + Sync {
 #[async_trait]
 pub trait ActionCaller: Send + Sync {
     async fn call(
-        &self, app_id: &str, action_id: &str, input: JsonValue, user_id: Uuid, caller_app_id: &str,
+        &self, app_id: &str, action_id: &str, input: JsonValue, user_id: Uuid,
+        caller_app_id: &str, effective_perms: Option<Vec<String>>,
     ) -> Result<JsonValue, String>;
 }
 

@@ -131,7 +131,7 @@ pub async fn callback(
 }
 
 async fn try_auto_sync_connect(
-    rt: &SharedRuntime,
+    _rt: &SharedRuntime,
     pool: &sqlx::PgPool,
     secrets: &crate::secrets::SecretManager,
     wm: &crate::worker_manager::WorkerManager,
@@ -142,11 +142,10 @@ async fn try_auto_sync_connect(
         .bind(user_id).fetch_optional(pool).await.ok()??;
     if email.is_empty() { return None; }
 
-    let token = crate::auth::jwt::encode_access(rt.auth_config(), user_id, &email).ok()?;
     let (user_credentials, effective_uid) = super::connections::resolve_credentials(
         secrets, pool, &pending.integration_id, &pending.user_id, None,
     ).await;
-    let caller = Some(crate::ipc::RpcCaller { user_id: pending.user_id.clone(), email: email.clone(), auth_token: Some(token) });
+    let caller = Some(crate::ipc::RpcCaller { user_id: pending.user_id.clone(), email: email.clone(), effective_perms: None });
     let config = super::routes::resolve_config(pool, secrets, &pending.integration_id).await.unwrap_or(serde_json::Value::Null);
 
     match wm.rpc(
@@ -298,7 +297,7 @@ mod tests {
     use crate::auth::identity::Identity;
 
     fn identity(id: &str) -> Identity {
-        Identity { user_id: Uuid::parse_str(id).unwrap(), email: String::new(), actor: None }
+        Identity { user_id: Uuid::parse_str(id).unwrap(), email: String::new() }
     }
 
     #[test]

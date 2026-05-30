@@ -28,7 +28,6 @@ pub struct WorkerManager {
     apps_dir: PathBuf,
     prelude_path: PathBuf,
     runtime_url: String,
-    database_url: String,
     bun_bin: PathBuf,
     tool_registry: Arc<ToolRegistry>,
     pending_approvals: PendingApprovals,
@@ -38,7 +37,7 @@ pub struct WorkerManager {
 
 impl WorkerManager {
     pub fn new(
-        apps_dir: PathBuf, runtime_url: String, database_url: String, bun_bin: PathBuf,
+        apps_dir: PathBuf, runtime_url: String, bun_bin: PathBuf,
         tool_registry: Arc<ToolRegistry>, pending_approvals: PendingApprovals,
         secret_manager: Arc<SecretManager>,
         upload_nonces: Arc<std::sync::Mutex<crate::extensions::storage::nonce::NonceStore>>,
@@ -52,20 +51,18 @@ impl WorkerManager {
             action_call: OnceLock::new(),
             integration_call: OnceLock::new(),
             fleet_tx,
-            apps_dir, prelude_path, runtime_url, database_url, bun_bin,
+            apps_dir, prelude_path, runtime_url, bun_bin,
             tool_registry, pending_approvals, secret_manager, upload_nonces,
         }
     }
 
     /// Must be called after wrapping in Arc to enable sub-agent dispatch and integration calling.
-    pub fn init_self_ref(self: &Arc<Self>, _pool: PgPool, auth: Arc<crate::auth::AuthConfig>) {
+    pub fn init_self_ref(self: &Arc<Self>) {
         let _ = self.dispatch.set(Arc::new(SubAgentDispatch { wm: Arc::clone(self) }));
         let _ = self.integration_call.set(Arc::new(IntegrationCallImpl {
             wm: Arc::clone(self), secrets: Arc::clone(&self.secret_manager),
         }));
-        let _ = self.action_call.set(Arc::new(AppActionCallImpl {
-            wm: Arc::clone(self), auth,
-        }));
+        let _ = self.action_call.set(Arc::new(AppActionCallImpl { wm: Arc::clone(self) }));
     }
 
     async fn build_agent_boot(&self, pool: &PgPool, app_id: &str) -> Option<(AgentBootConfig, Option<rootcx_types::SupervisionConfig>)> {
@@ -123,7 +120,6 @@ impl WorkerManager {
             working_dir: app_dir,
             credentials,
             runtime_url: self.runtime_url.clone(),
-            database_url: self.database_url.clone(),
             pool: pool.clone(),
             js_runtime: self.bun_bin.clone(),
             prelude_path: self.prelude_path.clone(),
@@ -272,6 +268,7 @@ impl AgentDispatcher for SubAgentDispatch {
             llm,
             invoker_user_id,
             attachments: None,
+            context_token: None,
         };
 
         let app_id = target.to_string();
@@ -303,21 +300,21 @@ impl AgentDispatcher for SubAgentDispatch {
 
 struct AppActionCallImpl {
     wm: Arc<WorkerManager>,
-    auth: Arc<crate::auth::AuthConfig>,
 }
 
 #[async_trait]
 impl ActionCaller for AppActionCallImpl {
     async fn call(
-        &self, app_id: &str, action_id: &str, input: JsonValue, user_id: uuid::Uuid, caller_app_id: &str,
+        &self, app_id: &str, action_id: &str, input: JsonValue, user_id: uuid::Uuid,
+        _caller_app_id: &str, effective_perms: Option<Vec<String>>,
     ) -> Result<JsonValue, String> {
-        let agent_uid = crate::extensions::agents::agent_user_id(caller_app_id);
-        let token = crate::auth::jwt::mint_delegated(&self.auth, user_id, agent_uid)
-            .map_err(|e| format!("mint token: {e}"))?;
+        // Phase 6a: the agent's effective authority (intersection grant∩human)
+        // rides along on the caller so the target re-poses it as the RLS GUC.
+        // No token: the worker never replays a JWT.
         let caller = Some(RpcCaller {
             user_id: user_id.to_string(),
             email: String::new(),
-            auth_token: Some(token),
+            effective_perms,
         });
         self.wm.rpc(
             app_id,

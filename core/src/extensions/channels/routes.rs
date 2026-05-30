@@ -328,12 +328,21 @@ async fn do_invoke(
     }
     let attachments = if attachment_list.is_empty() { None } else { Some(attachment_list) };
 
+    // Phase 6b: a channel message only drives the agent under a valid standing
+    // delegation from the linked human. No link, or a revoked delegation, → mute.
+    let delegator = invoker_user_id.ok_or("channel message: no linked user")?;
+    let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
+    if !crate::delegations::is_valid(pool, delegator, agent_uid).await.map_err(&e)? {
+        return Err("channel message: no valid delegation".into());
+    }
+
     let payload = AgentInvokePayload {
         invoke_id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.clone(),
         message: text.to_string(),
         history, is_sub_invoke: false, llm, invoker_user_id,
         attachments,
+        context_token: None,
     };
 
     let mut rx = wm.agent_invoke(&app_id, payload).await.map_err(&e)?;
@@ -626,6 +635,15 @@ async fn try_complete_link(
          DO UPDATE SET user_id = EXCLUDED.user_id, linked_at = now()",
     ).bind(channel_id).bind(chat_id).bind(user_id)
     .execute(pool).await.ok()?;
+
+    // Phase 6b: linking grants a standing 'channel' delegation to the active
+    // app's agent. Revoking it later mutes the agent for this user.
+    if let Ok((app_id, _)) = resolve_session(pool, channel_id, chat_id).await {
+        let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
+        if !crate::delegations::is_valid(pool, user_id, agent_uid).await.unwrap_or(false) {
+            let _ = crate::delegations::create(pool, user_id, agent_uid, "channel", None).await;
+        }
+    }
 
     Some(user_id.to_string())
 }

@@ -3,7 +3,7 @@ mod crons;
 pub(crate) mod crud;
 mod deploy;
 mod icon;
-mod introspection;
+pub(crate) mod introspection;
 mod jobs;
 pub mod llm_models;
 pub(crate) mod query_params;
@@ -146,6 +146,13 @@ pub async fn install_app(
     Json(manifest): Json<AppManifest>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = pool(&rt);
+    // First-boot bootstrap: the very first human install is open and promotes
+    // the installer to admin. After that, installing requires the permission.
+    // (The seeded system user holds admin, so "first boot" = no non-system
+    // assignment yet.)
+    if !crate::extensions::rbac::is_first_boot(&pool).await? {
+        crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:apps.install").await?;
+    }
     crate::manifest::install_app(&pool, &manifest, rt.extensions(), identity.user_id).await?;
     Ok(Json(json!({ "message": format!("app '{}' installed", manifest.app_id) })))
 }
@@ -226,11 +233,12 @@ pub async fn get_app(
 }
 
 pub async fn uninstall_app(
-    _identity: Identity,
+    identity: Identity,
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
     axum::extract::Path(app_id): axum::extract::Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = pool(&rt);
+    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:apps.install").await?;
     let data_dir = rt.data_dir().to_path_buf();
     let _ = wm(&rt).stop_app(&app_id).await;
     crate::manifest::uninstall_app(&pool, &app_id).await?;

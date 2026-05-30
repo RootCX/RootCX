@@ -11,13 +11,21 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
             id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             delegator_uid UUID NOT NULL,
             agent_uid     UUID NOT NULL,
-            trigger_type  TEXT NOT NULL CHECK (trigger_type IN ('cron', 'hook', 'webhook', 'manual')),
+            trigger_type  TEXT NOT NULL CHECK (trigger_type IN ('cron', 'hook', 'webhook', 'manual', 'channel')),
             trigger_ref   UUID,
             created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
             expires_at    TIMESTAMPTZ,
             revoked_at    TIMESTAMPTZ
         )
     "#).execute(pool).await.map_err(err)?;
+
+    // Existing DBs (CREATE TABLE IF NOT EXISTS skips the new constraint): widen
+    // the CHECK explicitly to admit the 'channel' trigger type (Phase 6b).
+    sqlx::query(
+        "ALTER TABLE rootcx_system.delegations DROP CONSTRAINT IF EXISTS delegations_trigger_type_check, \
+         ADD CONSTRAINT delegations_trigger_type_check \
+         CHECK (trigger_type IN ('cron', 'hook', 'webhook', 'manual', 'channel'))"
+    ).execute(pool).await.map_err(err)?;
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_delegations_lookup \

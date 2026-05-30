@@ -12,7 +12,6 @@ const DISCOVER = {
   type: "discover",
   app_id: "test-app",
   runtime_url: "http://localhost:9100",
-  database_url: "postgres://localhost/test",
   credentials: {},
   agent_config: null,
 };

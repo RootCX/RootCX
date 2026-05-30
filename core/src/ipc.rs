@@ -22,8 +22,12 @@ fn ipc_err(e: impl std::fmt::Display) -> RuntimeError {
 pub struct RpcCaller {
     pub user_id: String,
     pub email: String,
+    /// Effective permissions (intersection grant∩human) when the call is made
+    /// from a delegated context (agent, cross-app action). `Some` → the target
+    /// poses `is_delegated='1'` + this CSV as the RLS GUC. `None` → direct user
+    /// call, `is_delegated='0'`. The worker is never trusted with a token.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub auth_token: Option<String>,
+    pub effective_perms: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,6 +65,11 @@ pub struct AgentInvokePayload {
     pub invoker_user_id: Option<uuid::Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<FileAttachment>>,
+    /// Opaque per-invoke handle the prelude echoes back on `ctx.sql()` /
+    /// `ctx.collection()` so the supervisor can resolve the agent's effective
+    /// identity. Never the invoke_id (must not be derivable). See `worker.rs`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,14 +78,27 @@ pub enum OutboundMessage {
     Discover {
         app_id: String,
         runtime_url: String,
-        database_url: String,
         #[serde(skip_serializing_if = "HashMap::is_empty")]
         credentials: HashMap<String, String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         agent_config: Option<AgentBootConfig>,
     },
-    Rpc { id: String, method: String, params: JsonValue, caller: Option<RpcCaller> },
-    Job { id: String, payload: JsonValue, #[serde(skip_serializing_if = "Option::is_none")] caller: Option<RpcCaller> },
+    Rpc {
+        id: String,
+        method: String,
+        params: JsonValue,
+        caller: Option<RpcCaller>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_token: Option<String>,
+    },
+    Job {
+        id: String,
+        payload: JsonValue,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        caller: Option<RpcCaller>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        context_token: Option<String>,
+    },
     AgentInvoke(AgentInvokePayload),
     AgentToolResult {
         invoke_id: String,
@@ -96,6 +118,24 @@ pub enum OutboundMessage {
     StorageUploadUrl {
         id: String,
         url: String,
+    },
+    SqlQueryResult {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        columns: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rows: Option<Vec<Vec<JsonValue>>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        row_count: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    SelfActionResult {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<JsonValue>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     Shutdown,
 }
@@ -187,6 +227,27 @@ pub enum InboundMessage {
         entity: String,
         #[serde(default)]
         data: JsonValue,
+        #[serde(default)]
+        context_token: Option<String>,
+    },
+    /// App SQL forwarded to the core (Phase 2 SQL proxy). The core executes it
+    /// inside a transaction under `rootcx_app_executor` with the caller's RLS
+    /// GUCs resolved from `context_token`.
+    SqlQuery {
+        id: String,
+        #[serde(default)]
+        context_token: Option<String>,
+        sql: String,
+        #[serde(default)]
+        params: Vec<JsonValue>,
+    },
+    /// Privileged self-action a worker can invoke without holding a token
+    /// (replaces the old token-bearing HTTP callbacks for integrations).
+    SelfAction {
+        id: String,
+        action: String,
+        #[serde(default)]
+        params: JsonValue,
     },
     StorageUpload {
         id: String,
@@ -286,9 +347,9 @@ mod tests {
     #[test]
     fn outbound_messages_carry_type_tag() {
         let cases: Vec<(OutboundMessage, &str)> = vec![
-            (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), database_url: "postgres://localhost:5480/postgres".into(), credentials: HashMap::new(), agent_config: None }, "discover"),
-            (OutboundMessage::Rpc { id: "r1".into(), method: "echo".into(), params: json!({}), caller: None }, "rpc"),
-            (OutboundMessage::Job { id: "j1".into(), payload: json!({}), caller: None }, "job"),
+            (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), credentials: HashMap::new(), agent_config: None }, "discover"),
+            (OutboundMessage::Rpc { id: "r1".into(), method: "echo".into(), params: json!({}), caller: None, context_token: None }, "rpc"),
+            (OutboundMessage::Job { id: "j1".into(), payload: json!({}), caller: None, context_token: None }, "job"),
             (OutboundMessage::CollectionOpResult { id: "c1".into(), result: Some(json!({})), error: None }, "collection_op_result"),
             (OutboundMessage::Shutdown, "shutdown"),
             (OutboundMessage::AgentToolResult {
@@ -412,7 +473,7 @@ mod tests {
         let msg: InboundMessage = serde_json::from_str(
             r#"{"type":"collection_op","id":"c1","op":"insert","entity":"docs","data":{"title":"test"}}"#
         ).unwrap();
-        let InboundMessage::CollectionOp { id, op, entity, data } = msg else { panic!("expected CollectionOp") };
+        let InboundMessage::CollectionOp { id, op, entity, data, .. } = msg else { panic!("expected CollectionOp") };
         assert_eq!(id, "c1");
         assert_eq!(op, "insert");
         assert_eq!(entity, "docs");

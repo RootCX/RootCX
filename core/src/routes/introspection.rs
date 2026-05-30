@@ -119,11 +119,12 @@ pub struct QueryResult {
 }
 
 pub async fn execute_query(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Json(body): Json<QueryRequest>,
 ) -> Result<Json<QueryResult>, ApiError> {
     let pool = pool(&rt);
+    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:db.query").await?;
     let sql = body.sql.trim();
 
     if sql.is_empty() {
@@ -167,7 +168,7 @@ fn try_json<'r, T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>
     row.try_get::<T, _>(idx).map(f).unwrap_or(JsonValue::Null)
 }
 
-fn pg_val(row: &PgRow, idx: usize, ti: &PgTypeInfo) -> JsonValue {
+pub(crate) fn pg_val(row: &PgRow, idx: usize, ti: &PgTypeInfo) -> JsonValue {
     use sqlx::types::chrono;
 
     if row.try_get_raw(idx).map(|v| v.is_null()).unwrap_or(true) {

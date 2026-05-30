@@ -132,13 +132,11 @@ pub async fn execute_action(
         identity.email.clone()
     };
 
-    let caller = crate::auth::jwt::encode_access(rt.auth_config(), caller_uid, &caller_email)
-        .ok()
-        .map(|token| crate::ipc::RpcCaller {
-            user_id: target_user.clone(),
-            email: caller_email,
-            auth_token: Some(token),
-        });
+    let caller = Some(crate::ipc::RpcCaller {
+        user_id: target_user.clone(),
+        email: caller_email,
+        effective_perms: None,
+    });
 
     let result = wm
         .rpc(
@@ -214,6 +212,7 @@ pub async fn webhook_ingress(
                 llm,
                 invoker_user_id: Some(delegator),
                 attachments: None,
+                context_token: None,
             };
             let _ = wm.agent_invoke(&wh.app_id, invoke_payload).await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -224,7 +223,7 @@ pub async fn webhook_ingress(
         let caller = wh.created_by.map(|uid| crate::ipc::RpcCaller {
             user_id: uid.to_string(),
             email: String::new(),
-            auth_token: None,
+            effective_perms: None,
         });
         let result = wm
             .rpc(
