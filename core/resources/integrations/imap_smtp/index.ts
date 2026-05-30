@@ -10,16 +10,7 @@ const SKIP_SPECIAL_USE = new Set(["\\Junk", "\\Trash", "\\Drafts"]);
 
 interface Creds { imapHost: string; imapPort: number; smtpHost: string; username: string; password: string }
 
-let ctx: RootCxCtx;
-let db: any = null;
-
 serve({
-  async onStart(c) {
-    ctx = c;
-    const postgres = (await import("postgres")).default;
-    db = postgres(c.databaseUrl, { max: 10, idle_timeout: 30 });
-    ensureIndexes().catch(e => log.error(`indexes: ${e.message}`));
-  },
   rpc: {
     async __auth_start() {
       return {
@@ -38,32 +29,18 @@ serve({
       };
     },
     async __auth_callback() { return { credentials: {} }; },
-    async __integration(params, caller) {
+    async __integration(params, _caller, ctx) {
       const { action, input, userCredentials, userId } = params;
       if (!userCredentials?.imapHost || !userCredentials?.username) {
         return { ok: false, error: { code: "INSUFFICIENT_PERMISSIONS", message: "not connected" } };
       }
       const handler = actions[action];
       if (!handler) return { ok: false, error: { code: "MISCONFIGURED", message: `unknown action: ${action}` } };
-      const token = caller?.authToken ?? "";
-      return handler(userCredentials as Creds, input, userId, token);
+      return handler(userCredentials as Creds, input, userId, ctx);
     },
   },
   onJob: handleJob,
 });
-
-async function ensureIndexes() {
-  if (!db) return;
-  await db`CREATE UNIQUE INDEX IF NOT EXISTS idx_imap_msg_ext ON imap_smtp.messages (external_id)`;
-  await db`CREATE UNIQUE INDEX IF NOT EXISTS idx_imap_msg_hdr ON imap_smtp.messages (header_message_id)`;
-  await db`CREATE INDEX IF NOT EXISTS idx_imap_msg_thread ON imap_smtp.messages (thread_external_id)`;
-  await db`CREATE INDEX IF NOT EXISTS idx_imap_msg_user ON imap_smtp.messages (user_id)`;
-  await db`CREATE UNIQUE INDEX IF NOT EXISTS idx_imap_thread_ext ON imap_smtp.threads (external_id)`;
-  await db`CREATE INDEX IF NOT EXISTS idx_imap_part_msg ON imap_smtp.participants (message_id)`;
-  await db`CREATE INDEX IF NOT EXISTS idx_imap_part_addr ON imap_smtp.participants (lower(address))`;
-  await db`CREATE INDEX IF NOT EXISTS idx_imap_att_msg ON imap_smtp.attachments (message_id)`;
-  await db`CREATE UNIQUE INDEX IF NOT EXISTS idx_imap_cursor_user ON imap_smtp.sync_cursors (user_id)`;
-}
 
 async function withImap<T>(creds: Creds, fn: (client: ImapFlow) => Promise<T>): Promise<T> {
   const client = new ImapFlow({
@@ -77,7 +54,7 @@ async function withImap<T>(creds: Creds, fn: (client: ImapFlow) => Promise<T>): 
   finally { await client.logout().catch(() => {}); }
 }
 
-async function sendEmail(creds: Creds, input: any, userId: string, token: string) {
+async function sendEmail(creds: Creds, input: any, userId: string, ctx: RootCxCtx) {
   const { to, subject, body, cc, bcc, html } = input;
   const transport = createTransport({
     host: creds.smtpHost, port: 587, secure: false,
@@ -102,18 +79,15 @@ async function sendEmail(creds: Creds, input: any, userId: string, token: string
     });
   } catch (e: any) { log.warn(`append to Sent: ${e.message}`); }
 
-  // Auto-persist
-  if (token) {
-    try {
-      const parsed = await selfAction(token, "get_email", { uid: 0, folder: "SENT", messageId });
-      if (parsed) await persistParsedMessage(userId, parsed);
-    } catch { /* will be picked up on next sync */ }
-  }
+  try {
+    const parsed = await ctx.selfAction("get_email", { uid: 0, folder: "SENT", messageId });
+    if (parsed) await persistParsedMessage(ctx, userId, parsed);
+  } catch { /* will be picked up on next sync */ }
 
   return { ok: true, data: { messageId, ok: true } };
 }
 
-async function getEmail(creds: Creds, input: any, _userId: string, _token: string) {
+async function getEmail(creds: Creds, input: any, _userId: string, _ctx: RootCxCtx) {
   const { uid, folder = "INBOX" } = input;
   const msg = await withImap(creds, async (client) => {
     const lock = await client.getMailboxLock(folder);
@@ -126,7 +100,7 @@ async function getEmail(creds: Creds, input: any, _userId: string, _token: strin
   return { ok: true, data: await parseImapMessage(msg.source, uid, folder, msg.flags) };
 }
 
-async function getFolders(creds: Creds, _input: any, _userId: string, _token: string) {
+async function getFolders(creds: Creds, _input: any, _userId: string, _ctx: RootCxCtx) {
   const folders = await withImap(creds, async (client) => {
     const list = await client.list();
     return list
@@ -136,72 +110,86 @@ async function getFolders(creds: Creds, _input: any, _userId: string, _token: st
   return { ok: true, data: { folders } };
 }
 
-async function syncConnect(creds: Creds, _input: any, userId: string, token: string) {
+async function syncConnect(creds: Creds, _input: any, userId: string, ctx: RootCxCtx) {
   const handle = creds.username.toLowerCase();
-  const existing = await db`SELECT id, cron_id FROM imap_smtp.sync_cursors WHERE user_id = ${userId}`;
+  const existing = await ctx.sql(
+    `SELECT id, cron_id FROM imap_smtp.sync_cursors WHERE user_id = $1`, [userId]
+  );
   let cursorId: string;
   let cronId: string | null = null;
-  if (existing.length) {
-    cursorId = existing[0].id;
-    cronId = existing[0].cron_id;
-    await db`UPDATE imap_smtp.sync_cursors SET handle = ${handle}, enabled = true, status = 'idle', throttle_count = 0, throttle_after = null WHERE id = ${cursorId}`;
+  if (existing.rows.length) {
+    cursorId = existing.rows[0][0];
+    cronId = existing.rows[0][1];
+    await ctx.sql(
+      `UPDATE imap_smtp.sync_cursors SET handle = $1, enabled = true, status = 'idle', throttle_count = 0, throttle_after = null WHERE id = $2`,
+      [handle, cursorId]
+    );
   } else {
-    const ins = await db`INSERT INTO imap_smtp.sync_cursors (user_id, handle, status, enabled, throttle_count) VALUES (${userId}, ${handle}, 'idle', true, 0) RETURNING id`;
-    cursorId = ins[0].id;
+    const ins = await ctx.sql(
+      `INSERT INTO imap_smtp.sync_cursors (user_id, handle, status, enabled, throttle_count) VALUES ($1, $2, 'idle', true, 0) RETURNING id`,
+      [userId, handle]
+    );
+    cursorId = ins.rows[0][0];
   }
-  if (!cronId && token) {
-    cronId = await createSyncCron(userId, token);
-    if (cronId) await db`UPDATE imap_smtp.sync_cursors SET cron_id = ${cronId} WHERE id = ${cursorId}`;
+  if (!cronId) {
+    cronId = await createSyncCron(userId, ctx);
+    if (cronId) await ctx.sql(`UPDATE imap_smtp.sync_cursors SET cron_id = $1 WHERE id = $2`, [cronId, cursorId]);
   }
-  if (token) await dispatchSyncJob(userId, token);
+  await dispatchSyncJob(userId, ctx);
   return { ok: true, data: { cursor_id: cursorId, handle } };
 }
 
-async function syncDisconnect(_creds: Creds, _input: any, userId: string, token: string) {
-  const cursor = await db`SELECT cron_id FROM imap_smtp.sync_cursors WHERE user_id = ${userId}`;
-  if (cursor.length && cursor[0].cron_id && token) {
-    await deleteSyncCron(cursor[0].cron_id, token);
+async function syncDisconnect(_creds: Creds, _input: any, userId: string, ctx: RootCxCtx) {
+  const cursor = await ctx.sql(`SELECT cron_id FROM imap_smtp.sync_cursors WHERE user_id = $1`, [userId]);
+  if (cursor.rows.length && cursor.rows[0][0]) {
+    await deleteSyncCron(cursor.rows[0][0], ctx);
   }
-  await db`UPDATE imap_smtp.sync_cursors SET enabled = false, cron_id = null WHERE user_id = ${userId}`;
+  await ctx.sql(`UPDATE imap_smtp.sync_cursors SET enabled = false, cron_id = null WHERE user_id = $1`, [userId]);
   return { ok: true, data: {} };
 }
 
-async function syncNow(_creds: Creds, _input: any, userId: string, token: string) {
-  const cursor = await db`SELECT id, status, throttle_after FROM imap_smtp.sync_cursors WHERE user_id = ${userId} AND enabled = true`;
-  if (!cursor.length) return { ok: false, error: { code: "MISCONFIGURED", message: "no active sync" } };
-  if (cursor[0].status === "syncing") return { ok: true, data: { triggered: false } };
-  if (cursor[0].throttle_after && new Date(cursor[0].throttle_after).getTime() > Date.now()) return { ok: true, data: { triggered: false } };
-  if (token) await dispatchSyncJob(userId, token);
+async function syncNow(_creds: Creds, _input: any, userId: string, ctx: RootCxCtx) {
+  const cursor = await ctx.sql(
+    `SELECT id, status, throttle_after FROM imap_smtp.sync_cursors WHERE user_id = $1 AND enabled = true`, [userId]
+  );
+  if (!cursor.rows.length) return { ok: false, error: { code: "MISCONFIGURED", message: "no active sync" } };
+  const [, status, throttle_after] = cursor.rows[0] as any[];
+  if (status === "syncing") return { ok: true, data: { triggered: false } };
+  if (throttle_after && new Date(throttle_after).getTime() > Date.now()) return { ok: true, data: { triggered: false } };
+  await dispatchSyncJob(userId, ctx);
   return { ok: true, data: { triggered: true } };
 }
 
-const actions: Record<string, (creds: Creds, input: any, userId: string, token: string) => Promise<any>> = {
+const actions: Record<string, (creds: Creds, input: any, userId: string, ctx: RootCxCtx) => Promise<any>> = {
   send_email: sendEmail, get_email: getEmail, get_folders: getFolders,
   sync_connect: syncConnect, sync_disconnect: syncDisconnect, sync_now: syncNow,
 };
 
-async function handleJob(payload: any, caller: any) {
+async function handleJob(payload: any, _caller: any, ctx: RootCxCtx) {
   if (payload?.type !== "sync") return { skipped: true };
-  const token: string = caller?.authToken;
-  if (!token) return { error: "no auth token in job caller" };
   const userId = payload.user_id;
-  const cursors = await db`SELECT * FROM imap_smtp.sync_cursors WHERE user_id = ${userId} AND enabled = true`;
-  if (!cursors.length) return { skipped: true };
-  const sc = cursors[0];
+  const cursors = await ctx.sql(
+    `SELECT id, cursor, throttle_count FROM imap_smtp.sync_cursors WHERE user_id = $1 AND enabled = true`, [userId]
+  );
+  if (!cursors.rows.length) return { skipped: true };
+  const [id, cursor, throttle_count] = cursors.rows[0] as any[];
+  const sc = { id, cursor, throttle_count };
 
   try {
-    await db`UPDATE imap_smtp.sync_cursors SET status = 'syncing' WHERE id = ${sc.id}`;
-    await runSync(token, userId, sc);
-    await db`UPDATE imap_smtp.sync_cursors SET status = 'idle', last_synced_at = NOW(), throttle_count = 0, throttle_after = null WHERE id = ${sc.id}`;
+    await ctx.sql(`UPDATE imap_smtp.sync_cursors SET status = 'syncing' WHERE id = $1`, [sc.id]);
+    await runSync(ctx, userId, sc);
+    await ctx.sql(
+      `UPDATE imap_smtp.sync_cursors SET status = 'idle', last_synced_at = NOW(), throttle_count = 0, throttle_after = null WHERE id = $1`, [sc.id]
+    );
   } catch (e: any) {
     log.error(`sync ${userId}: ${e.message}`);
-    await handleSyncError(sc, e);
+    await handleSyncError(ctx, sc, e);
   }
   return { ok: true };
 }
 
-async function runSync(token: string, userId: string, sc: any) {
-  const foldersResp = await selfAction(token, "get_folders", {});
+async function runSync(ctx: RootCxCtx, userId: string, sc: any) {
+  const foldersResp = await ctx.selfAction("get_folders", {});
   const folders: Array<{ path: string; specialUse: string | null }> = (foldersResp?.folders ?? [])
     .filter((f: any) => !SKIP_SPECIAL_USE.has(f.specialUse));
 
@@ -210,13 +198,13 @@ async function runSync(token: string, userId: string, sc: any) {
 
   for (const folder of folders) {
     const prev = cursor[folder.path];
-    const listResp = await selfAction(token, "list_emails", { folder: folder.path, sinceUid: prev?.highestUid });
+    const listResp = await ctx.selfAction("list_emails", { folder: folder.path, sinceUid: prev?.highestUid });
     const { messageUids, uidValidity, highestUid } = listResp;
 
     if (prev && uidValidity !== prev.uidValidity) {
       log.warn(`uidValidity changed for folder ${folder.path}, full resync`);
-      const fullResp = await selfAction(token, "list_emails", { folder: folder.path });
-      await importUids(token, userId, folder.path, fullResp.messageUids ?? []);
+      const fullResp = await ctx.selfAction("list_emails", { folder: folder.path });
+      await importUids(ctx, userId, folder.path, fullResp.messageUids ?? []);
       newCursor[folder.path] = { uidValidity: fullResp.uidValidity, highestUid: fullResp.highestUid };
       continue;
     }
@@ -226,72 +214,86 @@ async function runSync(token: string, userId: string, sc: any) {
       continue;
     }
 
-    await importUids(token, userId, folder.path, messageUids ?? []);
+    await importUids(ctx, userId, folder.path, messageUids ?? []);
     newCursor[folder.path] = { uidValidity, highestUid };
   }
 
-  await db`UPDATE imap_smtp.sync_cursors SET cursor = ${JSON.stringify(newCursor)} WHERE id = ${sc.id}`;
+  await ctx.sql(`UPDATE imap_smtp.sync_cursors SET cursor = $1 WHERE id = $2`, [JSON.stringify(newCursor), sc.id]);
 }
 
-async function importUids(token: string, userId: string, folder: string, uids: number[]) {
+async function importUids(ctx: RootCxCtx, userId: string, folder: string, uids: number[]) {
   if (!uids.length) return;
   const externalIds = uids.map(uid => `${folder}:${uid}`);
-  const existing = await db`SELECT external_id FROM imap_smtp.messages WHERE external_id = ANY(${externalIds})`;
-  const existingSet = new Set(existing.map((r: any) => r.external_id));
+  const existing = await ctx.sql(
+    `SELECT external_id FROM imap_smtp.messages WHERE external_id = ANY($1)`, [externalIds]
+  );
+  const existingSet = new Set(existing.rows.map((r: any) => r[0]));
   const missing = uids.filter(uid => !existingSet.has(`${folder}:${uid}`));
   if (!missing.length) return;
 
   for (let i = 0; i < missing.length; i += FETCH_CONCURRENCY) {
     const chunk = missing.slice(i, i + FETCH_CONCURRENCY);
-    await Promise.allSettled(chunk.map(uid => persistSingleMessage(token, userId, uid, folder)));
+    await Promise.allSettled(chunk.map(uid => persistSingleMessage(ctx, userId, uid, folder)));
   }
 }
 
-async function persistSingleMessage(token: string, userId: string, uid: number, folder: string) {
+async function persistSingleMessage(ctx: RootCxCtx, userId: string, uid: number, folder: string) {
   let msg: any;
-  try { msg = await selfAction(token, "get_email", { uid, folder }); }
+  try { msg = await ctx.selfAction("get_email", { uid, folder }); }
   catch { return; }
-  await persistParsedMessage(userId, msg);
+  await persistParsedMessage(ctx, userId, msg);
 }
 
-async function persistParsedMessage(userId: string, msg: any) {
+async function persistParsedMessage(ctx: RootCxCtx, userId: string, msg: any) {
   const externalId = msg.externalId ?? `${msg.folder}:${msg.uid}`;
   const headerMsgId = msg.headerMessageId || `fallback-${userId}-${externalId}`;
   const threadId = msg.inReplyTo || msg.headerMessageId || externalId;
+  const internalDate = msg.date ? new Date(msg.date).toISOString() : null;
 
-  const inserted = await db`
-    INSERT INTO imap_smtp.messages (external_id, thread_external_id, header_message_id, user_id, folder, subject, body_text, body_html, snippet, internal_date, flags, in_reply_to, "references")
-    VALUES (${externalId}, ${threadId}, ${headerMsgId}, ${userId}, ${msg.folder ?? ""}, ${msg.subject ?? ""}, ${msg.bodyText ?? ""}, ${msg.bodyHtml ?? ""}, ${(msg.bodyText ?? "").slice(0, 200)}, ${msg.date ? new Date(msg.date).toISOString() : null}, ${JSON.stringify(msg.flags ?? [])}, ${msg.inReplyTo ?? null}, ${JSON.stringify(msg.references ?? [])})
-    ON CONFLICT (external_id) DO NOTHING
-    RETURNING id
-  `;
-  if (!inserted.length) return;
-  const msgDbId = inserted[0].id;
+  const inserted = await ctx.sql(
+    `INSERT INTO imap_smtp.messages (external_id, thread_external_id, header_message_id, user_id, folder, subject, body_text, body_html, snippet, internal_date, flags, in_reply_to, "references")
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     ON CONFLICT (external_id) DO NOTHING
+     RETURNING id`,
+    [externalId, threadId, headerMsgId, userId, msg.folder ?? "", msg.subject ?? "", msg.bodyText ?? "", msg.bodyHtml ?? "", (msg.bodyText ?? "").slice(0, 200), internalDate, JSON.stringify(msg.flags ?? []), msg.inReplyTo ?? null, JSON.stringify(msg.references ?? [])]
+  );
+  if (!inserted.rows.length) return;
+  const msgDbId = inserted.rows[0][0];
 
   if (threadId) {
-    await db`
-      INSERT INTO imap_smtp.threads (external_id, user_id, subject, last_message_at, message_count)
-      VALUES (${threadId}, ${userId}, ${msg.subject ?? ""}, ${msg.date ? new Date(msg.date).toISOString() : null}, 1)
-      ON CONFLICT (external_id) DO UPDATE SET
-        last_message_at = GREATEST(imap_smtp.threads.last_message_at, EXCLUDED.last_message_at),
-        message_count = imap_smtp.threads.message_count + 1
-    `;
+    await ctx.sql(
+      `INSERT INTO imap_smtp.threads (external_id, user_id, subject, last_message_at, message_count)
+       VALUES ($1, $2, $3, $4, 1)
+       ON CONFLICT (external_id) DO UPDATE SET
+         last_message_at = GREATEST(imap_smtp.threads.last_message_at, EXCLUDED.last_message_at),
+         message_count = imap_smtp.threads.message_count + 1`,
+      [threadId, userId, msg.subject ?? "", internalDate]
+    );
   }
 
-  const parts: Array<{ message_id: string; address: string; name: string; role: string }> = [];
-  if (msg.from) parts.push({ message_id: msgDbId, role: "from", address: msg.from.address ?? msg.from, name: msg.from.name ?? "" });
-  for (const p of msg.to ?? []) parts.push({ message_id: msgDbId, role: "to", address: p.address ?? p, name: p.name ?? "" });
-  for (const p of msg.cc ?? []) parts.push({ message_id: msgDbId, role: "cc", address: p.address ?? p, name: p.name ?? "" });
+  const parts: Array<[string, string, string, string]> = [];
+  if (msg.from) parts.push([msgDbId, "from", msg.from.address ?? msg.from, msg.from.name ?? ""]);
+  for (const p of msg.to ?? []) parts.push([msgDbId, "to", p.address ?? p, p.name ?? ""]);
+  for (const p of msg.cc ?? []) parts.push([msgDbId, "cc", p.address ?? p, p.name ?? ""]);
   if (parts.length) {
-    await db`INSERT INTO imap_smtp.participants ${db(parts)} ON CONFLICT DO NOTHING`;
+    const pCols = 4;
+    const pValues = parts.map((_, i) => `($${i*pCols+1}, $${i*pCols+2}, $${i*pCols+3}, $${i*pCols+4})`).join(", ");
+    const pParams = parts.flatMap(([mid, role, address, name]) => [mid, role, address, name]);
+    await ctx.sql(
+      `INSERT INTO imap_smtp.participants (message_id, role, address, name) VALUES ${pValues} ON CONFLICT DO NOTHING`,
+      pParams
+    );
   }
 
-  if (msg.attachments?.length) {
-    const attRows = msg.attachments.map((a: any) => ({
-      message_id: msgDbId, filename: a.filename ?? "", mime_type: a.mimeType ?? a.contentType ?? "",
-      size: a.size ?? 0, content_id: a.contentId ?? null, is_inline: !!a.disposition?.includes("inline"),
-    }));
-    await db`INSERT INTO imap_smtp.attachments ${db(attRows)} ON CONFLICT DO NOTHING`;
+  const attachments = msg.attachments ?? [];
+  if (attachments.length) {
+    const atCols = 6;
+    const atValues = attachments.map((_: any, i: number) => `($${i*atCols+1}, $${i*atCols+2}, $${i*atCols+3}, $${i*atCols+4}, $${i*atCols+5}, $${i*atCols+6})`).join(", ");
+    const atParams = attachments.flatMap((a: any) => [msgDbId, a.filename ?? "", a.mimeType ?? a.contentType ?? "", a.size ?? 0, a.contentId ?? null, !!a.disposition?.includes("inline")]);
+    await ctx.sql(
+      `INSERT INTO imap_smtp.attachments (message_id, filename, mime_type, size, content_id, is_inline) VALUES ${atValues} ON CONFLICT DO NOTHING`,
+      atParams
+    );
   }
 }
 
@@ -327,31 +329,16 @@ async function findSentFolder(client: ImapFlow): Promise<string | null> {
   return byName?.path ?? null;
 }
 
-async function selfAction(token: string, action: string, input: any): Promise<any> {
-  const res = await fetch(`${ctx.runtimeUrl}/api/v1/integrations/imap_smtp/actions/${action}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify(input),
-  });
-  if (!res.ok) throw new Error(`imap_smtp/${action} -> ${res.status}`);
-  const result = await res.json();
-  if (result?.ok === false && result?.error) {
-    const e: any = new Error(result.error.message ?? action);
-    e.code = result.error.code;
-    throw e;
-  }
-  return result?.ok === true && "data" in result ? result.data : result;
-}
-
-async function dispatchSyncJob(userId: string, token: string) {
-  await db`UPDATE imap_smtp.sync_cursors SET status = 'syncing' WHERE user_id = ${userId}`;
-  await runtimeFetch("POST", "/api/v1/apps/imap_smtp/jobs", token, { payload: { type: "sync", user_id: userId } })
-    .catch(e => log.warn(`job dispatch: ${e.message}`));
-}
-
-async function createSyncCron(userId: string, token: string): Promise<string | null> {
+async function dispatchSyncJob(userId: string, ctx: RootCxCtx) {
+  await ctx.sql(`UPDATE imap_smtp.sync_cursors SET status = 'syncing' WHERE user_id = $1`, [userId]);
   try {
-    const res = await runtimeFetch("POST", "/api/v1/apps/imap_smtp/crons", token, {
+    await ctx.selfAction("triggerAction", { actionName: "sync", input: { type: "sync", user_id: userId } });
+  } catch (e: any) { log.warn(`job dispatch: ${e.message}`); }
+}
+
+async function createSyncCron(userId: string, ctx: RootCxCtx): Promise<string | null> {
+  try {
+    const res = await ctx.selfAction("createCron", {
       name: `sync_imap_${userId}`, schedule: "*/5 * * * *",
       payload: { type: "sync", user_id: userId }, overlapPolicy: "skip",
     });
@@ -359,31 +346,26 @@ async function createSyncCron(userId: string, token: string): Promise<string | n
   } catch (e: any) { log.warn(`cron create: ${e.message}`); return null; }
 }
 
-async function deleteSyncCron(cronId: string, token: string) {
-  await runtimeFetch("DELETE", `/api/v1/apps/imap_smtp/crons/${cronId}`, token).catch(e => log.warn(`cron delete: ${e.message}`));
+async function deleteSyncCron(cronId: string, ctx: RootCxCtx) {
+  try { await ctx.selfAction("deleteCron", { cronId }); }
+  catch (e: any) { log.warn(`cron delete: ${e.message}`); }
 }
 
-async function runtimeFetch(method: string, path: string, token: string, body?: any): Promise<any> {
-  const res = await fetch(`${ctx.runtimeUrl}${path}`, {
-    method, headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-  if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}`);
-  return res.json().catch(() => null);
-}
-
-async function handleSyncError(sc: any, err: any) {
+async function handleSyncError(ctx: RootCxCtx, sc: any, err: any) {
   const count = (sc.throttle_count ?? 0) + 1;
   if (count >= MAX_THROTTLE) {
-    await db`UPDATE imap_smtp.sync_cursors SET status = 'failed_permanent', throttle_count = ${count} WHERE id = ${sc.id}`;
+    await ctx.sql(`UPDATE imap_smtp.sync_cursors SET status = 'failed_permanent', throttle_count = $1 WHERE id = $2`, [count, sc.id]);
     return;
   }
   const wait = 60_000 * Math.pow(2, Math.min(count - 1, 5));
   const after = new Date(Date.now() + wait).toISOString();
-  await db`UPDATE imap_smtp.sync_cursors SET status = 'failed_temporary', throttle_count = ${count}, throttle_after = ${after} WHERE id = ${sc.id}`;
+  await ctx.sql(
+    `UPDATE imap_smtp.sync_cursors SET status = 'failed_temporary', throttle_count = $1, throttle_after = $2 WHERE id = $3`,
+    [count, after, sc.id]
+  );
 }
 
-async function listEmails(creds: Creds, input: any, _userId: string, _token: string) {
+async function listEmails(creds: Creds, input: any, _userId: string, _ctx: RootCxCtx) {
   const { folder = "INBOX", sinceUid } = input ?? {};
   return withImap(creds, async (client) => {
     const lock = await client.getMailboxLock(folder);

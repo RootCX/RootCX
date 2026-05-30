@@ -46,7 +46,7 @@ impl Tool for MutateDataTool {
             is_delegated: true,
             effective_perms: ctx.permissions.clone(),
         };
-        let begin = || sql_proxy::begin_app_tx(&ctx.pool, app, &state, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool");
+        let begin = || sql_proxy::begin_app_tx(&ctx.pool, app, &state, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool", sql_proxy::TIMEOUT_AGENT_TOOL_MS);
 
         match action {
             "create" => {
@@ -113,7 +113,7 @@ impl Tool for MutateDataTool {
                     .map(|v| v.as_object().ok_or("each item in 'data' must be an object"))
                     .collect::<Result<_, _>>()?;
                 let types = field_type_map(&ctx.pool, app, entity).await.map_err(|e| e.to_string())?;
-                let rows = bulk_insert(&ctx.pool, app, &tbl, &types, &objects, &state, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool").await.map_err(|e| format!("{e:?}"))?;
+                let rows = bulk_insert(&ctx.pool, app, &tbl, &types, &objects, &state, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool", sql_proxy::TIMEOUT_AGENT_TOOL_MS).await.map_err(|e| format!("{e:?}"))?;
                 Ok(json!(rows))
             }
             "delete" => {

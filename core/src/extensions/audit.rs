@@ -28,8 +28,8 @@ pub(crate) async fn set_context(
     actor: Option<uuid::Uuid>,
     delegator: Option<uuid::Uuid>,
     trigger_ref: &str,
-) {
-    let _ = sqlx::query(
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
         "SELECT set_config('rootcx.actor_uid', $1, true), \
                 set_config('rootcx.delegator_uid', $2, true), \
                 set_config('rootcx.trigger_ref', $3, true)",
@@ -38,7 +38,8 @@ pub(crate) async fn set_context(
     .bind(delegator.map(|u| u.to_string()).unwrap_or_default())
     .bind(trigger_ref)
     .execute(&mut **tx)
-    .await;
+    .await?;
+    Ok(())
 }
 
 pub struct AuditExtension;

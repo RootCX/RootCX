@@ -41,9 +41,10 @@ the app cannot forge, override, or bypass it.
 | 11 | App calls ctx.sql("...") | The user of the current RPC/job | Core executes with identity posed, RLS filters | 0 rows or Postgres error |
 | 12 | App calls ctx.collection() | The user of the current RPC/job | Same as ctx.sql but structured ops | 0 rows or error |
 | 13 | Cross-app RPC (user calls another app) | The calling user | User must have `app:{target}:invoke` | 403 |
-| 14 | Anonymous / share-token visitor | No identity (empty) | App must declare RPC as public | 401 or 403 |
+| 14 | Anonymous / share-token visitor | No identity (empty user_id) | App must declare RPC as public; ctx.sql/ctx.collection = deny-all | 0 rows on data; 401 or 403 on invoke gate |
 | 15 | Standard webhook (non-agent RPC) | The webhook creator | Creator identity posed, RLS filters | Deny-all if no owner |
 | 16 | Scheduled job (non-agent) | The job creator | Creator identity posed, RLS filters | Job refused if no owner |
+| 17 | Integration worker (IntegrationCallImpl) | None (caller: None) | ctx.collection BYPASSRLS during onStart (self-schema); ctx.sql deny-all always (no identity) | 0 rows on data ops; selfAction denied without context |
 
 ---
 
@@ -51,20 +52,20 @@ the app cannot forge, override, or bypass it.
 
 | # | Action | Permission required | Who can do it | On deny |
 |---|--------|--------------------:|---------------|---------|
-| 17 | Deploy backend | `admin:apps.deploy` | Admins | 403 |
-| 18 | Deploy frontend | `admin:apps.deploy` | Admins | 403 |
-| 19 | Install app | `admin:apps.install` (bypassed on first boot only) | Admins (or the very first user) | 403 |
-| 20 | Uninstall app | `admin:apps.install` | Admins | 403 |
-| 21 | Manage secrets (app + platform) | `admin:secrets.manage` | Admins | 403 |
-| 22 | Execute admin SQL | `admin:db.query` | Admins (SELECT only, max 500 rows) | 403 |
-| 23 | View schema structure | Authenticated (no specific perm) | Any logged-in user | 401 |
-| 24 | Manage MCP tool servers | `admin:mcp.manage` | Admins | 403 |
-| 25 | Manage agent config/sessions | `admin:agents.manage` | Admins | 403 |
-| 26 | Start/stop workers | `*` (super-admin) | Super-admins | 403 |
-| 27 | Create/update/delete crons | `app:{id}:cron.write` | Users with the permission | 403 |
-| 28 | Create/delete entity hooks | Authenticated | Any logged-in user | 401 |
-| 29 | Create/delete webhooks | `app:{id}:webhook.read` (list) | Users with the permission | 403 |
-| 30 | Execute integration action | `integration:{id}:{action}` | Users with the permission | 403 |
+| 18 | Deploy backend | `admin:apps.deploy` | Admins | 403 |
+| 19 | Deploy frontend | `admin:apps.deploy` | Admins | 403 |
+| 20 | Install app | `admin:apps.install` (bypassed on first boot only) | Admins (or the very first user) | 403 |
+| 21 | Uninstall app | `admin:apps.install` | Admins | 403 |
+| 22 | Manage secrets (app + platform) | `admin:secrets.manage` | Admins | 403 |
+| 23 | Execute admin SQL | `admin:db.query` | Admins (SELECT only, max 500 rows) | 403 |
+| 24 | View schema structure | Authenticated; `admin:db.query` for system schemas | Any user (app schemas), Admins (rootcx_system/pg_*) | 403 for system schemas |
+| 25 | MCP tool servers (read + write) | `admin:mcp.manage` | Admins | 403 |
+| 26 | Manage agent config/sessions | `admin:agents.manage` | Admins | 403 |
+| 27 | Start/stop workers | `*` (super-admin) | Super-admins | 403 |
+| 28 | Create/update/delete crons | `app:{id}:cron.write` | Users with the permission | 403 |
+| 29 | Create/delete entity hooks | Authenticated | Any logged-in user | 401 |
+| 30 | Create/delete webhooks | `app:{id}:webhook.read` (list) | Users with the permission | 403 |
+| 31 | Execute integration action | `integration:{id}:{action}` | Users with the permission | 403 |
 
 ---
 
@@ -143,3 +144,19 @@ All three together = no exfiltration path.
 | Unknown context_token after onStart | Hard deny ("access denied: no user context") |
 | App sends SET/DDL/DO SQL | Rejected before reaching Postgres |
 | App calls set_config() | Permission denied (revoked from role) |
+| Public/share-token RPC caller | user_id="" -> UUID parse None -> check_access FALSE -> 0 rows on all data |
+| Integration worker RPC (caller: None) | ContextState::default() -> user_id None -> deny-all on ctx.sql and ctx.collection |
+| Integration selfAction without context | requester=None -> "self_action requires an authenticated context" error |
+
+---
+
+## Scope and Limitations
+
+| Property | Status | Detail |
+|----------|--------|--------|
+| RLS granularity | Per-entity, not per-row | Policies gate on `check_access('app:{schema}:{table}.{action}')` with no ownership clause. Two users with the same permission see identical rows. |
+| Row-level ownership | Not implemented | No `WHERE owner_id = current_setting(...)`. All holders of a table permission have equal visibility. |
+| Public/share-token data access | Deny-all by design | Public RPCs execute app logic but ctx.sql/ctx.collection return 0 rows. The app must use onStart-seeded data or stateless logic. |
+| Integration data access | Deny-all (ctx.sql always; ctx.collection after onStart) | IntegrationCallImpl sends caller: None. Only ctx.collection during onStart has BYPASSRLS (self-schema). ctx.sql is always deny-all. Runtime data ops require a user-triggered flow with real context. |
+| Cross-entity permission split | Not possible | A user either has `{entity}.read` or not. No field-level or condition-based filtering within an entity. |
+| Temporal access (row age, TTL) | Not implemented | No time-based policies. Access is purely permission-based. |

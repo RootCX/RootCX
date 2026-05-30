@@ -58,7 +58,7 @@ impl Tool for QueryDataTool {
             is_delegated: true,
             effective_perms: ctx.permissions.clone(),
         };
-        let mut tx = sql_proxy::begin_app_tx(&ctx.pool, app, &state, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool")
+        let mut tx = sql_proxy::begin_app_tx(&ctx.pool, app, &state, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool", sql_proxy::TIMEOUT_AGENT_TOOL_MS)
             .await.map_err(|e| e.to_string())?;
 
         let query_keys = ["where", "orderBy", "order", "limit", "offset"];
