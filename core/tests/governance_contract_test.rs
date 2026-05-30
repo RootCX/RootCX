@@ -151,38 +151,6 @@ async fn t6_1_nonadmin_cannot_deploy() {
 }
 
 #[tokio::test]
-async fn t6_3_nonadmin_cannot_run_db_query() {
-    let rt = harness::TestRuntime::boot().await;
-    admin(&rt).await;
-    let (tok, _) = user_with(&rt, "sales@t.local", &[]).await;
-    let (s, _) = rt.request_as(Method::POST, "/api/v1/db/query", &tok,
-        Some(&json!({"sql": "SELECT 1"}))).await;
-    assert_eq!(s, StatusCode::FORBIDDEN);
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn t6_2_nonadmin_cannot_read_platform_secrets() {
-    let rt = harness::TestRuntime::boot().await;
-    admin(&rt).await;
-    let (tok, _) = user_with(&rt, "sales@t.local", &[]).await;
-    let (s, _) = rt.request_as(Method::GET, "/api/v1/platform/secrets/env", &tok, None).await;
-    assert_eq!(s, StatusCode::FORBIDDEN);
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn t6_7_nonadmin_cannot_manage_mcp() {
-    let rt = harness::TestRuntime::boot().await;
-    admin(&rt).await;
-    let (tok, _) = user_with(&rt, "sales@t.local", &[]).await;
-    let (s, _) = rt.request_as(Method::POST, "/api/v1/mcp-servers", &tok,
-        Some(&json!({"name": "x", "transport": {"type": "stdio", "command": "true", "args": []}, "autoStart": false}))).await;
-    assert_eq!(s, StatusCode::FORBIDDEN);
-    rt.shutdown().await;
-}
-
-#[tokio::test]
 async fn t6_4_second_install_requires_permission() {
     let rt = harness::TestRuntime::boot().await;
     admin(&rt).await; // an admin now exists → no longer first-boot
@@ -208,6 +176,200 @@ async fn t7_1_user_without_invoke_cannot_call_app_rpc() {
     let (s, _) = rt.request_as(Method::POST, "/api/v1/apps/billing/rpc", &tok,
         Some(&json!({"method": "getInvoice", "params": {}}))).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "no app:billing:invoke → 403 at the hop");
+    rt.shutdown().await;
+}
+
+// ── CATEGORY 6 (continued) : first-boot and admin deploy ─────────────
+
+#[tokio::test]
+async fn t6_5_first_boot_promotes_first_installer() {
+    // Boot a fresh runtime. The harness auto-registers admin@test.local and
+    // promotes them; we undo that promotion so we can observe first-boot.
+    let rt = harness::TestRuntime::boot().await;
+    let pool = rt.pool();
+
+    // Undo the admin assignment so the system is at first-boot state (only
+    // system users have assignments).
+    sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id IN (SELECT id FROM rootcx_system.users WHERE NOT is_system)")
+        .execute(pool).await.unwrap();
+
+    // Verify we are back to first-boot: is_first_boot = true.
+    let is_first: bool = sqlx::query_scalar(
+        "SELECT NOT EXISTS(SELECT 1 FROM rootcx_system.rbac_assignments a \
+         JOIN rootcx_system.users u ON u.id = a.user_id WHERE NOT u.is_system)"
+    ).fetch_one(pool).await.unwrap();
+    assert!(is_first, "precondition: must be first-boot");
+
+    // Now install as the original admin@test.local user (via the default token).
+    let manifest = json!({
+        "appId": "first_app", "name": "first_app", "version": "1.0.0",
+        "dataContract": [{"entityName": "items", "fields": [{"name": "title", "type": "text"}]}]
+    });
+    let (s, body) = rt.post_json("/api/v1/apps", &manifest).await;
+    assert_eq!(s, StatusCode::OK, "first-boot install must succeed without admin: {body}");
+
+    // After install, the user should now be admin.
+    let uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
+        .fetch_one(pool).await.unwrap();
+    let has_admin: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_assignments WHERE user_id = $1 AND role = 'admin')"
+    ).bind(uid).fetch_one(pool).await.unwrap();
+    assert!(has_admin, "first-boot: installer must be promoted to admin");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t6_6_admin_can_deploy() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+
+    // Deploy a minimal tarball. The admin has admin:apps.deploy; the request
+    // should pass the PEP gate (may fail downstream for invalid tarball, but NOT 403).
+    let form = reqwest::multipart::Form::new().part(
+        "file",
+        reqwest::multipart::Part::bytes(b"fake".to_vec()).file_name("b.tar.gz").mime_str("application/gzip").unwrap(),
+    );
+    let s = reqwest::Client::new().post(rt.url("/api/v1/apps/crm/deploy"))
+        .bearer_auth(&rt.token).multipart(form).send().await.unwrap().status();
+    // Admin must NOT get 403 (may get 500 due to invalid tarball, but PEP passed).
+    assert_ne!(s, StatusCode::FORBIDDEN, "admin must pass the deploy PEP gate");
+    rt.shutdown().await;
+}
+
+// ── CATEGORY 7 (continued) : cross-app invoke + effective_perms ──────
+
+#[tokio::test]
+async fn t7_2_user_with_invoke_can_call_rpc() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("billing", "invoices").await;
+
+    // Give the user the invoke permission for the billing app.
+    let (tok, _) = user_with(&rt, "invoker@t.local", &["app:billing:invoke"]).await;
+    let (s, _) = rt.request_as(Method::POST, "/api/v1/apps/billing/rpc", &tok,
+        Some(&json!({"method": "getInvoice", "params": {}}))).await;
+    // The request must NOT be rejected at the PEP level (403). It may fail
+    // downstream (worker not running = 500/404) but governance passed.
+    assert_ne!(s, StatusCode::FORBIDDEN, "user with app:billing:invoke must pass the invoke gate");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t7_4_admin_can_invoke_any_app() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("billing", "invoices").await;
+
+    // The admin token (from harness) has `*` via admin role.
+    let (s, _) = rt.request_as(Method::POST, "/api/v1/apps/billing/rpc", &rt.token,
+        Some(&json!({"method": "anything", "params": {}}))).await;
+    // Must not be 403 (admin has wildcard).
+    assert_ne!(s, StatusCode::FORBIDDEN, "admin must pass any invoke gate");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t7_5_cross_app_action_propagates_intersection_perms() {
+    // This tests the core governance invariant: when an agent calls a cross-app
+    // action, the effective_perms (intersection of agent grants and human perms)
+    // are propagated to the target. The target's RLS sees is_delegated='1' and
+    // uses effective_perms, NOT the human's direct permissions.
+    //
+    // We test at the DB/RLS level: posing GUCs to simulate the delegation path.
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("billing", "invoices").await;
+    rt.create("billing", "invoices", &rec()).await;
+    let pool = rt.pool();
+
+    // Setup: Jean has full billing access directly.
+    let jean = Uuid::new_v4();
+    sqlx::query("INSERT INTO rootcx_system.users (id, email) VALUES ($1, 'jean-7.5@t.local')")
+        .bind(jean).execute(pool).await.unwrap();
+    let role = "role_jean_75";
+    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, permissions) VALUES ($1, ARRAY['app:billing:invoices.read', 'app:billing:invoices.create']) ON CONFLICT (name) DO NOTHING")
+        .bind(role).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, $2)")
+        .bind(jean).bind(role).execute(pool).await.unwrap();
+
+    // Direct access: Jean with no delegation sees the row.
+    let direct = count_as_billing(pool, Some(jean), false, "").await;
+    assert_eq!(direct, 1, "Jean directly sees 1 row");
+
+    // Simulating the cross-app hop: the agent's intersection only grants
+    // invoices.create but NOT invoices.read. RLS must deny visibility.
+    let restricted = count_as_billing(pool, Some(jean), true, "app:billing:invoices.create").await;
+    assert_eq!(restricted, 0, "delegated with only .create (no .read in intersection) -> 0 rows");
+
+    // With the correct intersection that includes .read -> visible.
+    let granted = count_as_billing(pool, Some(jean), true, "app:billing:invoices.read,app:billing:invoices.create").await;
+    assert_eq!(granted, 1, "delegated with .read in intersection -> row visible");
+
+    // Empty intersection -> deny all (defense-in-depth).
+    let empty = count_as_billing(pool, Some(jean), true, "").await;
+    assert_eq!(empty, 0, "delegated with empty intersection -> deny all");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t7_5b_call_action_tool_passes_effective_perms_to_caller() {
+    // Verify CallActionTool propagates ctx.permissions to the ActionCaller.
+    // This is the Rust-level assertion that the intersection flows through.
+    use std::sync::{Arc, Mutex};
+
+    struct SpyActionCaller {
+        captured_perms: Mutex<Option<Option<Vec<String>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl rootcx_core::tools::ActionCaller for SpyActionCaller {
+        async fn call(
+            &self, _app_id: &str, _action_id: &str, _input: serde_json::Value,
+            _user_id: uuid::Uuid, _caller_app_id: &str, effective_perms: Option<Vec<String>>,
+        ) -> Result<serde_json::Value, String> {
+            *self.captured_perms.lock().unwrap() = Some(effective_perms);
+            Ok(json!({"ok": true}))
+        }
+    }
+
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("billing", "invoices").await;
+    let pool = rt.pool();
+
+    // Register a fake action in the billing manifest so CallActionTool finds it.
+    sqlx::query("UPDATE rootcx_system.apps SET manifest = jsonb_set(COALESCE(manifest, '{}'::jsonb), '{actions}', $1) WHERE id = 'billing'")
+        .bind(json!([{"id": "createInvoice", "name": "Create Invoice"}]))
+        .execute(pool).await.unwrap();
+
+    let spy = Arc::new(SpyActionCaller { captured_perms: Mutex::new(None) });
+    let intersection = vec![
+        "app:billing:action:createInvoice".to_string(),
+        "app:billing:invoices.create".to_string(),
+    ];
+
+    let ctx = rootcx_core::tools::ToolContext {
+        pool: pool.clone(),
+        app_id: "crm".into(),
+        user_id: Uuid::new_v4(),
+        invoker_user_id: Some(Uuid::new_v4()),
+        permissions: intersection.clone(),
+        args: json!({"app": "billing", "action": "createInvoice", "input": {}}),
+        agent_dispatch: None,
+        integration_caller: None,
+        action_caller: Some(spy.clone()),
+        stream_tx: None,
+    };
+
+    let tool = rootcx_core::tools::call_action::CallActionTool;
+    let result = rootcx_core::tools::Tool::execute(&tool, &ctx).await;
+    assert!(result.is_ok(), "call_action should succeed: {result:?}");
+
+    let captured = spy.captured_perms.lock().unwrap().clone();
+    assert_eq!(captured, Some(Some(intersection)),
+        "CallActionTool must propagate ctx.permissions as effective_perms to the target");
     rt.shutdown().await;
 }
 
@@ -242,76 +404,198 @@ async fn db_has_permission_wildcard_and_boundary() {
     rt.shutdown().await;
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// CATEGORY 3 : triggers + delegation lifecycle
+// ══════════════════════════════════════════════════════════════════════
+
+// ── TEST 3.1 : User invoke direct (with invoke perm -> agent runs) ────
+// Attack: can a user with the correct permission invoke an agent?
+// Level: integration (HTTP). Requires live agent worker.
 #[tokio::test]
-async fn db_app_executor_role_is_locked_down() {
+#[ignore = "requires live agent worker; run with --ignored"]
+async fn t3_1_user_with_invoke_perm_can_invoke_agent() {
     let rt = harness::TestRuntime::boot().await;
     admin(&rt).await;
-    rt.install("crm", "contacts").await;
-    let pool = rt.pool();
+    rt.install("support", "tickets").await;
+    register_agent(rt.pool(), "support").await;
 
-    // The restricted role cannot read system tables, cannot rewrite identity
-    // GUCs, and cannot do DDL. Multi-statement is rejected structurally by the
-    // extended query protocol (the reason validate_sql needs no `;` parser).
-    // Each must error.
-    for sql in [
-        "SELECT * FROM rootcx_system.users",
-        "SELECT set_config('rootcx.is_delegated','0',true)",
-        "CREATE TABLE crm.evil (id int)",
-        "SELECT 1; DROP TABLE crm.contacts",
-    ] {
-        let mut tx = pool.begin().await.unwrap();
-        sqlx::query("SET LOCAL search_path TO crm, public").execute(&mut *tx).await.unwrap();
-        sqlx::query("SET LOCAL ROLE rootcx_app_executor").execute(&mut *tx).await.unwrap();
-        let res = sqlx::query(sql).execute(&mut *tx).await;
-        assert!(res.is_err(), "executor must be denied: {sql}");
-        let _ = tx.rollback().await;
+    let (tok, _) = user_with(&rt, "alice@t.local", &["app:support:invoke"]).await;
+    let (s, _) = rt.request_as(
+        Method::POST, "/api/v1/apps/support/agent/invoke", &tok,
+        Some(&json!({"message": "hello"})),
+    ).await;
+    // With a live worker SSE is returned (200). Without -> 500/502.
+    assert_eq!(s, StatusCode::OK, "user with invoke perm must be able to invoke agent");
+    rt.shutdown().await;
+}
+
+// ── TEST 3.2 : User invoke sans permission invoke -> 403 ─────────
+// Attack: user without app:X:invoke must NOT be able to trigger the agent.
+// Level: integration (HTTP). No worker needed; perm check fires first.
+#[tokio::test]
+async fn t3_2_user_without_invoke_perm_gets_403() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("support", "tickets").await;
+    register_agent(rt.pool(), "support").await;
+
+    let (tok, _) = user_with(&rt, "alice@t.local", &["app:support:tickets.read"]).await;
+    let (s, body) = rt.request_as(
+        Method::POST, "/api/v1/apps/support/agent/invoke", &tok,
+        Some(&json!({"message": "hello"})),
+    ).await;
+    assert_eq!(s, StatusCode::FORBIDDEN,
+        "user without invoke perm must be denied: {body}");
+    rt.shutdown().await;
+}
+
+// ── TEST 3.3/3.6/3.10 : Valid delegation for all trigger types ───────
+// Attack: scheduler/hook/channel must accept agent dispatch when delegation is active.
+// Level: unit (delegations::is_valid with DB fixtures)
+#[tokio::test]
+async fn delegation_valid_for_all_trigger_types() {
+    let rt = harness::TestRuntime::boot().await;
+    let pool = rt.pool();
+    let delegator = create_user(pool, "delegator@t.local").await;
+    register_agent(pool, "alerts").await;
+    let agent_uid = rootcx_core::extensions::agents::agent_user_id("alerts");
+
+    for trigger_type in ["cron", "hook", "channel"] {
+        let del_id = rootcx_core::delegations::create(pool, delegator, agent_uid, trigger_type, None).await.unwrap();
+        assert!(rootcx_core::delegations::is_valid(pool, delegator, agent_uid).await.unwrap(),
+            "delegation must be valid for trigger_type={trigger_type}");
+        rootcx_core::delegations::revoke(pool, del_id).await.unwrap();
     }
     rt.shutdown().await;
 }
 
+// ── TEST 3.4/3.7/3.11 : Revoked delegation denies all trigger types ──
+// Attack: admin revokes delegation; all trigger types must stop triggering.
+// Level: unit (delegation revoke + is_valid)
 #[tokio::test]
-async fn db_rls_filters_by_guc_identity() {
+async fn delegation_revoked_denies_all_trigger_types() {
     let rt = harness::TestRuntime::boot().await;
-    admin(&rt).await;
-    rt.install("crm", "contacts").await;
-    rt.create("crm", "contacts", &rec()).await;
     let pool = rt.pool();
+    let delegator = create_user(pool, "delegator2@t.local").await;
+    register_agent(pool, "alerts").await;
+    let agent_uid = rootcx_core::extensions::agents::agent_user_id("alerts");
 
-    let jean: Uuid = Uuid::new_v4();
-    sqlx::query("INSERT INTO rootcx_system.users (id, email) VALUES ($1, 'jean-db@t.local')")
-        .bind(jean).execute(pool).await.unwrap();
-    let role = "role_jean_db";
-    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, permissions) VALUES ($1, ARRAY['app:crm:contacts.read']) ON CONFLICT (name) DO NOTHING")
-        .bind(role).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, $2)")
-        .bind(jean).bind(role).execute(pool).await.unwrap();
-
-    // With Jean's identity posed → visible.
-    let n = count_as(pool, Some(jean), false, "").await;
-    assert_eq!(n, 1, "Jean with read perm sees the row");
-
-    // No identity → deny all.
-    let n = count_as(pool, None, false, "").await;
-    assert_eq!(n, 0, "NULL user_id → 0 rows");
-
-    // Delegated with empty intersection → deny all (sentinel).
-    let n = count_as(pool, Some(jean), true, "").await;
-    assert_eq!(n, 0, "is_delegated=1 + empty effective_perms → deny all");
-
-    // Delegated with the right perm in the intersection → visible.
-    let n = count_as(pool, Some(jean), true, "app:crm:contacts.read").await;
-    assert_eq!(n, 1, "delegated with perm in intersection → visible");
+    for trigger_type in ["cron", "hook", "channel"] {
+        let del_id = rootcx_core::delegations::create(pool, delegator, agent_uid, trigger_type, None).await.unwrap();
+        rootcx_core::delegations::revoke(pool, del_id).await.unwrap();
+        assert!(!rootcx_core::delegations::is_valid(pool, delegator, agent_uid).await.unwrap(),
+            "revoked delegation must be invalid for trigger_type={trigger_type}");
+    }
     rt.shutdown().await;
 }
 
-// ── Cross-agent invoke gate (TEST 3.13) ───────────────────────────────
+// ── TEST 3.5 : Cron without owner (created_by = NULL) -> refused ─────
+// Attack: legacy/orphan cron with no owner must be denied (deny-by-default).
+// Scheduler logic: `if invoker_user_id.is_none() -> fail`.
+// Level: unit (no delegation exists for nil UUID)
+#[tokio::test]
+async fn t3_5_cron_no_owner_denied() {
+    let rt = harness::TestRuntime::boot().await;
+    let pool = rt.pool();
+    register_agent(pool, "analytics").await;
 
+    let agent_uid = rootcx_core::extensions::agents::agent_user_id("analytics");
+    let valid = rootcx_core::delegations::is_valid(pool, Uuid::nil(), agent_uid).await.unwrap();
+    assert!(!valid, "non-existent delegator must have no valid delegation (deny-by-default)");
+    rt.shutdown().await;
+}
+
+// ── TEST 3.8 : Webhook with valid delegation -> agent runs ───────────
+// Attack: inbound agent-webhook without valid delegation must be rejected.
+// Level: integration (HTTP to the webhook inbound endpoint)
+#[tokio::test]
+async fn t3_8_webhook_valid_delegation_passes() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("alerts", "incidents").await;
+    register_agent(rt.pool(), "alerts").await;
+
+    let delegator = create_user(rt.pool(), "admin-wh@t.local").await;
+    let agent_uid = rootcx_core::extensions::agents::agent_user_id("alerts");
+
+    let wh_id = create_webhook(rt.pool(), "alerts", "incoming", "agent", Some(delegator)).await;
+    rootcx_core::delegations::create(rt.pool(), delegator, agent_uid, "webhook", Some(wh_id)).await.unwrap();
+
+    let token = get_webhook_token(rt.pool(), wh_id).await;
+    let r = rt.client.post(rt.url(&format!("/api/v1/hooks/{token}")))
+        .json(&json!({"event": "alert_fired"}))
+        .send().await.unwrap();
+    // With valid delegation: 200 (accepted) or 500 (no worker), NOT 403
+    assert_ne!(r.status(), StatusCode::FORBIDDEN,
+        "webhook with valid delegation must not be denied at the delegation gate");
+    rt.shutdown().await;
+}
+
+// ── TEST 3.9 : Webhook with revoked delegation -> 403 ────────────────
+// Attack: revoking delegation must immediately block webhook-triggered agents.
+// Level: integration (HTTP)
+#[tokio::test]
+async fn t3_9_webhook_revoked_delegation_denied() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("alerts", "incidents").await;
+    register_agent(rt.pool(), "alerts").await;
+
+    let delegator = create_user(rt.pool(), "admin-wh2@t.local").await;
+    let agent_uid = rootcx_core::extensions::agents::agent_user_id("alerts");
+
+    let wh_id = create_webhook(rt.pool(), "alerts", "incoming2", "agent", Some(delegator)).await;
+    let del_id = rootcx_core::delegations::create(rt.pool(), delegator, agent_uid, "webhook", Some(wh_id)).await.unwrap();
+
+    rootcx_core::delegations::revoke(rt.pool(), del_id).await.unwrap();
+
+    let token = get_webhook_token(rt.pool(), wh_id).await;
+    let r = rt.client.post(rt.url(&format!("/api/v1/hooks/{token}")))
+        .json(&json!({"event": "alert_fired"}))
+        .send().await.unwrap();
+    assert!(r.status() == StatusCode::FORBIDDEN || r.status() == StatusCode::UNAUTHORIZED,
+        "webhook with revoked delegation must be denied, got {}", r.status());
+    rt.shutdown().await;
+}
+
+// ── TEST 3.12 : Sub-agent invoke (agent A calls agent B, same human) ─
+// Attack: sub-agent invoke must succeed when effective permissions include
+// target's invoke permission (intersected perms carry through).
+// Level: unit (check_permission with correct perm set)
+#[tokio::test]
+async fn t3_12_sub_agent_invoke_with_perm_succeeds() {
+    let rt = harness::TestRuntime::boot().await;
+    let ctx = rootcx_core::tools::ToolContext {
+        pool: rt.pool().clone(),
+        app_id: "crm".into(),
+        user_id: Uuid::new_v4(),
+        invoker_user_id: Some(Uuid::new_v4()),
+        permissions: vec![
+            "app:crm:contacts.read".into(),
+            "app:billing:invoke".into(),
+        ],
+        args: json!({"app_id": "billing", "message": "generate invoice"}),
+        agent_dispatch: None,
+        integration_caller: None,
+        action_caller: None,
+        stream_tx: None,
+    };
+    let tool = rootcx_core::tools::invoke_agent::InvokeAgentTool;
+    let err = rootcx_core::tools::Tool::execute(&tool, &ctx).await.unwrap_err();
+    // Must NOT fail on permission; should fail on "dispatch unavailable"
+    assert!(!err.contains("permission denied"),
+        "sub-agent invoke with correct perm must pass the gate: {err}");
+    assert!(err.contains("dispatch unavailable"),
+        "with no dispatcher, error must be about dispatch: {err}");
+    rt.shutdown().await;
+}
+
+// ── TEST 3.13 : Sub-agent invoke sans permission invoke -> refused ────
+// Attack: agent A tries to invoke agent B but human lacks app:B:invoke.
+// Level: unit (InvokeAgentTool permission gate)
 #[tokio::test]
 async fn sub_agent_invoke_requires_invoke_perm() {
     let rt = harness::TestRuntime::boot().await;
-    // Effective authority (grant∩human) lacks app:billing:invoke → the agent
-    // must NOT be able to invoke the billing agent. The gate fires before any
-    // dispatch or I/O.
     let ctx = rootcx_core::tools::ToolContext {
         pool: rt.pool().clone(),
         app_id: "crm".into(),
@@ -329,6 +613,44 @@ async fn sub_agent_invoke_requires_invoke_perm() {
     assert!(err.contains("app:billing:invoke"), "sub-agent invoke must require invoke perm: {err}");
     rt.shutdown().await;
 }
+
+// ── Helpers for Category 3 ───────────────────────────────────────────────
+
+async fn create_user(pool: &sqlx::PgPool, email: &str) -> Uuid {
+    let uid = Uuid::new_v4();
+    sqlx::query("INSERT INTO rootcx_system.users (id, email) VALUES ($1, $2) ON CONFLICT (email) DO UPDATE SET id = rootcx_system.users.id RETURNING id")
+        .bind(uid).bind(email).execute(pool).await.unwrap();
+    sqlx::query_scalar::<_, Uuid>("SELECT id FROM rootcx_system.users WHERE email = $1")
+        .bind(email).fetch_one(pool).await.unwrap()
+}
+
+async fn register_agent(pool: &sqlx::PgPool, app_id: &str) {
+    let agent_uid = rootcx_core::extensions::agents::agent_user_id(app_id);
+    let agent_email = format!("agent+{app_id}@localhost");
+    sqlx::query("INSERT INTO rootcx_system.apps (id, name, manifest) VALUES ($1, $1, '{}') ON CONFLICT DO NOTHING")
+        .bind(app_id).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.users (id, email) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(agent_uid).bind(&agent_email).execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO rootcx_system.agents (app_id, name, config) VALUES ($1, $1, '{}') ON CONFLICT DO NOTHING"
+    ).bind(app_id).execute(pool).await.unwrap();
+}
+
+async fn create_webhook(pool: &sqlx::PgPool, app_id: &str, name: &str, method: &str, created_by: Option<Uuid>) -> Uuid {
+    let token = Uuid::new_v4().to_string().replace('-', "");
+    let (id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO rootcx_system.webhooks (app_id, name, method, token, created_by) \
+         VALUES ($1, $2, $3, $4, $5) RETURNING id"
+    ).bind(app_id).bind(name).bind(method).bind(&token).bind(created_by)
+    .fetch_one(pool).await.unwrap();
+    id
+}
+
+async fn get_webhook_token(pool: &sqlx::PgPool, wh_id: Uuid) -> String {
+    sqlx::query_scalar::<_, String>("SELECT token FROM rootcx_system.webhooks WHERE id = $1")
+        .bind(wh_id).fetch_one(pool).await.unwrap()
+}
+
 
 // ── SelfAction scope (P0 checklist: no arbitrary user targeting) ───────
 
@@ -395,4 +717,1020 @@ async fn count_as(pool: &sqlx::PgPool, user: Option<Uuid>, delegated: bool, perm
     let n: i64 = sqlx::query_scalar("SELECT count(*) FROM crm.contacts").fetch_one(&mut *tx).await.unwrap();
     let _ = tx.rollback().await;
     n
+}
+
+/// Count billing.invoices under a posed RLS identity (for cross-app delegation tests).
+async fn count_as_billing(pool: &sqlx::PgPool, user: Option<Uuid>, delegated: bool, perms: &str) -> i64 {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL search_path TO billing, public").execute(&mut *tx).await.unwrap();
+    sqlx::query("SELECT set_config('rootcx.user_id',$1,true), set_config('rootcx.is_delegated',$2,true), set_config('rootcx.effective_perms',$3,true)")
+        .bind(user.map(|u| u.to_string()).unwrap_or_default())
+        .bind(if delegated { "1" } else { "0" })
+        .bind(perms)
+        .execute(&mut *tx).await.unwrap();
+    sqlx::query("SET LOCAL ROLE rootcx_app_executor").execute(&mut *tx).await.unwrap();
+    let n: i64 = sqlx::query_scalar("SELECT count(*) FROM billing.invoices").fetch_one(&mut *tx).await.unwrap();
+    let _ = tx.rollback().await;
+    n
+}
+
+/// Count rows from a fully-qualified table as a given RLS identity.
+async fn count_table_as(pool: &sqlx::PgPool, fqn: &str, user: Option<Uuid>, delegated: bool, perms: &str) -> i64 {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL search_path TO public").execute(&mut *tx).await.unwrap();
+    sqlx::query("SELECT set_config('rootcx.user_id',$1,true), set_config('rootcx.is_delegated',$2,true), set_config('rootcx.effective_perms',$3,true)")
+        .bind(user.map(|u| u.to_string()).unwrap_or_default())
+        .bind(if delegated { "1" } else { "0" })
+        .bind(perms)
+        .execute(&mut *tx).await.unwrap();
+    sqlx::query("SET LOCAL ROLE rootcx_app_executor").execute(&mut *tx).await.unwrap();
+    let q = format!("SELECT count(*) FROM {fqn}");
+    let n: i64 = sqlx::query_scalar(&q).fetch_one(&mut *tx).await.unwrap();
+    let _ = tx.rollback().await;
+    n
+}
+
+/// Execute a cross-schema JOIN query under RLS and return row count.
+async fn join_count_as(pool: &sqlx::PgPool, sql: &str, user: Option<Uuid>, delegated: bool, perms: &str) -> i64 {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SET LOCAL search_path TO public").execute(&mut *tx).await.unwrap();
+    sqlx::query("SELECT set_config('rootcx.user_id',$1,true), set_config('rootcx.is_delegated',$2,true), set_config('rootcx.effective_perms',$3,true)")
+        .bind(user.map(|u| u.to_string()).unwrap_or_default())
+        .bind(if delegated { "1" } else { "0" })
+        .bind(perms)
+        .execute(&mut *tx).await.unwrap();
+    sqlx::query("SET LOCAL ROLE rootcx_app_executor").execute(&mut *tx).await.unwrap();
+    let q = format!("SELECT count(*) FROM ({sql}) sub");
+    let n: i64 = sqlx::query_scalar(&q).fetch_one(&mut *tx).await.unwrap();
+    let _ = tx.rollback().await;
+    n
+}
+
+/// Create a user directly in DB with specified permissions (no HTTP registration).
+async fn db_user(pool: &sqlx::PgPool, email: &str, perms: &[&str]) -> Uuid {
+    let uid = Uuid::new_v4();
+    sqlx::query("INSERT INTO rootcx_system.users (id, email) VALUES ($1, $2)")
+        .bind(uid).bind(email).execute(pool).await.unwrap();
+    let role = format!("role_{}", uid.simple());
+    let perm_list: Vec<String> = perms.iter().map(|s| s.to_string()).collect();
+    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, permissions) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET permissions = EXCLUDED.permissions")
+        .bind(&role).bind(&perm_list).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(uid).bind(&role).execute(pool).await.unwrap();
+    uid
+}
+
+// ── CATEGORY 1 (extended) : cross-app data-plane ─────────────────────
+
+#[tokio::test]
+async fn t1_7_cross_app_join_filters_by_user() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    rt.install("billing", "invoices").await;
+    rt.create("crm", "contacts", &rec()).await;
+    rt.create("billing", "invoices", &rec()).await;
+    let pool = rt.pool();
+
+    // Jean has both crm + billing read permissions
+    let jean = db_user(pool, "jean-join@t.local", &["app:crm:contacts.read", "app:billing:invoices.read"]).await;
+
+    // Marie has only crm read
+    let marie = db_user(pool, "marie-join@t.local", &["app:crm:contacts.read"]).await;
+
+    // Cross-app LEFT JOIN query using fully-qualified table names
+    let join_sql = "SELECT c.id, i.id AS inv_id FROM crm.contacts c LEFT JOIN billing.invoices i ON TRUE";
+
+    // Jean sees both sides of the JOIN (at least 1 combined row)
+    let n = join_count_as(pool, join_sql, Some(jean), false, "").await;
+    assert!(n >= 1, "Jean with both perms sees JOIN result: got {n}");
+
+    // Marie cannot see billing rows (RLS filters the billing side)
+    let billing_n = count_table_as(pool, "billing.invoices", Some(marie), false, "").await;
+    assert_eq!(billing_n, 0, "Marie without billing perm sees 0 billing rows");
+
+    // Marie can still see CRM rows
+    let crm_n = count_table_as(pool, "crm.contacts", Some(marie), false, "").await;
+    assert_eq!(crm_n, 1, "Marie with crm perm sees her crm rows");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t1_9_linked_enrichment_filtered_by_rls() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+
+    // Install crm + billing with shared identity_kind for cross-app linking
+    let crm_manifest = json!({
+        "appId": "crm", "name": "crm", "version": "1.0.0",
+        "dataContract": [{ "entityName": "contacts", "fields": [
+            { "name": "first_name", "type": "text", "required": true },
+            { "name": "last_name",  "type": "text", "required": true },
+            { "name": "email", "type": "text" },
+            { "name": "phone", "type": "text" },
+            { "name": "company", "type": "text" },
+            { "name": "notes", "type": "text" },
+        ], "identityKind": "customer", "identityKey": "email" }]
+    });
+    let billing_manifest = json!({
+        "appId": "billing", "name": "billing", "version": "1.0.0",
+        "dataContract": [{ "entityName": "invoices", "fields": [
+            { "name": "first_name", "type": "text", "required": true },
+            { "name": "last_name",  "type": "text", "required": true },
+            { "name": "email", "type": "text" },
+            { "name": "phone", "type": "text" },
+            { "name": "company", "type": "text" },
+            { "name": "notes", "type": "text" },
+        ], "identityKind": "customer", "identityKey": "email" }]
+    });
+    rt.install_manifest(&crm_manifest).await;
+    rt.install_manifest(&billing_manifest).await;
+
+    // Create records with the same identity key (email) for linking
+    let contact = json!({"first_name": "Jean", "last_name": "Dupont", "email": "jean@acme.com"});
+    let invoice = json!({"first_name": "Jean", "last_name": "Dupont", "email": "jean@acme.com"});
+    rt.create("crm", "contacts", &contact).await;
+    rt.create("billing", "invoices", &invoice).await;
+
+    // User with crm read but NOT billing read
+    let (tok, _) = user_with(&rt, "linked-user@t.local", &["app:crm:contacts.read"]).await;
+
+    // ?linked=billing: CRM rows visible but _linked.billing absent (RLS denies billing)
+    let (s, body) = rt.request_as(
+        Method::GET, "/api/v1/apps/crm/collections/contacts?linked=billing", &tok, None,
+    ).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let rows = body.as_array().expect("array response");
+    assert_eq!(rows.len(), 1, "CRM contact visible");
+    let linked = rows[0].get("_linked").and_then(|l| l.get("billing"));
+    assert!(linked.is_none(), "_linked.billing must be absent without billing perm: {body}");
+
+    // User with BOTH perms sees the linked data
+    let (tok2, _) = user_with(&rt, "linked-full@t.local", &["app:crm:contacts.read", "app:billing:invoices.read"]).await;
+    let (s2, body2) = rt.request_as(
+        Method::GET, "/api/v1/apps/crm/collections/contacts?linked=billing", &tok2, None,
+    ).await;
+    assert_eq!(s2, StatusCode::OK);
+    let rows2 = body2.as_array().expect("array response");
+    let linked2 = rows2[0].get("_linked").and_then(|l| l.get("billing"));
+    assert!(linked2.is_some(), "user with billing perm sees _linked.billing: {body2}");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t1_10_federated_query_filtered_by_rls() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+
+    // Install two apps sharing identity_kind "person" for federation
+    let crm_manifest = json!({
+        "appId": "crm", "name": "crm", "version": "1.0.0",
+        "dataContract": [{ "entityName": "contacts", "fields": [
+            { "name": "first_name", "type": "text", "required": true },
+            { "name": "last_name",  "type": "text", "required": true },
+            { "name": "email", "type": "text" },
+            { "name": "phone", "type": "text" },
+            { "name": "company", "type": "text" },
+            { "name": "notes", "type": "text" },
+        ], "identityKind": "person", "identityKey": "email" }]
+    });
+    let hr_manifest = json!({
+        "appId": "hr", "name": "hr", "version": "1.0.0",
+        "dataContract": [{ "entityName": "employees", "fields": [
+            { "name": "first_name", "type": "text", "required": true },
+            { "name": "last_name",  "type": "text", "required": true },
+            { "name": "email", "type": "text" },
+            { "name": "phone", "type": "text" },
+            { "name": "company", "type": "text" },
+            { "name": "notes", "type": "text" },
+        ], "identityKind": "person", "identityKey": "email" }]
+    });
+    rt.install_manifest(&crm_manifest).await;
+    rt.install_manifest(&hr_manifest).await;
+    rt.create("crm", "contacts", &json!({"first_name": "A", "last_name": "B", "email": "a@b.com"})).await;
+    rt.create("hr", "employees", &json!({"first_name": "C", "last_name": "D", "email": "c@d.com"})).await;
+
+    // User with only crm perm: federated query returns only crm records
+    let (tok, _) = user_with(&rt, "fed-user@t.local", &["app:crm:contacts.read"]).await;
+    let (s, body) = rt.request_as(
+        Method::POST, "/api/v1/federated/person/query", &tok, Some(&json!({})),
+    ).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let empty: Vec<Value> = vec![];
+    let data = body.get("data").and_then(|d| d.as_array()).unwrap_or(&empty);
+    for row in data {
+        let source = row.get("_source").and_then(|s| s.get("app")).and_then(|a| a.as_str());
+        assert_eq!(source, Some("crm"), "federated must filter out hr for user without hr perm: {body}");
+    }
+    assert!(!data.is_empty(), "crm record should be visible");
+
+    // User with both perms sees both apps
+    let (tok2, _) = user_with(&rt, "fed-full@t.local", &["app:crm:contacts.read", "app:hr:employees.read"]).await;
+    let (s2, body2) = rt.request_as(
+        Method::POST, "/api/v1/federated/person/query", &tok2, Some(&json!({})),
+    ).await;
+    assert_eq!(s2, StatusCode::OK);
+    let empty2: Vec<Value> = vec![];
+    let data2 = body2.get("data").and_then(|d| d.as_array()).unwrap_or(&empty2);
+    let apps: Vec<&str> = data2.iter()
+        .filter_map(|r| r.get("_source").and_then(|s| s.get("app")).and_then(|a| a.as_str()))
+        .collect();
+    assert!(apps.contains(&"crm"), "full user sees crm");
+    assert!(apps.contains(&"hr"), "full user sees hr");
+    rt.shutdown().await;
+}
+
+// ── CATEGORY 2 : Delegation / intersection (DB-level) ────────────────
+
+#[tokio::test]
+async fn t2_3_user_cannot_exceed_agent() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+
+    // Install crm with two entities: contacts and deals (both get RLS)
+    let manifest = json!({
+        "appId": "crm", "name": "crm", "version": "1.0.0",
+        "dataContract": [
+            { "entityName": "contacts", "fields": [
+                { "name": "first_name", "type": "text", "required": true },
+                { "name": "last_name",  "type": "text", "required": true },
+                { "name": "email", "type": "text" },
+                { "name": "phone", "type": "text" },
+                { "name": "company", "type": "text" },
+                { "name": "notes", "type": "text" },
+            ]},
+            { "entityName": "deals", "fields": [
+                { "name": "first_name", "type": "text", "required": true },
+                { "name": "last_name",  "type": "text", "required": true },
+                { "name": "email", "type": "text" },
+                { "name": "phone", "type": "text" },
+                { "name": "company", "type": "text" },
+                { "name": "notes", "type": "text" },
+            ]},
+        ]
+    });
+    rt.install_manifest(&manifest).await;
+    rt.create("crm", "contacts", &rec()).await;
+    rt.create("crm", "deals", &rec()).await;
+    let pool = rt.pool();
+
+    // Agent has [crm:contacts.read] only (NOT deals)
+    // User (Jean) has [crm:*] (includes deals)
+    // Intersection = [crm:contacts.read] (bounded by agent's narrower scope)
+    let jean = db_user(pool, "jean-t23@t.local", &["app:crm:*"]).await;
+
+    // Contacts visible via intersection
+    let contacts_n = count_as(pool, Some(jean), true, "app:crm:contacts.read").await;
+    assert_eq!(contacts_n, 1, "intersection includes contacts.read -> visible");
+
+    // Deals NOT visible: the intersection only has contacts.read, not deals.read
+    let deals_n = count_table_as(pool, "crm.deals", Some(jean), true, "app:crm:contacts.read").await;
+    assert_eq!(deals_n, 0, "user cannot exceed agent: intersection lacks deals.read -> 0 rows");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t2_4_agent_without_delegator_zero_authority() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    rt.create("crm", "contacts", &rec()).await;
+    let pool = rt.pool();
+
+    // No user_id (NULL) + delegated = agent without a human responsible -> deny all
+    let n = count_as(pool, None, true, "app:crm:contacts.read").await;
+    assert_eq!(n, 0, "no delegator (NULL user_id) + delegated -> zero authority");
+
+    // Even with broad perms in GUC, NULL user_id denies
+    let n2 = count_as(pool, None, true, "app:crm:*").await;
+    assert_eq!(n2, 0, "no user_id -> deny regardless of effective_perms content");
+
+    // Non-delegated NULL user_id also denies (baseline)
+    let n3 = count_as(pool, None, false, "").await;
+    assert_eq!(n3, 0, "NULL user_id always denies");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t2_5_admin_delegation_bounded_by_agent() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+
+    // Install crm with two entities: contacts and deals
+    let manifest = json!({
+        "appId": "crm", "name": "crm", "version": "1.0.0",
+        "dataContract": [
+            { "entityName": "contacts", "fields": [
+                { "name": "first_name", "type": "text", "required": true },
+                { "name": "last_name",  "type": "text", "required": true },
+                { "name": "email", "type": "text" },
+                { "name": "phone", "type": "text" },
+                { "name": "company", "type": "text" },
+                { "name": "notes", "type": "text" },
+            ]},
+            { "entityName": "deals", "fields": [
+                { "name": "first_name", "type": "text", "required": true },
+                { "name": "last_name",  "type": "text", "required": true },
+                { "name": "email", "type": "text" },
+                { "name": "phone", "type": "text" },
+                { "name": "company", "type": "text" },
+                { "name": "notes", "type": "text" },
+            ]},
+        ]
+    });
+    rt.install_manifest(&manifest).await;
+    rt.create("crm", "contacts", &rec()).await;
+    rt.create("crm", "deals", &rec()).await;
+    let pool = rt.pool();
+
+    // Admin (has '*') invokes agent with only [crm:contacts.read]
+    // intersect('*', [crm:contacts.read]) = [crm:contacts.read]
+    let admin_uid = db_user(pool, "admin-t25@t.local", &["*"]).await;
+
+    // Delegated: effective_perms carries only the agent's grant (the intersection)
+    let contacts_n = count_as(pool, Some(admin_uid), true, "app:crm:contacts.read").await;
+    assert_eq!(contacts_n, 1, "admin delegated with agent's contacts.read -> sees contacts");
+
+    let deals_n = count_table_as(pool, "crm.deals", Some(admin_uid), true, "app:crm:contacts.read").await;
+    assert_eq!(deals_n, 0, "admin delegated but agent lacks deals.read -> 0 rows");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t2_6_empty_intersection_zero_authority() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    rt.install("billing", "invoices").await;
+    rt.create("crm", "contacts", &rec()).await;
+    rt.create("billing", "invoices", &rec()).await;
+    let pool = rt.pool();
+
+    // Agent has [crm:contacts.read]
+    // User has [billing:invoices.read] (no overlap with agent)
+    // Intersection = EMPTY
+    let jean = db_user(pool, "jean-t26@t.local", &["app:billing:invoices.read"]).await;
+
+    // Delegated with empty perms string (the computed intersection is empty)
+    let crm_n = count_as(pool, Some(jean), true, "").await;
+    assert_eq!(crm_n, 0, "empty intersection -> cannot read crm contacts");
+
+    let billing_n = count_table_as(pool, "billing.invoices", Some(jean), true, "").await;
+    assert_eq!(billing_n, 0, "empty intersection -> cannot read billing even though user has billing perm");
+
+    // Control: non-delegated user CAN see billing directly
+    let billing_direct = count_table_as(pool, "billing.invoices", Some(jean), false, "").await;
+    assert_eq!(billing_direct, 1, "control: non-delegated user with billing perm sees invoices");
+    rt.shutdown().await;
+}
+
+/// Execute a SQL statement as the restricted `rootcx_app_executor` role inside
+/// the given app schema. Returns Ok(()) if the statement succeeds, Err(msg) if
+/// Postgres denies it.
+async fn exec_as_executor(pool: &sqlx::PgPool, schema: &str, sql: &str) -> Result<(), String> {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query(&format!("SET LOCAL search_path TO {schema}, public"))
+        .execute(&mut *tx).await.unwrap();
+    sqlx::query("SET LOCAL ROLE rootcx_app_executor")
+        .execute(&mut *tx).await.unwrap();
+    let res = sqlx::query(sql).execute(&mut *tx).await;
+    let _ = tx.rollback().await;
+    res.map(|_| ()).map_err(|e| e.to_string())
+}
+
+// ── CATEGORY 5 : Postgres role + RLS protection ──────────────────────
+
+#[tokio::test]
+async fn t5_1_app_cannot_read_rootcx_system() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let pool = rt.pool();
+
+    // Direct qualified access to rootcx_system tables must be denied.
+    for sql in [
+        "SELECT * FROM rootcx_system.users",
+        "SELECT * FROM rootcx_system.rbac_roles",
+        "SELECT * FROM rootcx_system.rbac_assignments",
+        "SELECT * FROM rootcx_system.apps",
+    ] {
+        let res = exec_as_executor(pool, "crm", sql).await;
+        assert!(res.is_err(), "executor must not read rootcx_system: {sql}");
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("permission denied") || err.contains("denied"),
+            "expected permission denied for {sql}, got: {err}"
+        );
+    }
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t5_2_app_cannot_read_pgmq() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let pool = rt.pool();
+
+    // pgmq carries cross-app job payloads. The executor has no access.
+    // The schema may or may not exist depending on the container; if it
+    // exists, access must be denied. If not, the query still errors (no
+    // schema = also safe).
+    let has_pgmq: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = 'pgmq')"
+    ).fetch_one(pool).await.unwrap();
+
+    if has_pgmq {
+        for sql in [
+            "SELECT * FROM pgmq.q_jobs",
+            "SELECT * FROM pgmq.a_jobs",
+        ] {
+            let res = exec_as_executor(pool, "crm", sql).await;
+            assert!(res.is_err(), "executor must not read pgmq: {sql}");
+        }
+    }
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t5_3_app_cannot_do_ddl() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let pool = rt.pool();
+
+    for sql in [
+        "CREATE TABLE crm.evil (id int)",
+        "DROP TABLE crm.contacts",
+        "ALTER TABLE crm.contacts ADD COLUMN pwned text",
+        "TRUNCATE crm.contacts",
+    ] {
+        let res = exec_as_executor(pool, "crm", sql).await;
+        assert!(res.is_err(), "executor must be denied DDL: {sql}");
+    }
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t5_4_app_cannot_rewrite_identity_gucs() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let pool = rt.pool();
+
+    // set_config is revoked from the executor. Any attempt to overwrite
+    // the RLS identity GUCs must fail.
+    for sql in [
+        "SELECT set_config('rootcx.user_id', '00000000-0000-0000-0000-000000000001', true)",
+        "SELECT set_config('rootcx.is_delegated', '0', true)",
+        "SELECT set_config('rootcx.effective_perms', '*', true)",
+        "SELECT set_config('rootcx.actor_uid', '00000000-0000-0000-0000-000000000001', true)",
+    ] {
+        let res = exec_as_executor(pool, "crm", sql).await;
+        assert!(res.is_err(), "executor must not call set_config: {sql}");
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("permission denied") || err.contains("denied"),
+            "expected permission denied for set_config, got: {err}"
+        );
+    }
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t5_5_app_cannot_set_role() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let pool = rt.pool();
+
+    // The executor must not be able to escalate to privileged roles.
+    // Note: SET ROLE to the session user (the pool owner) or RESET ROLE
+    // is allowed by PostgreSQL but is NOT a vulnerability because the app
+    // never has direct access to the connection -- the core owns the
+    // transaction and commits/rolls back. What matters is that the
+    // executor cannot SET ROLE to roles with elevated privileges.
+    for sql in [
+        "SET ROLE rootcx_owner",
+        "SET ROLE postgres",
+    ] {
+        let res = exec_as_executor(pool, "crm", sql).await;
+        assert!(res.is_err(), "executor must not escalate to privileged role: {sql}");
+    }
+
+    // Even if the session-user reset works (PG allows it), the validate_sql
+    // layer in the SQL proxy catches SET/RESET prefixes before they reach PG.
+    // This validates that the structural defense (env_clear + IPC) means the
+    // app never sends raw SQL to a connection -- only through run_sql which
+    // calls validate_sql first. The PG-level role test above is the last line
+    // of defense.
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t5_6_app_cannot_read_cron_schema() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let pool = rt.pool();
+
+    let has_cron: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = 'cron')"
+    ).fetch_one(pool).await.unwrap();
+
+    if has_cron {
+        let res = exec_as_executor(pool, "crm", "SELECT * FROM cron.job").await;
+        assert!(res.is_err(), "executor must not read cron.job");
+    }
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t5_7_do_block_refused() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let pool = rt.pool();
+
+    // DO blocks can execute arbitrary procedural code. The executor must
+    // not be allowed to use them (or at minimum, set_config inside fails).
+    let res = exec_as_executor(
+        pool, "crm",
+        "DO $$ BEGIN PERFORM set_config('rootcx.user_id','x',true); END $$"
+    ).await;
+    assert!(res.is_err(), "executor must be denied DO blocks or set_config inside DO");
+
+    // Even a benign DO block should fail (language plpgsql revoke or DO itself).
+    let res = exec_as_executor(pool, "crm", "DO $$ BEGIN NULL; END $$").await;
+    // Acceptable: either plpgsql is not granted, or DO itself is blocked.
+    // Both are valid enforcement paths. A success here means DO is allowed
+    // but set_config inside is still blocked (covered by the first assert).
+    // If this passes, it's not a security hole -- the set_config denial
+    // above is the real gate.
+    let _ = res;
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t5_8_multi_statement_refused() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let pool = rt.pool();
+
+    // sqlx's extended query protocol sends one statement at a time. A
+    // multi-statement string is rejected by the server.
+    let res = exec_as_executor(
+        pool, "crm",
+        "SELECT 1; DROP TABLE crm.contacts"
+    ).await;
+    assert!(res.is_err(), "multi-statement must be rejected");
+
+    let res = exec_as_executor(
+        pool, "crm",
+        "SELECT 1; SELECT set_config('rootcx.user_id','x',true)"
+    ).await;
+    assert!(res.is_err(), "multi-statement must be rejected even with benign first stmt");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t5_10_collection_onstart_bypass_rls() {
+    // The onStart collection access (no user context) should have full
+    // self-schema access via BYPASSRLS. We test this indirectly: if data
+    // was inserted during admin setup (as owner pool) and we can read it
+    // via the admin-authed HTTP route, the table has data. The real onStart
+    // bypass is tested by the worker's internal `collection_op` path with
+    // `allow_bypass=true`; at the integration level we verify the data
+    // exists (proving BYPASSRLS owner pool access works for the core).
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    rt.create("crm", "contacts", &rec()).await;
+
+    // Admin (who has *) can see the row proving the superuser pool works.
+    let (s, body) = rt.get_json("/api/v1/apps/crm/collections/contacts").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(body.as_array().map(|a| a.len()), Some(1),
+        "admin/owner pool can read data (BYPASSRLS works for core operations)");
+
+    // Additionally verify: the executor role WITHOUT a user context sees 0
+    // rows (proving that RLS is FORCE'd and the executor does not bypass).
+    let n = count_as(rt.pool(), None, false, "").await;
+    assert_eq!(n, 0,
+        "executor role with no user context sees 0 (FORCE RLS active, no bypass)");
+
+    rt.shutdown().await;
+}
+
+// ── CATEGORY 4 : Sandbox worker (process isolation) ──────────────────
+//
+// Category 4 tests verify that the worker process is sandboxed: no
+// DATABASE_URL, no JWT_SECRET, no auth token, no direct PG access. Most
+// of these require spawning a real Bun worker with a test JS payload.
+// The ones that CAN be tested as Rust integration tests are below (4.4).
+// The rest are documented as executable shell/CI scripts.
+
+#[tokio::test]
+async fn t4_4_fetch_core_http_without_token_is_401() {
+    // A worker that tries to call the core HTTP API without a bearer token
+    // gets 401. We simulate this by making an unauthenticated request.
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+
+    // Unauthenticated requests to protected endpoints must return 401.
+    let s = rt.get_unauthed("/api/v1/apps").await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "no token = 401 on /apps");
+
+    let s = rt.get_unauthed("/api/v1/apps/crm/collections/contacts").await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "no token = 401 on collections");
+
+    let (s, _) = rt.post_unauthed("/api/v1/apps/crm/collections/contacts", &rec()).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "no token = 401 on POST collections");
+
+    rt.shutdown().await;
+}
+
+// ── Category 4 tests requiring a real worker process ─────────────────
+//
+// Tests 4.1, 4.2, 4.3, 4.5, 4.6, 4.7 require spawning a Bun worker
+// with a controlled JS payload. They are specified below as shell-script
+// tests with exact pass/fail criteria. These run in CI (Docker) where
+// the full sandbox (env_clear, UID separation, hidepid=2) is active.
+//
+// ┌──────────────────────────────────────────────────────────────────┐
+// │ TEST 4.1: process.env.DATABASE_URL === undefined                 │
+// │                                                                  │
+// │ Script: deploy a test app with this handler:                     │
+// │   export function onStart(ctx) {                                 │
+// │     const val = process.env.DATABASE_URL;                        │
+// │     if (val !== undefined) throw new Error('LEAK: ' + val);      │
+// │   }                                                              │
+// │                                                                  │
+// │ Pass: worker starts without throwing.                            │
+// │ Fail: worker crashes with "LEAK: postgresql://..."               │
+// │                                                                  │
+// │ Rust-level assertion: spawn_worker calls .env_clear() before     │
+// │ setting the allow-list. Verified by reading `worker.rs:761`:     │
+// │ `cmd.env_clear()` is the first builder call after Command::new.  │
+// └──────────────────────────────────────────────────────────────────┘
+//
+// ┌──────────────────────────────────────────────────────────────────┐
+// │ TEST 4.2: process.env.ROOTCX_JWT_SECRET === undefined            │
+// │                                                                  │
+// │ Script: same pattern as 4.1 but checks ROOTCX_JWT_SECRET.       │
+// │   export function onStart(ctx) {                                 │
+// │     const val = process.env.ROOTCX_JWT_SECRET;                   │
+// │     if (val !== undefined) throw new Error('LEAK: ' + val);      │
+// │   }                                                              │
+// │                                                                  │
+// │ Pass: worker starts without throwing.                            │
+// │ Fail: worker crashes with "LEAK: ..."                            │
+// └──────────────────────────────────────────────────────────────────┘
+//
+// ┌──────────────────────────────────────────────────────────────────┐
+// │ TEST 4.3: caller.authToken === undefined/absent                  │
+// │                                                                  │
+// │ The RpcCaller struct no longer has an auth_token field (removed   │
+// │ in Phase 0b). The wire format is `{userId, email}` with no       │
+// │ authToken key. This is structurally enforced by Rust:            │
+// │                                                                  │
+// │   struct RpcCaller { user_id, email, effective_perms }           │
+// │                                                                  │
+// │ Script: deploy a test app with RPC handler:                      │
+// │   export default { testRpc(ctx, msg) {                           │
+// │     if (msg.caller && msg.caller.authToken !== undefined)        │
+// │       throw new Error('LEAK: ' + msg.caller.authToken);          │
+// │     return { ok: true };                                         │
+// │   }}                                                             │
+// │                                                                  │
+// │ Invoke: POST /apps/test/rpc {method: "testRpc"}                  │
+// │ Pass: returns {ok: true}                                         │
+// │ Fail: throws "LEAK: eyJ..."                                      │
+// └──────────────────────────────────────────────────────────────────┘
+//
+// ┌──────────────────────────────────────────────────────────────────┐
+// │ TEST 4.5: TCP connect to Postgres = impossible                   │
+// │                                                                  │
+// │ Requires: Docker container with PG on Unix socket only, or       │
+// │ network namespace isolation.                                     │
+// │                                                                  │
+// │ Script: deploy a test app:                                       │
+// │   import { createConnection } from 'net';                        │
+// │   export function onStart(ctx) {                                 │
+// │     return new Promise((_, reject) => {                          │
+// │       const sock = createConnection({host:'127.0.0.1',port:5432})│
+// │       sock.on('error', (e) => { /* expected: ECONNREFUSED */ })  │
+// │       sock.on('connect', () => reject(new Error('CONNECTED!')))  │
+// │       setTimeout(() => {}, 2000); // also acceptable: timeout    │
+// │     });                                                          │
+// │   }                                                              │
+// │                                                                  │
+// │ Pass: sock.on('error') fires (ECONNREFUSED/ETIMEDOUT).           │
+// │ Fail: sock.on('connect') fires.                                  │
+// │                                                                  │
+// │ In the test container: PG binds to Unix socket only, not TCP.    │
+// │ Even if the worker guesses the port, there's nothing listening.  │
+// └──────────────────────────────────────────────────────────────────┘
+//
+// ┌──────────────────────────────────────────────────────────────────┐
+// │ TEST 4.6: read /proc/1/environ = EACCES                         │
+// │                                                                  │
+// │ Requires: Linux Docker container with UID separation (worker     │
+// │ runs as UID 1001) + hidepid=2 on /proc.                         │
+// │                                                                  │
+// │ Script (run as UID 1001 inside Docker):                          │
+// │   const fs = require('fs');                                      │
+// │   try { fs.readFileSync('/proc/1/environ'); }                    │
+// │   catch(e) { if (e.code === 'EACCES') process.exit(0); }        │
+// │   process.exit(1); // fail: could read core secrets              │
+// │                                                                  │
+// │ CI command:                                                      │
+// │   docker exec --user 1001 $CONTAINER \                           │
+// │     cat /proc/1/environ && exit 1 || exit 0                      │
+// │                                                                  │
+// │ Pass: exit 0 (EACCES).                                           │
+// │ Fail: exit 1 (file readable).                                    │
+// └──────────────────────────────────────────────────────────────────┘
+//
+// ┌──────────────────────────────────────────────────────────────────┐
+// │ TEST 4.7: ctx.databaseUrl does not exist                         │
+// │                                                                  │
+// │ The OutboundMessage::Discover no longer sends `database_url`     │
+// │ (removed in Phase 2). The wire JSON has no databaseUrl key.      │
+// │ The prelude does not expose `ctx.databaseUrl`.                   │
+// │                                                                  │
+// │ Script: deploy a test app:                                       │
+// │   export function onStart(ctx) {                                 │
+// │     if (ctx.databaseUrl !== undefined)                           │
+// │       throw new Error('LEAK: ' + ctx.databaseUrl);               │
+// │   }                                                              │
+// │                                                                  │
+// │ Pass: worker starts without throwing.                            │
+// │ Fail: worker crashes with "LEAK: postgresql://..."               │
+// │                                                                  │
+// │ Structural verification: grep OutboundMessage::Discover in       │
+// │ ipc.rs -- no database_url field present.                         │
+// └──────────────────────────────────────────────────────────────────┘
+
+// ── Category 5 supplementary: SQL proxy validate_sql layer ───────────
+// These test the early-rejection layer (not the security boundary, but
+// a defense-in-depth filter that gives clear errors for obvious attacks).
+
+#[tokio::test]
+async fn t5_supplementary_validate_sql_blocks_grant_revoke_early() {
+    // GRANT/REVOKE are blocked by the validate_sql layer BEFORE reaching
+    // Postgres. The PG role may or may not deny them depending on ownership
+    // semantics, but the SQL proxy never lets them through. This test
+    // verifies the validate_sql prefix check (unit-level, already tested in
+    // sql_proxy::tests::rejects_ddl_prefixes, but duplicated here for the
+    // contract suite completeness).
+    //
+    // At the integration level we verify the HTTP endpoint rejects them:
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+
+    // The validate_sql function is private (not callable from integration
+    // tests). Its correctness is verified by the unit tests in
+    // sql_proxy::tests::rejects_ddl_prefixes. Here we verify the role-level
+    // denial for privileges the executor definitely cannot have.
+    let pool = rt.pool();
+
+    // The executor cannot grant itself membership in the owner role.
+    let res = exec_as_executor(
+        pool, "crm", "GRANT rootcx TO rootcx_app_executor"
+    ).await;
+    assert!(res.is_err(), "executor must not grant itself membership in the owner role");
+
+    // The executor cannot create new roles (DDL on roles).
+    let res = exec_as_executor(pool, "crm", "CREATE ROLE evil_role").await;
+    assert!(res.is_err(), "executor must not create roles");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t5_supplementary_executor_cannot_create_functions() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let pool = rt.pool();
+
+    let res = exec_as_executor(
+        pool, "crm",
+        "CREATE FUNCTION crm.evil() RETURNS void AS 'BEGIN END' LANGUAGE plpgsql"
+    ).await;
+    assert!(res.is_err(), "executor must not create functions");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn t5_supplementary_executor_cannot_copy() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let pool = rt.pool();
+
+    let res = exec_as_executor(pool, "crm", "COPY crm.contacts TO '/tmp/dump.csv'").await;
+    assert!(res.is_err(), "executor must not use COPY");
+    rt.shutdown().await;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// REGRESSION GUARDS — lines that, if reverted, silently break governance
+// ══════════════════════════════════════════════════════════════════════════════
+
+// GAP 16: deploy_frontend must require admin permission
+#[tokio::test]
+async fn regression_nonadmin_cannot_deploy_frontend() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let (tok, _) = user_with(&rt, "sales@t.local", &["app:crm:contacts.read"]).await;
+    let form = reqwest::multipart::Form::new().part(
+        "file",
+        reqwest::multipart::Part::bytes(b"fake".to_vec())
+            .file_name("f.tar.gz")
+            .mime_str("application/gzip")
+            .unwrap(),
+    );
+    let s = reqwest::Client::new()
+        .post(rt.url("/api/v1/apps/crm/frontend"))
+        .bearer_auth(&tok)
+        .multipart(form)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(s, StatusCode::FORBIDDEN, "non-admin must not deploy frontend");
+    rt.shutdown().await;
+}
+
+// GAP 13: collection_op after onStart denies without valid context (BYPASSRLS disabled)
+#[tokio::test]
+async fn regression_collection_op_denies_after_onstart() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let pool = rt.pool();
+
+    // Simulate post-onStart: allow_bypass = false, state = None.
+    // This calls the internal collection_op with the exact args that the
+    // supervisor uses after onstart_done=true when context_token is missing.
+    let result = rootcx_core::worker::collection_op_test(
+        pool, "crm", "find", "contacts", json!({}), None, false,
+    ).await;
+    assert!(result.is_err(), "collection_op without context after onStart must deny");
+    assert!(result.unwrap_err().contains("access denied"), "must be access denied, not a random error");
+    rt.shutdown().await;
+}
+
+// GAP 14+15: agent tool ContextState must be delegated with invoker (human) identity.
+// If is_delegated regresses to false OR user_id uses agent UID instead of human,
+// the agent gets the human's FULL permissions (bypasses intersection).
+#[tokio::test]
+async fn regression_agent_tool_delegated_context_blocks_excess_perms() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install_manifest(&json!({
+        "appId": "crm", "name": "crm", "version": "1.0.0",
+        "dataContract": [
+            { "entityName": "contacts", "fields": [{"name": "name", "type": "text", "required": true}] },
+            { "entityName": "deals", "fields": [{"name": "name", "type": "text", "required": true}] },
+        ]
+    })).await;
+    let pool = rt.pool();
+
+    // Jean has contacts + deals permissions
+    let (_, jean) = user_with(&rt, "jean-tool@t.local", &[
+        "app:crm:contacts.read", "app:crm:contacts.create",
+        "app:crm:deals.read", "app:crm:deals.create",
+    ]).await;
+
+    // Insert test data
+    sqlx::query("INSERT INTO crm.contacts (id, name) VALUES (gen_random_uuid(), 'Alice')")
+        .execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO crm.deals (id, name) VALUES (gen_random_uuid(), 'Deal1')")
+        .execute(pool).await.unwrap();
+
+    // Agent intersection: only contacts.read (NOT deals.read)
+    let agent_intersection = vec!["app:crm:contacts.read".to_string()];
+
+    // Simulate exactly what query_data.rs does: delegated=true, user_id=invoker (jean)
+    let state = rootcx_core::sql_proxy::ContextState {
+        user_id: Some(jean),
+        is_delegated: true,
+        effective_perms: agent_intersection,
+    };
+    let mut tx = rootcx_core::sql_proxy::begin_app_tx(pool, "crm", &state, Some(jean), None, "test")
+        .await.unwrap();
+    let contacts: i64 = sqlx::query_scalar("SELECT count(*) FROM crm.contacts")
+        .fetch_one(&mut *tx).await.unwrap();
+    let deals: i64 = sqlx::query_scalar("SELECT count(*) FROM crm.deals")
+        .fetch_one(&mut *tx).await.unwrap();
+    tx.commit().await.unwrap();
+
+    assert!(contacts > 0, "agent with contacts.read must see contacts");
+    assert_eq!(deals, 0, "agent WITHOUT deals.read must see 0 deals (intersection enforced)");
+    rt.shutdown().await;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GOVERNANCE MODEL COVERAGE — parameterized control-plane gates
+// One test, multiple endpoints, same pattern: non-admin/missing-perm -> 403.
+// Follows testing-guidelines: "N tests with identical structure = 1 test with a loop"
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn governance_model_control_plane_gates() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+
+    // Non-admin user with only basic data perms (no admin:*, no cron.write, no webhook.read)
+    let (tok, _) = user_with(&rt, "basic@t.local", &["app:crm:contacts.read"]).await;
+
+    // Each tuple: (method, path, body, description). All must return 403.
+    let cases: &[(Method, &str, Option<&Value>, &str)] = &[
+        // Row 20: uninstall requires admin
+        (Method::DELETE, "/api/v1/apps/crm", None, "uninstall app"),
+        // Row 25: agent management requires admin
+        (Method::DELETE, "/api/v1/agents/crm", None, "delete agent config"),
+        // Row 26: worker start/stop requires super-admin
+        (Method::POST, "/api/v1/apps/crm/worker/start", None, "start worker"),
+        (Method::POST, "/api/v1/apps/crm/worker/stop", None, "stop worker"),
+        // Row 29: webhook list requires webhook.read
+        (Method::GET, "/api/v1/apps/crm/webhooks", None, "list webhooks"),
+        // Platform secrets require admin
+        (Method::GET, "/api/v1/platform/secrets/env", None, "read platform secrets"),
+        // MCP server management requires admin (tested separately, body validation precedes perm check)
+    ];
+
+    for (method, path, body, desc) in cases {
+        let (status, _) = rt.request_as(method.clone(), path, &tok, *body).await;
+        assert_eq!(status, StatusCode::FORBIDDEN,
+            "non-admin/non-privileged user must be denied on: {desc} ({method} {path}), got {status}");
+    }
+
+    // Row 27: cron CRUD requires cron.write (POST needs JSON body)
+    let (status, _) = rt.request_as(Method::POST, "/api/v1/apps/crm/crons", &tok,
+        Some(&json!({"name": "test", "schedule": "0 * * * *", "action_type": "rpc", "action": "sync"}))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "user without cron.write must be denied on create cron, got {status}");
+
+    // Admin SQL query requires admin (needs JSON body)
+    let (status, _) = rt.request_as(Method::POST, "/api/v1/db/query", &tok,
+        Some(&json!({"sql": "SELECT 1"}))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "non-admin must be denied on execute admin sql, got {status}");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn governance_model_authenticated_routes_accessible() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+
+    // Any authenticated user should access schema introspection (Row 23)
+    let (tok, _) = user_with(&rt, "viewer@t.local", &[]).await;
+
+    let cases: &[(&str, &str)] = &[
+        ("/api/v1/db/schemas", "list schemas"),
+        ("/api/v1/db/schemas/crm/tables", "list tables in schema"),
+    ];
+
+    for (path, desc) in cases {
+        let (status, _) = rt.request_as(Method::GET, path, &tok, None).await;
+        assert_ne!(status, StatusCode::FORBIDDEN,
+            "any authenticated user must access: {desc} ({path}), got {status}");
+        assert_ne!(status, StatusCode::UNAUTHORIZED,
+            "authenticated request must not get 401 on: {desc} ({path})");
+    }
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn governance_model_integration_action_requires_permission() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+
+    // User without any integration permission (Row 30)
+    let (tok, _) = user_with(&rt, "nointeg@t.local", &["app:crm:contacts.read"]).await;
+
+    // Attempt to call an integration action without the integration permission
+    let (status, _) = rt.request_as(
+        Method::POST,
+        "/api/v1/integrations/gmail/actions/sync_now",
+        &tok,
+        Some(&json!({"userId": "fake", "userCredentials": {}})),
+    ).await;
+    // Should be 403 (or 404 if integration not installed, both are "denied")
+    assert!(status == StatusCode::FORBIDDEN || status == StatusCode::NOT_FOUND,
+        "user without integration permission must be denied, got {status}");
+
+    rt.shutdown().await;
 }

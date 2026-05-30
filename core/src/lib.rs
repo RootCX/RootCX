@@ -13,13 +13,13 @@ mod scheduler;
 mod schema;
 mod schema_sync;
 mod secrets;
-mod sql_proxy;
+pub mod sql_proxy;
 mod seed;
 pub mod server;
 pub mod tools;
 mod tool_executor;
 pub mod webhooks;
-mod worker;
+pub mod worker;
 mod worker_manager;
 
 pub use error::RuntimeError;
