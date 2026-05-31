@@ -200,13 +200,13 @@ fail-closed holds, mergeable.
 **Remaining follow-ups (none block the security fix; do BEFORE relying on it for
 public endpoints / at scale):**
 
-1. **[priority] Anonymous/public RPC + NULL-owner standard webhooks collapse to
-   the system identity.** `from_caller(None)` / empty user_id → `ContextState::default()`
-   → `is_system()` → the `·system` lifecycle worker. NOT an RLS bypass (rows are
-   denied; `onstart_done` is already true), but it merges untrusted anonymous
-   traffic into the privileged onStart process. Fix: give anonymous a distinct
-   non-system sentinel key so it never shares the BYPASSRLS lifecycle worker.
-   Refs: `core/src/routes/workers.rs` (empty user_id), `core/src/extensions/integrations/routes.rs` (created_by None → caller None), `core/src/worker_manager.rs` (`is_system`/`identity_key`).
+1. **[DONE] Anonymous/public RPC + NULL-owner webhooks no longer share the system
+   worker.** Introduced an explicit `Principal { System, Anonymous, User }` in
+   `worker_manager.rs` (replaces the `is_system`/`identity_key`/`ContextState::default`-
+   as-sentinel convention, also closes follow-up #6). Request paths classify via
+   `Principal::from_request` → empty identity = `Anonymous` (its own worker, no
+   onStart, RLS deny-all); only `start_app` spawns `System`. Guarded by
+   `empty_request_identity_is_anonymous_not_system` + `distinct_principals_never_share_a_worker`.
 2. **DoS / unbounded worker count.** Worker count is now ~N_users × M_apps with no
    idle eviction or per-app cap; `get_or_spawn` spawns unboundedly, so a
    user-churning attacker can fork many Bun processes. Add LRU+TTL idle eviction
@@ -221,8 +221,7 @@ public endpoints / at scale):**
 5. Cache per-app boot template (credentials + agent_boot_config + supervision) so
    `spawn_for` does not re-query Postgres on every new identity's first spawn
    (first-contact only; workers are long-lived). Invalidate on deploy/secret change.
-6. Consider an explicit `enum Principal { System, User, Delegated, Anonymous }` owned
-   by `sql_proxy` to replace the `is_system`/`run_onstart`/`ContextState::default()`
-   sentinel convention spread across worker/manager/ipc (collapses #1 cleanly).
+6. [DONE] `enum Principal { System, Anonymous, User }` introduced in
+   `worker_manager.rs` (see #1). `run_onstart` is now derived from the variant.
 7. `vestigial pool/secrets params on WorkerManager::start_app` (now uses `self.pool`);
    drop them and update the ~6 call sites.

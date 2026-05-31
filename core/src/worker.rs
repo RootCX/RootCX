@@ -95,9 +95,10 @@ pub struct WorkerConfig {
     /// nested same-identity calls are safe and cross-user confusion is
     /// structurally impossible. See docs/security-context-token-confusion.md.
     pub identity: crate::sql_proxy::ContextState,
-    /// Only the per-app system/lifecycle worker (identity = default, user_id
-    /// None) runs onStart with BYPASSRLS self-schema access. User-identity
-    /// workers never run onStart and never bypass.
+    /// Only the per-app System (lifecycle) worker runs onStart with BYPASSRLS
+    /// self-schema access. Anonymous and User workers never run onStart and never
+    /// bypass — even though Anonymous, like System, carries the default (no-user)
+    /// identity, it is a distinct worker (see `Principal` in worker_manager).
     pub run_onstart: bool,
     pub entry_point: PathBuf,
     pub working_dir: PathBuf,
