@@ -25,24 +25,60 @@ const BACKEND_PRELUDE: &str = include_str!("backend_prelude.js");
 /// token to forge. See docs/security-context-token-confusion.md.
 type WorkerKey = (String, String);
 
-/// Stable string key for an identity. Two units with the same identity share a
-/// worker; different identities (incl. direct vs delegated for the same user)
-/// get separate processes. The empty/default state is the per-app lifecycle
-/// (system) worker that runs onStart.
-fn identity_key(state: &crate::sql_proxy::ContextState) -> String {
-    if is_system(state) {
-        return "·system".into();
-    }
-    let uid = state.user_id.map(|u| u.to_string()).unwrap_or_default();
-    let mut perms = state.effective_perms.clone();
-    perms.sort();
-    format!("{uid}|{}|{}", state.is_delegated as u8, perms.join(","))
+/// Who a worker process acts as, for its whole life. Each distinct principal
+/// gets its own process, so a worker can never act as another (the cross-user
+/// confused deputy is structurally impossible). Three kinds never share a
+/// process: the privileged lifecycle worker, un-authenticated traffic, and each
+/// real authenticated identity.
+enum Principal {
+    /// The per-app lifecycle worker: runs onStart with BYPASSRLS self-schema.
+    /// Spawned only by `start_app`, never by an incoming request.
+    System,
+    /// A request with no authenticated user (public/share-token RPC, owner-less
+    /// webhook/job). Denied every row by RLS, and kept OFF the System worker so
+    /// untrusted anonymous traffic never shares the privileged onStart process.
+    Anonymous,
+    /// A real identity: a direct user, or an agent's delegated authority.
+    User(crate::sql_proxy::ContextState),
 }
 
-/// The default identity (no user, not delegated, no perms) = the lifecycle
-/// worker. It alone runs onStart with BYPASSRLS self-schema access.
-fn is_system(state: &crate::sql_proxy::ContextState) -> bool {
-    state.user_id.is_none() && !state.is_delegated && state.effective_perms.is_empty()
+impl Principal {
+    /// Classify the identity resolved for an incoming request. A request never
+    /// yields System; an empty identity (no user, not delegated) is Anonymous.
+    fn from_request(state: crate::sql_proxy::ContextState) -> Self {
+        if state.user_id.is_none() && !state.is_delegated && state.effective_perms.is_empty() {
+            Principal::Anonymous
+        } else {
+            Principal::User(state)
+        }
+    }
+
+    /// Stable per-app worker key. Distinct principals never collide; the same
+    /// User identity (perms in any order) always maps to the same worker.
+    fn key(&self) -> String {
+        match self {
+            Principal::System => "·system".into(),
+            Principal::Anonymous => "·anon".into(),
+            Principal::User(s) => {
+                let uid = s.user_id.map(|u| u.to_string()).unwrap_or_default();
+                let mut perms = s.effective_perms.clone();
+                perms.sort();
+                format!("{uid}|{}|{}", s.is_delegated as u8, perms.join(","))
+            }
+        }
+    }
+
+    /// Only the lifecycle worker runs onStart / may BYPASSRLS the self-schema.
+    fn run_onstart(&self) -> bool { matches!(self, Principal::System) }
+
+    /// The RLS identity posed for this principal. System and Anonymous carry no
+    /// user, so RLS denies every row; User poses its real identity.
+    fn rls_state(&self) -> crate::sql_proxy::ContextState {
+        match self {
+            Principal::User(s) => s.clone(),
+            _ => crate::sql_proxy::ContextState::default(),
+        }
+    }
 }
 
 pub struct WorkerManager {
@@ -122,11 +158,11 @@ impl WorkerManager {
         Some((AgentBootConfig { tool_descriptors, max_turns }, supervision))
     }
 
-    /// Spawn a fresh worker bound for life to `identity`. Only the system
-    /// identity gets `run_onstart` (BYPASSRLS self-schema for onStart).
+    /// Spawn a fresh worker bound for life to `principal`. Only the System
+    /// principal gets `run_onstart` (BYPASSRLS self-schema for onStart).
     async fn spawn_for(
         &self, pool: &PgPool, secrets: &SecretManager, app_id: &str,
-        identity: crate::sql_proxy::ContextState,
+        principal: &Principal,
     ) -> Result<SupervisorHandle, RuntimeError> {
         let app_dir = self.apps_dir.join(app_id);
         let entry_point = resolve_entry_point(&app_dir)?;
@@ -135,11 +171,10 @@ impl WorkerManager {
             Some((boot, sup)) => (Some(boot), sup),
             None => (None, None),
         };
-        let run_onstart = is_system(&identity);
         let config = WorkerConfig {
             app_id: app_id.to_string(),
-            identity,
-            run_onstart,
+            identity: principal.rls_state(),
+            run_onstart: principal.run_onstart(),
             entry_point,
             working_dir: app_dir,
             credentials,
@@ -161,19 +196,19 @@ impl WorkerManager {
         Ok(handle)
     }
 
-    /// Route a unit of work to the worker bound to `(app_id, identity)`,
-    /// spawning it on first use. The identity is set by the core here — never
+    /// Route a unit of work to the worker bound to `(app_id, principal)`,
+    /// spawning it on first use. The principal is set by the core here — never
     /// taken from a worker message — so a worker can only ever act as the one
-    /// identity it was spawned for.
+    /// principal it was spawned for.
     async fn get_or_spawn(
-        &self, app_id: &str, identity: crate::sql_proxy::ContextState,
+        &self, app_id: &str, principal: Principal,
     ) -> Result<SupervisorHandle, RuntimeError> {
-        let key = (app_id.to_string(), identity_key(&identity));
+        let key = (app_id.to_string(), principal.key());
         if let Some(h) = self.workers.read().await.get(&key).cloned() {
             if h.status().await? == WorkerStatus::Running { return Ok(h); }
             self.workers.write().await.remove(&key);
         }
-        let handle = self.spawn_for(&self.pool, &self.secret_manager, app_id, identity).await?;
+        let handle = self.spawn_for(&self.pool, &self.secret_manager, app_id, &principal).await?;
         // Lost-race guard: another task may have spawned the same key meanwhile.
         let mut w = self.workers.write().await;
         if let Some(existing) = w.get(&key).cloned() {
@@ -190,7 +225,7 @@ impl WorkerManager {
     /// agent workers spawn lazily on first request. Shares the single per-identity
     /// spawn path; `pool`/`secrets` are vestigial (the manager holds its own).
     pub async fn start_app(&self, _pool: &PgPool, _secrets: &SecretManager, app_id: &str) -> Result<(), RuntimeError> {
-        self.get_or_spawn(app_id, crate::sql_proxy::ContextState::default()).await.map(|_| ())
+        self.get_or_spawn(app_id, Principal::System).await.map(|_| ())
     }
 
     pub async fn stop_app(&self, app_id: &str) -> Result<(), RuntimeError> {
@@ -250,8 +285,8 @@ impl WorkerManager {
     pub async fn rpc(
         &self, app_id: &str, id: String, method: String, params: JsonValue, caller: Option<RpcCaller>,
     ) -> Result<JsonValue, RuntimeError> {
-        let identity = crate::sql_proxy::ContextState::from_caller(caller.as_ref());
-        self.get_or_spawn(app_id, identity).await?.rpc(id, method, params, caller).await
+        let principal = Principal::from_request(crate::sql_proxy::ContextState::from_caller(caller.as_ref()));
+        self.get_or_spawn(app_id, principal).await?.rpc(id, method, params, caller).await
     }
 
     pub async fn agent_invoke(
@@ -267,8 +302,9 @@ impl WorkerManager {
             }
             None => crate::sql_proxy::ContextState { user_id: None, is_delegated: true, effective_perms: vec![] },
         };
+        // An agent invoke is always a delegated principal, never anonymous.
         let session_id = payload.session_id.clone();
-        let mut inner_rx = self.get_or_spawn(app_id, identity).await?.agent_invoke(payload).await?;
+        let mut inner_rx = self.get_or_spawn(app_id, Principal::User(identity)).await?.agent_invoke(payload).await?;
 
         // Fan out events to fleet broadcast for real-time monitoring
         let (outer_tx, outer_rx) = mpsc::channel(64);
@@ -293,8 +329,8 @@ impl WorkerManager {
     }
 
     pub async fn dispatch_job(&self, app_id: &str, job_id: String, payload: JsonValue, caller: Option<RpcCaller>) -> Result<(), RuntimeError> {
-        let identity = crate::sql_proxy::ContextState::from_caller(caller.as_ref());
-        self.get_or_spawn(app_id, identity).await?.dispatch_job(job_id, payload, caller).await
+        let principal = Principal::from_request(crate::sql_proxy::ContextState::from_caller(caller.as_ref()));
+        self.get_or_spawn(app_id, principal).await?.dispatch_job(job_id, payload, caller).await
     }
 
     /// Aggregate status for an app across all its identity workers (Running if
@@ -315,7 +351,7 @@ impl WorkerManager {
     pub async fn subscribe_logs(&self, app_id: &str) -> Result<broadcast::Receiver<LogEntry>, RuntimeError> {
         // Logs stream from the lifecycle worker. Per-identity worker log fan-in
         // is a known follow-up (see token-confusion fix notes).
-        self.get_or_spawn(app_id, crate::sql_proxy::ContextState::default()).await.map(|h| h.subscribe())
+        self.get_or_spawn(app_id, Principal::System).await.map(|h| h.subscribe())
     }
 
     /// Aggregate per-app status across identity workers (Running wins).
@@ -462,69 +498,88 @@ fn resolve_entry_point(app_dir: &Path) -> Result<PathBuf, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{identity_key, is_system};
+    use super::Principal;
     use crate::sql_proxy::ContextState;
     use uuid::Uuid;
 
-    fn ident(uid: Option<Uuid>, delegated: bool, perms: &[&str]) -> ContextState {
-        ContextState {
+    fn user(uid: Option<Uuid>, delegated: bool, perms: &[&str]) -> Principal {
+        Principal::User(ContextState {
             user_id: uid,
             is_delegated: delegated,
             effective_perms: perms.iter().map(|s| s.to_string()).collect(),
-        }
+        })
     }
 
-    // identity_key is the worker-routing key: same identity must always map to
-    // the same worker, regardless of perm ordering. A bug here (e.g. forgetting
-    // to sort) would spawn a fresh worker per call (churn) instead of reusing.
+    // The worker-routing key for one User identity must be stable regardless of
+    // perm ordering. A bug here (e.g. forgetting to sort) would spawn a fresh
+    // worker per call (churn) instead of reusing.
     #[test]
-    fn identity_key_is_order_independent() {
+    fn user_key_is_order_independent() {
         let u = Uuid::new_v4();
         assert_eq!(
-            identity_key(&ident(Some(u), true, &["b", "a", "c"])),
-            identity_key(&ident(Some(u), true, &["c", "b", "a"])),
+            user(Some(u), true, &["b", "a", "c"]).key(),
+            user(Some(u), true, &["c", "b", "a"]).key(),
             "permission order must not change the worker key",
         );
     }
 
     // The security-critical property: distinct principals NEVER share a worker.
-    // If two of these collided, one user could act inside another's process.
+    // If two collided, one could act inside another's process. Crucially this
+    // includes System vs Anonymous: untrusted anonymous traffic must never land
+    // on the privileged onStart/BYPASSRLS worker.
     #[test]
-    fn identity_key_separates_distinct_principals() {
+    fn distinct_principals_never_share_a_worker() {
         let u1 = Uuid::new_v4();
         let u2 = Uuid::new_v4();
-        let labelled = [
-            ("u1 direct", ident(Some(u1), false, &[])),
-            ("u1 delegated", ident(Some(u1), true, &["app:x:invoke"])),
-            ("u1 direct, extra perm", ident(Some(u1), false, &["app:x:invoke"])),
-            ("u2 direct", ident(Some(u2), false, &[])),
-            ("no-user delegated", ident(None, true, &[])),
-            ("system (default)", ContextState::default()),
+        let principals = [
+            ("system", Principal::System),
+            ("anonymous", Principal::Anonymous),
+            ("u1 direct", user(Some(u1), false, &[])),
+            ("u1 delegated", user(Some(u1), true, &["app:x:invoke"])),
+            ("u1 direct, extra perm", user(Some(u1), false, &["app:x:invoke"])),
+            ("u2 direct", user(Some(u2), false, &[])),
+            ("no-user delegated", user(None, true, &[])),
         ];
-        for i in 0..labelled.len() {
-            for j in (i + 1)..labelled.len() {
+        for i in 0..principals.len() {
+            for j in (i + 1)..principals.len() {
                 assert_ne!(
-                    identity_key(&labelled[i].1), identity_key(&labelled[j].1),
-                    "'{}' and '{}' must not share a worker", labelled[i].0, labelled[j].0,
+                    principals[i].1.key(), principals[j].1.key(),
+                    "'{}' and '{}' must not share a worker", principals[i].0, principals[j].0,
                 );
             }
         }
     }
 
-    // Only the default identity is the privileged onStart/BYPASSRLS worker. A
-    // real user (even with no perms) must never be classified as system, or it
-    // would inherit the lifecycle worker's self-schema bypass.
+    // Only System runs onStart / may BYPASSRLS. Anonymous (no-user requests) and
+    // every User must not — else they would inherit the self-schema bypass.
     #[test]
-    fn only_default_identity_is_system() {
-        assert!(is_system(&ContextState::default()));
-        for (label, st) in [
-            ("user, no perms", ident(Some(Uuid::new_v4()), false, &[])),
-            ("no-user delegated", ident(None, true, &[])),
-            ("no-user with perms", ident(None, false, &["app:x:invoke"])),
-        ] {
-            assert!(!is_system(&st), "'{label}' must not be the system worker");
-            assert_ne!(identity_key(&st), identity_key(&ContextState::default()),
-                "'{label}' must not map to the system worker key");
-        }
+    fn only_system_runs_onstart() {
+        assert!(Principal::System.run_onstart());
+        assert!(!Principal::Anonymous.run_onstart());
+        assert!(!user(Some(Uuid::new_v4()), false, &[]).run_onstart());
+        assert!(!user(None, true, &[]).run_onstart());
+    }
+
+    // A no-user request is Anonymous, NOT System: it gets its own worker, off the
+    // privileged onStart process. (Regression guard for follow-up #1.)
+    #[test]
+    fn empty_request_identity_is_anonymous_not_system() {
+        let p = Principal::from_request(ContextState::default());
+        assert!(matches!(p, Principal::Anonymous));
+        assert_eq!(p.key(), Principal::Anonymous.key());
+        assert_ne!(p.key(), Principal::System.key());
+        assert!(!p.run_onstart());
+        // A real user is classified as User, never Anonymous/System.
+        assert!(matches!(
+            Principal::from_request(ContextState { user_id: Some(Uuid::new_v4()), is_delegated: false, effective_perms: vec![] }),
+            Principal::User(_)
+        ));
+        // A delegated no-user principal (cron/webhook agent) is a real authority,
+        // NOT anonymous: it must get its own worker. Guards against simplifying
+        // from_request to a `user_id.is_none()` check alone.
+        assert!(matches!(
+            Principal::from_request(ContextState { user_id: None, is_delegated: true, effective_perms: vec![] }),
+            Principal::User(_)
+        ));
     }
 }
