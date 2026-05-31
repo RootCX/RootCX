@@ -65,11 +65,6 @@ pub struct AgentInvokePayload {
     pub invoker_user_id: Option<uuid::Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<FileAttachment>>,
-    /// Opaque per-invoke handle the prelude echoes back on `ctx.sql()` /
-    /// `ctx.collection()` so the supervisor can resolve the agent's effective
-    /// identity. Never the invoke_id (must not be derivable). See `worker.rs`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -82,22 +77,23 @@ pub enum OutboundMessage {
         credentials: HashMap<String, String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         agent_config: Option<AgentBootConfig>,
+        /// Only the per-app lifecycle worker runs onStart (with BYPASSRLS
+        /// self-schema). Per-user workers get `false` so onStart never runs
+        /// under a user identity. Absent → false (legacy/v1 workers ignore it).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        run_onstart: bool,
     },
     Rpc {
         id: String,
         method: String,
         params: JsonValue,
         caller: Option<RpcCaller>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        context_token: Option<String>,
     },
     Job {
         id: String,
         payload: JsonValue,
         #[serde(skip_serializing_if = "Option::is_none")]
         caller: Option<RpcCaller>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        context_token: Option<String>,
     },
     AgentInvoke(AgentInvokePayload),
     AgentToolResult {
@@ -227,28 +223,24 @@ pub enum InboundMessage {
         entity: String,
         #[serde(default)]
         data: JsonValue,
-        #[serde(default)]
-        context_token: Option<String>,
     },
     /// App SQL forwarded to the core (Phase 2 SQL proxy). The core executes it
-    /// inside a transaction under `rootcx_app_executor` with the caller's RLS
-    /// GUCs resolved from `context_token`.
+    /// inside a transaction under `rootcx_app_executor`. Identity is NOT carried
+    /// on the message: the core uses the worker's fixed identity (`WorkerConfig.
+    /// identity`, bound at spawn), so a malicious worker cannot select another
+    /// user's identity. The worker has no identity field to forge.
     SqlQuery {
         id: String,
-        #[serde(default)]
-        context_token: Option<String>,
         sql: String,
         #[serde(default)]
         params: Vec<JsonValue>,
     },
-    /// Privileged self-action a worker can invoke without holding a token
-    /// (replaces the old token-bearing HTTP callbacks for integrations). The
-    /// `context_token` identifies the requesting user so the core can scope the
-    /// action to them (no arbitrary cross-user targeting).
+    /// Privileged self-action a worker can invoke. The requesting user is the
+    /// worker's sole in-flight unit-of-work identity (bound by the core), so the
+    /// action is scoped to them with no arbitrary cross-user targeting and no
+    /// forgeable token.
     SelfAction {
         id: String,
-        #[serde(default)]
-        context_token: Option<String>,
         action: String,
         #[serde(default)]
         params: JsonValue,
@@ -351,9 +343,9 @@ mod tests {
     #[test]
     fn outbound_messages_carry_type_tag() {
         let cases: Vec<(OutboundMessage, &str)> = vec![
-            (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), credentials: HashMap::new(), agent_config: None }, "discover"),
-            (OutboundMessage::Rpc { id: "r1".into(), method: "echo".into(), params: json!({}), caller: None, context_token: None }, "rpc"),
-            (OutboundMessage::Job { id: "j1".into(), payload: json!({}), caller: None, context_token: None }, "job"),
+            (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), credentials: HashMap::new(), agent_config: None, run_onstart: true }, "discover"),
+            (OutboundMessage::Rpc { id: "r1".into(), method: "echo".into(), params: json!({}), caller: None }, "rpc"),
+            (OutboundMessage::Job { id: "j1".into(), payload: json!({}), caller: None }, "job"),
             (OutboundMessage::CollectionOpResult { id: "c1".into(), result: Some(json!({})), error: None }, "collection_op_result"),
             (OutboundMessage::Shutdown, "shutdown"),
             (OutboundMessage::AgentToolResult {

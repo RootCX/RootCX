@@ -14,6 +14,8 @@ const DISCOVER = {
   runtime_url: "http://localhost:9100",
   credentials: {},
   agent_config: null,
+  // Lifecycle worker: onStart runs only when the core sets this.
+  run_onstart: true,
 };
 
 interface Worker {
@@ -181,6 +183,26 @@ describe("v2: serve()", () => {
     w.send({ type: "rpc", id: "r1", method: "getCount", params: {} });
     const msg = await w.readLine();
     expect(msg.result).toBe(1);
+    await w.close();
+  });
+
+  test("onStart does NOT fire for a non-lifecycle worker (run_onstart absent)", async () => {
+    // Per-user/agent workers receive discover WITHOUT run_onstart. onStart must
+    // not run for them: it bypasses RLS for self-schema and must never execute
+    // under a user identity. Inverting/dropping the gate would regress here.
+    const w = spawnWorker(`
+      let count = 0;
+      serve({
+        onStart() { count++; },
+        rpc: { getCount: () => count },
+      });
+    `);
+    const { run_onstart, ...userDiscover } = DISCOVER;
+    w.send(userDiscover);
+    await w.readLine(); // discover response (always sent)
+    w.send({ type: "rpc", id: "r1", method: "getCount", params: {} });
+    const msg = await w.readLine();
+    expect(msg.result).toBe(0);
     await w.close();
   });
 

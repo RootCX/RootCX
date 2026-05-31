@@ -24,7 +24,9 @@ const MAX_ROWS: usize = 1_000;
 pub const TIMEOUT_INTERACTIVE_MS: u32 = 8_000;
 pub const TIMEOUT_AGENT_TOOL_MS: u32 = 30_000;
 
-/// Resolved identity for a unit of work, looked up from a `context_token`.
+/// Resolved identity for a unit of work. The core binds this to a worker's
+/// sole in-flight unit out-of-band; it is never carried on a worker-controlled
+/// message, so an untrusted worker cannot select another user's identity.
 #[derive(Debug, Clone, Default)]
 pub struct ContextState {
     pub user_id: Option<Uuid>,
@@ -44,14 +46,6 @@ impl ContextState {
             None => Self::default(),
         }
     }
-}
-
-/// 256-bit opaque handle. Not derivable from any message id.
-pub fn new_context_token() -> String {
-    use rand::RngCore;
-    let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    hex::encode(bytes)
 }
 
 /// Pose the three RLS identity GUCs for the open transaction. MUST run before
@@ -224,13 +218,5 @@ mod tests {
         ] {
             assert!(validate_sql(ok).is_ok(), "should allow: {ok}");
         }
-    }
-
-    #[test]
-    fn token_is_256_bit_hex() {
-        let t = new_context_token();
-        assert_eq!(t.len(), 64);
-        assert!(t.bytes().all(|b| b.is_ascii_hexdigit()));
-        assert_ne!(new_context_token(), new_context_token());
     }
 }

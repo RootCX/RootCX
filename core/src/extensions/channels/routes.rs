@@ -342,7 +342,6 @@ async fn do_invoke(
         message: text.to_string(),
         history, is_sub_invoke: false, llm, invoker_user_id,
         attachments,
-        context_token: None,
     };
 
     let mut rx = wm.agent_invoke(&app_id, payload).await.map_err(&e)?;

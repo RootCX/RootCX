@@ -88,6 +88,17 @@ pub enum SupervisorCommand {
 
 pub struct WorkerConfig {
     pub app_id: String,
+    /// The ONE identity this worker process serves for its whole life. Bound at
+    /// spawn by the manager (which keys workers by identity), never mutated and
+    /// never taken from a worker message — so a malicious worker cannot act as
+    /// another user. A process only ever holds one identity, so concurrent and
+    /// nested same-identity calls are safe and cross-user confusion is
+    /// structurally impossible. See docs/security-context-token-confusion.md.
+    pub identity: crate::sql_proxy::ContextState,
+    /// Only the per-app system/lifecycle worker (identity = default, user_id
+    /// None) runs onStart with BYPASSRLS self-schema access. User-identity
+    /// workers never run onStart and never bypass.
+    pub run_onstart: bool,
     pub entry_point: PathBuf,
     pub working_dir: PathBuf,
     pub credentials: HashMap<String, String>,
@@ -185,16 +196,12 @@ async fn supervisor_loop(
     let mut sub_invocations: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut invoker_user_ids: HashMap<String, uuid::Uuid> = HashMap::new();
     let mut effective_permissions: HashMap<String, Vec<String>> = HashMap::new();
-    // context_token → (resolved identity, created). The worker echoes the token
-    // on ctx.sql()/ctx.collection() so we resolve the RLS identity here. Tokens
-    // are 256-bit random (not the message id) and pruned on completion/timeout.
-    let mut context_states: HashMap<String, (crate::sql_proxy::ContextState, Instant)> = HashMap::new();
-    let mut msg_tokens: HashMap<String, String> = HashMap::new();
     // Per-worker SQL-proxy rate limiter (best-effort DoS guard).
     let mut sql_query_times: Vec<Instant> = Vec::new();
-    // Once the first Rpc/Job/AgentInvoke is dispatched the onStart phase is
-    // over; after that a CollectionOp without a valid token is denied (no
-    // implicit BYPASSRLS). Before it, onStart self-schema access is allowed.
+    // Marks the end of the onStart phase (first Rpc/Job/AgentInvoke dispatched).
+    // Only the lifecycle worker (config.run_onstart) bypasses RLS for self-schema
+    // access, and only before this flips. After it, collection ops run under the
+    // worker's fixed identity. User workers never bypass.
     let mut onstart_done = false;
     let pending_approvals = config.pending_approvals.clone();
     let mut crash_times: Vec<Instant> = Vec::new();
@@ -239,11 +246,8 @@ async fn supervisor_loop(
                                 output_handles.push(spawn_output_reader(stderr, "stderr", log_tx.clone()));
                                 status = WorkerStatus::Running;
                                 restart_count = 0;
-                                // Fresh process: onStart may BYPASSRLS again, and
-                                // any tokens from a previous instance are stale.
+                                // Fresh process: onStart may BYPASSRLS again.
                                 onstart_done = false;
-                                context_states.clear();
-                                msg_tokens.clear();
                                 info!(app_id = %app_id, "worker started");
                                 emit_log(&log_tx, "system", "worker started");
                             }
@@ -268,8 +272,6 @@ async fn supervisor_loop(
                         }
                         policy_evaluators.clear();
                         effective_permissions.clear();
-                        context_states.clear();
-                        msg_tokens.clear();
                         status = WorkerStatus::Stopped;
                         crash_times.clear();
                         info!(app_id = %app_id, "worker stopped");
@@ -283,11 +285,9 @@ async fn supervisor_loop(
                             continue;
                         }
                         onstart_done = true;
-                        let token = register_context(&mut context_states, &mut msg_tokens, &id,
-                            crate::sql_proxy::ContextState::from_caller(caller.as_ref()));
                         let rx = pending_rpcs.register(id.clone());
                         if let Some(ref mut w) = ipc_writer
-                            && let Err(e) = w.send(&OutboundMessage::Rpc { id: id.clone(), method, params, caller, context_token: Some(token) }).await {
+                            && let Err(e) = w.send(&OutboundMessage::Rpc { id: id.clone(), method, params, caller }).await {
                                 pending_rpcs.resolve(&id, Err(e.to_string()));
                             }
                         tokio::spawn(async move {
@@ -306,15 +306,13 @@ async fn supervisor_loop(
                             continue;
                         }
                         onstart_done = true;
-                        let token = register_context(&mut context_states, &mut msg_tokens, &id,
-                            crate::sql_proxy::ContextState::from_caller(caller.as_ref()));
                         if let Some(ref mut w) = ipc_writer
-                            && let Err(e) = w.send(&OutboundMessage::Job { id: id.clone(), payload, caller, context_token: Some(token) }).await {
+                            && let Err(e) = w.send(&OutboundMessage::Job { id: id.clone(), payload, caller }).await {
                                 error!(app_id = %app_id, job_id = %id, "send failed: {e}");
                             }
                     }
 
-                    SupervisorCommand::AgentInvoke { mut payload, stream_tx } => {
+                    SupervisorCommand::AgentInvoke { payload, stream_tx } => {
                         if status != WorkerStatus::Running {
                             let _ = stream_tx.send(AgentEvent::Error {
                                 error: "worker not running".into(),
@@ -331,27 +329,11 @@ async fn supervisor_loop(
                         if payload.is_sub_invoke { sub_invocations.insert(invoke_id.clone()); }
                         if let Some(uid) = payload.invoker_user_id { invoker_user_ids.insert(invoke_id.clone(), uid); }
 
-                        // Pre-compute effective permissions (intersection) once per invoke
-                        let perms = match payload.invoker_user_id {
-                            Some(uid) => {
-                                let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
-                                crate::extensions::rbac::policy::effective_for_pair(&config.pool, agent_uid, uid).await
-                            }
-                            None => vec![],
-                        };
-                        effective_permissions.insert(invoke_id.clone(), perms.clone());
-
-                        // Register the agent's delegated identity so any
-                        // ctx.sql()/ctx.collection() the agent JS issues runs
-                        // under RLS with the pre-computed intersection.
-                        payload.context_token = Some(register_context(
-                            &mut context_states, &mut msg_tokens, &invoke_id,
-                            crate::sql_proxy::ContextState {
-                                user_id: payload.invoker_user_id,
-                                is_delegated: true,
-                                effective_perms: perms,
-                            },
-                        ));
+                        // Tool authority = this worker's fixed delegated identity.
+                        // The manager already computed the intersection (grant∩human)
+                        // and baked it into config.identity, which also governs any
+                        // ctx.sql()/ctx.collection() the agent JS issues. No token.
+                        effective_permissions.insert(invoke_id.clone(), config.identity.effective_perms.clone());
 
                         pending_agent_streams.insert(invoke_id.clone(), stream_tx);
                         if let Some(ref mut w) = ipc_writer {
@@ -400,10 +382,8 @@ async fn supervisor_loop(
                                 Some(e) => Err(e),
                                 None => Ok(result.unwrap_or(JsonValue::Null)),
                             });
-                            if let Some(tok) = msg_tokens.remove(&id) { context_states.remove(&tok); }
                         }
                         InboundMessage::JobResult { id, error } => {
-                            if let Some(tok) = msg_tokens.remove(&id) { context_states.remove(&tok); }
                             if let Ok(msg_id) = id.parse::<i64>() {
                                 if let Some(e) = error {
                                     warn!(app_id = %app_id, msg_id, "job failed: {e}");
@@ -438,7 +418,6 @@ async fn supervisor_loop(
                             sub_invocations.remove(&invoke_id);
                             invoker_user_ids.remove(&invoke_id);
                             effective_permissions.remove(&invoke_id);
-                            if let Some(tok) = msg_tokens.remove(&invoke_id) { context_states.remove(&tok); }
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Done { response, tokens }).await;
                             }
@@ -448,7 +427,6 @@ async fn supervisor_loop(
                             sub_invocations.remove(&invoke_id);
                             invoker_user_ids.remove(&invoke_id);
                             effective_permissions.remove(&invoke_id);
-                            if let Some(tok) = msg_tokens.remove(&invoke_id) { context_states.remove(&tok); }
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Error { error }).await;
                             }
@@ -553,17 +531,16 @@ async fn supervisor_loop(
                             }
                             info!(app_id = %app_id, "agent session compacted");
                         }
-                        InboundMessage::CollectionOp { id, op, entity, data, context_token } => {
+                        InboundMessage::CollectionOp { id, op, entity, data } => {
                             let pool = config.pool.clone();
                             let aid = config.app_id.clone();
                             let tx = outbound_tx.clone();
-                            // RLS applies when a user context is resolvable.
-                            // Fail-closed: an unknown token after onStart is a
-                            // deny, NOT an implicit BYPASSRLS.
-                            let state = context_token.as_ref()
-                                .and_then(|t| context_states.get_mut(t))
-                                .map(|(s, ts)| { *ts = Instant::now(); s.clone() });
-                            let allow_bypass = !onstart_done;
+                            // Identity is this worker's fixed identity. Only the
+                            // lifecycle worker, during onStart, gets the BYPASSRLS
+                            // self-schema window (state=None). Everyone else runs
+                            // under RLS as their fixed identity. Fail-closed.
+                            let allow_bypass = config.run_onstart && !onstart_done;
+                            let state = if allow_bypass { None } else { Some(config.identity.clone()) };
                             tokio::spawn(async move {
                                 let (result, error) = match collection_op(&pool, &aid, &op, &entity, data, state, allow_bypass).await {
                                     Ok(v) => (Some(v), None),
@@ -572,7 +549,7 @@ async fn supervisor_loop(
                                 let _ = tx.send(OutboundMessage::CollectionOpResult { id, result, error }).await;
                             });
                         }
-                        InboundMessage::SqlQuery { id, context_token, sql, params } => {
+                        InboundMessage::SqlQuery { id, sql, params } => {
                             // Per-worker rate limit (best-effort DoS guard).
                             let now = Instant::now();
                             sql_query_times.retain(|t| now.duration_since(*t) < Duration::from_secs(1));
@@ -584,12 +561,10 @@ async fn supervisor_loop(
                                 continue;
                             }
                             sql_query_times.push(now);
-                            // Unknown/absent token → default ContextState (user_id
-                            // None) → check_access denies every row. Fail-closed.
-                            let state = context_token.as_ref()
-                                .and_then(|t| context_states.get_mut(t))
-                                .map(|(s, ts)| { *ts = Instant::now(); s.clone() })
-                                .unwrap_or_default();
+                            // Identity = this worker's fixed identity (system
+                            // worker = default → user_id None → check_access
+                            // denies every row). Fail-closed; no token to forge.
+                            let state = config.identity.clone();
                             let pool = config.pool.clone();
                             let aid = config.app_id.clone();
                             let tx = outbound_tx.clone();
@@ -606,16 +581,15 @@ async fn supervisor_loop(
                                 let _ = tx.send(msg).await;
                             });
                         }
-                        InboundMessage::SelfAction { id, context_token, action, params } => {
+                        InboundMessage::SelfAction { id, action, params } => {
                             let pool = config.pool.clone();
                             let aid = config.app_id.clone();
                             let tx = outbound_tx.clone();
                             let int_caller = config.integration_caller.clone();
-                            // The requesting user is resolved from the token, so
-                            // the action is scoped to them (never an arbitrary user).
-                            let requester = context_token.as_ref()
-                                .and_then(|t| context_states.get(t))
-                                .and_then(|(s, _)| s.user_id);
+                            // The requesting user is this worker's fixed identity,
+                            // so the action is scoped to them (never an arbitrary
+                            // user the worker could name).
+                            let requester = config.identity.user_id;
                             tokio::spawn(async move {
                                 let result = match int_caller {
                                     Some(c) => crate::extensions::integrations::execute_self_action(&pool, c.as_ref(), &aid, &action, params, requester).await,
@@ -664,11 +638,9 @@ async fn supervisor_loop(
                                 error: "worker crashed".into(),
                             }).await;
                         }
-                        // The process is gone: every in-flight context is dead.
-                        // The respawned worker re-runs onStart from scratch.
+                        // The process is gone. The respawned worker re-runs
+                        // onStart from scratch (if it is the lifecycle worker).
                         effective_permissions.clear();
-                        context_states.clear();
-                        msg_tokens.clear();
                         onstart_done = false;
 
                         let now = Instant::now();
@@ -797,6 +769,7 @@ async fn spawn_worker(
         runtime_url: config.runtime_url.clone(),
         credentials: config.credentials.clone(),
         agent_config: config.agent_boot_config.clone(),
+        run_onstart: config.run_onstart,
     }).await?;
 
     Ok((child, writer, IpcReader::new(stdout), stderr))
@@ -943,25 +916,6 @@ async fn collection_exec(
 
 fn backoff_delay(restart_count: u32) -> Duration {
     if restart_count <= 1 { Duration::ZERO } else { BACKOFF_BASE * 2u32.saturating_pow(restart_count - 2) }
-}
-
-/// Register a unit of work's resolved identity and return its context token
-/// (echoed by the worker on ctx.sql/ctx.collection). Stale entries are pruned
-/// first — dropping states older than the RPC timeout window and any orphaned
-/// `msg_token` — which reclaims tokens for requests that timed out without ever
-/// sending a completion message (otherwise `msg_tokens` would leak unboundedly).
-fn register_context(
-    states: &mut HashMap<String, (crate::sql_proxy::ContextState, Instant)>,
-    msg_tokens: &mut HashMap<String, String>,
-    msg_id: &str,
-    state: crate::sql_proxy::ContextState,
-) -> String {
-    states.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(60));
-    msg_tokens.retain(|_, tok| states.contains_key(tok));
-    let token = crate::sql_proxy::new_context_token();
-    states.insert(token.clone(), (state, Instant::now()));
-    msg_tokens.insert(msg_id.to_string(), token.clone());
-    token
 }
 
 #[doc(hidden)]
