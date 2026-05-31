@@ -165,7 +165,7 @@ function _uploadFile(content, filename, contentType) {
   });
 }
 
-function _collectionOp(contextToken, op, entity, data) {
+function _collectionOp(op, entity, data) {
   const id = `cop_${++_opSeq}`;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -175,13 +175,15 @@ function _collectionOp(contextToken, op, entity, data) {
       }
     }, 30_000);
     _pendingOps.set(id, { resolve, reject, timer });
-    _transport.send({ type: "collection_op", id, context_token: contextToken, op, entity, data });
+    _transport.send({ type: "collection_op", id, op, entity, data });
   });
 }
 
 // SQL proxy: app SQL is executed by the core under the caller's RLS identity.
 // The app never holds a DB connection. Returns { columns, rows, rowCount }.
-function _sqlQuery(contextToken, sql, params) {
+// No identity travels on the message: the core binds it to this worker's sole
+// in-flight unit of work, so the worker cannot name another user's identity.
+function _sqlQuery(sql, params) {
   const id = `sql_${++_sqlSeq}`;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -191,13 +193,13 @@ function _sqlQuery(contextToken, sql, params) {
       }
     }, 30_000);
     _pendingSql.set(id, { resolve, reject, timer });
-    _transport.send({ type: "sql_query", id, context_token: contextToken, sql, params: params ?? [] });
+    _transport.send({ type: "sql_query", id, sql, params: params ?? [] });
   });
 }
 
-// Privileged self-action over IPC (integrations). No token replay; the
-// contextToken lets the core scope the action to the requesting user.
-function _selfAction(contextToken, action, params) {
+// Privileged self-action over IPC (integrations). The core scopes the action
+// to this worker's sole in-flight unit-of-work identity — no token to replay.
+function _selfAction(action, params) {
   const id = `sa_${++_saSeq}`;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -207,14 +209,15 @@ function _selfAction(contextToken, action, params) {
       }
     }, 30_000);
     _pendingSelf.set(id, { resolve, reject, timer });
-    _transport.send({ type: "self_action", id, context_token: contextToken, action, params: params ?? {} });
+    _transport.send({ type: "self_action", id, action, params: params ?? {} });
   });
 }
 
-// Per-call ctx. `contextToken` (echoed on ctx.sql / ctx.collection) lets the
-// core resolve the caller's RLS identity. onStart gets a null token: ctx.sql
-// then denies (no identity) and ctx.collection runs BYPASSRLS on self-schema.
-function _makeCtx(contextToken) {
+// Per-call ctx. It carries NO identity token: the core resolves the caller's
+// RLS identity from this worker's sole in-flight unit of work. During onStart
+// (no active unit) ctx.sql denies (no identity) and ctx.collection runs
+// BYPASSRLS on the self-schema.
+function _makeCtx() {
   return {
     appId: _boot.app_id,
     runtimeUrl: _boot.runtime_url,
@@ -223,15 +226,15 @@ function _makeCtx(contextToken) {
     log: globalThis.log,
     emit: globalThis.emit,
     uploadFile: _uploadFile,
-    sql: (sql, params = []) => _sqlQuery(contextToken, sql, params),
-    selfAction: (action, params = {}) => _selfAction(contextToken, action, params),
+    sql: (sql, params = []) => _sqlQuery(sql, params),
+    selfAction: (action, params = {}) => _selfAction(action, params),
     collection(entity) {
       return {
-        insert: (data) => _collectionOp(contextToken, "insert", entity, data),
-        update: (data) => _collectionOp(contextToken, "update", entity, data),
+        insert: (data) => _collectionOp("insert", entity, data),
+        update: (data) => _collectionOp("update", entity, data),
         // Read ops use `where` as the equality map ({col: value}). Empty {} = full scan.
-        find: (where = {}) => _collectionOp(contextToken, "find", entity, where),
-        findOne: (where = {}) => _collectionOp(contextToken, "findOne", entity, where),
+        find: (where = {}) => _collectionOp("find", entity, where),
+        findOne: (where = {}) => _collectionOp("findOne", entity, where),
       };
     },
   };
@@ -288,7 +291,7 @@ function _dispatch(msg) {
 
     case "discover": {
       _boot = msg;
-      _ctx = _makeCtx(null);
+      _ctx = _makeCtx();
       // v1 legacy: no serve() → worker responds to discover itself.
       if (!_handlers) return;
       _transport.send({
@@ -296,7 +299,10 @@ function _dispatch(msg) {
         protocol: PROTOCOL_VERSION,
         methods: Object.keys(_handlers.rpc ?? {}),
       });
-      if (_handlers.onStart && !_started) {
+      // onStart runs ONLY in the per-app lifecycle worker (run_onstart). Per-user
+      // workers skip it: it seeds the self-schema under BYPASSRLS, which must not
+      // run under a user identity, and the seeding already happened once.
+      if (_handlers.onStart && !_started && msg.run_onstart) {
         _started = true;
         _resolve(_handlers.onStart, [_ctx],
           () => {},
@@ -314,7 +320,7 @@ function _dispatch(msg) {
         _transport.send({ type: "rpc_response", id: msg.id, error: `unknown method: ${msg.method}` });
         return;
       }
-      _resolve(fn, [msg.params, msg.caller ?? null, _makeCtx(msg.context_token ?? null)],
+      _resolve(fn, [msg.params, msg.caller ?? null, _makeCtx()],
         (r) => _transport.send({ type: "rpc_response", id: msg.id, result: r }),
         (e) => _transport.send({ type: "rpc_response", id: msg.id, error: _err(e) }),
       );
@@ -329,7 +335,7 @@ function _dispatch(msg) {
         _transport.send({ type: "job_result", id: msg.id, result: { ok: true } });
         return;
       }
-      _resolve(fn, [msg.payload, msg.caller ?? null, _makeCtx(msg.context_token ?? null)],
+      _resolve(fn, [msg.payload, msg.caller ?? null, _makeCtx()],
         (r) => _transport.send({ type: "job_result", id: msg.id, result: r ?? { ok: true } }),
         (e) => _transport.send({ type: "job_result", id: msg.id, error: _err(e) }),
       );

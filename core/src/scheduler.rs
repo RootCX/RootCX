@@ -74,7 +74,6 @@ async fn dispatch_agent_job(
         llm,
         invoker_user_id,
         attachments: None,
-        context_token: None,
     };
 
     let system_user = uuid::Uuid::nil();

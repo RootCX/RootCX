@@ -116,7 +116,7 @@ impl Runtime {
         let runtime_url = format!("http://127.0.0.1:{api_port}");
         let upload_nonces = Arc::new(std::sync::Mutex::new(extensions::storage::nonce::NonceStore::default()));
         let wm = Arc::new(WorkerManager::new(
-            apps_dir, runtime_url.clone(), self.bun_bin.clone(),
+            apps_dir, runtime_url.clone(), self.bun_bin.clone(), pool.clone(),
             Arc::clone(&self.tool_registry), self.pending_approvals.clone(),
             Arc::clone(&secret_manager), Arc::clone(&upload_nonces),
         ));

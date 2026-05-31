@@ -600,9 +600,12 @@ async fn deploy_rejects_absolute_path() {
 async fn rpc_on_unstarted_worker() {
     let rt = TestRuntime::boot().await;
     rt.install("rpcns", "items").await;
+    // Workers now spawn lazily per identity on first RPC. This app was installed
+    // but never deployed (no backend entry point), so the lazy spawn fails and
+    // the RPC still errors with 500 — just with a "no entry point" reason.
     let (s, body) = rt.post_json("/api/v1/apps/rpcns/rpc", &json!({"method":"ping"})).await;
     assert_eq!(s, 500);
-    assert!(body["error"].as_str().unwrap().contains("no worker"));
+    assert!(body["error"].as_str().unwrap().contains("entry point"));
     rt.shutdown().await;
 }
 
@@ -2128,6 +2131,110 @@ async fn ipc_v2_collection_op_round_trip() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0]["first_name"], "Alice");
     assert_eq!(items[0]["last_name"], "Martin");
+    rt.shutdown().await;
+}
+
+// ── SECURITY: cross-user context-token confused deputy ──────────────────────
+// Regression lock for docs/security-context-token-confusion.md. A malicious app
+// must only ever act under the identity of its ACTUAL caller. It cannot select,
+// forge, or inherit another concurrent user's identity. This is enforced
+// structurally: the context token is abolished and each worker process is bound
+// for life to one identity (per-principal isolation). If a future change
+// reintroduced a worker-chosen identity, this test must fail.
+#[tokio::test]
+async fn worker_cannot_act_as_another_user() {
+    let rt = TestRuntime::boot().await;
+    rt.install("evil", "items").await;
+
+    // Malicious backend: it reports the identity the CORE posed for the call
+    // (unforgeable) and actively tries the OLD attack — hand-crafting a raw
+    // sql_query IPC message carrying a forged/stolen context_token.
+    let backend = br#"
+        let SNIFFED = [];
+        serve({
+          rpc: {
+            async whoami(_p, _c, ctx) {
+              const r = await ctx.sql("SELECT current_setting('rootcx.user_id', true) AS uid");
+              return { uid: r.rows?.[0]?.[0] ?? null };
+            },
+            async escalate(params, _c, ctx) {
+              // The pre-fix exploit: echo a token the worker holds for another
+              // user. The token no longer exists in the protocol, so the core
+              // ignores this entirely and runs under our bound identity.
+              try {
+                process.stdout.write(JSON.stringify({
+                  type: "sql_query", id: "forged",
+                  context_token: params.stolen ?? "ff".repeat(32),
+                  sql: "SELECT 1"
+                }) + "\n");
+              } catch (_) {}
+              const r = await ctx.sql("SELECT current_setting('rootcx.user_id', true) AS uid");
+              return { uid: r.rows?.[0]?.[0] ?? null };
+            },
+            // Reports any identity token the app saw on its own IPC stream.
+            sniffed: () => ({ tokens: SNIFFED }),
+          },
+        });
+        // Sniff the raw inbound IPC AFTER serve() (so the discover handshake is
+        // untouched). On the pre-fix protocol, rpc/job messages carried a
+        // context_token an untrusted worker could harvest and replay. The fix
+        // abolished it, so SNIFFED must stay empty forever.
+        process.stdin.on("data", (chunk) => {
+          String(chunk).split("\n").forEach((line) => {
+            line = line.trim(); if (!line) return;
+            try { const m = JSON.parse(line); if (m && m.context_token != null) SNIFFED.push(String(m.context_token)); } catch (_) {}
+          });
+        });
+    "#;
+    let (s, _) = rt.deploy("evil", &make_tar_gz(&[("index.ts", backend)])).await;
+    assert_eq!(s, 200);
+
+    // Admin (harness owner) and a low-priv user, both allowed to invoke.
+    let admin_uid: uuid::Uuid = sqlx::query_scalar(
+        "SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
+        .fetch_one(rt.pool()).await.unwrap();
+    let low_token = rt.register_and_login("lowpriv@test.local").await;
+    let low_uid: uuid::Uuid = sqlx::query_scalar(
+        "SELECT id FROM rootcx_system.users WHERE email = 'lowpriv@test.local'")
+        .fetch_one(rt.pool()).await.unwrap();
+    // Grant ONLY invoke on evil — no admin, no data permissions.
+    let role = format!("role_{}", low_uid.simple());
+    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, inherits, permissions) VALUES ($1, '{}', ARRAY['app:evil:invoke']) ON CONFLICT (name) DO UPDATE SET permissions = EXCLUDED.permissions")
+        .bind(&role).execute(rt.pool()).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(low_uid).bind(&role).execute(rt.pool()).await.unwrap();
+
+    async fn call(rt: &TestRuntime, token: &str, method: &str) -> Value {
+        for _ in 0..25 {
+            let (s, body) = rt.request_as(
+                Method::POST, "/api/v1/apps/evil/rpc", token,
+                Some(&json!({"method": method, "params": {}}))).await;
+            if s == 200 { return body; }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        panic!("rpc {method} never succeeded");
+    }
+
+    // 1. The low-priv user's worker runs as the low-priv user.
+    let r = call(&rt, &low_token, "whoami").await;
+    assert_eq!(r["uid"], low_uid.to_string(), "low-priv worker must run as its caller");
+
+    // 2. The admin invokes in a SEPARATE per-identity worker, as admin.
+    let r = call(&rt, &rt.token, "whoami").await;
+    assert_eq!(r["uid"], admin_uid.to_string(), "admin worker must run as admin");
+
+    // 3. The forged-token escalation has NO effect: still the low-priv user.
+    let r = call(&rt, &low_token, "escalate").await;
+    assert_eq!(r["uid"], low_uid.to_string(), "forged context_token must not change identity");
+    assert_ne!(r["uid"], admin_uid.to_string(), "a worker must never become another user");
+
+    // 4. No identity token ever crossed the IPC wire — there is nothing for an
+    //    untrusted worker to harvest and replay. This fails the instant a
+    //    context_token (or any worker-supplied identity) is reintroduced.
+    let r = call(&rt, &low_token, "sniffed").await;
+    assert!(r["tokens"].as_array().unwrap().is_empty(),
+        "no identity token may appear on the IPC wire: {r}");
+
     rt.shutdown().await;
 }
 

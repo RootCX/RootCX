@@ -19,8 +19,35 @@ use crate::worker::{self, AgentEvent, FleetEvent, SupervisorHandle, WorkerConfig
 
 const BACKEND_PRELUDE: &str = include_str!("backend_prelude.js");
 
+/// A worker process is keyed by (app_id, identity). One process serves exactly
+/// ONE identity for its whole life, so a malicious app can never act as another
+/// user (cross-user confused deputy is structurally impossible) and there is no
+/// token to forge. See docs/security-context-token-confusion.md.
+type WorkerKey = (String, String);
+
+/// Stable string key for an identity. Two units with the same identity share a
+/// worker; different identities (incl. direct vs delegated for the same user)
+/// get separate processes. The empty/default state is the per-app lifecycle
+/// (system) worker that runs onStart.
+fn identity_key(state: &crate::sql_proxy::ContextState) -> String {
+    if is_system(state) {
+        return "·system".into();
+    }
+    let uid = state.user_id.map(|u| u.to_string()).unwrap_or_default();
+    let mut perms = state.effective_perms.clone();
+    perms.sort();
+    format!("{uid}|{}|{}", state.is_delegated as u8, perms.join(","))
+}
+
+/// The default identity (no user, not delegated, no perms) = the lifecycle
+/// worker. It alone runs onStart with BYPASSRLS self-schema access.
+fn is_system(state: &crate::sql_proxy::ContextState) -> bool {
+    state.user_id.is_none() && !state.is_delegated && state.effective_perms.is_empty()
+}
+
 pub struct WorkerManager {
-    workers: Arc<RwLock<HashMap<String, SupervisorHandle>>>,
+    workers: Arc<RwLock<HashMap<WorkerKey, SupervisorHandle>>>,
+    pool: PgPool,
     dispatch: OnceLock<Arc<dyn AgentDispatcher>>,
     integration_call: OnceLock<Arc<dyn IntegrationCaller>>,
     action_call: OnceLock<Arc<dyn ActionCaller>>,
@@ -37,7 +64,7 @@ pub struct WorkerManager {
 
 impl WorkerManager {
     pub fn new(
-        apps_dir: PathBuf, runtime_url: String, bun_bin: PathBuf,
+        apps_dir: PathBuf, runtime_url: String, bun_bin: PathBuf, pool: PgPool,
         tool_registry: Arc<ToolRegistry>, pending_approvals: PendingApprovals,
         secret_manager: Arc<SecretManager>,
         upload_nonces: Arc<std::sync::Mutex<crate::extensions::storage::nonce::NonceStore>>,
@@ -47,6 +74,7 @@ impl WorkerManager {
         let (fleet_tx, _) = broadcast::channel(512);
         Self {
             workers: Arc::new(RwLock::new(HashMap::new())),
+            pool,
             dispatch: OnceLock::new(),
             action_call: OnceLock::new(),
             integration_call: OnceLock::new(),
@@ -94,28 +122,24 @@ impl WorkerManager {
         Some((AgentBootConfig { tool_descriptors, max_turns }, supervision))
     }
 
-    async fn get_handle(&self, app_id: &str) -> Result<SupervisorHandle, RuntimeError> {
-        self.workers.read().await.get(app_id).cloned()
-            .ok_or_else(|| RuntimeError::Worker(format!("no worker for app '{app_id}'")))
-    }
-
-    pub async fn start_app(&self, pool: &PgPool, secrets: &SecretManager, app_id: &str) -> Result<(), RuntimeError> {
-        if let Ok(h) = self.get_handle(app_id).await
-            && h.status().await? == WorkerStatus::Running {
-                return Ok(());
-            }
-
+    /// Spawn a fresh worker bound for life to `identity`. Only the system
+    /// identity gets `run_onstart` (BYPASSRLS self-schema for onStart).
+    async fn spawn_for(
+        &self, pool: &PgPool, secrets: &SecretManager, app_id: &str,
+        identity: crate::sql_proxy::ContextState,
+    ) -> Result<SupervisorHandle, RuntimeError> {
         let app_dir = self.apps_dir.join(app_id);
         let entry_point = resolve_entry_point(&app_dir)?;
         let credentials = secrets.get_env_for_app(pool, app_id).await?;
-
         let (agent_boot_config, supervision) = match self.build_agent_boot(pool, app_id).await {
             Some((boot, sup)) => (Some(boot), sup),
             None => (None, None),
         };
-
+        let run_onstart = is_system(&identity);
         let config = WorkerConfig {
             app_id: app_id.to_string(),
+            identity,
+            run_onstart,
             entry_point,
             working_dir: app_dir,
             credentials,
@@ -132,23 +156,52 @@ impl WorkerManager {
             supervision,
             upload_nonces: Arc::clone(&self.upload_nonces),
         };
-
         let handle = worker::spawn_supervisor(config);
         handle.start().await?;
-        self.workers.write().await.insert(app_id.to_string(), handle);
+        Ok(handle)
+    }
+
+    /// Route a unit of work to the worker bound to `(app_id, identity)`,
+    /// spawning it on first use. The identity is set by the core here — never
+    /// taken from a worker message — so a worker can only ever act as the one
+    /// identity it was spawned for.
+    async fn get_or_spawn(
+        &self, app_id: &str, identity: crate::sql_proxy::ContextState,
+    ) -> Result<SupervisorHandle, RuntimeError> {
+        let key = (app_id.to_string(), identity_key(&identity));
+        if let Some(h) = self.workers.read().await.get(&key).cloned() {
+            if h.status().await? == WorkerStatus::Running { return Ok(h); }
+            self.workers.write().await.remove(&key);
+        }
+        let handle = self.spawn_for(&self.pool, &self.secret_manager, app_id, identity).await?;
+        // Lost-race guard: another task may have spawned the same key meanwhile.
+        let mut w = self.workers.write().await;
+        if let Some(existing) = w.get(&key).cloned() {
+            drop(w);
+            let _ = handle.stop().await;
+            return Ok(existing);
+        }
+        w.insert(key, handle.clone());
         info!(app_id, "worker started");
-        Ok(())
+        Ok(handle)
+    }
+
+    /// Start the per-app lifecycle (system) worker, which runs onStart. User and
+    /// agent workers spawn lazily on first request. Shares the single per-identity
+    /// spawn path; `pool`/`secrets` are vestigial (the manager holds its own).
+    pub async fn start_app(&self, _pool: &PgPool, _secrets: &SecretManager, app_id: &str) -> Result<(), RuntimeError> {
+        self.get_or_spawn(app_id, crate::sql_proxy::ContextState::default()).await.map(|_| ())
     }
 
     pub async fn stop_app(&self, app_id: &str) -> Result<(), RuntimeError> {
-        let handle = self.workers.read().await.get(app_id).cloned();
-        if let Some(h) = handle {
-            h.stop().await?;
-            self.workers.write().await.remove(app_id);
-            info!(app_id, "worker stopped");
-        } else {
-            warn!(app_id, "no worker to stop");
+        let handles: Vec<(WorkerKey, SupervisorHandle)> = self.workers.read().await
+            .iter().filter(|((a, _), _)| a == app_id).map(|(k, h)| (k.clone(), h.clone())).collect();
+        if handles.is_empty() { warn!(app_id, "no worker to stop"); return Ok(()); }
+        for (key, h) in handles {
+            let _ = h.stop().await;
+            self.workers.write().await.remove(&key);
         }
+        info!(app_id, "workers stopped");
         Ok(())
     }
 
@@ -171,33 +224,51 @@ impl WorkerManager {
     }
 
     pub async fn restart_all(&self, pool: &PgPool, secrets: &SecretManager) -> usize {
-        let ids: Vec<String> = self.workers.read().await.keys().cloned().collect();
-        let count = ids.len();
-        for id in &ids {
-            if let Err(e) = self.stop_app(id).await { error!(app_id = %id, "restart stop: {e}"); }
-            if let Err(e) = self.start_app(pool, secrets, id).await { error!(app_id = %id, "restart start: {e}"); }
+        let apps: std::collections::HashSet<String> =
+            self.workers.read().await.keys().map(|(a, _)| a.clone()).collect();
+        let count = apps.len();
+        // Drop every worker (lifecycle + user + agent); user workers respawn
+        // lazily with fresh creds, lifecycle workers are restarted here.
+        self.stop_all().await;
+        for app_id in &apps {
+            if let Err(e) = self.start_app(pool, secrets, app_id).await { error!(app_id = %app_id, "restart start: {e}"); }
         }
-        info!(count, "workers restarted (platform secrets changed)");
+        info!(count, "apps restarted (platform secrets changed)");
         count
     }
 
     pub async fn stop_all(&self) {
-        let ids: Vec<String> = self.workers.read().await.keys().cloned().collect();
-        let futs = ids.iter().map(|id| async move { if let Err(e) = self.stop_app(id).await { error!(app_id = %id, "stop error: {e}"); } });
+        let handles: Vec<(WorkerKey, SupervisorHandle)> =
+            self.workers.read().await.iter().map(|(k, h)| (k.clone(), h.clone())).collect();
+        let futs = handles.into_iter().map(|(key, h)| {
+            let workers = Arc::clone(&self.workers);
+            async move { let _ = h.stop().await; workers.write().await.remove(&key); }
+        });
         join_all(futs).await;
     }
 
     pub async fn rpc(
         &self, app_id: &str, id: String, method: String, params: JsonValue, caller: Option<RpcCaller>,
     ) -> Result<JsonValue, RuntimeError> {
-        self.get_handle(app_id).await?.rpc(id, method, params, caller).await
+        let identity = crate::sql_proxy::ContextState::from_caller(caller.as_ref());
+        self.get_or_spawn(app_id, identity).await?.rpc(id, method, params, caller).await
     }
 
     pub async fn agent_invoke(
         &self, app_id: &str, payload: AgentInvokePayload,
     ) -> Result<mpsc::Receiver<AgentEvent>, RuntimeError> {
+        // Compute the agent's delegated identity (intersection grant∩human) HERE,
+        // so the worker is keyed and spawned bound to exactly that authority.
+        let identity = match payload.invoker_user_id {
+            Some(uid) => {
+                let agent_uid = crate::extensions::agents::agent_user_id(app_id);
+                let perms = crate::extensions::rbac::policy::effective_for_pair(&self.pool, agent_uid, uid).await;
+                crate::sql_proxy::ContextState { user_id: Some(uid), is_delegated: true, effective_perms: perms }
+            }
+            None => crate::sql_proxy::ContextState { user_id: None, is_delegated: true, effective_perms: vec![] },
+        };
         let session_id = payload.session_id.clone();
-        let mut inner_rx = self.get_handle(app_id).await?.agent_invoke(payload).await?;
+        let mut inner_rx = self.get_or_spawn(app_id, identity).await?.agent_invoke(payload).await?;
 
         // Fan out events to fleet broadcast for real-time monitoring
         let (outer_tx, outer_rx) = mpsc::channel(64);
@@ -222,21 +293,44 @@ impl WorkerManager {
     }
 
     pub async fn dispatch_job(&self, app_id: &str, job_id: String, payload: JsonValue, caller: Option<RpcCaller>) -> Result<(), RuntimeError> {
-        self.get_handle(app_id).await?.dispatch_job(job_id, payload, caller).await
+        let identity = crate::sql_proxy::ContextState::from_caller(caller.as_ref());
+        self.get_or_spawn(app_id, identity).await?.dispatch_job(job_id, payload, caller).await
     }
 
+    /// Aggregate status for an app across all its identity workers (Running if
+    /// any worker is running).
     pub async fn worker_status(&self, app_id: &str) -> Result<WorkerStatus, RuntimeError> {
-        self.get_handle(app_id).await?.status().await
+        let handles: Vec<SupervisorHandle> = self.workers.read().await
+            .iter().filter(|((a, _), _)| a == app_id).map(|(_, h)| h.clone()).collect();
+        if handles.is_empty() { return Err(RuntimeError::Worker(format!("no worker for app '{app_id}'"))); }
+        // Running wins; poll all identity workers concurrently.
+        let mut agg = WorkerStatus::Stopped;
+        for s in join_all(handles.iter().map(|h| h.status())).await.into_iter().flatten() {
+            if s == WorkerStatus::Running { return Ok(WorkerStatus::Running); }
+            agg = s;
+        }
+        Ok(agg)
     }
 
     pub async fn subscribe_logs(&self, app_id: &str) -> Result<broadcast::Receiver<LogEntry>, RuntimeError> {
-        Ok(self.get_handle(app_id).await?.subscribe())
+        // Logs stream from the lifecycle worker. Per-identity worker log fan-in
+        // is a known follow-up (see token-confusion fix notes).
+        self.get_or_spawn(app_id, crate::sql_proxy::ContextState::default()).await.map(|h| h.subscribe())
     }
 
+    /// Aggregate per-app status across identity workers (Running wins).
     pub async fn all_statuses(&self) -> HashMap<String, WorkerStatus> {
-        let handles: Vec<_> = self.workers.read().await.iter().map(|(id, h)| (id.clone(), h.clone())).collect();
-        let futs = handles.into_iter().map(|(id, h)| async move { h.status().await.ok().map(|s| (id, s)) });
-        join_all(futs).await.into_iter().flatten().collect()
+        let handles: Vec<(String, SupervisorHandle)> =
+            self.workers.read().await.iter().map(|((a, _), h)| (a.clone(), h.clone())).collect();
+        // Poll all workers concurrently, then fold per app (Running wins).
+        let results = join_all(handles.into_iter().map(|(app, h)| async move { (app, h.status().await.ok()) })).await;
+        let mut out: HashMap<String, WorkerStatus> = HashMap::new();
+        for (app, s) in results.into_iter().filter_map(|(a, s)| s.map(|s| (a, s))) {
+            out.entry(app)
+                .and_modify(|cur| { if *cur != WorkerStatus::Running { *cur = s.clone(); } })
+                .or_insert(s);
+        }
+        out
     }
 }
 
@@ -268,7 +362,6 @@ impl AgentDispatcher for SubAgentDispatch {
             llm,
             invoker_user_id,
             attachments: None,
-            context_token: None,
         };
 
         let app_id = target.to_string();
@@ -365,4 +458,73 @@ fn resolve_entry_point(app_dir: &Path) -> Result<PathBuf, RuntimeError> {
         if p.exists() { return Ok(p); }
     }
     Err(RuntimeError::Worker(format!("no entry point in {}", app_dir.display())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{identity_key, is_system};
+    use crate::sql_proxy::ContextState;
+    use uuid::Uuid;
+
+    fn ident(uid: Option<Uuid>, delegated: bool, perms: &[&str]) -> ContextState {
+        ContextState {
+            user_id: uid,
+            is_delegated: delegated,
+            effective_perms: perms.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    // identity_key is the worker-routing key: same identity must always map to
+    // the same worker, regardless of perm ordering. A bug here (e.g. forgetting
+    // to sort) would spawn a fresh worker per call (churn) instead of reusing.
+    #[test]
+    fn identity_key_is_order_independent() {
+        let u = Uuid::new_v4();
+        assert_eq!(
+            identity_key(&ident(Some(u), true, &["b", "a", "c"])),
+            identity_key(&ident(Some(u), true, &["c", "b", "a"])),
+            "permission order must not change the worker key",
+        );
+    }
+
+    // The security-critical property: distinct principals NEVER share a worker.
+    // If two of these collided, one user could act inside another's process.
+    #[test]
+    fn identity_key_separates_distinct_principals() {
+        let u1 = Uuid::new_v4();
+        let u2 = Uuid::new_v4();
+        let labelled = [
+            ("u1 direct", ident(Some(u1), false, &[])),
+            ("u1 delegated", ident(Some(u1), true, &["app:x:invoke"])),
+            ("u1 direct, extra perm", ident(Some(u1), false, &["app:x:invoke"])),
+            ("u2 direct", ident(Some(u2), false, &[])),
+            ("no-user delegated", ident(None, true, &[])),
+            ("system (default)", ContextState::default()),
+        ];
+        for i in 0..labelled.len() {
+            for j in (i + 1)..labelled.len() {
+                assert_ne!(
+                    identity_key(&labelled[i].1), identity_key(&labelled[j].1),
+                    "'{}' and '{}' must not share a worker", labelled[i].0, labelled[j].0,
+                );
+            }
+        }
+    }
+
+    // Only the default identity is the privileged onStart/BYPASSRLS worker. A
+    // real user (even with no perms) must never be classified as system, or it
+    // would inherit the lifecycle worker's self-schema bypass.
+    #[test]
+    fn only_default_identity_is_system() {
+        assert!(is_system(&ContextState::default()));
+        for (label, st) in [
+            ("user, no perms", ident(Some(Uuid::new_v4()), false, &[])),
+            ("no-user delegated", ident(None, true, &[])),
+            ("no-user with perms", ident(None, false, &["app:x:invoke"])),
+        ] {
+            assert!(!is_system(&st), "'{label}' must not be the system worker");
+            assert_ne!(identity_key(&st), identity_key(&ContextState::default()),
+                "'{label}' must not map to the system worker key");
+        }
+    }
 }
