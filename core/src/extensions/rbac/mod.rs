@@ -102,16 +102,25 @@ impl RuntimeExtension for RbacExtension {
     async fn on_app_installed(&self, pool: &PgPool, manifest: &AppManifest, installed_by: Uuid) -> Result<(), RuntimeError> {
         let app_id = &manifest.app_id;
 
-        let (mut keys, mut descs): (Vec<String>, Vec<String>) = if let Some(c) = &manifest.permissions {
-            c.permissions.iter().map(|p| (format!("app:{app_id}:{}", p.key), p.description.clone())).unzip()
-        } else {
-            manifest.data_contract.iter()
-                .flat_map(|e| ["create", "read", "update", "delete"]
-                    .map(|a| (format!("app:{app_id}:{}.{a}", e.entity_name), format!("{a} {}", e.entity_name))))
-                .chain(["read", "write", "trigger"].into_iter()
-                    .map(|a| (format!("app:{app_id}:cron.{a}"), format!("{a} crons"))))
-                .unzip()
-        };
+        // Per-entity CRUD + cron keys are what the table RLS policies require
+        // (apply_table_rls gates on `app:{schema}:{entity}.{action}`), so they
+        // must exist for EVERY app. Mint them unconditionally, then append any
+        // custom keys the manifest declares. (A custom block used to REPLACE
+        // these, leaving custom-permission apps with ungrantable, invisible
+        // entity keys and deny-all data for every non-admin.)
+        let (mut keys, mut descs): (Vec<String>, Vec<String>) = manifest.data_contract.iter()
+            .flat_map(|e| ["create", "read", "update", "delete"]
+                .map(|a| (format!("app:{app_id}:{}.{a}", e.entity_name), format!("{a} {}", e.entity_name))))
+            .chain(["read", "write", "trigger"].into_iter()
+                .map(|a| (format!("app:{app_id}:cron.{a}"), format!("{a} crons"))))
+            .unzip();
+
+        if let Some(c) = &manifest.permissions {
+            for p in &c.permissions {
+                keys.push(format!("app:{app_id}:{}", p.key));
+                descs.push(p.description.clone());
+            }
+        }
 
         // Always generate the invoke permission so it is grantable per role
         keys.push(format!("app:{app_id}:invoke"));
@@ -122,7 +131,8 @@ impl RuntimeExtension for RbacExtension {
             .bind(app_id).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
         sqlx::query(
             "INSERT INTO rootcx_system.rbac_permissions (key, description, source_app)
-             SELECT unnest($1::text[]), unnest($2::text[]), $3")
+             SELECT unnest($1::text[]), unnest($2::text[]), $3
+             ON CONFLICT (key) DO NOTHING")
             .bind(&keys).bind(&descs).bind(app_id)
             .execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
         tx.commit().await.map_err(RuntimeError::Schema)?;
@@ -454,6 +464,22 @@ impl RbacExtension {
              END;
              $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, rootcx_system",
         ).await?;
+
+        // Lock down EXECUTE on the RBAC helpers. Only check_access is invoked
+        // by the RLS policies (so the executor must keep it); the helpers it
+        // calls run as the SECURITY DEFINER owner, so the executor never needs
+        // direct EXECUTE on them. New functions default to EXECUTE by PUBLIC, so
+        // without this an app could call resolve_permissions/has_permission with
+        // an arbitrary user_id via ctx.sql and enumerate the whole RBAC graph
+        // (violating Layer 2: "cannot read rootcx_system").
+        for sig in [
+            "rootcx_system.expand_roles(text[])",
+            "rootcx_system.resolve_permissions(uuid)",
+            "rootcx_system.match_permission(text[], text)",
+            "rootcx_system.has_permission(uuid, text)",
+        ] {
+            exec(pool, &format!("REVOKE EXECUTE ON FUNCTION {sig} FROM PUBLIC")).await?;
+        }
 
         // Retroactive RLS over tables that predate this refactor.
         let tables: Vec<(String, String)> = sqlx::query_as(
