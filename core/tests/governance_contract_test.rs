@@ -2051,3 +2051,81 @@ async fn mcp_read_endpoints_require_admin() {
 
     rt.shutdown().await;
 }
+
+// ── Regression: governance hardening (release review 2026-05-31) ─────────
+
+/// HIGH: untrusted app SQL must not be able to enumerate the RBAC graph.
+/// The plpgsql RBAC helpers are SECURITY DEFINER and take an arbitrary
+/// user_id; if PUBLIC keeps the default EXECUTE grant, any app can call
+/// `resolve_permissions(<anyone>)` through ctx.sql and read their full
+/// permission set. Layer 2 promises "cannot read rootcx_system". Only
+/// `check_access` (invoked by the RLS policies) may stay callable.
+#[tokio::test]
+async fn t5_8_app_cannot_enumerate_rbac_graph() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let pool = rt.pool();
+
+    let sys = "00000000-0000-0000-0000-000000000001";
+    for sql in [
+        format!("SELECT rootcx_system.resolve_permissions('{sys}'::uuid)"),
+        format!("SELECT rootcx_system.has_permission('{sys}'::uuid, '*')"),
+        "SELECT rootcx_system.expand_roles(ARRAY['admin'])".to_string(),
+        "SELECT rootcx_system.match_permission(ARRAY['*'], 'admin:secrets.manage')".to_string(),
+    ] {
+        let res = exec_as_executor(pool, "crm", &sql).await;
+        assert!(res.is_err(), "executor must not execute RBAC helper: {sql}");
+        let err = res.unwrap_err();
+        assert!(
+            err.contains("permission denied") || err.contains("denied"),
+            "expected permission denied for {sql}, got: {err}"
+        );
+    }
+
+    // check_access stays callable: the RLS policies depend on it.
+    let ok = exec_as_executor(pool, "crm", "SELECT rootcx_system.check_access('app:crm:contacts.read')").await;
+    assert!(ok.is_ok(), "check_access must remain callable by the executor: {ok:?}");
+
+    rt.shutdown().await;
+}
+
+/// Blocker: an app that declares a custom `permissions` block must STILL get
+/// the per-entity keys its table RLS policies require. apply_table_rls gates
+/// every table on `app:{id}:{entity}.{action}`; if those keys are never minted
+/// they are absent from the permission catalog, invisible to admins, and no
+/// non-admin can ever be granted access -> the app's data is deny-all by
+/// default for everyone but `*`.
+#[tokio::test]
+async fn t1_9_custom_permissions_app_still_mints_entity_keys() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+
+    let manifest = json!({
+        "appId": "crm", "name": "crm", "version": "1.0.0",
+        "permissions": { "permissions": [
+            { "key": "reports.export", "description": "export reports" }
+        ]},
+        "dataContract": [{ "entityName": "contacts", "fields": [
+            { "name": "first_name", "type": "text", "required": true }
+        ]}]
+    });
+    rt.install_manifest(&manifest).await;
+
+    let keys: Vec<String> = sqlx::query_scalar(
+        "SELECT key FROM rootcx_system.rbac_permissions WHERE source_app = 'crm' ORDER BY key",
+    ).fetch_all(rt.pool()).await.unwrap();
+
+    for required in [
+        "app:crm:contacts.create", "app:crm:contacts.read",
+        "app:crm:contacts.update", "app:crm:contacts.delete",
+    ] {
+        assert!(keys.iter().any(|k| k == required),
+            "custom-permissions app must still mint entity key {required}; got {keys:?}");
+    }
+    // The custom-declared key must also be present (no regression).
+    assert!(keys.iter().any(|k| k == "app:crm:reports.export"),
+        "custom-declared key must be minted; got {keys:?}");
+
+    rt.shutdown().await;
+}
