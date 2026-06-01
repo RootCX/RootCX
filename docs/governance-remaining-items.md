@@ -47,14 +47,14 @@ authentifie lit le journal d'audit global (old/new JSONB de toutes les apps).
 **Fix :** `require_perm(&pool, identity.user_id, "admin:db.query")` (ou un
 `admin:audit.read` dedie), ou scoper aux apps accessibles au caller.
 
-### Nonces stockes en clair -- HIGH
+### Nonces stockes en clair -- RESOLU
 
-`oidc/mod.rs` : `auth_nonces` stocke `access_token`/`refresh_token` en clair
-(la table magic-link, elle, ne garde qu'un SHA-256). Une seule lecture DB =
-sessions live sur la fenetre ~30s.
-
-**Fix :** chiffrer via `SecretManager`, ou stocker une reference de session au
-lieu des JWT bruts.
+`auth_nonces` refactoree : la table ne stocke plus aucun token. Pattern aligne
+sur l'industrie (Supabase/Hydra/Auth0) :
+- Le nonce est hashe (SHA-256 via `secure_tokens::hash`) avant stockage.
+- Seuls `(nonce_hash, user_id, session_id, created_at)` sont en DB.
+- Les JWT sont mintes a la volee au moment de l'exchange (`token_delivery::exchange`).
+- Zero token en DB, zero secret a chiffrer.
 
 ### Ecritures refusees par RLS -> HTTP 500 -- MEDIUM
 

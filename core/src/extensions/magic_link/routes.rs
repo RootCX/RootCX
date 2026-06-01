@@ -180,8 +180,8 @@ pub async fn consume(
     axum::Extension(auth_config): axum::Extension<Arc<AuthConfig>>,
     Json(req): Json<ConsumeRequest>,
 ) -> Result<Json<ConsumeResponse>, ApiError> {
-    let (result, _) = consume_inner(&rt, &auth_config, &req.token).await?;
-    Ok(Json(result))
+    let cr = consume_inner(&rt, &auth_config, &req.token).await?;
+    Ok(Json(cr.response))
 }
 
 #[derive(Deserialize)]
@@ -194,30 +194,38 @@ pub async fn consume_get(
     axum::Extension(auth_config): axum::Extension<Arc<AuthConfig>>,
     Query(q): Query<ConsumeQuery>,
 ) -> Result<Response, ApiError> {
-    let (result, delivery) = consume_inner(&rt, &auth_config, &q.token).await?;
+    let cr = consume_inner(&rt, &auth_config, &q.token).await?;
 
-    if let Some(ref uri) = result.redirect_uri {
+    if let Some(ref uri) = cr.response.redirect_uri {
         let redirect_url = url::Url::parse(uri)
             .map_err(|_| ApiError::Internal("invalid stored redirect_uri".into()))?;
         deliver(
             &pool(&rt),
             redirect_url,
-            &result.access_token,
-            &result.refresh_token,
-            result.expires_in,
-            delivery,
+            cr.user_id,
+            cr.session_id,
+            &auth_config,
+            &cr.response.user.email,
+            cr.delivery,
         )
         .await
     } else {
-        Ok(Json(result).into_response())
+        Ok(Json(cr.response).into_response())
     }
+}
+
+struct ConsumeResult {
+    response: ConsumeResponse,
+    delivery: Delivery,
+    user_id: Uuid,
+    session_id: Uuid,
 }
 
 async fn consume_inner(
     rt: &SharedRuntime,
     auth_config: &AuthConfig,
     raw_token: &str,
-) -> Result<(ConsumeResponse, Delivery), ApiError> {
+) -> Result<ConsumeResult, ApiError> {
     if !tokens::is_well_formed(raw_token) {
         return Err(ApiError::Unauthorized("invalid token".into()));
     }
@@ -306,8 +314,8 @@ async fn consume_inner(
 
     tracing::info!(user_id = %user_id, email = %email, roles_conferred = ?roles, "magic-link consumed");
 
-    Ok((
-        ConsumeResponse {
+    Ok(ConsumeResult {
+        response: ConsumeResponse {
             access_token,
             refresh_token,
             expires_in: auth_config.access_ttl.as_secs() as i64,
@@ -319,8 +327,10 @@ async fn consume_inner(
             },
             redirect_uri,
         },
-        Delivery::from_param(&token_delivery),
-    ))
+        delivery: Delivery::from_param(&token_delivery),
+        user_id,
+        session_id,
+    })
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
