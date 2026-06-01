@@ -166,6 +166,18 @@ async fn t6_4_second_install_requires_permission() {
     rt.shutdown().await;
 }
 
+#[tokio::test]
+async fn t6_5_role_api_rejects_comma_in_perm_key() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    // effective_perms is CSV-encoded into a Postgres GUC; a comma would corrupt
+    // the list. The role API must reject the malformed key at the door (400).
+    let body = json!({"name": "bad_role", "permissions": ["app:crm,billing:read"]});
+    let (s, _) = rt.post_json("/api/v1/roles", &body).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "comma in permission key → 400");
+    rt.shutdown().await;
+}
+
 // ── CATEGORY 7 / 3 : cross-app invoke gate + invocation ACL ───────────
 
 #[tokio::test]

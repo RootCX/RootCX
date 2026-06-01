@@ -101,6 +101,7 @@ pub(crate) async fn create_role(
 
     if body.name.is_empty() { return Err(ApiError::BadRequest("role name must not be empty".into())); }
     if body.name == "admin" { return Err(ApiError::BadRequest("cannot create a role named 'admin' (reserved)".into())); }
+    for p in &body.permissions { crate::manifest::validate_perm_key(p).map_err(ApiError::BadRequest)?; }
 
     if !body.inherits.is_empty() {
         let existing = sqlx::query_as("SELECT name, inherits FROM rootcx_system.rbac_roles")
@@ -136,6 +137,9 @@ pub(crate) async fn update_role(
     }
     if body.description.is_none() && body.inherits.is_none() && body.permissions.is_none() {
         return Err(ApiError::BadRequest("no fields to update".into()));
+    }
+    if let Some(ref perms) = body.permissions {
+        for p in perms { crate::manifest::validate_perm_key(p).map_err(ApiError::BadRequest)?; }
     }
 
     if let Some(ref new_inherits) = body.inherits {
