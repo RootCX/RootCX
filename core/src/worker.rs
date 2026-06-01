@@ -722,6 +722,31 @@ async fn kill_child(child: &mut Option<AsyncGroupChild>) {
     *child = None;
 }
 
+/// The COMPLETE environment a sandboxed worker may observe. Spawned from an
+/// empty environment (`env_clear`), the worker receives ONLY these vars — never
+/// the core's DATABASE_URL / ROOTCX_JWT_SECRET. Kept pure so the sandbox
+/// contract is directly assertable (governance_contract_test, Category 4).
+pub(crate) fn sandbox_env(
+    app_id: &str,
+    runtime_url: &str,
+    credentials: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("ROOTCX_APP_ID".to_string(), app_id.to_string()),
+        ("ROOTCX_RUNTIME_URL".to_string(), runtime_url.to_string()),
+    ];
+    // PATH (bun resolves deps) + HOME/TMPDIR (temp filesystem) are required by
+    // the runtime itself; pass them through if present, nothing else.
+    for key in ["PATH", "HOME", "TMPDIR"] {
+        if let Ok(val) = std::env::var(key) {
+            env.push((key.to_string(), val));
+        }
+    }
+    // The app's own credentials are injected explicitly (never the core's env).
+    env.extend(credentials.iter().map(|(k, v)| (k.clone(), v.clone())));
+    env
+}
+
 async fn spawn_worker(
     config: &WorkerConfig,
 ) -> Result<(AsyncGroupChild, IpcWriter, IpcReader, tokio::process::ChildStderr), RuntimeError> {
@@ -729,8 +754,10 @@ async fn spawn_worker(
     info!(app_id = %config.app_id, bin = %bin.display(), entry = %config.entry_point.display(), "spawning worker");
 
     let mut cmd = Command::new(bin);
-    // Phase 0a: empty the environment, then add back ONLY the strict allow-list.
-    // The worker must never inherit DATABASE_URL / ROOTCX_JWT_SECRET / etc.
+    // Phase 0a: empty the environment, then add back ONLY the strict allow-list
+    // (`sandbox_env`). The worker must never inherit DATABASE_URL /
+    // ROOTCX_JWT_SECRET / etc — the sandbox's central claim, asserted executably
+    // by the governance contract suite (Category 4).
     cmd.env_clear()
         .arg("--preload").arg(&config.prelude_path)
         .arg(&config.entry_point)
@@ -738,19 +765,7 @@ async fn spawn_worker(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .env("ROOTCX_APP_ID", &config.app_id)
-        .env("ROOTCX_RUNTIME_URL", &config.runtime_url);
-    // PATH (bun resolves deps) + HOME/TMPDIR (temp filesystem) are required for
-    // the runtime itself; pass them through if present, nothing else.
-    for key in ["PATH", "HOME", "TMPDIR"] {
-        if let Ok(val) = std::env::var(key) {
-            cmd.env(key, val);
-        }
-    }
-    // The app's own credentials are injected explicitly (never the core's env).
-    for (k, v) in &config.credentials {
-        cmd.env(k, v);
-    }
+        .envs(sandbox_env(&config.app_id, &config.runtime_url, &config.credentials));
 
     // Phase 0d: drop to the dedicated worker UID on Unix so the worker cannot
     // read /proc/<core>/environ. Best-effort: only when the core runs as root
@@ -856,12 +871,9 @@ async fn collection_exec(
     // Read ops use `data` as a where-equality map ({col: value}). Empty {} = full scan.
     if op == "find" || op == "findOne" || op == "list" {
         let obj = data.as_object().ok_or("data must be a JSON object (where clause)")?;
-        let mut idx = 1usize;
-        let conds: Vec<String> = obj.keys().map(|k| {
-            let s = format!("{} = ${idx}", quote_ident(k));
-            idx += 1;
-            s
-        }).collect();
+        let conds: Vec<String> = obj.keys().enumerate()
+            .map(|(i, k)| format!("{} = ${}", quote_ident(k), i + 1))
+            .collect();
         let where_clause = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
 
         if op == "findOne" {
@@ -894,10 +906,11 @@ async fn collection_exec(
             format!("INSERT INTO {tbl} ({}) VALUES ({}) RETURNING to_jsonb({tbl}.*) AS row", cols.join(","), phs.join(","))
         }
         "update" => {
-            let mut idx = 1usize;
-            let sets: Vec<_> = obj.keys().filter(|k| *k != "id").map(|k| { let s = format!("{} = ${idx}", quote_ident(k)); idx += 1; s }).collect();
+            let sets: Vec<_> = obj.keys().filter(|k| *k != "id").enumerate()
+                .map(|(i, k)| format!("{} = ${}", quote_ident(k), i + 1))
+                .collect();
             if sets.is_empty() { return Err("no fields to update".into()); }
-            format!("UPDATE {tbl} SET {} WHERE id = ${idx} RETURNING to_jsonb({tbl}.*) AS row", sets.join(","))
+            format!("UPDATE {tbl} SET {} WHERE id = ${} RETURNING to_jsonb({tbl}.*) AS row", sets.join(","), sets.len() + 1)
         }
         _ => return Err(format!("unsupported op: {op}")),
     };

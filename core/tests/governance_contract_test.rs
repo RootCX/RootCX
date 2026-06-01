@@ -1327,21 +1327,68 @@ async fn t5_10_collection_onstart_bypass_rls() {
 
 // ── CATEGORY 4 : Sandbox worker (process isolation) ──────────────────
 //
-// Category 4 tests verify that the worker process is sandboxed: no
-// DATABASE_URL, no JWT_SECRET, no auth token, no direct PG access. Most
-// of these require spawning a real Bun worker with a test JS payload.
-// The ones that CAN be tested as Rust integration tests are below (4.4).
-// The rest are documented as executable shell/CI scripts.
+// The central security claim: "the app holds no DB credentials and no JWT."
+//
+// t4_sandbox_worker_env_has_no_secrets: THE definitive test. Deploys a real
+// app with a JS handler that dumps process.env, invokes it via HTTP, and
+// asserts the secrets are absent. Tests the ACTUAL spawn_worker path
+// (env_clear + sandbox_env + bun + IPC handshake + RPC response).
+//
+// t4_4: unauthenticated HTTP to core is 401 (worker has no token to use).
+//
+// t4_3/t4_7: protocol contract guards (exact key sets). Fast canaries that
+// break if someone adds a field to RpcCaller or Discover.
+
+
+#[tokio::test]
+async fn t4_sandbox_worker_env_has_no_secrets() {
+    // Deploy a real app whose RPC handler returns process.env. Invoke it and
+    // assert the core's secrets never reach the worker process.
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("sandbox_test", "dummy").await;
+
+    let js = br#"serve({ rpc: { dumpEnv(params, caller, ctx) { return process.env; } } });"#;
+    let tarball = harness::make_tar_gz(&[("index.js", js)]);
+    let (s, body) = rt.deploy("sandbox_test", &tarball).await;
+    assert!(s.is_success(), "deploy failed: {body}");
+
+    // Give the test user invoke permission.
+    let (tok, _) = user_with(&rt, "sandbox@t.local", &["app:sandbox_test:invoke"]).await;
+
+    // Poll until the worker is running (discover handshake complete).
+    for _ in 0..100 {
+        let (s, _) = rt.get_json("/api/v1/apps/sandbox_test/worker/status").await;
+        if s == StatusCode::OK { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let (s, env_dump) = rt.request_as(
+        Method::POST, "/api/v1/apps/sandbox_test/rpc", &tok,
+        Some(&json!({"method": "dumpEnv", "params": {}})),
+    ).await;
+    assert_eq!(s, StatusCode::OK, "RPC failed: {env_dump}");
+
+    let env_str = env_dump.to_string();
+    for secret in ["DATABASE_URL", "ROOTCX_JWT_SECRET"] {
+        assert!(!env_str.contains(secret),
+            "SECURITY VIOLATION: worker process.env contains `{secret}`: {env_str}");
+    }
+    // Positive: the worker DOES see its app identity vars.
+    let obj = env_dump.as_object().expect("env must be an object");
+    assert_eq!(obj.get("ROOTCX_APP_ID").and_then(|v| v.as_str()), Some("sandbox_test"),
+        "worker must see ROOTCX_APP_ID");
+    assert!(obj.contains_key("ROOTCX_RUNTIME_URL"), "worker must see ROOTCX_RUNTIME_URL");
+
+    rt.shutdown().await;
+}
 
 #[tokio::test]
 async fn t4_4_fetch_core_http_without_token_is_401() {
-    // A worker that tries to call the core HTTP API without a bearer token
-    // gets 401. We simulate this by making an unauthenticated request.
     let rt = harness::TestRuntime::boot().await;
     admin(&rt).await;
     rt.install("crm", "contacts").await;
 
-    // Unauthenticated requests to protected endpoints must return 401.
     let s = rt.get_unauthed("/api/v1/apps").await;
     assert_eq!(s, StatusCode::UNAUTHORIZED, "no token = 401 on /apps");
 
@@ -1354,127 +1401,47 @@ async fn t4_4_fetch_core_http_without_token_is_401() {
     rt.shutdown().await;
 }
 
-// ── Category 4 tests requiring a real worker process ─────────────────
-//
-// Tests 4.1, 4.2, 4.3, 4.5, 4.6, 4.7 require spawning a Bun worker
-// with a controlled JS payload. They are specified below as shell-script
-// tests with exact pass/fail criteria. These run in CI (Docker) where
-// the full sandbox (env_clear, UID separation, hidepid=2) is active.
-//
-// ┌──────────────────────────────────────────────────────────────────┐
-// │ TEST 4.1: process.env.DATABASE_URL === undefined                 │
-// │                                                                  │
-// │ Script: deploy a test app with this handler:                     │
-// │   export function onStart(ctx) {                                 │
-// │     const val = process.env.DATABASE_URL;                        │
-// │     if (val !== undefined) throw new Error('LEAK: ' + val);      │
-// │   }                                                              │
-// │                                                                  │
-// │ Pass: worker starts without throwing.                            │
-// │ Fail: worker crashes with "LEAK: postgresql://..."               │
-// │                                                                  │
-// │ Rust-level assertion: spawn_worker calls .env_clear() before     │
-// │ setting the allow-list. Verified by reading `worker.rs:761`:     │
-// │ `cmd.env_clear()` is the first builder call after Command::new.  │
-// └──────────────────────────────────────────────────────────────────┘
-//
-// ┌──────────────────────────────────────────────────────────────────┐
-// │ TEST 4.2: process.env.ROOTCX_JWT_SECRET === undefined            │
-// │                                                                  │
-// │ Script: same pattern as 4.1 but checks ROOTCX_JWT_SECRET.       │
-// │   export function onStart(ctx) {                                 │
-// │     const val = process.env.ROOTCX_JWT_SECRET;                   │
-// │     if (val !== undefined) throw new Error('LEAK: ' + val);      │
-// │   }                                                              │
-// │                                                                  │
-// │ Pass: worker starts without throwing.                            │
-// │ Fail: worker crashes with "LEAK: ..."                            │
-// └──────────────────────────────────────────────────────────────────┘
-//
-// ┌──────────────────────────────────────────────────────────────────┐
-// │ TEST 4.3: caller.authToken === undefined/absent                  │
-// │                                                                  │
-// │ The RpcCaller struct no longer has an auth_token field (removed   │
-// │ in Phase 0b). The wire format is `{userId, email}` with no       │
-// │ authToken key. This is structurally enforced by Rust:            │
-// │                                                                  │
-// │   struct RpcCaller { user_id, email, effective_perms }           │
-// │                                                                  │
-// │ Script: deploy a test app with RPC handler:                      │
-// │   export default { testRpc(ctx, msg) {                           │
-// │     if (msg.caller && msg.caller.authToken !== undefined)        │
-// │       throw new Error('LEAK: ' + msg.caller.authToken);          │
-// │     return { ok: true };                                         │
-// │   }}                                                             │
-// │                                                                  │
-// │ Invoke: POST /apps/test/rpc {method: "testRpc"}                  │
-// │ Pass: returns {ok: true}                                         │
-// │ Fail: throws "LEAK: eyJ..."                                      │
-// └──────────────────────────────────────────────────────────────────┘
-//
-// ┌──────────────────────────────────────────────────────────────────┐
-// │ TEST 4.5: TCP connect to Postgres = impossible                   │
-// │                                                                  │
-// │ Requires: Docker container with PG on Unix socket only, or       │
-// │ network namespace isolation.                                     │
-// │                                                                  │
-// │ Script: deploy a test app:                                       │
-// │   import { createConnection } from 'net';                        │
-// │   export function onStart(ctx) {                                 │
-// │     return new Promise((_, reject) => {                          │
-// │       const sock = createConnection({host:'127.0.0.1',port:5432})│
-// │       sock.on('error', (e) => { /* expected: ECONNREFUSED */ })  │
-// │       sock.on('connect', () => reject(new Error('CONNECTED!')))  │
-// │       setTimeout(() => {}, 2000); // also acceptable: timeout    │
-// │     });                                                          │
-// │   }                                                              │
-// │                                                                  │
-// │ Pass: sock.on('error') fires (ECONNREFUSED/ETIMEDOUT).           │
-// │ Fail: sock.on('connect') fires.                                  │
-// │                                                                  │
-// │ In the test container: PG binds to Unix socket only, not TCP.    │
-// │ Even if the worker guesses the port, there's nothing listening.  │
-// └──────────────────────────────────────────────────────────────────┘
-//
-// ┌──────────────────────────────────────────────────────────────────┐
-// │ TEST 4.6: read /proc/1/environ = EACCES                         │
-// │                                                                  │
-// │ Requires: Linux Docker container with UID separation (worker     │
-// │ runs as UID 1001) + hidepid=2 on /proc.                         │
-// │                                                                  │
-// │ Script (run as UID 1001 inside Docker):                          │
-// │   const fs = require('fs');                                      │
-// │   try { fs.readFileSync('/proc/1/environ'); }                    │
-// │   catch(e) { if (e.code === 'EACCES') process.exit(0); }        │
-// │   process.exit(1); // fail: could read core secrets              │
-// │                                                                  │
-// │ CI command:                                                      │
-// │   docker exec --user 1001 $CONTAINER \                           │
-// │     cat /proc/1/environ && exit 1 || exit 0                      │
-// │                                                                  │
-// │ Pass: exit 0 (EACCES).                                           │
-// │ Fail: exit 1 (file readable).                                    │
-// └──────────────────────────────────────────────────────────────────┘
-//
-// ┌──────────────────────────────────────────────────────────────────┐
-// │ TEST 4.7: ctx.databaseUrl does not exist                         │
-// │                                                                  │
-// │ The OutboundMessage::Discover no longer sends `database_url`     │
-// │ (removed in Phase 2). The wire JSON has no databaseUrl key.      │
-// │ The prelude does not expose `ctx.databaseUrl`.                   │
-// │                                                                  │
-// │ Script: deploy a test app:                                       │
-// │   export function onStart(ctx) {                                 │
-// │     if (ctx.databaseUrl !== undefined)                           │
-// │       throw new Error('LEAK: ' + ctx.databaseUrl);               │
-// │   }                                                              │
-// │                                                                  │
-// │ Pass: worker starts without throwing.                            │
-// │ Fail: worker crashes with "LEAK: postgresql://..."               │
-// │                                                                  │
-// │ Structural verification: grep OutboundMessage::Discover in       │
-// │ ipc.rs -- no database_url field present.                         │
-// └──────────────────────────────────────────────────────────────────┘
+// ── Protocol contract guards (fast, no runtime needed) ───────────────
+
+fn wire_keys(v: &Value) -> std::collections::BTreeSet<&str> {
+    v.as_object().unwrap().keys().map(|k| k.as_str()).collect()
+}
+
+fn expect_keys(v: &Value, expected: &[&str]) {
+    let got = wire_keys(v);
+    let want: std::collections::BTreeSet<&str> = expected.iter().copied().collect();
+    assert_eq!(got, want, "wire key set drifted: {v}");
+}
+
+#[test]
+fn t4_3_rpc_caller_wire_carries_no_token() {
+    let with_perms = serde_json::to_value(rootcx_core::RpcCaller {
+        user_id: "u-1".into(), email: "u@x.com".into(),
+        effective_perms: Some(vec!["app:crm:contacts.read".into()]),
+    }).unwrap();
+    expect_keys(&with_perms, &["effectivePerms", "email", "userId"]);
+
+    let without_perms = serde_json::to_value(rootcx_core::RpcCaller {
+        user_id: "u-2".into(), email: "u2@x.com".into(), effective_perms: None,
+    }).unwrap();
+    expect_keys(&without_perms, &["email", "userId"]);
+}
+
+#[test]
+fn t4_7_discover_wire_carries_no_database_url() {
+    let minimal = serde_json::to_value(rootcx_core::OutboundMessage::Discover {
+        app_id: "crm".into(), runtime_url: "http://127.0.0.1:9100".into(),
+        credentials: std::collections::HashMap::new(), agent_config: None, run_onstart: true,
+    }).unwrap();
+    expect_keys(&minimal, &["app_id", "run_onstart", "runtime_url", "type"]);
+
+    let with_creds = serde_json::to_value(rootcx_core::OutboundMessage::Discover {
+        app_id: "crm".into(), runtime_url: "http://127.0.0.1:9100".into(),
+        credentials: std::collections::HashMap::from([("K".into(), "V".into())]),
+        agent_config: None, run_onstart: false,
+    }).unwrap();
+    expect_keys(&with_creds, &["app_id", "credentials", "runtime_url", "type"]);
+}
 
 // ── Category 5 supplementary: SQL proxy validate_sql layer ───────────
 // These test the early-rejection layer (not the security boundary, but

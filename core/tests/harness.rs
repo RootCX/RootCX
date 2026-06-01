@@ -209,3 +209,17 @@ impl TestRuntime {
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
+
+pub fn make_tar_gz(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    let mut tar = tar::Builder::new(enc);
+    for &(name, data) in files {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(name).unwrap();
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append(&header, data).unwrap();
+    }
+    tar.into_inner().unwrap().finish().unwrap()
+}
