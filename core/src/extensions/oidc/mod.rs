@@ -47,8 +47,19 @@ impl RuntimeExtension for OidcExtension {
                 nonce           TEXT NOT NULL,
                 pkce_verifier   TEXT NOT NULL,
                 redirect_uri    TEXT NOT NULL,
+                token_delivery  TEXT NOT NULL DEFAULT 'query',
                 created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
             )",
+            "ALTER TABLE rootcx_system.oidc_state ADD COLUMN IF NOT EXISTS token_delivery TEXT NOT NULL DEFAULT 'query'",
+            // One-time auth nonces for secure token delivery
+            "CREATE TABLE IF NOT EXISTS rootcx_system.auth_nonces (
+                nonce           TEXT PRIMARY KEY,
+                access_token    TEXT NOT NULL,
+                refresh_token   TEXT NOT NULL,
+                expires_in      BIGINT NOT NULL,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            )",
+            "CREATE INDEX IF NOT EXISTS idx_auth_nonces_created ON rootcx_system.auth_nonces (created_at)",
             "CREATE INDEX IF NOT EXISTS idx_oidc_state_created
                 ON rootcx_system.oidc_state (created_at)",
             // Add OIDC columns to users (idempotent)
@@ -86,6 +97,11 @@ impl RuntimeExtension for OidcExtension {
             info!(count = pruned.rows_affected(), "pruned expired OIDC states");
         }
 
+        sqlx::query("DELETE FROM rootcx_system.auth_nonces WHERE created_at < now() - interval '30 seconds'")
+            .execute(pool)
+            .await
+            .map_err(RuntimeError::Schema)?;
+
         info!("OIDC extension ready");
         Ok(())
     }
@@ -96,7 +112,8 @@ impl RuntimeExtension for OidcExtension {
             .route("/api/v1/auth/oidc/providers/{id}", delete(routes::delete_provider))
             .route("/api/v1/auth/oidc/token-exchange", post(routes::token_exchange))
             .route("/api/v1/auth/oidc/{provider_id}/authorize", get(routes::authorize))
-            .route("/api/v1/auth/oidc/callback", get(routes::callback)))
+            .route("/api/v1/auth/oidc/callback", get(routes::callback))
+            .route("/api/v1/auth/nonce-exchange", post(routes::nonce_exchange)))
     }
 }
 

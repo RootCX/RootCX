@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use openidconnect::core::{CoreIdToken, CoreProviderMetadata};
 use openidconnect::{
@@ -266,6 +266,7 @@ pub(crate) async fn token_exchange(
 #[derive(Deserialize)]
 pub(crate) struct AuthorizeParams {
     redirect_uri: Option<String>,
+    token_delivery: Option<String>,
 }
 
 /// GET /api/v1/auth/oidc/{provider_id}/authorize
@@ -278,6 +279,16 @@ pub(crate) async fn authorize(
     let provider = load_provider(&pool, &secrets, &provider_id).await?;
 
     let redirect_uri = params.redirect_uri.unwrap_or_default();
+    if !redirect_uri.is_empty() {
+        let public = url::Url::parse(&core_public_url())
+            .map_err(|_| ApiError::Internal("invalid ROOTCX_PUBLIC_URL".into()))?;
+        let target = url::Url::parse(&redirect_uri)
+            .map_err(|_| ApiError::BadRequest("invalid redirect_uri".into()))?;
+        if target.origin() != public.origin() {
+            return Err(ApiError::BadRequest("redirect_uri must be same-origin".into()));
+        }
+    }
+    let token_delivery = params.token_delivery.unwrap_or_else(|| "query".to_string());
 
     let issuer = IssuerUrl::new(provider.issuer_url.clone())
         .map_err(|e| ApiError::Internal(format!("invalid issuer_url: {e}")))?;
@@ -307,14 +318,15 @@ pub(crate) async fn authorize(
         .url();
 
     sqlx::query(
-        "INSERT INTO rootcx_system.oidc_state (state, provider_id, nonce, pkce_verifier, redirect_uri)
-         VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO rootcx_system.oidc_state (state, provider_id, nonce, pkce_verifier, redirect_uri, token_delivery)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(state.secret())
     .bind(&provider_id)
     .bind(nonce.secret())
     .bind(pkce_verifier.secret())
     .bind(&redirect_uri)
+    .bind(&token_delivery)
     .execute(&pool)
     .await?;
 
@@ -336,17 +348,17 @@ pub(crate) async fn callback(
     let (pool, secrets) = routes::pool_and_secrets(&rt);
 
     // Look up and delete the state (single-use)
-    let state_row: Option<(String, String, String, String, chrono::DateTime<chrono::Utc>)> =
+    let state_row: Option<(String, String, String, String, String, chrono::DateTime<chrono::Utc>)> =
         sqlx::query_as(
             "DELETE FROM rootcx_system.oidc_state
              WHERE state = $1
-             RETURNING provider_id, nonce, pkce_verifier, redirect_uri, created_at",
+             RETURNING provider_id, nonce, pkce_verifier, redirect_uri, token_delivery, created_at",
         )
         .bind(&params.state)
         .fetch_optional(&pool)
         .await?;
 
-    let (provider_id, nonce_str, pkce_verifier_str, client_redirect_uri, created_at) =
+    let (provider_id, nonce_str, pkce_verifier_str, client_redirect_uri, token_delivery, created_at) =
         state_row.ok_or_else(|| ApiError::Unauthorized("invalid or expired state".into()))?;
 
     if chrono::Utc::now() - created_at > chrono::Duration::minutes(10) {
@@ -428,13 +440,72 @@ pub(crate) async fn callback(
 
     let mut redirect_url = url::Url::parse(&client_redirect_uri)
         .map_err(|_| ApiError::Internal("invalid redirect_uri".into()))?;
-    let fragment = format!(
-        "access_token={}&refresh_token={}&expires_in={}",
-        access_token, refresh_token, auth_config.access_ttl.as_secs()
-    );
-    redirect_url.set_fragment(Some(&fragment));
 
-    Ok(Redirect::temporary(redirect_url.as_str()).into_response())
+    if token_delivery == "nonce" {
+        let nonce = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO rootcx_system.auth_nonces (nonce, access_token, refresh_token, expires_in)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&nonce)
+        .bind(&access_token)
+        .bind(&refresh_token)
+        .bind(auth_config.access_ttl.as_secs() as i64)
+        .execute(&pool)
+        .await?;
+        redirect_url.query_pairs_mut().append_pair("auth_nonce", &nonce);
+    } else {
+        // DEPRECATED: legacy token delivery via query params + fragment.
+        // Supports SDK 0.13-0.16 (query) and 0.17-0.18 (fragment).
+        // Will be removed when all clients use token_delivery=nonce.
+        let token_params = format!(
+            "access_token={}&refresh_token={}&expires_in={}",
+            access_token, refresh_token, auth_config.access_ttl.as_secs()
+        );
+        redirect_url.query_pairs_mut()
+            .append_pair("access_token", &access_token)
+            .append_pair("refresh_token", &refresh_token)
+            .append_pair("expires_in", &auth_config.access_ttl.as_secs().to_string());
+        redirect_url.set_fragment(Some(&token_params));
+    }
+
+    Ok((
+        [(header::REFERRER_POLICY, "no-referrer")],
+        Redirect::temporary(redirect_url.as_str()),
+    ).into_response())
+}
+
+// ── Nonce Exchange ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub(crate) struct NonceExchangeBody {
+    nonce: String,
+}
+
+/// POST /api/v1/auth/nonce-exchange
+pub(crate) async fn nonce_exchange(
+    State(rt): State<SharedRuntime>,
+    Json(body): Json<NonceExchangeBody>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let pool = routes::pool(&rt);
+
+    let row: Option<(String, String, i64)> = sqlx::query_as(
+        "DELETE FROM rootcx_system.auth_nonces
+         WHERE nonce = $1 AND created_at > now() - interval '30 seconds'
+         RETURNING access_token, refresh_token, expires_in",
+    )
+    .bind(&body.nonce)
+    .fetch_optional(&pool)
+    .await?;
+
+    let (access_token, refresh_token, expires_in) =
+        row.ok_or_else(|| ApiError::Unauthorized("invalid or expired nonce".into()))?;
+
+    Ok(Json(json!({
+        "accessToken": access_token,
+        "refreshToken": refresh_token,
+        "expiresIn": expires_in,
+    })))
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────

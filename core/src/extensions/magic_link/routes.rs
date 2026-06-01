@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -193,14 +193,34 @@ pub async fn consume_get(
     if let Some(ref uri) = result.redirect_uri {
         let mut redirect_url = url::Url::parse(uri)
             .map_err(|_| ApiError::Internal("invalid stored redirect_uri".into()))?;
-        // Tokens in URL fragment: never sent to the server, never in Referer,
-        // never in proxy logs. The client-side JS reads them from location.hash.
-        let fragment = format!(
+        let pool = pool(&rt);
+        let nonce = Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO rootcx_system.auth_nonces (nonce, access_token, refresh_token, expires_in)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&nonce)
+        .bind(&result.access_token)
+        .bind(&result.refresh_token)
+        .bind(result.expires_in)
+        .execute(&pool)
+        .await?;
+        // DEPRECATED: also include raw tokens for SDK 0.13-0.18 backwards compat.
+        // New SDK (0.19+) uses auth_nonce; legacy SDKs read query or fragment.
+        let token_params = format!(
             "access_token={}&refresh_token={}&expires_in={}",
             result.access_token, result.refresh_token, result.expires_in
         );
-        redirect_url.set_fragment(Some(&fragment));
-        Ok(Redirect::temporary(redirect_url.as_str()).into_response())
+        redirect_url.query_pairs_mut()
+            .append_pair("auth_nonce", &nonce)
+            .append_pair("access_token", &result.access_token)
+            .append_pair("refresh_token", &result.refresh_token)
+            .append_pair("expires_in", &result.expires_in.to_string());
+        redirect_url.set_fragment(Some(&token_params));
+        Ok((
+            [(header::REFERRER_POLICY, "no-referrer")],
+            Redirect::temporary(redirect_url.as_str()),
+        ).into_response())
     } else {
         Ok(Json(result).into_response())
     }
