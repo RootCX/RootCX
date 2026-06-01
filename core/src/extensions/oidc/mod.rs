@@ -51,15 +51,6 @@ impl RuntimeExtension for OidcExtension {
                 created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
             )",
             "ALTER TABLE rootcx_system.oidc_state ADD COLUMN IF NOT EXISTS token_delivery TEXT NOT NULL DEFAULT 'query'",
-            // One-time auth nonces for secure token delivery
-            "CREATE TABLE IF NOT EXISTS rootcx_system.auth_nonces (
-                nonce           TEXT PRIMARY KEY,
-                access_token    TEXT NOT NULL,
-                refresh_token   TEXT NOT NULL,
-                expires_in      BIGINT NOT NULL,
-                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-            )",
-            "CREATE INDEX IF NOT EXISTS idx_auth_nonces_created ON rootcx_system.auth_nonces (created_at)",
             "CREATE INDEX IF NOT EXISTS idx_oidc_state_created
                 ON rootcx_system.oidc_state (created_at)",
             // Add OIDC columns to users (idempotent)
@@ -68,6 +59,9 @@ impl RuntimeExtension for OidcExtension {
         ] {
             exec(pool, ddl).await?;
         }
+
+        // Shared nonce store (also bootstrapped by magic_link; idempotent).
+        crate::auth::token_delivery::ensure_schema(pool).await?;
 
         // Unique index on (oidc_provider, oidc_sub) where not null
         // Use DO block for idempotency since CREATE UNIQUE INDEX IF NOT EXISTS
@@ -97,10 +91,7 @@ impl RuntimeExtension for OidcExtension {
             info!(count = pruned.rows_affected(), "pruned expired OIDC states");
         }
 
-        sqlx::query("DELETE FROM rootcx_system.auth_nonces WHERE created_at < now() - interval '30 seconds'")
-            .execute(pool)
-            .await
-            .map_err(RuntimeError::Schema)?;
+        crate::auth::token_delivery::prune_expired(pool).await?;
 
         info!("OIDC extension ready");
         Ok(())

@@ -206,6 +206,27 @@ and apps.
 | Channel message (Slack/Telegram) | No delegation check | Requires valid delegation; revoked = agent mute |
 | Webhook agent without delegation | Already checked | Still checked (unchanged) |
 
+### Auth token delivery (magic-link / OIDC callback)
+
+v0.19 introduces nonce-exchange token delivery. The callback redirect carries a
+single-use `auth_nonce`; the SDK exchanges it server-side for the tokens, so the
+tokens themselves never land in the URL (no proxy/server logs, no browser
+history, no `Referer`).
+
+| Client | Delivery | Action needed |
+|--------|----------|---------------|
+| New projects (SDK >= 0.19) | `token_delivery=nonce`: tokens via nonce exchange only, never in the URL | None. Secure by default, no flag. |
+| Existing projects (older SDK) | Tokens still delivered in the URL (query + fragment), exactly as before v0.19 | None. Backwards compatible, keeps working unchanged. |
+
+There is no flag and no opt-in: the server keys the behavior off the request the
+SDK sends. A project built on SDK >= 0.19 gets nonce delivery automatically; an
+older SDK keeps receiving URL tokens. Nothing breaks on upgrade.
+
+Security note for existing projects: URL token delivery exposes the tokens to
+proxy/server access logs, browser history, and `Referer`. This is an accepted,
+backwards-compatibility tradeoff for clients that predate nonce exchange.
+Upgrading the client SDK to >= 0.19 closes it with no code change on your side.
+
 ### Unchanged behaviors (no migration needed)
 
 - Agent invoke gate (`app:{id}:invoke`) was already enforced

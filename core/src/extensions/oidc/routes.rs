@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use openidconnect::core::{CoreIdToken, CoreProviderMetadata};
 use openidconnect::{
@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::auth::{AuthConfig, jwt};
+use crate::auth::{AuthConfig, jwt, token_delivery};
 use crate::extensions::rbac::policy::require_admin;
 use crate::routes::{self, SharedRuntime};
 use crate::secrets::SecretManager;
@@ -438,41 +438,18 @@ pub(crate) async fn callback(
         .into_response());
     }
 
-    let mut redirect_url = url::Url::parse(&client_redirect_uri)
+    let redirect_url = url::Url::parse(&client_redirect_uri)
         .map_err(|_| ApiError::Internal("invalid redirect_uri".into()))?;
 
-    if token_delivery == "nonce" {
-        let nonce = Uuid::new_v4().to_string();
-        sqlx::query(
-            "INSERT INTO rootcx_system.auth_nonces (nonce, access_token, refresh_token, expires_in)
-             VALUES ($1, $2, $3, $4)",
-        )
-        .bind(&nonce)
-        .bind(&access_token)
-        .bind(&refresh_token)
-        .bind(auth_config.access_ttl.as_secs() as i64)
-        .execute(&pool)
-        .await?;
-        redirect_url.query_pairs_mut().append_pair("auth_nonce", &nonce);
-    } else {
-        // DEPRECATED: legacy token delivery via query params + fragment.
-        // Supports SDK 0.13-0.16 (query) and 0.17-0.18 (fragment).
-        // Will be removed when all clients use token_delivery=nonce.
-        let token_params = format!(
-            "access_token={}&refresh_token={}&expires_in={}",
-            access_token, refresh_token, auth_config.access_ttl.as_secs()
-        );
-        redirect_url.query_pairs_mut()
-            .append_pair("access_token", &access_token)
-            .append_pair("refresh_token", &refresh_token)
-            .append_pair("expires_in", &auth_config.access_ttl.as_secs().to_string());
-        redirect_url.set_fragment(Some(&token_params));
-    }
-
-    Ok((
-        [(header::REFERRER_POLICY, "no-referrer")],
-        Redirect::temporary(redirect_url.as_str()),
-    ).into_response())
+    token_delivery::deliver(
+        &pool,
+        redirect_url,
+        &access_token,
+        &refresh_token,
+        auth_config.access_ttl.as_secs() as i64,
+        token_delivery::Delivery::from_param(&token_delivery),
+    )
+    .await
 }
 
 // ── Nonce Exchange ────────────────────────────────────────────────────────
@@ -487,19 +464,8 @@ pub(crate) async fn nonce_exchange(
     State(rt): State<SharedRuntime>,
     Json(body): Json<NonceExchangeBody>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = routes::pool(&rt);
-
-    let row: Option<(String, String, i64)> = sqlx::query_as(
-        "DELETE FROM rootcx_system.auth_nonces
-         WHERE nonce = $1 AND created_at > now() - interval '30 seconds'
-         RETURNING access_token, refresh_token, expires_in",
-    )
-    .bind(&body.nonce)
-    .fetch_optional(&pool)
-    .await?;
-
     let (access_token, refresh_token, expires_in) =
-        row.ok_or_else(|| ApiError::Unauthorized("invalid or expired nonce".into()))?;
+        token_delivery::exchange(&routes::pool(&rt), &body.nonce).await?;
 
     Ok(Json(json!({
         "accessToken": access_token,
