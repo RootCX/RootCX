@@ -38,11 +38,15 @@ non-authentifies vers login sur les routes `/app/project*`.
 
 ## Hardening futur (pas bloquant, v2)
 
-### 1. Virgule dans les cles de permission
+### 1. Virgule dans les cles de permission -- RESOLU
 
-`sql_proxy.rs:58` encode les permissions en CSV (`join(",")`). Si une cle contient une virgule, le decodage cote Postgres la corrompt. Fail-closed (perte d'acces, pas gain). Aucune permission existante n'a de virgule.
+`sql_proxy.rs:60` encode les permissions en CSV (`join(",")`). Une cle contenant
+une virgule corrompait le decodage cote Postgres.
 
-**Fix preventif :** valider le format des cles au parse du manifest (rejeter tout caractere hors `[a-z0-9_:.*]`).
+**Fix livre :** `manifest::validate_perm_key` (charset `[a-z0-9_:.*]`) applique
+aux TROIS portes d'entree free-form : declarations de permissions du manifest,
+ids d'actions (`validate_manifest`), et l'API de roles (`create_role` /
+`update_role`). Couvert par `perm_key_charset` (unit) + `t6_5` (porte API -> 400).
 
 ### 2. Race condition onStart
 
@@ -85,7 +89,7 @@ Decision deferred to v2.
 | 1 | Audit-log permission gate | RESOLU (0526a86) | -- |
 | 2 | RLS 42501 -> 403 | RESOLU | -- |
 | 3 | Front logout redirect | ECARTE (non bloquant, web) | -- |
-| 4 | Validation format permission keys | v2 | 30 min |
+| 4 | Validation format permission keys | RESOLU | -- |
 | 5 | OnStartComplete IPC | v2 | 2h |
 | 6 | Streaming fetch | v2 (>500 apps) | 1 jour |
 | 7 | Response size cap 50MB | v2 | 2h |

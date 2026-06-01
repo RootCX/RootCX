@@ -449,8 +449,33 @@ fn validate_ident(value: &str, label: &str) -> Result<(), RuntimeError> {
     ))))
 }
 
+/// Permission keys are CSV-encoded into the `rootcx.effective_perms` GUC
+/// (sql_proxy). A comma would corrupt the list, so keys are restricted to a
+/// charset that excludes it: `[a-z0-9_:.*]`. Validated at every ingestion door
+/// (manifest install + role API), never at the encoding boundary.
+pub fn validate_perm_key(key: &str) -> Result<(), String> {
+    if !key.is_empty()
+        && key.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b':' | b'.' | b'*'))
+    {
+        return Ok(());
+    }
+    Err(format!("permission key '{key}' must match [a-z0-9_:.*]"))
+}
+
+fn validate_perm_key_schema(key: &str) -> Result<(), RuntimeError> {
+    validate_perm_key(key).map_err(|m| RuntimeError::Schema(sqlx::Error::Protocol(m)))
+}
+
 pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
     validate_ident(&manifest.app_id, "appId")?;
+    if let Some(perms) = &manifest.permissions {
+        for p in &perms.permissions {
+            validate_perm_key_schema(&p.key)?;
+        }
+    }
+    for action in &manifest.actions {
+        validate_perm_key_schema(&action.id)?;
+    }
     let all_entity_names: Vec<&str> = manifest.data_contract.iter().map(|e| e.entity_name.as_str()).collect();
     for entity in &manifest.data_contract {
         validate_ident(&entity.entity_name, "entity name")?;
@@ -589,6 +614,17 @@ mod tests {
     fn validate_ident_rejects_invalid() {
         for id in ["", "sdr-agent", "MyApp", "123app", "app id", "app;drop", "!@#"] {
             assert!(validate_ident(id, "test").is_err(), "should reject: {id}");
+        }
+    }
+
+    #[test]
+    fn perm_key_charset() {
+        for ok in ["app:crm:contacts.read", "app:crm:*", "admin:db.query", "app:x:action:do_thing", "tool:browser"] {
+            assert!(validate_perm_key(ok).is_ok(), "should accept: {ok}");
+        }
+        // Comma is the CSV separator — rejecting it is the whole point.
+        for bad in ["app:crm,billing:read", "", "App:CRM", "app:crm:read ", "app:crm:réad", "app:crm:a;b"] {
+            assert!(validate_perm_key(bad).is_err(), "should reject: {bad}");
         }
     }
 
