@@ -24,15 +24,15 @@ WITH CHECK sur UPDATE) remontait en 500 au lieu de 403.
 lectures et les DELETE/UPDATE filtres par RLS USING restent volontairement
 silencieux (0 rows / 404) pour ne pas divulguer l'existence des lignes.
 
-### Front : routes protegees apres logout -- MEDIUM (frontend)
+### Front : routes protegees apres logout -- MEDIUM (frontend) -- ECARTE (non bloquant)
 
 Apres logout (session `null`, cookie supprime), `/app/project*` rend le shell
 de l'app au lieu de rediriger vers `/app/login` (observe au browser). Les
 donnees restent protegees cote core (session null), donc defense-en-profondeur,
-pas une fuite.
+pas une fuite -- ne bloque pas le merge.
 
-**Fix :** middleware Next.js qui redirige les non-authentifies vers login sur
-les routes `/app/project*`. Cote web, pas core.
+**Fix (cote web, si repris) :** middleware Next.js qui redirige les
+non-authentifies vers login sur les routes `/app/project*`.
 
 ---
 
@@ -84,7 +84,7 @@ Decision deferred to v2.
 |---|------|-------|--------|
 | 1 | Audit-log permission gate | RESOLU (0526a86) | -- |
 | 2 | RLS 42501 -> 403 | RESOLU | -- |
-| 3 | Front logout redirect | avant merge (web) | 1h |
+| 3 | Front logout redirect | ECARTE (non bloquant, web) | -- |
 | 4 | Validation format permission keys | v2 | 30 min |
 | 5 | OnStartComplete IPC | v2 | 2h |
 | 6 | Streaming fetch | v2 (>500 apps) | 1 jour |
