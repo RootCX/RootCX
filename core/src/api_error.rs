@@ -31,9 +31,14 @@ impl IntoResponse for ApiError {
 impl From<sqlx::Error> for ApiError {
     fn from(e: sqlx::Error) -> Self {
         if let sqlx::Error::Database(ref db_err) = e {
-            if db_err.code().as_deref() == Some("23503") {
-                let detail = db_err.message();
-                return Self::Conflict(format!("foreign key constraint violated: {detail}"));
+            match db_err.code().as_deref() {
+                // RLS denied the write (INSERT/UPDATE WITH CHECK): contract is 403, not 500.
+                Some("42501") => return Self::Forbidden("write rejected by access policy".into()),
+                Some("23503") => {
+                    let detail = db_err.message();
+                    return Self::Conflict(format!("foreign key constraint violated: {detail}"));
+                }
+                _ => {}
             }
         }
         tracing::error!("database error: {e}");

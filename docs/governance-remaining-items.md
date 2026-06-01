@@ -5,65 +5,24 @@ Approach: market best practice (aligned Supabase/PostgREST/Hasura pattern)
 
 ---
 
-## Review 2026-06-01 (avant merge)
+## Avant merge
 
-Findings de la review multi-agents + run Playwright E2E. Severite et statut.
+### Audit-log lisible par tout utilisateur -- HIGH -- RESOLU (0526a86)
 
-### B1 -- Tokens bruts dans l'URL (magic-link) -- RESOLU
+`audit.rs:175` `list_audit_events` n'avait aucun gate de permission : tout user
+authentifie lisait le journal d'audit global (old/new JSONB de toutes les apps).
 
-`magic_link/routes.rs` `consume_get` ajoutait `access_token`/`refresh_token`
-en query + fragment de maniere inconditionnelle, meme quand le client demandait
-la livraison par nonce -> fuite dans les logs proxy/serveur, l'historique et le
-Referer. OIDC etait deja gate ; magic-link avait diverge.
+**Fix livre :** endpoint gate derriere `admin:audit.read`.
 
-**Resolu** par le commit `2988ac0` : module partage `auth/token_delivery.rs`
-(source unique create/exchange/prune + `deliver`), preference `token_delivery`
-stockee par token au generate (defaut `query`). Retro-compatible (SDK < 0.19
-gardent les tokens en URL via le fragment) ; `token_delivery=nonce` ne met que
-`auth_nonce` dans l'URL. Garde-fou de test `magic_link_nonce_delivery_keeps_tokens_out_of_url`.
+### Ecritures refusees par RLS -> HTTP 500 -- MEDIUM -- RESOLU
 
-### B2 -- Sandbox Layer-1 sans test executable -- RESOLU
+`api_error.rs` : une ecriture refusee par RLS (`42501`, INSERT ou violation
+WITH CHECK sur UPDATE) remontait en 500 au lieu de 403.
 
-`governance_contract_test.rs` (~4.1-4.7) : les tests d'isolation du process
-worker etaient des blocs de commentaires ASCII sans execution. Desormais :
-
-- `t4_sandbox_worker_env_has_no_secrets` : **test definitif**. Deploy un vrai
-  app JS (`dumpEnv` RPC), invoke via HTTP, assert que `process.env` du worker
-  ne contient ni `DATABASE_URL` ni `ROOTCX_JWT_SECRET`. Teste le vrai chemin
-  `spawn_worker` -> `env_clear` -> `sandbox_env` -> bun -> IPC -> reponse.
-- `t4_3_rpc_caller_wire_carries_no_token` : assert le set exact de cles
-  serialisees de `RpcCaller`. Tout nouveau champ casse le test.
-- `t4_7_discover_wire_carries_no_database_url` : assert le set exact de cles
-  de `OutboundMessage::Discover`.
-- `t4_4_fetch_core_http_without_token_is_401` : inchange.
-
-Refactoring : `sandbox_env()` extraite dans `worker.rs` (crate-private).
-
-### Audit-log lisible par tout utilisateur -- HIGH
-
-`audit.rs:175` `list_audit_events` n'a aucun gate de permission : tout user
-authentifie lit le journal d'audit global (old/new JSONB de toutes les apps).
-
-**Fix :** `require_perm(&pool, identity.user_id, "admin:db.query")` (ou un
-`admin:audit.read` dedie), ou scoper aux apps accessibles au caller.
-
-### Nonces stockes en clair -- RESOLU
-
-`auth_nonces` refactoree : la table ne stocke plus aucun token. Pattern aligne
-sur l'industrie (Supabase/Hydra/Auth0) :
-- Le nonce est hashe (SHA-256 via `secure_tokens::hash`) avant stockage.
-- Seuls `(nonce_hash, user_id, session_id, created_at)` sont en DB.
-- Les JWT sont mintes a la volee au moment de l'exchange (`token_delivery::exchange`).
-- Zero token en DB, zero secret a chiffrer.
-
-### Ecritures refusees par RLS -> HTTP 500 -- MEDIUM
-
-`crud.rs` + `api_error.rs:31` : une ecriture refusee par RLS (`42501`) remonte
-en 500 au lieu de 403 ; un DELETE non autorise renvoie 404 (masque l'echec de
-permission). Contrat API casse, gestion d'erreur cliente impossible.
-
-**Fix :** dans `From<sqlx::Error>`, mapper `db_err.code() == "42501"` vers
-`ApiError::Forbidden`. (Les lectures restent silencieuses / 0 rows, correct.)
+**Fix livre :** `From<sqlx::Error>` mappe `db_err.code() == "42501"` vers
+`ApiError::Forbidden`. Couvert par `t1_3` (create sans `.create` -> 403). Les
+lectures et les DELETE/UPDATE filtres par RLS USING restent volontairement
+silencieux (0 rows / 404) pour ne pas divulguer l'existence des lignes.
 
 ### Front : routes protegees apres logout -- MEDIUM (frontend)
 
@@ -123,9 +82,12 @@ Decision deferred to v2.
 
 | # | Item | Quand | Effort |
 |---|------|-------|--------|
-| 1 | Validation format permission keys | v2 | 30 min |
-| 2 | OnStartComplete IPC | v2 | 2h |
-| 3 | Streaming fetch | v2 (>500 apps) | 1 jour |
-| 4 | Response size cap 50MB | v2 | 2h |
-| 5 | Per-app timeout config | v2 (demande client) | 4h |
-| 6 | Public share data path | v2 | Design TBD |
+| 1 | Audit-log permission gate | RESOLU (0526a86) | -- |
+| 2 | RLS 42501 -> 403 | RESOLU | -- |
+| 3 | Front logout redirect | avant merge (web) | 1h |
+| 4 | Validation format permission keys | v2 | 30 min |
+| 5 | OnStartComplete IPC | v2 | 2h |
+| 6 | Streaming fetch | v2 (>500 apps) | 1 jour |
+| 7 | Response size cap 50MB | v2 | 2h |
+| 8 | Per-app timeout config | v2 (demande client) | 4h |
+| 9 | Public share data path | v2 | Design TBD |
