@@ -80,7 +80,8 @@ async fn t1_3_read_without_create_is_refused() {
     rt.install("crm", "contacts").await;
     let (tok, _) = user_with(&rt, "jean@t.local", &["app:crm:contacts.read"]).await;
     let (s, _) = rt.request_as(Method::POST, "/api/v1/apps/crm/collections/contacts", &tok, Some(&rec())).await;
-    assert_ne!(s, StatusCode::CREATED, "create without .create must be refused by RLS WITH CHECK");
+    // RLS WITH CHECK raises 42501; the API contract maps that to 403, not 500.
+    assert_eq!(s, StatusCode::FORBIDDEN, "create without .create → RLS denial surfaces as 403");
     rt.shutdown().await;
 }
 
