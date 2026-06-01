@@ -416,7 +416,6 @@ pub(crate) async fn callback(
 
     let user_id = find_or_create_user(&pool, &provider, &sub, &email, name.as_deref(), role.as_deref()).await?;
 
-    // Issue Core JWT (access + refresh)
     let session_id = Uuid::new_v4();
     let expires_at = chrono::Utc::now() + auth_config.refresh_ttl;
     sqlx::query("INSERT INTO rootcx_system.sessions (id, user_id, expires_at) VALUES ($1, $2, $3)")
@@ -426,10 +425,11 @@ pub(crate) async fn callback(
         .execute(&pool)
         .await?;
 
-    let access_token = jwt::encode_access(&auth_config, user_id, &email)?;
-    let refresh_token = jwt::encode_refresh(&auth_config, user_id, session_id)?;
+    let mode = token_delivery::Delivery::from_param(&token_delivery);
 
     if client_redirect_uri.is_empty() {
+        let access_token = jwt::encode_access(&auth_config, user_id, &email)?;
+        let refresh_token = jwt::encode_refresh(&auth_config, user_id, session_id)?;
         return Ok(Json(json!({
             "accessToken": access_token,
             "refreshToken": refresh_token,
@@ -444,10 +444,11 @@ pub(crate) async fn callback(
     token_delivery::deliver(
         &pool,
         redirect_url,
-        &access_token,
-        &refresh_token,
-        auth_config.access_ttl.as_secs() as i64,
-        token_delivery::Delivery::from_param(&token_delivery),
+        user_id,
+        session_id,
+        &auth_config,
+        &email,
+        mode,
     )
     .await
 }
@@ -462,10 +463,11 @@ pub(crate) struct NonceExchangeBody {
 /// POST /api/v1/auth/nonce-exchange
 pub(crate) async fn nonce_exchange(
     State(rt): State<SharedRuntime>,
+    axum::Extension(auth_config): axum::Extension<Arc<AuthConfig>>,
     Json(body): Json<NonceExchangeBody>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (access_token, refresh_token, expires_in) =
-        token_delivery::exchange(&routes::pool(&rt), &body.nonce).await?;
+        token_delivery::exchange(&routes::pool(&rt), &auth_config, &body.nonce).await?;
 
     Ok(Json(json!({
         "accessToken": access_token,
