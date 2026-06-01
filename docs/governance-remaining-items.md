@@ -1,7 +1,79 @@
 # Governance Refactor -- Remaining Items
 
-Branch: `governance-refactor` (audited 2026-05-30)
+Branch: `governance-refactor` (audited 2026-05-30, review 2026-06-01)
 Approach: market best practice (aligned Supabase/PostgREST/Hasura pattern)
+
+---
+
+## Review 2026-06-01 (avant merge)
+
+Findings de la review multi-agents + run Playwright E2E. Severite et statut.
+
+### B1 -- Tokens bruts dans l'URL (magic-link) -- RESOLU
+
+`magic_link/routes.rs` `consume_get` ajoutait `access_token`/`refresh_token`
+en query + fragment de maniere inconditionnelle, meme quand le client demandait
+la livraison par nonce -> fuite dans les logs proxy/serveur, l'historique et le
+Referer. OIDC etait deja gate ; magic-link avait diverge.
+
+**Resolu** par le commit `2988ac0` : module partage `auth/token_delivery.rs`
+(source unique create/exchange/prune + `deliver`), preference `token_delivery`
+stockee par token au generate (defaut `query`). Retro-compatible (SDK < 0.19
+gardent les tokens en URL via le fragment) ; `token_delivery=nonce` ne met que
+`auth_nonce` dans l'URL. Garde-fou de test `magic_link_nonce_delivery_keeps_tokens_out_of_url`.
+
+### B2 -- Sandbox Layer-1 sans test executable -- RESOLU
+
+`governance_contract_test.rs` (~4.1-4.7) : les tests d'isolation du process
+worker etaient des blocs de commentaires ASCII sans execution. Desormais :
+
+- `t4_sandbox_worker_env_has_no_secrets` : **test definitif**. Deploy un vrai
+  app JS (`dumpEnv` RPC), invoke via HTTP, assert que `process.env` du worker
+  ne contient ni `DATABASE_URL` ni `ROOTCX_JWT_SECRET`. Teste le vrai chemin
+  `spawn_worker` -> `env_clear` -> `sandbox_env` -> bun -> IPC -> reponse.
+- `t4_3_rpc_caller_wire_carries_no_token` : assert le set exact de cles
+  serialisees de `RpcCaller`. Tout nouveau champ casse le test.
+- `t4_7_discover_wire_carries_no_database_url` : assert le set exact de cles
+  de `OutboundMessage::Discover`.
+- `t4_4_fetch_core_http_without_token_is_401` : inchange.
+
+Refactoring : `sandbox_env()` extraite dans `worker.rs` (crate-private).
+
+### Audit-log lisible par tout utilisateur -- HIGH
+
+`audit.rs:175` `list_audit_events` n'a aucun gate de permission : tout user
+authentifie lit le journal d'audit global (old/new JSONB de toutes les apps).
+
+**Fix :** `require_perm(&pool, identity.user_id, "admin:db.query")` (ou un
+`admin:audit.read` dedie), ou scoper aux apps accessibles au caller.
+
+### Nonces stockes en clair -- HIGH
+
+`oidc/mod.rs` : `auth_nonces` stocke `access_token`/`refresh_token` en clair
+(la table magic-link, elle, ne garde qu'un SHA-256). Une seule lecture DB =
+sessions live sur la fenetre ~30s.
+
+**Fix :** chiffrer via `SecretManager`, ou stocker une reference de session au
+lieu des JWT bruts.
+
+### Ecritures refusees par RLS -> HTTP 500 -- MEDIUM
+
+`crud.rs` + `api_error.rs:31` : une ecriture refusee par RLS (`42501`) remonte
+en 500 au lieu de 403 ; un DELETE non autorise renvoie 404 (masque l'echec de
+permission). Contrat API casse, gestion d'erreur cliente impossible.
+
+**Fix :** dans `From<sqlx::Error>`, mapper `db_err.code() == "42501"` vers
+`ApiError::Forbidden`. (Les lectures restent silencieuses / 0 rows, correct.)
+
+### Front : routes protegees apres logout -- MEDIUM (frontend)
+
+Apres logout (session `null`, cookie supprime), `/app/project*` rend le shell
+de l'app au lieu de rediriger vers `/app/login` (observe au browser). Les
+donnees restent protegees cote core (session null), donc defense-en-profondeur,
+pas une fuite.
+
+**Fix :** middleware Next.js qui redirige les non-authentifies vers login sur
+les routes `/app/project*`. Cote web, pas core.
 
 ---
 

@@ -23,6 +23,9 @@ pub mod worker;
 mod worker_manager;
 
 pub use error::RuntimeError;
+/// Worker IPC wire types exposed for the governance contract suite (Category 4):
+/// the worker is never handed a token (`RpcCaller`) nor a DB URL (`Discover`).
+pub use ipc::{OutboundMessage, RpcCaller};
 
 use std::path::PathBuf;
 use std::sync::Arc;
