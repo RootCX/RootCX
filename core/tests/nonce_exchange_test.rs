@@ -148,8 +148,9 @@ async fn oidc_legacy_callback_delivers_tokens_in_query_and_fragment() {
 
 // ── magic-link retro-compat ────────────────────────────────────────────────
 
-/// Helper: generate a magic-link with redirect_uri and GET-consume it, returning the Location URL.
-async fn magic_link_redirect_url(rt: &TestRuntime) -> url::Url {
+/// Helper: generate a magic-link with redirect_uri + token_delivery and
+/// GET-consume it, returning the Location URL.
+async fn magic_link_redirect_url(rt: &TestRuntime, token_delivery: &str) -> url::Url {
     sqlx::query(
         "INSERT INTO rootcx_system.rbac_assignments (user_id, role)
          SELECT id, 'admin' FROM rootcx_system.users WHERE email = 'admin@test.local'
@@ -167,6 +168,7 @@ async fn magic_link_redirect_url(rt: &TestRuntime) -> url::Url {
             "email": email,
             "roles": ["compat_role"],
             "redirectUri": rt.url("/apps/test/"),
+            "tokenDelivery": token_delivery,
         }),
     ).await;
     assert_eq!(s, StatusCode::CREATED, "generate failed: {body}");
@@ -184,44 +186,52 @@ async fn magic_link_redirect_url(rt: &TestRuntime) -> url::Url {
     url::Url::parse(location).unwrap()
 }
 
-/// SDK 0.13-0.16 reads access_token from query params.
-/// SDK 0.17-0.18 reads access_token from hash fragment.
-/// SDK 0.19+ reads auth_nonce from query params and exchanges via POST.
-/// All three must work from the same redirect URL.
+/// Legacy delivery (default, no `tokenDelivery=nonce`) serves both pre-nonce
+/// SDK generations from the same redirect: 0.13-0.16 read query params,
+/// 0.17-0.18 read the fragment. It must NOT mint a nonce.
 #[tokio::test]
-async fn magic_link_all_sdk_generations_can_authenticate() {
+async fn magic_link_legacy_delivers_tokens_in_query_and_fragment() {
     let rt = TestRuntime::boot().await;
-    let loc = magic_link_redirect_url(&rt).await;
+    let loc = magic_link_redirect_url(&rt, "query").await;
 
-    // SDK 0.13-0.16: reads from query params
-    let query_access = loc.query_pairs().find(|(k, _)| k == "access_token");
-    assert!(query_access.is_some(), "SDK 0.13-0.16: access_token must be in query params");
+    // SDK 0.13-0.16: query params
+    assert!(loc.query_pairs().any(|(k, _)| k == "access_token"), "access_token must be in query");
+    assert!(loc.query_pairs().any(|(k, _)| k == "refresh_token"), "refresh_token must be in query");
 
-    let query_refresh = loc.query_pairs().find(|(k, _)| k == "refresh_token");
-    assert!(query_refresh.is_some(), "SDK 0.13-0.16: refresh_token must be in query params");
-
-    // SDK 0.17-0.18: reads from fragment
-    let fragment = loc.fragment().expect("SDK 0.17-0.18: fragment must be present");
+    // SDK 0.17-0.18: fragment
+    let fragment = loc.fragment().expect("fragment must be present");
     let frag_params = url::form_urlencoded::parse(fragment.as_bytes())
         .collect::<std::collections::HashMap<_, _>>();
-    assert!(frag_params.contains_key("access_token"), "SDK 0.17-0.18: access_token must be in fragment");
-    assert!(frag_params.contains_key("refresh_token"), "SDK 0.17-0.18: refresh_token must be in fragment");
+    assert!(frag_params.contains_key("access_token"), "access_token must be in fragment");
+    assert!(frag_params.contains_key("refresh_token"), "refresh_token must be in fragment");
 
-    // SDK 0.19+: reads auth_nonce and exchanges
+    // Legacy must not emit a nonce.
+    assert!(loc.query_pairs().all(|(k, _)| k != "auth_nonce"), "legacy must not emit auth_nonce");
+
+    rt.shutdown().await;
+}
+
+/// SDK 0.19+ : `tokenDelivery=nonce`. The redirect carries ONLY `auth_nonce`,
+/// never the raw tokens (not in query, not in fragment). Regression guard for
+/// the URL token-leak (B1): nonce mode must keep tokens out of the URL.
+#[tokio::test]
+async fn magic_link_nonce_delivery_keeps_tokens_out_of_url() {
+    let rt = TestRuntime::boot().await;
+    let loc = magic_link_redirect_url(&rt, "nonce").await;
+
+    assert!(
+        loc.query_pairs().all(|(k, _)| k != "access_token" && k != "refresh_token"),
+        "nonce mode must not put tokens in query",
+    );
+    assert!(loc.fragment().is_none(), "nonce mode must not put tokens in fragment");
+
     let nonce = loc.query_pairs()
         .find(|(k, _)| k == "auth_nonce")
-        .expect("SDK 0.19+: auth_nonce must be in query params")
+        .expect("auth_nonce must be present")
         .1.into_owned();
     let (s, body) = rt.post_unauthed("/api/v1/auth/nonce-exchange", &json!({"nonce": nonce})).await;
-    assert_eq!(s, StatusCode::OK, "SDK 0.19+: nonce exchange must succeed: {body}");
+    assert_eq!(s, StatusCode::OK, "nonce exchange must succeed: {body}");
     assert!(body["accessToken"].as_str().unwrap().starts_with("eyJ"), "must be a JWT");
-
-    // All three paths must return tokens for the same user
-    let query_at = query_access.unwrap().1.into_owned();
-    let frag_at = frag_params["access_token"].to_string();
-    let nonce_at = body["accessToken"].as_str().unwrap();
-    assert_eq!(query_at, frag_at, "query and fragment tokens must match");
-    assert_eq!(query_at, nonce_at, "query and nonce-exchanged tokens must match");
 
     rt.shutdown().await;
 }
