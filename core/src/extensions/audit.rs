@@ -173,11 +173,12 @@ const AUDIT_ALIASES: &[(&str, &str)] = &[
 ];
 
 async fn list_audit_events(
-    _identity: crate::auth::identity::Identity,
+    identity: crate::auth::identity::Identity,
     State(rt): State<SharedRuntime>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<JsonValue>>, crate::api_error::ApiError> {
     let pool = routes::pool(&rt);
+    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:audit.read").await?;
     let q = query_params::parse(&params, AUDIT_COLS, AUDIT_ALIASES, 100, "id");
     let wc = q.where_clause();
 

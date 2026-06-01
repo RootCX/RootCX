@@ -2019,6 +2019,24 @@ async fn mcp_read_endpoints_require_admin() {
     rt.shutdown().await;
 }
 
+// ── Regression: audit-log requires admin:audit.read ──────────────────────
+
+#[tokio::test]
+async fn regression_audit_log_requires_admin() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+
+    let (tok, _) = user_with(&rt, "nonadmin-audit@t.local", &["app:crm:contacts.read"]).await;
+    let (status, _) = rt.request_as(Method::GET, "/api/v1/audit", &tok, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN,
+        "non-admin must be denied audit log access, got {status}");
+
+    let (status, body) = rt.request_as(Method::GET, "/api/v1/audit", &rt.token, None).await;
+    assert_eq!(status, StatusCode::OK, "admin must access audit log: {body}");
+
+    rt.shutdown().await;
+}
+
 // ── Regression: governance hardening (release review 2026-05-31) ─────────
 
 /// HIGH: untrusted app SQL must not be able to enumerate the RBAC graph.
