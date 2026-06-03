@@ -151,7 +151,13 @@ pub async fn install_app(
     // (The seeded system user holds admin, so "first boot" = no non-system
     // assignment yet.)
     if !crate::extensions::rbac::is_first_boot(&pool).await? {
-        crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:apps.install").await?;
+        // Self-service: `platform:apps.create` lets any employee install their
+        // own app. `admin:apps.install` remains for platform admins (superset).
+        let ok = crate::extensions::rbac::policy::has_permission_db(&pool, identity.user_id, "admin:apps.install").await?
+            || crate::extensions::rbac::policy::has_permission_db(&pool, identity.user_id, "platform:apps.create").await?;
+        if !ok {
+            return Err(ApiError::Forbidden("permission denied: admin:apps.install or platform:apps.create".into()));
+        }
     }
     crate::manifest::install_app(&pool, &manifest, rt.extensions(), identity.user_id).await?;
     Ok(Json(json!({ "message": format!("app '{}' installed", manifest.app_id) })))
