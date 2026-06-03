@@ -164,8 +164,8 @@ async fn sync_agent_rbac(pool: &PgPool, app_id: &str) -> Result<(), RuntimeError
     let agent_uid = agent_user_id(app_id);
 
     sqlx::query(
-        "INSERT INTO rootcx_system.users (id, email, is_system) \
-         VALUES ($1, $2, true) ON CONFLICT (id) DO NOTHING"
+        "INSERT INTO rootcx_system.users (id, email, is_system, kind) \
+         VALUES ($1, $2, true, 'agent') ON CONFLICT (id) DO NOTHING"
     ).bind(agent_uid).bind(format!("agent+{app_id}@localhost"))
     .execute(pool).await.map_err(RuntimeError::Schema)?;
 
