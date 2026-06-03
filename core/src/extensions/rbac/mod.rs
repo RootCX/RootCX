@@ -82,6 +82,12 @@ impl RuntimeExtension for RbacExtension {
              ON CONFLICT (name) DO NOTHING",
         ).await?;
 
+        exec(pool,
+            "INSERT INTO rootcx_system.rbac_permissions (key, description) \
+             VALUES ('platform:apps.create', 'Create and own apps (self-service)') \
+             ON CONFLICT (key) DO NOTHING",
+        ).await?;
+
         self.bootstrap_governance(pool).await?;
 
         // ── Migration: namespace permission keys ───────────────────────
@@ -137,9 +143,7 @@ impl RuntimeExtension for RbacExtension {
             .execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
         tx.commit().await.map_err(RuntimeError::Schema)?;
 
-        // First-boot only: promote the very first installer to admin. After an
-        // admin exists, installs no longer escalate (the HTTP gate also blocks
-        // non-admins at the door — this is defense-in-depth).
+        // First-boot only: promote the very first installer to platform admin.
         if is_first_boot(pool).await.unwrap_or(false) {
             sqlx::query(
                 "INSERT INTO rootcx_system.rbac_assignments (user_id, role)
@@ -147,6 +151,29 @@ impl RuntimeExtension for RbacExtension {
             ).bind(installed_by).execute(pool).await.map_err(RuntimeError::Schema)?;
             info!(app = %app_id, user = %installed_by, "first-boot: installer promoted to admin");
         }
+
+        // Auto-assign the installer as app admin: a role carrying `app:{id}:*`
+        // gives full control over this app (data, crons, hooks, invoke, deploy)
+        // without granting platform-level authority.
+        let owner_role = format!("app:{app_id}:admin");
+        let owner_perms = vec![format!("app:{app_id}:*")];
+        sqlx::query(
+            "INSERT INTO rootcx_system.rbac_roles (name, description, permissions) \
+             VALUES ($1, $2, $3) ON CONFLICT (name) DO UPDATE SET permissions = EXCLUDED.permissions",
+        )
+        .bind(&owner_role)
+        .bind(format!("{app_id} app administrator"))
+        .bind(&owner_perms)
+        .execute(pool).await.map_err(RuntimeError::Schema)?;
+        sqlx::query(
+            "INSERT INTO rootcx_system.rbac_assignments (user_id, role) \
+             VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(installed_by)
+        .bind(&owner_role)
+        .execute(pool).await.map_err(RuntimeError::Schema)?;
+        info!(app = %app_id, user = %installed_by, "app admin role assigned");
+
         Ok(())
     }
 
