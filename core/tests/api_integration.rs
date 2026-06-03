@@ -2647,31 +2647,40 @@ async fn cron_created_by_nulled_on_user_deletion() {
 // ── Job impersonation ──────────────────────────────────────────────
 
 #[tokio::test]
-async fn job_enqueue_with_user_id_requires_admin() {
+async fn job_enqueue_run_as_requires_act_as() {
     let rt = TestRuntime::boot().await;
     rt.install("jobimp", "items").await;
 
-    let other = rt.register_and_login("other@test.local").await;
-    let (_, users) = rt.get_json("/api/v1/users").await;
-    let other_id = users.as_array().unwrap().iter()
-        .find(|u| u["email"] == "other@test.local").unwrap()["id"]
-        .as_str().unwrap().to_string();
+    // A service account to own jobs.
+    let (s, sa) = rt.post_json("/api/v1/service-accounts", &json!({ "slug": "jobimp_sa" })).await;
+    assert_eq!(s, 201, "create SA: {sa}");
+    let sa_id = sa["id"].as_str().unwrap().to_string();
 
-    // Admin can enqueue as another user
+    // No bare-admin shortcut: owning a job as another principal needs an act-as
+    // delegation, even for an admin.
     let (s, body) = rt.post_json("/api/v1/apps/jobimp/jobs", &json!({
-        "payload": { "type": "test" }, "user_id": other_id
+        "payload": { "type": "test" }, "user_id": sa_id
     })).await;
-    assert_eq!(s, 201, "admin impersonation: {body}");
+    assert_eq!(s, 403, "no act-as delegation -> denied even for admin: {body}");
 
-    // Non-admin cannot impersonate the admin
-    let admin_id = users.as_array().unwrap().iter()
-        .find(|u| u["email"] == "admin@test.local").unwrap()["id"]
-        .as_str().unwrap();
+    // Grant the admin act-as on the SA; now it succeeds (admin's `*` makes the
+    // anti-escalation subset trivially satisfied).
+    let admin_id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
+        .fetch_one(rt.pool()).await.unwrap();
+    let (s, _) = rt.post_json(&format!("/api/v1/service-accounts/{sa_id}/act-as"), &json!({ "userId": admin_id })).await;
+    assert_eq!(s, 200);
+    let (s, body) = rt.post_json("/api/v1/apps/jobimp/jobs", &json!({
+        "payload": { "type": "test" }, "user_id": sa_id
+    })).await;
+    assert_eq!(s, 201, "with act-as delegation -> allowed: {body}");
+
+    // A non-admin without `app:jobimp:invoke` cannot enqueue at all.
+    let other = rt.register_and_login("other@test.local").await;
     let (s, _) = rt.request_as(
         Method::POST, "/api/v1/apps/jobimp/jobs", &other,
-        Some(&json!({"payload": {"type": "test"}, "user_id": admin_id})),
+        Some(&json!({ "payload": { "type": "test" } })),
     ).await;
-    assert_eq!(s, 403, "non-admin impersonation must be forbidden");
+    assert_eq!(s, 403, "non-admin without invoke must be denied");
 
     rt.shutdown().await;
 }

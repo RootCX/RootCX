@@ -107,30 +107,19 @@ pub async fn execute_action(
         return Err(ApiError::Forbidden(format!("permission denied: {perm}")));
     }
 
-    let run_as = headers.get("x-run-as").and_then(|v| v.to_str().ok());
-    let target_user = if let Some(uid_str) = run_as {
-        if !crate::extensions::rbac::policy::has_permission(&perms, "*") {
-            return Err(ApiError::Forbidden("x-run-as requires admin".into()));
-        }
-        uid_str.to_string()
-    } else {
-        identity.user_id.to_string()
-    };
-
+    // No impersonation: an integration action always runs as the authenticated
+    // caller. Acting for a connected user is handled in-process by
+    // execute_self_action (requester-scoped); owning automation is handled by
+    // run_as on crons/jobs. There is no HTTP "act as anyone" header.
     let config = resolve_config(&pool, &secrets, &integration_id).await?;
 
+    let target_user = identity.user_id.to_string();
     let caller_app = headers.get("x-app-id").and_then(|v| v.to_str().ok());
     let (user_credentials, effective_uid) = super::connections::resolve_credentials(
         &secrets, &pool, &integration_id, &target_user, caller_app,
     ).await;
 
-    let caller_uid = uuid::Uuid::parse_str(&target_user).unwrap_or(identity.user_id);
-    let caller_email = if run_as.is_some() {
-        sqlx::query_scalar::<_, String>("SELECT email FROM rootcx_system.users WHERE id = $1")
-            .bind(caller_uid).fetch_optional(&pool).await.ok().flatten().unwrap_or_default()
-    } else {
-        identity.email.clone()
-    };
+    let caller_email = identity.email.clone();
 
     let caller = Some(crate::ipc::RpcCaller {
         user_id: target_user.clone(),
