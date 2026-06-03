@@ -222,7 +222,7 @@ pub async fn invoke_agent(
         })
     } else { None };
 
-    let stream_rx = wm.agent_invoke(&app_id, payload).await?;
+    let stream_rx = wm.agent_invoke(&app_id, payload, None).await?;
 
     Ok(Sse::new(streaming::build_sse_stream(stream_rx, session_id.into(), persist_ctx))
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))

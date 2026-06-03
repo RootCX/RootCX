@@ -25,6 +25,7 @@ pub trait AgentDispatcher: Send + Sync {
         &self, pool: &PgPool, caller: &str, target: &str, message: &str,
         parent_tx: Option<tokio::sync::mpsc::Sender<crate::worker::AgentEvent>>,
         invoker_user_id: Option<Uuid>,
+        parent_perms: Vec<String>,
     ) -> Result<String, String>;
 }
 

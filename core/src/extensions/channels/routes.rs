@@ -344,7 +344,7 @@ async fn do_invoke(
         attachments,
     };
 
-    let mut rx = wm.agent_invoke(&app_id, payload).await.map_err(&e)?;
+    let mut rx = wm.agent_invoke(&app_id, payload, None).await.map_err(&e)?;
     let typing = provider.start_typing(config, chat_id);
 
     let mut response = String::new();

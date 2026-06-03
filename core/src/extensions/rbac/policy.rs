@@ -143,6 +143,33 @@ pub async fn effective_for_pair(pool: &PgPool, agent_uid: Uuid, delegator_uid: U
     intersect_permissions(&agent_perms, &deleg_perms)
 }
 
+/// Child authority for a sub-invoke: the child agent's OWN grant intersected
+/// with the parent's ALREADY-FROZEN effective set. Authority narrows against
+/// the parent, never re-widens against the human, so it is monotone
+/// non-increasing down the chain. Deny-on-error: a failed lookup yields none.
+pub async fn effective_under_parent(pool: &PgPool, child_agent_uid: Uuid, parent_perms: &[String]) -> Vec<String> {
+    let child = resolve_permissions(pool, child_agent_uid).await.map(|(_, p)| p).unwrap_or_default();
+    intersect_permissions(&child, parent_perms)
+}
+
+/// Frozen authority for an agent invocation, by context. The single place that
+/// decides what a run is bounded by: a sub-invoke (`parent_perms` = `Some`)
+/// narrows the child against the parent's already-frozen set, never re-widening
+/// against the human; at the top of a run-tree (`None`) the cap is the
+/// delegating human; an owner-less invoke yields no authority.
+pub async fn delegated_effective(
+    pool: &PgPool, agent_uid: Uuid,
+    invoker_user_id: Option<Uuid>, parent_perms: Option<&[String]>,
+) -> Vec<String> {
+    match parent_perms {
+        Some(pp) => effective_under_parent(pool, agent_uid, pp).await,
+        None => match invoker_user_id {
+            Some(uid) => effective_for_pair(pool, agent_uid, uid).await,
+            None => vec![],
+        },
+    }
+}
+
 /// Compute the intersection of two permission sets.
 /// A permission is in the result IFF both sides grant it.
 /// Handles wildcards: `*` grants everything, `ns:scope:*` grants the subtree.

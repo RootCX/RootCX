@@ -289,18 +289,23 @@ impl WorkerManager {
         self.get_or_spawn(app_id, principal).await?.rpc(id, method, params, caller).await
     }
 
+    /// Invoke an app's agent. `parent_perms` is the invoking parent agent's
+    /// ALREADY-FROZEN effective set on a sub-invoke (`Some`), or `None` at the
+    /// top of a run-tree (human / cron / webhook / channel). The child narrows
+    /// against the parent, never re-widening against the human, so authority is
+    /// monotone non-increasing down the chain.
     pub async fn agent_invoke(
-        &self, app_id: &str, payload: AgentInvokePayload,
+        &self, app_id: &str, payload: AgentInvokePayload, parent_perms: Option<Vec<String>>,
     ) -> Result<mpsc::Receiver<AgentEvent>, RuntimeError> {
-        // Compute the agent's delegated identity (intersection grant∩human) HERE,
-        // so the worker is keyed and spawned bound to exactly that authority.
-        let identity = match payload.invoker_user_id {
-            Some(uid) => {
-                let agent_uid = crate::extensions::agents::agent_user_id(app_id);
-                let perms = crate::extensions::rbac::policy::effective_for_pair(&self.pool, agent_uid, uid).await;
-                crate::sql_proxy::ContextState { user_id: Some(uid), is_delegated: true, effective_perms: perms }
-            }
-            None => crate::sql_proxy::ContextState { user_id: None, is_delegated: true, effective_perms: vec![] },
+        // Freeze the delegated identity HERE so the worker is keyed and spawned
+        // bound to exactly that authority. user_id stays the human (RLS row
+        // ownership); effective_perms is the narrowed intersection.
+        let agent_uid = crate::extensions::agents::agent_user_id(app_id);
+        let effective_perms = crate::extensions::rbac::policy::delegated_effective(
+            &self.pool, agent_uid, payload.invoker_user_id, parent_perms.as_deref(),
+        ).await;
+        let identity = crate::sql_proxy::ContextState {
+            user_id: payload.invoker_user_id, is_delegated: true, effective_perms,
         };
         // An agent invoke is always a delegated principal, never anonymous.
         let session_id = payload.session_id.clone();
@@ -382,6 +387,7 @@ impl AgentDispatcher for SubAgentDispatch {
         &self, pool: &PgPool, caller: &str, target: &str, message: &str,
         parent_tx: Option<mpsc::Sender<AgentEvent>>,
         invoker_user_id: Option<uuid::Uuid>,
+        parent_perms: Vec<String>,
     ) -> Result<String, String> {
         if target == caller { return Err("cannot invoke self".into()); }
 
@@ -401,7 +407,7 @@ impl AgentDispatcher for SubAgentDispatch {
         };
 
         let app_id = target.to_string();
-        let mut rx = self.wm.agent_invoke(target, payload).await.map_err(|e| e.to_string())?;
+        let mut rx = self.wm.agent_invoke(target, payload, Some(parent_perms)).await.map_err(|e| e.to_string())?;
         let mut response = String::new();
         while let Some(event) = rx.recv().await {
             match event {

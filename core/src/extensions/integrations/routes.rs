@@ -213,7 +213,7 @@ pub async fn webhook_ingress(
                 invoker_user_id: Some(delegator),
                 attachments: None,
             };
-            let _ = wm.agent_invoke(&wh.app_id, invoke_payload).await
+            let _ = wm.agent_invoke(&wh.app_id, invoke_payload, None).await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             return Ok(Json(json!({"status": "accepted"})));
         }
