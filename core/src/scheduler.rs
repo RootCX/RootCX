@@ -18,7 +18,10 @@ pub struct SchedulerHandle {
 }
 
 async fn resolve_caller(pool: &PgPool, user_id: uuid::Uuid) -> Option<RpcCaller> {
-    let (email,): (String,) = sqlx::query_as("SELECT email FROM rootcx_system.users WHERE id = $1")
+    // Disabled principals (deny-by-default) resolve to no caller: the job then
+    // runs with no identity and RLS denies every row.
+    let (email,): (String,) = sqlx::query_as(
+        "SELECT email FROM rootcx_system.users WHERE id = $1 AND disabled_at IS NULL")
         .bind(user_id).fetch_optional(pool).await.ok()??;
     Some(RpcCaller { user_id: user_id.to_string(), email, effective_perms: None })
 }
@@ -43,6 +46,15 @@ async fn dispatch_agent_job(
 
     // Validate standing mandate (invoker_user_id guaranteed Some after early-return above)
     let delegator = invoker_user_id.unwrap();
+
+    // Deny-by-default: a disabled owner (e.g. a disabled service account) cannot
+    // drive automation.
+    if !crate::auth::identity::principal_enabled(pool, delegator).await {
+        warn!(msg_id, app_id = %target_app, "{label} agent denied: owner disabled or missing");
+        let _ = jobs::fail(pool, msg_id).await;
+        return;
+    }
+
     let agent_uid = crate::extensions::agents::agent_user_id(target_app);
     match crate::delegations::is_valid(pool, delegator, agent_uid).await {
         Ok(true) => {}
