@@ -6,6 +6,9 @@
 node_modules/
 dist/
 
+# Browser-automation (Playwright CLI) console logs
+.playwright-cli/
+
 # Platform-specific resource binaries (downloaded via `make deps`)
 core/resources/*
 !core/resources/integrations/
