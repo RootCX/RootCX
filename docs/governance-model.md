@@ -8,9 +8,15 @@ Derived from the implementation on branch `governance-refactor` (2026-05-30).
 ## Core Principle
 
 ```
-Effective authority = grant(agent) intersect perms(responsible human)
-No human = no authority = denied.
+Effective authority = grant(agent) intersect perms(responsible principal)
+No principal = no authority = denied.
+Principal = human user OR managed service account. Never ambient/root.
 ```
+
+See `docs/service-accounts.md` for the full service account architecture. Running
+as another principal (`run_as` on a cron/job/hook) is a standing delegation in
+`delegations`, bounded by an anti-escalation subset check (target perms must be a
+subset of the human's).
 
 Every data operation passes through PostgreSQL RLS. The core sets the identity;
 the app cannot forge, override, or bypass it.
@@ -66,6 +72,11 @@ the app cannot forge, override, or bypass it.
 | 29 | Create/delete entity hooks | Authenticated | Any logged-in user | 401 |
 | 30 | Create/delete webhooks | `app:{id}:webhook.read` (list) | Users with the permission | 403 |
 | 31 | Execute integration action | `integration:{id}:{action}` | Users with the permission | 403 |
+| 32 | Manage service accounts | `admin:service_accounts.manage` | Admins | 403 |
+| 33 | Act as another principal (`run_as` on cron/job/hook) | act-as delegation + perms subset | Holder of the delegation | 403 |
+| 34 | Override anti-escalation | `admin:rbac.escalate` | Super-admins | 403 |
+
+_Rows 32-34 are the service-account extension; see `docs/service-accounts.md`._
 
 ---
 
