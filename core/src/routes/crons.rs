@@ -72,18 +72,23 @@ pub async fn create_cron(
     let overlap = body.get("overlapPolicy").and_then(|v| v.as_str()).unwrap_or("skip");
 
     let db = pool(&rt);
+
+    // Optional `runAs`: own the cron as another principal (a service account),
+    // gated by the act-as guard. The owner survives the creator's departure.
+    let owner = crate::act_as::resolve_owner(&db, identity.user_id, body.get("runAs").and_then(|v| v.as_str())).await?;
+
     let row = crons::create(&db, &app_id, CreateCron {
         name: name.into(),
         schedule: schedule.into(),
         timezone,
         payload,
         overlap_policy: overlap.into(),
-        created_by: Some(identity.user_id),
+        created_by: Some(owner),
     }).await?;
 
-    // Auto-create standing delegation for agent crons
+    // Auto-create the standing owner -> agent delegation for agent crons.
     let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
-    let _ = crate::delegations::create(&db, identity.user_id, agent_uid, "cron", Some(row.id)).await;
+    let _ = crate::delegations::create(&db, owner, agent_uid, "cron", Some(row.id)).await;
 
     rt.scheduler_wake().notify_one();
     Ok((StatusCode::CREATED, Json(serde_json::to_value(row).unwrap())))
