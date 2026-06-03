@@ -413,6 +413,49 @@ async fn worker_permission_lowpriv_invoker_restricts_agent() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// SUB-AGENT CHAIN: the authority cap is chosen by context. This goes
+// through delegated_effective (the exact decision WorkerManager::
+// agent_invoke makes), so a regression that re-resolves a sub-invoke
+// against the human instead of the parent IS caught here.
+// ═══════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn delegated_effective_caps_sub_invoke_at_parent_not_human() {
+    let rt = harness::TestRuntime::boot().await;
+    let app_id = setup_agent_app(&rt).await; // child agent gets '*' on first deploy
+    let pool = rt.pool();
+    let child_uid = agent_uid_for(&app_id);
+
+    // The original human is admin ('*'). The child agent is also broad ('*').
+    // The DISCRIMINATOR: if a sub-invoke wrongly capped at the human (the
+    // defect), the child would regain '*'. Capping at a narrow parent must not.
+    let human: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
+        .fetch_one(pool).await.unwrap();
+    let read = format!("app:{app_id}:tasks.read");
+    let parent_perms = vec![read.clone(), "tool:query_data".into()];
+
+    use rootcx_core::extensions::rbac::policy::{delegated_effective, has_permission};
+
+    // Sub-invoke (parent_perms = Some): cap at the parent, ignore the human.
+    let sub = delegated_effective(pool, child_uid, Some(human), Some(&parent_perms)).await;
+    assert!(has_permission(&sub, &read) && has_permission(&sub, "tool:query_data"),
+        "child keeps the parent's authority");
+    assert!(!sub.contains(&"*".to_string()),
+        "CRITICAL: sub-invoke caps at the parent, NOT the human (admin '*')");
+    assert!(!has_permission(&sub, &format!("app:{app_id}:tasks.write")),
+        "CRITICAL: child must not regain authority the parent lacks (re-widening defect)");
+
+    // Top of the tree (parent_perms = None): here the human IS the cap.
+    let top = delegated_effective(pool, child_uid, Some(human), None).await;
+    assert!(top.contains(&"*".to_string()),
+        "top-level invoke caps at the delegating human (admin '*')");
+
+    // Owner-less (no parent, no human): no authority at all (deny by default).
+    assert!(delegated_effective(pool, child_uid, None, None).await.is_empty(),
+        "owner-less invoke yields no authority");
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // PER-AGENT RBAC GRANT (admin restricts agent via standard RBAC API)
 // ═══════════════════════════════════════════════════════════════════
 
