@@ -154,7 +154,7 @@ async fn delegation_expired_denied() {
     let agent = agent_uid_for(&app_id);
 
     sqlx::query(
-        "INSERT INTO rootcx_system.delegations (delegator_uid, agent_uid, trigger_type, expires_at) \
+        "INSERT INTO rootcx_system.delegations (delegator_uid, delegatee_uid, trigger_type, expires_at) \
          VALUES ($1, $2, 'manual', now() - interval '1 hour')"
     ).bind(uid).bind(agent).execute(pool).await.unwrap();
 

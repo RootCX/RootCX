@@ -5,31 +5,48 @@ use crate::RuntimeError;
 
 fn err(e: sqlx::Error) -> RuntimeError { RuntimeError::Schema(e) }
 
+const TRIGGER_TYPES: &str = "'cron', 'hook', 'webhook', 'manual', 'channel', 'act_as'";
+
 pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
-    sqlx::query(r#"
+    sqlx::query(&format!(r#"
         CREATE TABLE IF NOT EXISTS rootcx_system.delegations (
             id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             delegator_uid UUID NOT NULL,
-            agent_uid     UUID NOT NULL,
-            trigger_type  TEXT NOT NULL CHECK (trigger_type IN ('cron', 'hook', 'webhook', 'manual', 'channel')),
+            delegatee_uid UUID NOT NULL,
+            trigger_type  TEXT NOT NULL CHECK (trigger_type IN ({TRIGGER_TYPES})),
             trigger_ref   UUID,
             created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
             expires_at    TIMESTAMPTZ,
             revoked_at    TIMESTAMPTZ
         )
-    "#).execute(pool).await.map_err(err)?;
+    "#)).execute(pool).await.map_err(err)?;
 
-    // Existing DBs (CREATE TABLE IF NOT EXISTS skips the new constraint): widen
-    // the CHECK explicitly to admit the 'channel' trigger type (Phase 6b).
+    // Pre-existing DBs used `agent_uid`; a delegatee is any non-human principal
+    // (agent OR service account), so the column is generalized. Rename in place.
     sqlx::query(
+        "DO $$ BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_schema='rootcx_system' AND table_name='delegations'
+                         AND column_name='agent_uid')
+               AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_schema='rootcx_system' AND table_name='delegations'
+                         AND column_name='delegatee_uid') THEN
+                ALTER TABLE rootcx_system.delegations RENAME COLUMN agent_uid TO delegatee_uid;
+            END IF;
+        END $$"
+    ).execute(pool).await.map_err(err)?;
+
+    // Widen the CHECK explicitly (CREATE TABLE IF NOT EXISTS skips it on old DBs):
+    // admit 'channel' (Phase 6b) and 'act_as' (service accounts).
+    sqlx::query(&format!(
         "ALTER TABLE rootcx_system.delegations DROP CONSTRAINT IF EXISTS delegations_trigger_type_check, \
          ADD CONSTRAINT delegations_trigger_type_check \
-         CHECK (trigger_type IN ('cron', 'hook', 'webhook', 'manual', 'channel'))"
-    ).execute(pool).await.map_err(err)?;
+         CHECK (trigger_type IN ({TRIGGER_TYPES}))"
+    )).execute(pool).await.map_err(err)?;
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_delegations_lookup \
-         ON rootcx_system.delegations (delegator_uid, agent_uid) WHERE revoked_at IS NULL"
+         ON rootcx_system.delegations (delegator_uid, delegatee_uid) WHERE revoked_at IS NULL"
     ).execute(pool).await.map_err(err)?;
 
     sqlx::query(
@@ -58,24 +75,24 @@ async fn resolve_primary_admin(pool: &PgPool) -> Option<Uuid> {
     ).fetch_optional(pool).await.ok().flatten()
 }
 
-pub async fn is_valid(pool: &PgPool, delegator: Uuid, agent: Uuid) -> Result<bool, RuntimeError> {
+pub async fn is_valid(pool: &PgPool, delegator: Uuid, delegatee: Uuid) -> Result<bool, RuntimeError> {
     sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM rootcx_system.delegations \
-         WHERE delegator_uid = $1 AND agent_uid = $2 \
+         WHERE delegator_uid = $1 AND delegatee_uid = $2 \
          AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now()))"
-    ).bind(delegator).bind(agent).fetch_one(pool).await.map_err(err)
+    ).bind(delegator).bind(delegatee).fetch_one(pool).await.map_err(err)
 }
 
 pub async fn create(
-    pool: &PgPool, delegator: Uuid, agent: Uuid, trigger_type: &str, trigger_ref: Option<Uuid>,
+    pool: &PgPool, delegator: Uuid, delegatee: Uuid, trigger_type: &str, trigger_ref: Option<Uuid>,
 ) -> Result<Uuid, RuntimeError> {
     let id: Uuid = sqlx::query_scalar(
-        "INSERT INTO rootcx_system.delegations (delegator_uid, agent_uid, trigger_type, trigger_ref) \
+        "INSERT INTO rootcx_system.delegations (delegator_uid, delegatee_uid, trigger_type, trigger_ref) \
          VALUES ($1, $2, $3, $4) \
          ON CONFLICT (trigger_type, trigger_ref) WHERE revoked_at IS NULL AND trigger_ref IS NOT NULL \
          DO UPDATE SET delegator_uid = EXCLUDED.delegator_uid \
          RETURNING id"
-    ).bind(delegator).bind(agent).bind(trigger_type).bind(trigger_ref)
+    ).bind(delegator).bind(delegatee).bind(trigger_type).bind(trigger_ref)
     .fetch_one(pool).await.map_err(err)?;
     Ok(id)
 }
