@@ -412,6 +412,7 @@ impl AgentDispatcher for SubAgentDispatch {
         parent_tx: Option<mpsc::Sender<AgentEvent>>,
         invoker_user_id: Option<uuid::Uuid>,
         parent_perms: Vec<String>,
+        task_scope: Option<Vec<String>>,
     ) -> Result<String, String> {
         if target == caller { return Err("cannot invoke self".into()); }
 
@@ -428,6 +429,7 @@ impl AgentDispatcher for SubAgentDispatch {
             llm,
             invoker_user_id,
             attachments: None,
+            task_scope,
         };
 
         let app_id = target.to_string();

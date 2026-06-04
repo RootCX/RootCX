@@ -105,6 +105,10 @@ async fn dispatch_agent_job(
         llm,
         invoker_user_id,
         attachments: None,
+        task_scope: Some(vec![
+            format!("app:{target_app}:*.read"),
+            format!("app:{target_app}:invoke"),
+        ]),
     };
 
     let system_user = uuid::Uuid::nil();

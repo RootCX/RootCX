@@ -197,6 +197,7 @@ async fn supervisor_loop(
     let mut sub_invocations: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut invoker_user_ids: HashMap<String, uuid::Uuid> = HashMap::new();
     let mut effective_permissions: HashMap<String, Vec<String>> = HashMap::new();
+    let mut task_scopes: HashMap<String, Option<Vec<String>>> = HashMap::new();
     // Per-worker SQL-proxy rate limiter (best-effort DoS guard).
     let mut sql_query_times: Vec<Instant> = Vec::new();
     // Marks the end of the onStart phase (first Rpc/Job/AgentInvoke dispatched).
@@ -272,7 +273,7 @@ async fn supervisor_loop(
                             let _ = tx.send(AgentEvent::Error { error: "worker stopped".into() }).await;
                         }
                         policy_evaluators.clear();
-                        effective_permissions.clear();
+                        effective_permissions.clear(); task_scopes.clear();
                         status = WorkerStatus::Stopped;
                         crash_times.clear();
                         info!(app_id = %app_id, "worker stopped");
@@ -330,11 +331,14 @@ async fn supervisor_loop(
                         if payload.is_sub_invoke { sub_invocations.insert(invoke_id.clone()); }
                         if let Some(uid) = payload.invoker_user_id { invoker_user_ids.insert(invoke_id.clone(), uid); }
 
-                        // Tool authority = this worker's fixed delegated identity.
-                        // The manager already computed the intersection (grant∩human)
-                        // and baked it into config.identity, which also governs any
-                        // ctx.sql()/ctx.collection() the agent JS issues. No token.
-                        effective_permissions.insert(invoke_id.clone(), config.identity.effective_perms.clone());
+                        // Tool authority = this worker's fixed delegated identity,
+                        // optionally narrowed by task_scope (the 3rd intersection operand).
+                        let mut effective = config.identity.effective_perms.clone();
+                        if let Some(ref scope) = payload.task_scope {
+                            effective = crate::extensions::rbac::policy::intersect_permissions(&effective, scope);
+                        }
+                        effective_permissions.insert(invoke_id.clone(), effective);
+                        task_scopes.insert(invoke_id.clone(), payload.task_scope.clone());
 
                         pending_agent_streams.insert(invoke_id.clone(), stream_tx);
                         if let Some(ref mut w) = ipc_writer {
@@ -418,7 +422,7 @@ async fn supervisor_loop(
                             policy_evaluators.remove(&invoke_id);
                             sub_invocations.remove(&invoke_id);
                             invoker_user_ids.remove(&invoke_id);
-                            effective_permissions.remove(&invoke_id);
+                            effective_permissions.remove(&invoke_id); task_scopes.remove(&invoke_id);
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Done { response, tokens }).await;
                             }
@@ -427,7 +431,7 @@ async fn supervisor_loop(
                             policy_evaluators.remove(&invoke_id);
                             sub_invocations.remove(&invoke_id);
                             invoker_user_ids.remove(&invoke_id);
-                            effective_permissions.remove(&invoke_id);
+                            effective_permissions.remove(&invoke_id); task_scopes.remove(&invoke_id);
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Error { error }).await;
                             }
@@ -450,6 +454,7 @@ async fn supervisor_loop(
                             let act_caller = config.action_caller.clone();
                             let invoker_uid = invoker_user_ids.get(&invoke_id).copied();
                             let cached_perms = effective_permissions.get(&invoke_id).cloned();
+                            let cached_scope = task_scopes.get(&invoke_id).cloned().flatten();
                             let out_tx = outbound_tx.clone();
                             let evaluator = policy_evaluators.get(&invoke_id).cloned();
                             let approvals_ref = pending_approvals.clone();
@@ -521,7 +526,7 @@ async fn supervisor_loop(
 
                                 crate::tool_executor::execute(
                                     tool, tool_name, args, aid, agent_uid, invoker_uid,
-                                    permissions, pool, dispatch, int_caller, act_caller,
+                                    permissions, cached_scope, pool, dispatch, int_caller, act_caller,
                                     out_tx, stream_tx, invoke_id, call_id,
                                 ).await;
                             });
@@ -641,7 +646,7 @@ async fn supervisor_loop(
                         }
                         // The process is gone. The respawned worker re-runs
                         // onStart from scratch (if it is the lifecycle worker).
-                        effective_permissions.clear();
+                        effective_permissions.clear(); task_scopes.clear();
                         onstart_done = false;
 
                         let now = Instant::now();

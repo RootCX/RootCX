@@ -65,6 +65,8 @@ pub struct AgentInvokePayload {
     pub invoker_user_id: Option<uuid::Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<FileAttachment>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_scope: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]

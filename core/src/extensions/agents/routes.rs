@@ -212,6 +212,7 @@ pub async fn invoke_agent(
         llm,
         invoker_user_id: Some(identity.user_id),
         attachments,
+        task_scope: None,
     };
 
     let persist_ctx = if memory_enabled {

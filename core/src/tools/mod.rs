@@ -26,6 +26,7 @@ pub trait AgentDispatcher: Send + Sync {
         parent_tx: Option<tokio::sync::mpsc::Sender<crate::worker::AgentEvent>>,
         invoker_user_id: Option<Uuid>,
         parent_perms: Vec<String>,
+        task_scope: Option<Vec<String>>,
     ) -> Result<String, String>;
 }
 
@@ -51,6 +52,7 @@ pub struct ToolContext {
     pub user_id: Uuid,
     pub invoker_user_id: Option<Uuid>,
     pub permissions: Vec<String>,
+    pub task_scope: Option<Vec<String>>,
     pub args: JsonValue,
     pub agent_dispatch: Option<Arc<dyn AgentDispatcher>>,
     pub integration_caller: Option<Arc<dyn IntegrationCaller>>,
