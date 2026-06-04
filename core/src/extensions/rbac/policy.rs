@@ -347,4 +347,5 @@ mod tests {
         assert!(has_permission(&["integration:gmail:*".into()], "integration:gmail:send"));
         assert!(!has_permission(&["integration:gmail:*".into()], "integration:slack:send"));
     }
+
 }

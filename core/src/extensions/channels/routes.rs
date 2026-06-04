@@ -18,6 +18,7 @@ use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::extensions::agents::{self, config as agent_config, persistence};
 use crate::extensions::agents::approvals::ApprovalResponse;
+use crate::extensions::rbac::policy::{resolve_permissions, has_permission};
 use crate::extensions::storage::backend::{PostgresBackend, StorageBackend};
 use crate::ipc::{AgentInvokePayload, FileAttachment, LlmModelRef};
 use crate::routes::{self, SharedRuntime, llm_models::fetch_default_llm};
@@ -299,6 +300,15 @@ async fn do_invoke(
         resolve_session(pool, channel_id, chat_id),
         async { Ok(resolve_invoker(pool, channel_id, chat_id).await) },
     ).map_err(&e)?;
+
+    // B1 gate: invoker must hold app:{id}:invoke
+    if let Some(uid) = invoker_user_id {
+        let required_perm = format!("app:{app_id}:invoke");
+        let (_, perms) = resolve_permissions(pool, uid).await.map_err(&e)?;
+        if !has_permission(&perms, &required_perm) {
+            return Err(format!("channel agent denied: user lacks {required_perm}"));
+        }
+    }
 
     let agent_cfg: JsonValue = sqlx::query_scalar(
         "SELECT config FROM rootcx_system.agents WHERE app_id = $1",

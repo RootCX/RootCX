@@ -188,6 +188,13 @@ pub async fn webhook_ingress(
                 .map_err(|e| ApiError::Internal(e.to_string()))? {
                 return Err(ApiError::Forbidden("no valid delegation for webhook agent".into()));
             }
+            let required_perm = format!("app:{}:invoke", wh.app_id);
+            let (_, perms) = crate::extensions::rbac::policy::resolve_permissions(&pool, delegator).await?;
+            if !crate::extensions::rbac::policy::has_permission(&perms, &required_perm) {
+                return Err(ApiError::Forbidden(format!(
+                    "webhook agent denied: owner lacks {required_perm}"
+                )));
+            }
             let message = format!("Webhook received: {}\n\nPayload:\n{payload}", wh.name);
             let llm = crate::routes::llm_models::fetch_default_llm(&pool).await
                 .ok().flatten()
