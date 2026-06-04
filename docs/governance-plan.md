@@ -28,8 +28,8 @@ These were the genuine "no right to be wrong" forks. Each is decided, with ratio
 |---|----------|--------|---------------|
 | D1 | **Channel message: attended or unattended?** | **Unattended by default.** A channel message can never itself authorize a sensitive action. A sensitive action under a channel trigger needs the linked user's standing pre-authorization. A live confirmation counts ONLY through an explicit, fresh interactive Approve/Reject bound to that exact action (a button event with a nonce), never inferred from a free-text message. | A chat message is asynchronous, replayable, and untrusted content; treating "they sent a message" as consent is OWASP ASI09 Human-Agent Trust Exploitation. The suspend-and-post-approval pattern is the 2026 standard. [OWASP Agentic 2026], [nNode approval gates] |
 | D2 | **Default task scope when unset?** | **Read-only plus the single action the trigger names** (resolved from the trigger DEFINITION, never the payload). Not the full `agent ∩ principal`. | 2026 consensus is deny-by-default / minimal scope; "unset = maximum" is the ASI03 privilege-abuse failure. This also confirms the philosophy over the older `governance-model.md`. [OWASP ASI03], [least-privilege for agents] |
-| D3 | **Is there a "delegation object"?** | **Yes, and it is the trigger row plus the append-only audit entry.** Stop saying "there is no delegation object." There is no SEPARATELY MANAGED object: the delegation is created and revoked with the trigger, and the audit entry (`actor` = agent, `authorizer` = responsible principal, scope, result) is the per-run record. | Every standard (RFC 8693 `act`/`may_act`, the 2026 OBO draft, GCP domain-wide delegation, Okta OBO) requires an explicit recordable grant with who-authorized + scope. The trigger row + audit entry IS that record. It also reconciles the doc with the existing `delegations` table. [RFC 8693], [OBO draft], [Okta OBO] |
-| D4 | **`runAs` gate: subset only, or subset + standing grant + escalate-bypass?** | **Subset only.** Remove the standing `act_as` delegation requirement AND remove the `admin:rbac.escalate` bypass. The recordable delegation is the trigger row (`created_by` + `run_as_sa`), gated by `SA ⊆ creator` at creation, logged in audit. | The escalate-bypass re-creates the exact GCP `actAs` / AWS `PassRole` escalation vector the philosophy claims to design out. Subset-by-construction is the whole point; a bypass negates it. [Tenable PassRole], [Rhino GCP privesc] |
+| D3 | **Is there a "delegation object"?** | **Yes, and it is a first-class, independently-revocable row in the `delegations` table.** The delegation grant is distinct from both the trigger (what fires) and the audit record (proof it happened). Revoking the grant disables every trigger that references it without deleting the triggers. This is the RFC 8693 `may_act` (authorization) vs `act` (record of occurrence) distinction. | Every standard (RFC 8693 `act`/`may_act`, the 2026 OBO draft, GCP domain-wide delegation, Okta OBO) requires an explicit recordable grant with who-authorized + scope, independently revocable for recertification. The `delegations` table implements exactly this. [RFC 8693], [OBO draft], [Okta OBO] |
+| D4 | **`runAs` gate: subset only, or subset + standing grant + escalate-bypass?** | **Subset-by-default + one narrow act-as grant above it; no standing escalate-override.** If `SA ⊆ creator`, no extra grant needed. To attach a SA more privileged than the creator, exactly one path: a narrow, per-target, revocable, audited act-as delegation grant (`delegations` table, `trigger_type='act_as'`), fenced so the issuer must already hold the target authority. Remove `admin:rbac.escalate` as a permanent permission; break-glass only. | A blanket escalate-override re-creates the GCP `actAs` / AWS `PassRole` escalation vector. Subset-by-default covers the common case; the bounded act-as grant covers the legitimate case (a dedicated least-privilege SA that outlives its creator). [Tenable PassRole], [Rhino GCP privesc], [GCP actAs], [K8s escalate/bind] |
 | D5 | **How is RBAC management delegated below super-admin?** | **Bounded granting.** Introduce `admin:rbac.manage`; a holder may grant/revoke roles, but bounded by their own authority (cannot grant a permission they do not hold). Only `*` is unbounded. Today RBAC management is all-or-nothing on `*`. | This is the philosophy's own "bounded granting" invariant, and it is what makes least-privilege admin, SoD, and the mover workflow possible without ha­nding out `*`. [AWS least-privilege], [NIST AC-6] |
 | D6 | **Deploy authority** | **Three-way split:** author (uploads) ≠ deployer (`app:{id}:deploy`, routine) ≠ promoter (`app:{id}:promote`, production, maker-checker, no self-approve). `admin:apps.deploy` stays as the cross-app superset. Production promote is a sensitive action and reuses the step-up path. | Universal enterprise pattern: GitHub Environments required-reviewers (initiator cannot approve), Vercel "Full Production Deployment", Heroku admin-only promote, K8s deploy SA with no secrets/RBAC. [GitHub deployments], [Vercel], [Heroku], [K8s RBAC] |
 
@@ -187,10 +187,10 @@ A deploy/promote pipeline can `runAs` a deployment service account (survives the
 
 Standard: GitHub Environments (no self-approve), Vercel, Heroku, K8s RBAC, DevOps SoD. [GitHub deployments], [Vercel], [Heroku], [K8s RBAC]
 
-### 4.4 Reconcile `runAs` to subset-only (D4)
+### 4.4 Reconcile `runAs` to subset-by-default + bounded act-as (D4)
 
-- `act_as.rs:17-41`: remove the standing `act_as` delegation requirement and the `admin:rbac.escalate` bypass. Keep the subset check (`SA ⊆ creator`).
-- Record the binding on the trigger row (`created_by` + `run_as_sa`) and in audit. The separate `act_as` delegation type is dropped (the `delegations` table keeps the cron/hook/webhook/channel consent rows).
+- `act_as.rs:17-41`: remove the `admin:rbac.escalate` bypass permission. Keep the subset check (`SA ⊆ creator`) as the zero-grant default path.
+- The `act_as` delegation type in `delegations` table stays (it is the narrow grant for the exceed-subset case, per D4). It is bounded: the issuer must already hold the target authority. It is recertifiable as a standing grant.
 - Add the missing **bounded-granting check** on `assign_role` (`rbac/routes.rs:203-218`): a non-`*` `admin:rbac.manage` holder cannot grant a permission they do not hold. This is what closes the SA-widening drift seam structurally.
 
 ---
@@ -212,9 +212,9 @@ Today only a per-agent `supervision` config exists (`worker.rs:459-516`) with `R
 
 Standard: OWASP Agentic step-up, Anthropic HITL-before-critical, Delegation Receipt Protocol freshness. [OWASP Agentic 2026], [DRP]
 
-### 5.4 Per-run resource budget (refinement, OWASP ASI08)
+### 5.4 Per-run resource budget (refinement, OWASP ASI02)
 
-Attach `budget { max_tool_calls, max_fanout, max_wall_clock_ms, max_cost }` to a run as a SINGLE SHARED pool for the whole run-tree (not per-hop, which multiplies under fan-out). On sub-invoke, each field is `min(child_requested, parent_remaining)` (monotone, like authority). Exhaustion = fail closed, partial work preserved. Wall-clock uses the server clock, never an agent timestamp. [OWASP ASI08], [attenuating-tokens]
+Attach `budget { max_tool_calls, max_fanout, max_wall_clock_ms, max_cost }` to a run as a SINGLE SHARED pool for the whole run-tree (not per-hop, which multiplies under fan-out). On sub-invoke, each field is `min(child_requested, parent_remaining)` (monotone, like authority). Exhaustion = fail closed, partial work preserved. Wall-clock uses the server clock, never an agent timestamp. [OWASP ASI02 Tool Misuse / budget exhaustion], [attenuating-tokens]
 
 ### 5.5 Verifiable delegation token for the REMOTE sub-invoke (true blocker, remote path only)
 
@@ -279,27 +279,30 @@ Every path, the responsible principal, the gate at create time, the gate at exec
 2. Task scope as the third operand + read-only default. `RpcCaller`/`ContextState`, `worker_manager.rs:300`, `sql_proxy.rs:54-72`, `tools/*`.
 3. Fire-time `invoke` check on all owned-automation paths. `scheduler.rs:38-71`, `integrations/routes.rs:183-208`, `channels/routes.rs:333-337`.
 4. Webhook HMAC + timestamp + hashed token. `integrations/routes.rs:158-253`, `webhooks.rs:12-30`.
-5. `runAs` subset-only: drop standing `act_as` + `admin:rbac.escalate` bypass. `act_as.rs:17-41`.
+5. `runAs`: drop `admin:rbac.escalate` bypass, keep subset-by-default + bounded act-as grant for exceed-subset. `act_as.rs:17-41`.
+6. Delegation matrix kind enforcement: `delegations::create()` must validate `(delegator.kind, delegatee.kind)` against permitted pairs (Part 3). Human->Human, Agent->Human, SA->Human, Agent->SA = structurally refused. `delegations.rs`, `act_as.rs`.
+7. Worker invalidation on permission change: when a role is assigned/revoked, proactively kill all workers whose principal includes the affected user (they respawn lazily with fresh perms). `worker_manager.rs` (new `invalidate_for_user`), `rbac/routes.rs` (call after assign/revoke).
 
 **P1 (enterprise blockers + coherence):**
-6. MFA for privileged humans + step-up to a fresh factor. `extensions/auth.rs`, `routes/auth.rs`.
-7. Audit append-only + chain + external sink + governance-table coverage + retention. `extensions/audit.rs`.
-8. Bounded granting (`admin:rbac.manage`) + mover replace-semantics + `rbac.role.*` events. `rbac/routes.rs:203-218`.
-9. Recertification cadences + auto-suspend sweep. `rbac` metadata + scheduler.
-10. Sensitive-action step-up engine (pre-auth table, fail-closed). `worker.rs:435-527`.
-11. SoD toxic set + two-person rule on `*`/`admin:*`. `rbac/routes.rs` + `pending_grants`.
-12. Permission-enumeration auth guard + scope to grantable. `rbac/routes.rs:265-273`.
-13. Deploy/promote split. `routes/deploy.rs:52,199`.
-14. Human credential hygiene + break-glass alerting. `extensions/auth.rs`, `Identity` path.
-15. Agent default role least-privilege (not admin). `agents/mod.rs:172-183`.
+8. MFA for privileged humans + step-up to a fresh factor. `extensions/auth.rs`, `routes/auth.rs`.
+9. Audit append-only + chain + external sink + governance-table coverage + retention. `extensions/audit.rs`.
+10. Bounded granting (`admin:rbac.manage`) + mover replace-semantics + `rbac.role.*` events. `rbac/routes.rs:203-218`.
+11. Recertification cadences + auto-suspend sweep. `rbac` metadata + scheduler.
+12. Sensitive-action step-up engine (pre-auth table, fail-closed). `worker.rs:435-527`.
+13. SoD toxic set + two-person rule on `*`/`admin:*`. `rbac/routes.rs` + `pending_grants`.
+14. Permission-enumeration auth guard + scope to grantable. `rbac/routes.rs:265-273`.
+15. Deploy/promote split. `routes/deploy.rs:52,199`.
+16. Human credential hygiene + break-glass alerting. `extensions/auth.rs`, `Identity` path.
+17. Agent default role least-privilege (not admin). `agents/mod.rs:172-183`.
+18. SA owner-of-record as mandatory enforced field + ownerless refused + offboarding reassigns. `users` table + `service_accounts/mod.rs` + `agents/mod.rs`.
 
 **P2 (hardening / refinements, ship with or before remote transport):**
-16. Per-run resource budget. invoke path + sub-invoke dispatch.
-17. Attenuating delegation token for remote sub-invoke (BLOCKER before remote is enabled).
-18. Consent freshness (nonces, max-age, lifetime caps).
-19. Root-owned depth ceiling.
+19. Per-run resource budget. invoke path + sub-invoke dispatch.
+20. Attenuating delegation token for remote sub-invoke (BLOCKER before remote is enabled).
+21. Consent freshness (nonces, max-age, lifetime caps).
+22. Root-owned depth ceiling (configurable, lowered per hop, replaces hard depth-2 cap).
 
-**Doc reconciliation:** update `governance-philosophy.md` for D1-D6 (channel unattended; read-only default; delegation = trigger row + audit entry, drop "no object"; runAs subset-only, drop the "no actAs" overclaim which the code contradicted; deploy/promote; bounded granting). Reconcile `governance-model.md`, which still implies unset-scope = full intersection.
+**Doc reconciliation:** DONE (2026-06-04). `governance-philosophy.md` is the single canonical spec, updated with D1-D6. `governance-model.md`, `service-accounts.md`, `agent-identity-rearchitecture.md`, and `security-context-token-confusion.md` are deleted (superseded/archived).
 
 ---
 
@@ -308,13 +311,11 @@ Every path, the responsible principal, the gate at create time, the gate at exec
 The plan adds capabilities, not orthogonal concepts. The teachable surface stays small because almost everything reuses primitives that already exist:
 
 - Task scope, the resource budget, and sub-agent narrowing are all **the same intersection**, applied to more operands and down the chain. One mental model.
-- The delegation record is **the trigger row you already create**, plus the audit entry you already write. No new object to manage.
+- The delegation grant is a **first-class row in the `delegations` table**, independently revocable. But creating a trigger auto-creates one, so the common path is zero-overhead.
 - Production promote, sensitive integration actions, and destructive agent actions all go through **one step-up path**. One control.
 - Bounded granting is **the subset rule** (already used for `runAs`) applied to role grants and to permission discovery. One rule, three uses.
 - Mover is **role-assignment as replace** plus the disable semantics that already exist. No IGA engine.
 - The enterprise perimeter (MFA, recert cadences, SoD list, break-glass alert, audit lockdown) is bounded configuration and a daily sweep job, not a platform.
-
-Recommended terminology cleanups so the doc reads as few orthogonal nouns: fold "owner" into "responsible principal" (owner = the responsible principal recorded on a stored trigger); demote "delegation" from a section to a sentence; define "app admin" inline rather than as a vocabulary primitive; rename the trigger consent so it does not collide with the sensitive-action "standing pre-authorization."
 
 ---
 
