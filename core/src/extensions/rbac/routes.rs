@@ -275,10 +275,15 @@ pub(crate) async fn user_permissions(
 
 pub(crate) async fn list_available_permissions(
     State(rt): State<SharedRuntime>,
+    identity: Identity,
 ) -> Result<Json<Vec<PermissionDeclarationResponse>>, ApiError> {
     let pool = routes::pool(&rt);
+    let (_, caller_perms) = resolve_permissions(&pool, identity.user_id).await?;
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT key, description FROM rootcx_system.rbac_permissions ORDER BY key",
     ).fetch_all(&pool).await?;
-    Ok(Json(rows.into_iter().map(|(key, description)| PermissionDeclarationResponse { key, description }).collect()))
+    Ok(Json(rows.into_iter()
+        .filter(|(key, _)| super::policy::has_permission(&caller_perms, key))
+        .map(|(key, description)| PermissionDeclarationResponse { key, description })
+        .collect()))
 }

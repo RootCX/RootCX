@@ -70,6 +70,7 @@ async fn mgmt_endpoints_reject_unauthenticated() {
     assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/worker/start", &json!({})).await.0, 401);
     assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/worker/stop", &json!({})).await.0, 401);
     assert_eq!(rt.delete_unauthed("/api/v1/users/00000000-0000-0000-0000-000000000099").await, 401);
+    assert_eq!(rt.get_unauthed("/api/v1/permissions/available").await, 401);
     rt.shutdown().await;
 }
 
@@ -1077,13 +1078,30 @@ async fn rbac_available_permissions() {
     let rt = TestRuntime::boot().await;
     rt.install("rbacavail", "items").await;
 
+    // Unauthenticated -> 401
+    assert_eq!(rt.get_unauthed("/api/v1/permissions/available").await, 401);
+
+    // Admin (holds `*`) sees all permissions
     let (s, body) = rt.get_json("/api/v1/permissions/available").await;
     assert_eq!(s, 200);
-    let perms = body.as_array().unwrap();
-    let keys: Vec<&str> = perms.iter().filter_map(|p| p["key"].as_str()).collect();
-    // Permissions are namespaced: app:{app_id}:{entity}.{action}
+    let keys: Vec<&str> = body.as_array().unwrap().iter().filter_map(|p| p["key"].as_str()).collect();
     assert!(keys.contains(&"app:rbacavail:items.read"));
     assert!(keys.contains(&"app:rbacavail:items.create"));
+
+    // Limited user: only sees permissions within their granted namespace
+    let limited_token = rt.register_and_login("limited@test.local").await;
+    let (_, users) = rt.get_json("/api/v1/users").await;
+    let uid = users.as_array().unwrap().iter()
+        .find(|u| u["email"] == "limited@test.local").unwrap()["id"].as_str().unwrap().to_string();
+    rt.post_json("/api/v1/roles", &json!({"name":"reader","permissions":["app:rbacavail:items.read"]})).await;
+    rt.post_json("/api/v1/roles/assign", &json!({"userId": uid, "role": "reader"})).await;
+
+    let (s, body) = rt.request_as(Method::GET, "/api/v1/permissions/available", &limited_token, None).await;
+    assert_eq!(s, 200);
+    let limited_keys: Vec<&str> = body.as_array().unwrap().iter().filter_map(|p| p["key"].as_str()).collect();
+    assert!(limited_keys.contains(&"app:rbacavail:items.read"));
+    assert!(!limited_keys.contains(&"app:rbacavail:items.create"));
+
     rt.shutdown().await;
 }
 
