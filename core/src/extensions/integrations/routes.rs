@@ -226,10 +226,7 @@ pub async fn webhook_ingress(
                 llm,
                 invoker_user_id: Some(delegator),
                 attachments: None,
-                task_scope: Some(vec![
-                    format!("app:{}:*.read", wh.app_id),
-                    format!("app:{}:invoke", wh.app_id),
-                ]),
+                task_scope: Some(vec![format!("app:{}:*", wh.app_id)]),
             };
             let _ = wm.agent_invoke(&wh.app_id, invoke_payload, None).await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
