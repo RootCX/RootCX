@@ -12,8 +12,8 @@ use crate::extensions::rbac::policy::{has_permission, resolve_permissions};
 
 /// Authorize `human` to act as `target`. Deny-by-default; both required:
 ///   1. a standing act-as delegation `human -> target` exists, AND
-///   2. anti-escalation: every permission of `target` is held by `human`,
-///      unless `human` holds `admin:rbac.escalate` (audited override).
+///   2. anti-escalation: every permission of `target` is held by `human`.
+///      No bypass exists. The subset check always runs.
 pub async fn assert_can_act_as(pool: &PgPool, human: Uuid, target: Uuid) -> Result<(), ApiError> {
     if human == target {
         return Ok(());
@@ -27,9 +27,6 @@ pub async fn assert_can_act_as(pool: &PgPool, human: Uuid, target: Uuid) -> Resu
     }
 
     let (_, human_perms) = resolve_permissions(pool, human).await?;
-    if has_permission(&human_perms, "admin:rbac.escalate") {
-        return Ok(());
-    }
     let (_, target_perms) = resolve_permissions(pool, target).await?;
     if target_perms.iter().all(|p| has_permission(&human_perms, p)) {
         Ok(())
