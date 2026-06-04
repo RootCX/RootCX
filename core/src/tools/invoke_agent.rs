@@ -34,7 +34,7 @@ impl Tool for InvokeAgentTool {
         // ctx.permissions is THIS (parent) agent's frozen authority; pass it so
         // the child narrows against the parent, not the human (the chain stays
         // monotone non-increasing).
-        let response = dispatch.dispatch(&ctx.pool, &ctx.app_id, target, message, ctx.stream_tx.clone(), ctx.invoker_user_id, ctx.permissions.clone()).await?;
+        let response = dispatch.dispatch(&ctx.pool, &ctx.app_id, target, message, ctx.stream_tx.clone(), ctx.invoker_user_id, ctx.permissions.clone(), ctx.task_scope.clone()).await?;
         Ok(json!({ "agent": target, "response": response }))
     }
 }
