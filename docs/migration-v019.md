@@ -155,6 +155,40 @@ grep -rE "databaseUrl|postgres\(|authToken|syncAllConnectedUsers" backend/ --inc
 
 Must return nothing (ignore `node_modules/`).
 
+## API response changes
+
+### Webhook list (`GET /api/v1/apps/{id}/webhooks`)
+
+The response no longer includes the full `token`. It returns `prefix` (first 8
+chars) for display/identification only. The full token is shown once at creation
+and never retrievable again.
+
+```diff
+- { "name": "stripe", "token": "a1b2c3d4e5f6...full64chars" }
++ { "name": "stripe", "prefix": "a1b2c3d4" }
+```
+
+If your UI copies the webhook URL for users, it must now store the token at
+creation time or prompt the user to regenerate.
+
+### New: Service accounts API
+
+New endpoints under `/api/v1/service-accounts` for M2M automation:
+
+| Endpoint | Purpose |
+|----------|---------|
+| `POST /api/v1/service-accounts` | Create SA (requires `admin:sa.manage`) |
+| `POST .../credentials` | Generate `rcs_` credential (shown once) |
+| `POST /api/v1/auth/token` | Client-credentials token exchange (RFC 6749 s4.4) |
+| `POST .../disable` / `POST .../enable` | Kill switch |
+| `POST .../transfer-ownership` | Reassign owner of record |
+| `POST .../act-as` / `DELETE .../act-as` | Manage act-as delegation grants |
+
+These are new endpoints (no migration needed), but if your website provisions
+automation accounts, use this API instead of creating human users.
+
+---
+
 ## Behavioral changes (exhaustive)
 
 Every change below was verified against the codebase. Admins (role with `*`
@@ -190,7 +224,7 @@ and apps.
 
 | Capability | Before (v0.18) | After (v0.19) |
 |-----------|---------------|---------------|
-| Direct DB connection | App receives `DATABASE_URL` in Discover IPC | Removed; use `ctx.sql()` |
+| Direct DB connection | App receives `DATABASE_URL` in Discover IPC | Removed from IPC entirely; use `ctx.sql()` |
 | User JWT token | App receives `caller.authToken` | Removed; never exposed |
 | Direct TCP to Postgres | Possible (app had credentials) | Blocked (pg_hba + no credentials) |
 | DDL in app code (CREATE INDEX, etc.) | Allowed | Blocked (restricted role, no DDL) |
@@ -235,6 +269,16 @@ Upgrading the client SDK to >= 0.19 closes it with no code change on your side.
 - Integration actions require `integration:{id}:{action}` (unchanged)
 - Worker start/stop requires admin (unchanged)
 - Agent intersection logic (unchanged, now enforced by RLS instead of Rust)
+
+### Agent registration
+
+`register_agent()` now accepts an optional `deployer: Uuid` (the user who
+deployed the app). The deployer becomes the agent's owner of record. If omitted,
+the system backfills ownership from the app installer.
+
+This is internal (no app-facing API change), but if your provisioning code calls
+the core's deploy endpoint, the deploying user's identity is now captured and
+used for governance (fire-gate, delegation).
 
 ### What to do after upgrading the core
 
