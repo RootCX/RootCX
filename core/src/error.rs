@@ -35,4 +35,7 @@ pub enum RuntimeError {
 
     #[error("not found: {0}")]
     NotFound(String),
+
+    #[error("delegation refused: {0}")]
+    Delegation(String),
 }
