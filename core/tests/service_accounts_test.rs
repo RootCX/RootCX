@@ -72,10 +72,14 @@ async fn grant_act_as(rt: &harness::TestRuntime, sa: Uuid, human: Uuid) {
 }
 
 /// Insert a user directly with a role carrying exactly `perms`.
+/// Infers kind from email: `sa+*` = service, `agent+*` = agent, else human.
 async fn db_user(pool: &sqlx::PgPool, email: &str, perms: &[&str]) -> Uuid {
     let uid = Uuid::new_v4();
-    sqlx::query("INSERT INTO rootcx_system.users (id, email) VALUES ($1, $2)")
-        .bind(uid).bind(email).execute(pool).await.unwrap();
+    let kind = if email.starts_with("sa+") { "service" }
+        else if email.starts_with("agent+") { "agent" }
+        else { "human" };
+    sqlx::query("INSERT INTO rootcx_system.users (id, email, kind) VALUES ($1, $2, $3)")
+        .bind(uid).bind(email).bind(kind).execute(pool).await.unwrap();
     grant_perms(pool, uid, perms).await;
     uid
 }
