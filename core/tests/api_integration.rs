@@ -2957,7 +2957,7 @@ async fn register_test_agent(rt: &TestRuntime, app_id: &str) {
         limits: None,
         supervision: None,
     };
-    rootcx_core::extensions::agents::register_agent(rt.pool(), app_id, &def)
+    rootcx_core::extensions::agents::register_agent(rt.pool(), app_id, &def, None)
         .await.expect("register_agent");
 }
 

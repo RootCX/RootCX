@@ -217,9 +217,9 @@ pub(crate) async fn assign_role(
     let pool = routes::pool(&rt);
     require_admin(&pool, identity.user_id).await?;
 
-    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_roles WHERE name = $1)")
-        .bind(&body.role).fetch_one(&pool).await?;
-    if !exists { return Err(ApiError::BadRequest(format!("role '{}' not defined", body.role))); }
+    if !super::policy::role_exists(&pool, &body.role).await? {
+        return Err(ApiError::BadRequest(format!("role '{}' not defined", body.role)));
+    }
 
     sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING")
         .bind(body.user_id).bind(&body.role).execute(&pool).await?;

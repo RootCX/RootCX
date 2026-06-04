@@ -58,7 +58,7 @@ pub(crate) struct UpsertProviderRequest {
 
 fn default_scopes() -> Vec<String> { vec!["openid".into(), "email".into(), "profile".into()] }
 fn default_true() -> bool { true }
-fn default_role() -> String { "admin".into() }
+fn default_role() -> String { "base".into() }
 
 /// GET /api/v1/auth/oidc/providers — public, for login screen
 pub(crate) async fn list_providers(
@@ -556,6 +556,21 @@ fn extract_role_claim(raw_token: &str, provider: &ProviderRow) -> Result<Option<
     Ok(claims.get(claim_name).and_then(|v| v.as_str()).map(|s| s.to_string()))
 }
 
+/// Initial RBAC role for a newly auto-registered OIDC user. The first
+/// non-system user of a tenant bootstraps as `admin` so the tenant is
+/// administrable; everyone else takes the token's role claim when it resolves
+/// to a real role, otherwise the provider default — never `admin`. This is what
+/// keeps invited members deny-by-default (governance-philosophy.md, Invariant #1).
+fn pick_initial_role(first_boot: bool, claim_role: Option<&str>, claim_role_exists: bool, default_role: &str) -> String {
+    if first_boot {
+        return "admin".to_string();
+    }
+    match claim_role {
+        Some(r) if claim_role_exists => r.to_string(),
+        _ => default_role.to_string(),
+    }
+}
+
 /// Find or create a Core user from OIDC claims.
 async fn find_or_create_user(
     pool: &sqlx::PgPool,
@@ -632,22 +647,19 @@ async fn find_or_create_user(
         }
     })?;
 
-    // Assign role
-    let assigned_role = role.unwrap_or(&provider.default_role);
-    let role_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_roles WHERE name = $1)",
-    )
-    .bind(assigned_role)
-    .fetch_one(pool)
-    .await?;
-
-    let final_role = if role_exists { assigned_role } else { &provider.default_role };
+    // Role assignment (decision extracted to `pick_initial_role` for unit testing).
+    let first_boot = crate::extensions::rbac::is_first_boot(pool).await.unwrap_or(false);
+    let claim_role_exists = match role {
+        Some(r) => crate::extensions::rbac::policy::role_exists(pool, r).await?,
+        None => false,
+    };
+    let final_role = pick_initial_role(first_boot, role, claim_role_exists, &provider.default_role);
 
     sqlx::query(
         "INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING",
     )
     .bind(user_id)
-    .bind(final_role)
+    .bind(&final_role)
     .execute(pool)
     .await?;
 
@@ -680,6 +692,23 @@ mod tests {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(payload_json);
         format!("{header}.{payload}.fakesig")
+    }
+
+    // ── pick_initial_role (the role decision the governance fix introduced) ──
+
+    #[test]
+    fn pick_initial_role_decisions() {
+        // (first_boot, claim, claim_exists, default) -> expected, why
+        let cases: &[(bool, Option<&str>, bool, &str, &str, &str)] = &[
+            (true,  None,           false, "base", "admin",  "first user bootstraps admin"),
+            (true,  Some("base"),   true,  "base", "admin",  "first user is admin even with a claim"),
+            (false, None,           false, "base", "base",   "invited user, no claim -> default, never admin"),
+            (false, Some("editor"), true,  "base", "editor", "invited user honours an existing claim role"),
+            (false, Some("ghost"),  false, "base", "base",   "claim role missing -> safe fallback to default"),
+        ];
+        for (first_boot, claim, exists, default, expected, why) in cases {
+            assert_eq!(pick_initial_role(*first_boot, *claim, *exists, default), *expected, "{why}");
+        }
     }
 
     // ── extract_role_claim ─────────────────────────────────────────────

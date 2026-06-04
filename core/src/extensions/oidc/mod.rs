@@ -35,7 +35,7 @@ impl RuntimeExtension for OidcExtension {
                 client_secret   TEXT,
                 scopes          TEXT[] NOT NULL DEFAULT '{openid,email,profile}',
                 auto_register   BOOLEAN NOT NULL DEFAULT true,
-                default_role    TEXT NOT NULL DEFAULT 'admin',
+                default_role    TEXT NOT NULL DEFAULT 'base',
                 role_claim      TEXT,
                 enabled         BOOLEAN NOT NULL DEFAULT true,
                 created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -56,6 +56,13 @@ impl RuntimeExtension for OidcExtension {
             // Add OIDC columns to users (idempotent)
             "ALTER TABLE rootcx_system.users ADD COLUMN IF NOT EXISTS oidc_provider TEXT",
             "ALTER TABLE rootcx_system.users ADD COLUMN IF NOT EXISTS oidc_sub TEXT",
+            // Security remediation: the seeded `rootcx` provider historically
+            // defaulted federated users to `admin` (full `*`), which made every
+            // invited member a tenant super-admin (deny-by-default violation).
+            // Flip the insecure default to the `base` role — both the
+            // column default (new providers) and the already-seeded row.
+            "ALTER TABLE rootcx_system.oidc_providers ALTER COLUMN default_role SET DEFAULT 'base'",
+            "UPDATE rootcx_system.oidc_providers SET default_role = 'base' WHERE id = 'rootcx' AND default_role = 'admin'",
         ] {
             exec(pool, ddl).await?;
         }
@@ -136,7 +143,7 @@ pub async fn seed_from_env(pool: &PgPool, secrets: &SecretManager) -> Result<(),
     sqlx::query(
         "INSERT INTO rootcx_system.oidc_providers
             (id, display_name, issuer_url, client_id, client_secret, auto_register, default_role)
-         VALUES ('rootcx', 'RootCX', $1, $2, NULL, true, 'admin')",
+         VALUES ('rootcx', 'RootCX', $1, $2, NULL, true, 'base')",
     )
     .bind(&issuer)
     .bind(&client_id)

@@ -82,6 +82,17 @@ impl RuntimeExtension for RbacExtension {
              ON CONFLICT (name) DO NOTHING",
         ).await?;
 
+        // Deny-by-default base role for federated/invited users. Holds no
+        // permissions; real access comes from explicitly-granted roles. This is
+        // the safe fallback `default_role` for the OIDC provider — never `admin`.
+        // Named `base` (not `member`) to avoid collision with the website's
+        // platform `member` role, which is a separate concept in a separate DB.
+        exec(pool,
+            "INSERT INTO rootcx_system.rbac_roles (name, description, permissions)
+             VALUES ('base', 'Base role — no permissions by default', ARRAY[]::text[])
+             ON CONFLICT (name) DO NOTHING",
+        ).await?;
+
         exec(pool,
             "INSERT INTO rootcx_system.rbac_permissions (key, description) \
              VALUES ('platform:apps.create', 'Create and own apps (self-service)') \
