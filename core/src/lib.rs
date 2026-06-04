@@ -5,6 +5,7 @@ mod crons;
 pub mod delegations;
 mod error;
 pub mod extensions;
+pub mod governance;
 mod ipc;
 mod jobs;
 mod manifest;
