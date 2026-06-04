@@ -2962,22 +2962,34 @@ async fn register_test_agent(rt: &TestRuntime, app_id: &str) {
 }
 
 #[tokio::test]
-async fn agent_registration_assigns_admin_with_no_per_agent_role() {
+async fn agent_registration_assigns_least_privilege_role() {
     let rt = TestRuntime::boot().await;
-    let app_id = "agentadmin";
+    let app_id = "agentlp";
     register_test_agent(&rt, app_id).await;
 
     let agent_uid = rootcx_core::extensions::agents::agent_user_id(app_id);
 
+    // Must NOT have admin
     let admin_assignments: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM rootcx_system.rbac_assignments WHERE user_id = $1 AND role = 'admin'",
     ).bind(agent_uid).fetch_one(rt.pool()).await.unwrap();
-    assert_eq!(admin_assignments, 1, "agent system user must be assigned to 'admin'");
+    assert_eq!(admin_assignments, 0, "agent must NOT be assigned 'admin' (deny-by-default)");
 
-    let per_agent_roles: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM rootcx_system.rbac_roles WHERE name LIKE 'agent:%'",
-    ).fetch_one(rt.pool()).await.unwrap();
-    assert_eq!(per_agent_roles, 0, "no per-agent role should be created");
+    // Must have the per-app agent role
+    let role_name = format!("app:{app_id}:agent");
+    let has_role: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_assignments WHERE user_id = $1 AND role = $2)",
+    ).bind(agent_uid).bind(&role_name).fetch_one(rt.pool()).await.unwrap();
+    assert!(has_role, "agent must be assigned app:{{app_id}}:agent role");
+
+    // Verify the role contains entity CRUD + invoke, no wildcard
+    let (_, perms) = rootcx_core::extensions::rbac::policy::resolve_permissions(rt.pool(), agent_uid).await.unwrap();
+    assert!(!perms.contains(&"*".to_string()), "agent must NOT have wildcard");
+    assert!(perms.contains(&format!("app:{app_id}:items.create")), "must have entity create");
+    assert!(perms.contains(&format!("app:{app_id}:items.read")), "must have entity read");
+    assert!(perms.contains(&format!("app:{app_id}:items.update")), "must have entity update");
+    assert!(perms.contains(&format!("app:{app_id}:items.delete")), "must have entity delete");
+    assert!(perms.contains(&format!("app:{app_id}:invoke")), "must have invoke");
 
     rt.shutdown().await;
 }

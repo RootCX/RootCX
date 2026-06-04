@@ -157,9 +157,9 @@ pub async fn register_agent(pool: &PgPool, app_id: &str, def: &AgentDefinition) 
     Ok(())
 }
 
-/// Ensure the agent has a system user identity and a default role assignment.
-/// Permissions are governed via the standard RBAC API (same as humans).
-/// Does not overwrite existing role assignments (admin may have already scoped the agent).
+/// Ensure the agent has a system user identity and a least-privilege role
+/// derived from the app's data contract. Does not overwrite existing role
+/// assignments (admin may have already scoped the agent differently).
 async fn sync_agent_rbac(pool: &PgPool, app_id: &str) -> Result<(), RuntimeError> {
     let agent_uid = agent_user_id(app_id);
 
@@ -169,18 +169,54 @@ async fn sync_agent_rbac(pool: &PgPool, app_id: &str) -> Result<(), RuntimeError
     ).bind(agent_uid).bind(format!("agent+{app_id}@localhost"))
     .execute(pool).await.map_err(RuntimeError::Schema)?;
 
-    // Only assign admin if the agent has no role yet (first deploy).
-    // After that, the admin governs the agent's role via the RBAC API.
+    // Only assign role on first deploy; after that the admin governs via RBAC API.
     let has_role: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_assignments WHERE user_id = $1)"
     ).bind(agent_uid).fetch_one(pool).await.map_err(RuntimeError::Schema)?;
 
     if !has_role {
+        let role_name = format!("app:{app_id}:agent");
+        let perms = derive_agent_permissions(pool, app_id).await?;
+
+        sqlx::query(
+            "INSERT INTO rootcx_system.rbac_roles (name, description, permissions) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (name) DO UPDATE SET permissions = EXCLUDED.permissions"
+        )
+        .bind(&role_name)
+        .bind(format!("Auto-generated least-privilege role for {app_id} agent"))
+        .bind(&perms)
+        .execute(pool).await.map_err(RuntimeError::Schema)?;
+
         sqlx::query(
             "INSERT INTO rootcx_system.rbac_assignments (user_id, role) \
-             VALUES ($1, 'admin') ON CONFLICT DO NOTHING"
-        ).bind(agent_uid).execute(pool).await.map_err(RuntimeError::Schema)?;
+             VALUES ($1, $2) ON CONFLICT DO NOTHING"
+        ).bind(agent_uid).bind(&role_name)
+        .execute(pool).await.map_err(RuntimeError::Schema)?;
     }
 
     Ok(())
+}
+
+/// Derive least-privilege permissions from the app's installed manifest.
+/// Grants CRUD on all entities + invoke. No wildcard, no admin.
+async fn derive_agent_permissions(pool: &PgPool, app_id: &str) -> Result<Vec<String>, RuntimeError> {
+    let manifest_json: Option<(Option<serde_json::Value>,)> = sqlx::query_as(
+        "SELECT manifest FROM rootcx_system.apps WHERE id = $1"
+    ).bind(app_id).fetch_optional(pool).await.map_err(RuntimeError::Schema)?;
+
+    let mut perms: Vec<String> = match manifest_json.and_then(|(j,)| j) {
+        Some(json) => {
+            let manifest: AppManifest = serde_json::from_value(json)
+                .map_err(|e| RuntimeError::Config(format!("bad manifest for {app_id}: {e}")))?;
+            manifest.data_contract.iter()
+                .flat_map(|e| ["create", "read", "update", "delete"]
+                    .map(|a| format!("app:{app_id}:{}.{a}", e.entity_name)))
+                .collect()
+        }
+        None => vec![],
+    };
+
+    perms.push(format!("app:{app_id}:invoke"));
+    Ok(perms)
 }
