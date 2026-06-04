@@ -67,7 +67,7 @@ pub async fn deploy_backend(
     }
 
     if let Some(def) = crate::extensions::agents::config::load_agent_json(&app_dir).await {
-        crate::extensions::agents::register_agent(&pool, &app_id, &def)
+        crate::extensions::agents::register_agent(&pool, &app_id, &def, Some(identity.user_id))
             .await
             .map_err(|e| ApiError::Internal(format!("agent registration: {e}")))?;
     }

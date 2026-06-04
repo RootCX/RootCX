@@ -82,7 +82,7 @@ pub async fn seed_assistant(
     })).execute(pool).await.map_err(RuntimeError::Schema)?;
 
     if let Some(def) = agents::config::load_agent_json(&app_dir).await {
-        agents::register_agent(pool, APP_ID, &def).await?;
+        agents::register_agent(pool, APP_ID, &def, None).await?;
     }
 
     wm.start_app(pool, secrets, APP_ID).await?;

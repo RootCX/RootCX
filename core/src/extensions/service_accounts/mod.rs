@@ -88,6 +88,7 @@ impl RuntimeExtension for ServiceAccountExtension {
                 .route("/api/v1/service-accounts/{id}/enable", post(enable_sa))
                 .route("/api/v1/service-accounts/{id}/credentials", post(create_credential))
                 .route("/api/v1/service-accounts/{id}/credentials/{cred_id}", delete(revoke_credential))
+                .route("/api/v1/service-accounts/{id}/transfer-ownership", post(transfer_ownership))
                 .route("/api/v1/service-accounts/{id}/act-as", post(grant_act_as).delete(revoke_act_as))
                 .route("/api/v1/auth/token", post(issue_token))
                 .layer(axum::Extension(Arc::clone(&self.config))),
@@ -123,12 +124,13 @@ async fn create_sa(
     let id = Uuid::new_v4();
     let email = format!("sa+{}@localhost", body.slug);
     sqlx::query(
-        "INSERT INTO rootcx_system.users (id, email, display_name, is_system, kind) \
-         VALUES ($1, $2, $3, true, 'service')",
+        "INSERT INTO rootcx_system.users (id, email, display_name, is_system, kind, owner_of_record) \
+         VALUES ($1, $2, $3, true, 'service', $4)",
     )
     .bind(id)
     .bind(&email)
     .bind(&body.display_name)
+    .bind(identity.user_id)
     .execute(&pool)
     .await
     .map_err(|e| {
@@ -216,6 +218,36 @@ async fn delete_sa(
         return Err(ApiError::NotFound("service account not found".into()));
     }
     Ok(Json(json!({ "message": "service account deleted" })))
+}
+
+// ── Ownership transfer ────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct TransferOwnership {
+    new_owner: Uuid,
+}
+
+async fn transfer_ownership(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<TransferOwnership>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let pool = routes::pool(&rt);
+    require_perm(&pool, identity.user_id, MANAGE).await?;
+    assert_is_service_account(&pool, id).await?;
+
+    let is_human: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.users WHERE id = $1 AND kind = 'human')",
+    ).bind(body.new_owner).fetch_one(&pool).await?;
+    if !is_human {
+        return Err(ApiError::BadRequest("new_owner must be a human user".into()));
+    }
+
+    sqlx::query("UPDATE rootcx_system.users SET owner_of_record = $2 WHERE id = $1")
+        .bind(id).bind(body.new_owner).execute(&pool).await?;
+
+    Ok(Json(json!({ "id": id, "owner_of_record": body.new_owner })))
 }
 
 // ── Credentials ───────────────────────────────────────────────────────
@@ -339,12 +371,15 @@ async fn issue_token(
     let sa_id: Uuid = req.client_id.parse()
         .map_err(|_| ApiError::Unauthorized("invalid_client".into()))?;
 
-    let sa: Option<(String, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
-        "SELECT email, disabled_at FROM rootcx_system.users WHERE id = $1 AND kind = 'service'",
+    let sa: Option<(String, Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT email, disabled_at, owner_of_record FROM rootcx_system.users WHERE id = $1 AND kind = 'service'",
     ).bind(sa_id).fetch_optional(&pool).await?;
-    let (email, disabled_at) = sa.ok_or_else(|| ApiError::Unauthorized("invalid_client".into()))?;
+    let (email, disabled_at, owner) = sa.ok_or_else(|| ApiError::Unauthorized("invalid_client".into()))?;
     if disabled_at.is_some() {
         return Err(ApiError::Unauthorized("invalid_client".into()));
+    }
+    if owner.is_none() {
+        return Err(ApiError::BadRequest("service account has no owner of record".into()));
     }
 
     let prefix = key_prefix(&req.client_secret);
