@@ -369,6 +369,7 @@ async fn t7_5b_call_action_tool_passes_effective_perms_to_caller() {
         user_id: Uuid::new_v4(),
         invoker_user_id: Some(Uuid::new_v4()),
         permissions: intersection.clone(),
+        task_scope: None,
         args: json!({"app": "billing", "action": "createInvoice", "input": {}}),
         agent_dispatch: None,
         integration_caller: None,
@@ -530,6 +531,11 @@ async fn t3_8_webhook_valid_delegation_passes() {
 
     let delegator = create_user(rt.pool(), "admin-wh@t.local").await;
     let agent_uid = rootcx_core::extensions::agents::agent_user_id("alerts");
+    // The fire-time gate (B1) requires the owner to hold app:{id}:invoke
+    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, permissions) VALUES ('wh_owner', $1) ON CONFLICT DO NOTHING")
+        .bind(&vec![format!("app:alerts:invoke")]).execute(rt.pool()).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, 'wh_owner') ON CONFLICT DO NOTHING")
+        .bind(delegator).execute(rt.pool()).await.unwrap();
 
     let wh_id = create_webhook(rt.pool(), "alerts", "incoming", "agent", Some(delegator)).await;
     rootcx_core::delegations::create(rt.pool(), delegator, agent_uid, "webhook", Some(wh_id)).await.unwrap();
@@ -587,6 +593,7 @@ async fn t3_12_sub_agent_invoke_with_perm_succeeds() {
             "app:crm:contacts.read".into(),
             "app:billing:invoke".into(),
         ],
+        task_scope: None,
         args: json!({"app_id": "billing", "message": "generate invoice"}),
         agent_dispatch: None,
         integration_caller: None,
@@ -615,6 +622,7 @@ async fn sub_agent_invoke_requires_invoke_perm() {
         user_id: Uuid::new_v4(),
         invoker_user_id: Some(Uuid::new_v4()),
         permissions: vec!["app:crm:contacts.read".into()],
+        task_scope: None,
         args: json!({"app_id": "billing", "message": "hi"}),
         agent_dispatch: None,
         integration_caller: None,
@@ -624,6 +632,44 @@ async fn sub_agent_invoke_requires_invoke_perm() {
     let tool = rootcx_core::tools::invoke_agent::InvokeAgentTool;
     let err = rootcx_core::tools::Tool::execute(&tool, &ctx).await.unwrap_err();
     assert!(err.contains("app:billing:invoke"), "sub-agent invoke must require invoke perm: {err}");
+    rt.shutdown().await;
+}
+
+// ── TEST: Task scope blocks cross-app tool call ─────────────────────────
+// Anti-regression: the scheduler sets task_scope = ["app:{id}:*"].
+// After intersection with scope, cross-app perms are dropped, so an agent
+// triggered by cron cannot invoke or read another app's data.
+#[tokio::test]
+async fn task_scope_blocks_cross_app_sub_invoke() {
+    let rt = harness::TestRuntime::boot().await;
+    // Simulate: agent had both crm and billing perms from the 2-way intersection,
+    // but the cron scope narrowed to app:crm:* only.
+    let full_perms = vec![
+        "app:crm:contacts.read".into(),
+        "app:crm:invoke".into(),
+        "app:billing:invoke".into(),
+        "app:billing:invoices.read".into(),
+    ];
+    let scope = vec!["app:crm:*".to_string()];
+    let narrowed = rootcx_core::extensions::rbac::policy::intersect_permissions(&full_perms, &scope);
+
+    let ctx = rootcx_core::tools::ToolContext {
+        pool: rt.pool().clone(),
+        app_id: "crm".into(),
+        user_id: Uuid::new_v4(),
+        invoker_user_id: Some(Uuid::new_v4()),
+        permissions: narrowed,
+        task_scope: Some(scope),
+        args: json!({"app_id": "billing", "message": "hi"}),
+        agent_dispatch: None,
+        integration_caller: None,
+        action_caller: None,
+        stream_tx: None,
+    };
+    let tool = rootcx_core::tools::invoke_agent::InvokeAgentTool;
+    let err = rootcx_core::tools::Tool::execute(&tool, &ctx).await.unwrap_err();
+    assert!(err.contains("app:billing:invoke"),
+        "task_scope must block cross-app invoke for cron-triggered agents: {err}");
     rt.shutdown().await;
 }
 
@@ -642,7 +688,7 @@ async fn register_agent(pool: &sqlx::PgPool, app_id: &str) {
     let agent_email = format!("agent+{app_id}@localhost");
     sqlx::query("INSERT INTO rootcx_system.apps (id, name, manifest) VALUES ($1, $1, '{}') ON CONFLICT DO NOTHING")
         .bind(app_id).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO rootcx_system.users (id, email) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+    sqlx::query("INSERT INTO rootcx_system.users (id, email, is_system, kind) VALUES ($1, $2, true, 'agent') ON CONFLICT (id) DO UPDATE SET kind = 'agent'")
         .bind(agent_uid).bind(&agent_email).execute(pool).await.unwrap();
     sqlx::query(
         "INSERT INTO rootcx_system.agents (app_id, name, config) VALUES ($1, $1, '{}') ON CONFLICT DO NOTHING"
