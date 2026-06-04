@@ -86,6 +86,7 @@ pub async fn is_valid(pool: &PgPool, delegator: Uuid, delegatee: Uuid) -> Result
 pub async fn create(
     pool: &PgPool, delegator: Uuid, delegatee: Uuid, trigger_type: &str, trigger_ref: Option<Uuid>,
 ) -> Result<Uuid, RuntimeError> {
+    validate_delegation_kinds(pool, delegator, delegatee, trigger_type).await?;
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO rootcx_system.delegations (delegator_uid, delegatee_uid, trigger_type, trigger_ref) \
          VALUES ($1, $2, $3, $4) \
@@ -95,6 +96,26 @@ pub async fn create(
     ).bind(delegator).bind(delegatee).bind(trigger_type).bind(trigger_ref)
     .fetch_one(pool).await.map_err(err)?;
     Ok(id)
+}
+
+async fn validate_delegation_kinds(
+    pool: &PgPool, delegator: Uuid, delegatee: Uuid, trigger_type: &str,
+) -> Result<(), RuntimeError> {
+    let kinds: Vec<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, kind FROM rootcx_system.users WHERE id = ANY($1)"
+    ).bind(&[delegator, delegatee][..])
+    .fetch_all(pool).await.map_err(err)?;
+
+    let delegatee_kind = kinds.iter().find(|(id, _)| *id == delegatee).map(|(_, k)| k.as_str());
+    let delegator_kind = kinds.iter().find(|(id, _)| *id == delegator).map(|(_, k)| k.as_str());
+
+    if delegatee_kind == Some("human") {
+        return Err(RuntimeError::Delegation("delegatee must not be a human principal".into()));
+    }
+    if delegator_kind == Some("agent") && trigger_type == "act_as" {
+        return Err(RuntimeError::Delegation("agent principals cannot initiate act_as delegations".into()));
+    }
+    Ok(())
 }
 
 pub async fn revoke(pool: &PgPool, delegation_id: Uuid) -> Result<(), RuntimeError> {

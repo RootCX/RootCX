@@ -27,7 +27,7 @@ async fn setup_agent_app(rt: &harness::TestRuntime) -> String {
         &uuid::Uuid::from_bytes([0x9a,0x3b,0x4c,0x5d,0x6e,0x7f,0x40,0x01,0x82,0x93,0xa4,0xb5,0xc6,0xd7,0xe8,0xf9]),
         format!("agent:{app_id}").as_bytes(),
     );
-    sqlx::query("INSERT INTO rootcx_system.users (id, email, is_system) VALUES ($1, $2, true) ON CONFLICT DO NOTHING")
+    sqlx::query("INSERT INTO rootcx_system.users (id, email, is_system, kind) VALUES ($1, $2, true, 'agent') ON CONFLICT (id) DO UPDATE SET kind = 'agent'")
         .bind(agent_uid).bind(format!("agent+{app_id}@localhost")).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, 'admin') ON CONFLICT DO NOTHING")
         .bind(agent_uid).execute(pool).await.unwrap();
@@ -271,7 +271,7 @@ async fn crud_delegated_token_intersection() {
 
     // Register an agent user for this app (like setup_agent_app does)
     let agent_uid = agent_uid_for(&app_id);
-    sqlx::query("INSERT INTO rootcx_system.users (id, email, is_system) VALUES ($1, $2, true) ON CONFLICT DO NOTHING")
+    sqlx::query("INSERT INTO rootcx_system.users (id, email, is_system, kind) VALUES ($1, $2, true, 'agent') ON CONFLICT (id) DO UPDATE SET kind = 'agent'")
         .bind(agent_uid).bind(format!("agent+{app_id}@localhost")).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, 'admin') ON CONFLICT DO NOTHING")
         .bind(agent_uid).execute(pool).await.unwrap();
@@ -657,7 +657,7 @@ async fn invoke_granted_via_role_allows_access() {
     sqlx::query("INSERT INTO rootcx_system.agents (app_id, name, config) VALUES ($1, 'Test Agent', '{}') ON CONFLICT DO NOTHING")
         .bind(app_id).execute(pool).await.unwrap();
     let agent_uid = agent_uid_for(app_id);
-    sqlx::query("INSERT INTO rootcx_system.users (id, email, is_system) VALUES ($1, $2, true) ON CONFLICT DO NOTHING")
+    sqlx::query("INSERT INTO rootcx_system.users (id, email, is_system, kind) VALUES ($1, $2, true, 'agent') ON CONFLICT (id) DO UPDATE SET kind = 'agent'")
         .bind(agent_uid).bind(format!("agent+{app_id}@localhost")).execute(pool).await.unwrap();
     sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, 'admin') ON CONFLICT DO NOTHING")
         .bind(agent_uid).execute(pool).await.unwrap();
@@ -746,7 +746,7 @@ async fn cross_app_action_callback_uses_caller_identity() {
     // 5. Negative: mint with TARGET app identity (non-agent, has no role) -- should fail
     let target_fake_agent_uid = agent_uid_for(target_app_id);
     // Ensure this user exists but has NO roles (non-agent app has no agent user row)
-    sqlx::query("INSERT INTO rootcx_system.users (id, email, is_system) VALUES ($1, $2, true) ON CONFLICT DO NOTHING")
+    sqlx::query("INSERT INTO rootcx_system.users (id, email, is_system, kind) VALUES ($1, $2, true, 'agent') ON CONFLICT (id) DO UPDATE SET kind = 'agent'")
         .bind(target_fake_agent_uid).bind(format!("agent+{target_app_id}@localhost")).execute(pool).await.unwrap();
     // Explicitly ensure no roles
     sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1")
