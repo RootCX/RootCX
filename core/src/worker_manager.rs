@@ -282,6 +282,30 @@ impl WorkerManager {
         join_all(futs).await;
     }
 
+    pub async fn invalidate_for_principal(&self, user_id: uuid::Uuid) {
+        let target = self.workers.read().await.keys()
+            .find(|(app_id, _)| crate::extensions::agents::agent_user_id(app_id) == user_id)
+            .map(|(app_id, _)| app_id.clone());
+        if let Some(app_id) = target {
+            info!(app_id = %app_id, %user_id, "invalidating worker (permission change)");
+            if let Err(e) = self.stop_app(&app_id).await {
+                error!(app_id = %app_id, "invalidate stop: {e}");
+            }
+        }
+    }
+
+    /// Stop workers for all principals that hold a given role.
+    /// Used when role permissions/inheritance change.
+    pub async fn invalidate_for_role(&self, pool: &PgPool, role: &str) {
+        let user_ids: Vec<(uuid::Uuid,)> = sqlx::query_as(
+            "SELECT user_id FROM rootcx_system.rbac_assignments WHERE role = $1",
+        ).bind(role).fetch_all(pool).await.unwrap_or_default();
+
+        for (uid,) in user_ids {
+            self.invalidate_for_principal(uid).await;
+        }
+    }
+
     pub async fn rpc(
         &self, app_id: &str, id: String, method: String, params: JsonValue, caller: Option<RpcCaller>,
     ) -> Result<JsonValue, RuntimeError> {

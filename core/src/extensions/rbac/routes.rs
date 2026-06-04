@@ -9,7 +9,7 @@ use uuid::Uuid;
 use super::policy::{detect_cycle, require_admin, resolve_permissions};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::routes::{self, SharedRuntime};
+use crate::routes::{self, SharedRuntime, wm};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,6 +167,10 @@ pub(crate) async fn update_role(
 
     let r = qb.build().execute(&pool).await?;
     if r.rows_affected() == 0 { return Err(ApiError::NotFound(format!("role '{role_name}' not found"))); }
+
+    if body.permissions.is_some() || body.inherits.is_some() {
+        wm(&rt).invalidate_for_role(&pool, &role_name).await;
+    }
     Ok(Json(json!({ "message": format!("role '{role_name}' updated") })))
 }
 
@@ -178,6 +182,9 @@ pub(crate) async fn delete_role(
     let pool = routes::pool(&rt);
     require_admin(&pool, identity.user_id).await?;
     if role_name == "admin" { return Err(ApiError::BadRequest("cannot delete built-in admin role".into())); }
+
+    // Invalidate before deleting assignments so we can still find affected principals
+    wm(&rt).invalidate_for_role(&pool, &role_name).await;
 
     let r = sqlx::query("DELETE FROM rootcx_system.rbac_roles WHERE name = $1")
         .bind(&role_name).execute(&pool).await?;
@@ -214,6 +221,8 @@ pub(crate) async fn assign_role(
 
     sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING")
         .bind(body.user_id).bind(&body.role).execute(&pool).await?;
+
+    wm(&rt).invalidate_for_principal(body.user_id).await;
     Ok(Json(json!({ "message": format!("role '{}' assigned", body.role) })))
 }
 
@@ -239,6 +248,8 @@ pub(crate) async fn revoke_role(
     tx.commit().await?;
 
     if r.rows_affected() == 0 { return Err(ApiError::NotFound(format!("assignment not found for role '{}'", body.role))); }
+
+    wm(&rt).invalidate_for_principal(body.user_id).await;
     Ok(Json(json!({ "message": format!("role '{}' revoked", body.role) })))
 }
 

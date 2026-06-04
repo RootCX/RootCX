@@ -570,6 +570,140 @@ async fn agent_redeploy_preserves_restricted_role() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// WORKER INVALIDATION ON PERMISSION CHANGE (G6 governance rule)
+// ═══════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn revoke_role_invalidates_worker() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+    let app_id = setup_agent_app(&rt).await;
+    let pool = rt.pool();
+    let wm = rt.runtime.worker_manager();
+
+    // Start the worker (simulates deploy)
+    let secrets = rt.runtime.secret_manager();
+    wm.start_app(pool, &secrets, &app_id).await.unwrap();
+
+    // Verify worker is running
+    let statuses = wm.all_statuses().await;
+    assert!(statuses.contains_key(&app_id), "worker should be running after start_app");
+
+    // Revoke the admin role from the agent via the RBAC API
+    let agent_uid = agent_uid_for(&app_id);
+    let (status, _) = rt.post_json("/api/v1/roles/revoke", &json!({
+        "userId": agent_uid,
+        "role": "admin",
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Worker should be gone (invalidated)
+    let statuses = wm.all_statuses().await;
+    assert!(!statuses.contains_key(&app_id),
+        "worker must be invalidated after role revocation (G6: instant revocation)");
+}
+
+#[tokio::test]
+async fn update_role_perms_invalidates_holders_workers() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+    let app_id = setup_agent_app(&rt).await;
+    let pool = rt.pool();
+    let wm = rt.runtime.worker_manager();
+
+    let agent_uid = agent_uid_for(&app_id);
+
+    // Give the agent a custom role instead of admin
+    sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1")
+        .bind(agent_uid).execute(pool).await.unwrap();
+    let role_name = "custom_worker_role";
+    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, inherits, permissions) VALUES ($1, '{}', $2) ON CONFLICT (name) DO NOTHING")
+        .bind(role_name).bind(&vec!["*".to_string()]).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(agent_uid).bind(role_name).execute(pool).await.unwrap();
+
+    // Start the worker
+    let secrets = rt.runtime.secret_manager();
+    wm.start_app(pool, &secrets, &app_id).await.unwrap();
+    assert!(wm.all_statuses().await.contains_key(&app_id));
+
+    // Update the role's permissions via API (narrows them)
+    let (status, _) = rt.patch_json(
+        &format!("/api/v1/roles/{role_name}"),
+        &json!({"permissions": ["app:x:read"]}),
+    ).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Worker should be invalidated
+    let statuses = wm.all_statuses().await;
+    assert!(!statuses.contains_key(&app_id),
+        "worker must be invalidated when role permissions change (G6)");
+}
+
+#[tokio::test]
+async fn assign_role_invalidates_worker() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+    let app_id = setup_agent_app(&rt).await;
+    let pool = rt.pool();
+    let wm = rt.runtime.worker_manager();
+
+    // Start the worker
+    let secrets = rt.runtime.secret_manager();
+    wm.start_app(pool, &secrets, &app_id).await.unwrap();
+    assert!(wm.all_statuses().await.contains_key(&app_id), "worker should be running after start_app");
+
+    // Assign an additional role to the agent via the RBAC API
+    let agent_uid = agent_uid_for(&app_id);
+    let extra_role = format!("extra_{}", &app_id[..8]);
+    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, inherits, permissions) VALUES ($1, '{}', $2) ON CONFLICT (name) DO NOTHING")
+        .bind(&extra_role).bind(&vec!["app:x:read".to_string()]).execute(pool).await.unwrap();
+
+    let (status, _) = rt.post_json("/api/v1/roles/assign", &json!({
+        "userId": agent_uid,
+        "role": extra_role,
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Worker should be gone (new perms means old worker is stale)
+    let statuses = wm.all_statuses().await;
+    assert!(!statuses.contains_key(&app_id),
+        "worker must be invalidated after role assignment (G6: perms changed)");
+}
+
+#[tokio::test]
+async fn delete_role_invalidates_worker() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+    let app_id = setup_agent_app(&rt).await;
+    let pool = rt.pool();
+    let wm = rt.runtime.worker_manager();
+
+    let agent_uid = agent_uid_for(&app_id);
+
+    // Create a custom role and assign it to the agent (keep admin too so delete doesn't fail)
+    let custom_role = format!("del_{}", &app_id[..8]);
+    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, inherits, permissions) VALUES ($1, '{}', $2) ON CONFLICT (name) DO NOTHING")
+        .bind(&custom_role).bind(&vec!["app:x:write".to_string()]).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(agent_uid).bind(&custom_role).execute(pool).await.unwrap();
+
+    // Start the worker
+    let secrets = rt.runtime.secret_manager();
+    wm.start_app(pool, &secrets, &app_id).await.unwrap();
+    assert!(wm.all_statuses().await.contains_key(&app_id), "worker should be running after start_app");
+
+    // Delete the custom role via API
+    let (status, _) = rt.delete_json(&format!("/api/v1/roles/{custom_role}")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Worker should be invalidated
+    let statuses = wm.all_statuses().await;
+    assert!(!statuses.contains_key(&app_id),
+        "worker must be invalidated after role deletion (G6: perms changed)");
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // MIGRATION BACKFILL (legacy triggers with NULL created_by)
 // ═══════════════════════════════════════════════════════════════════
 
