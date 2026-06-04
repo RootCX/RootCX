@@ -236,16 +236,17 @@ async fn multiple_credentials_rotation() {
 }
 
 #[tokio::test]
-async fn act_as_escalate_override() {
+async fn escalate_permission_does_not_bypass_subset_check() {
     let rt = harness::TestRuntime::boot().await;
     let pool = rt.pool();
 
-    let superadmin = db_user(pool, "escalator@t.local", &["admin:rbac.escalate"]).await;
+    // A user holding the old escalate permission must NOT bypass the subset check.
+    let admin = db_user(pool, "escalator@t.local", &["admin:rbac.escalate"]).await;
     let sa_big = db_user(pool, "sa+huge@localhost", &["app:crm:*", "app:billing:*"]).await;
 
-    rootcx_core::act_as::grant(pool, superadmin, sa_big).await.unwrap();
-    assert!(rootcx_core::act_as::assert_can_act_as(pool, superadmin, sa_big).await.is_ok(),
-        "admin:rbac.escalate overrides the anti-escalation subset check");
+    rootcx_core::act_as::grant(pool, admin, sa_big).await.unwrap();
+    assert!(rootcx_core::act_as::assert_can_act_as(pool, admin, sa_big).await.is_err(),
+        "anti-escalation must deny even when caller holds admin:rbac.escalate");
     rt.shutdown().await;
 }
 

@@ -73,9 +73,6 @@ impl RuntimeExtension for ServiceAccountExtension {
             "INSERT INTO rootcx_system.rbac_permissions (key, description) \
              VALUES ('admin:service_accounts.manage', 'Manage service accounts and their credentials') \
              ON CONFLICT (key) DO NOTHING",
-            "INSERT INTO rootcx_system.rbac_permissions (key, description) \
-             VALUES ('admin:rbac.escalate', 'Override the act-as anti-escalation rule') \
-             ON CONFLICT (key) DO NOTHING",
         ] {
             exec(pool, ddl).await?;
         }
