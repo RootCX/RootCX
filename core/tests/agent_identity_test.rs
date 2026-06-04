@@ -561,7 +561,7 @@ async fn agent_redeploy_preserves_restricted_role() {
         limits: None,
         supervision: None,
     };
-    rootcx_core::extensions::agents::register_agent(pool, &app_id, &def).await.unwrap();
+    rootcx_core::extensions::agents::register_agent(pool, &app_id, &def, None).await.unwrap();
 
     // Role must NOT be overwritten back to admin
     let (_, perms) = rootcx_core::extensions::rbac::policy::resolve_permissions(pool, agent_uid).await.unwrap();
