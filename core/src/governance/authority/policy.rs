@@ -49,6 +49,12 @@ pub async fn has_permission_db(pool: &PgPool, user_id: Uuid, required: &str) -> 
         .bind(user_id).bind(required).fetch_one(pool).await?)
 }
 
+pub async fn role_exists(pool: &PgPool, name: &str) -> Result<bool, ApiError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_roles WHERE name = $1)",
+    ).bind(name).fetch_one(pool).await?)
+}
+
 pub async fn require_perm(pool: &PgPool, user_id: Uuid, perm: &str) -> Result<(), ApiError> {
     if has_permission_db(pool, user_id, perm).await? { Ok(()) }
     else { Err(ApiError::Forbidden(format!("permission denied: {perm}"))) }
