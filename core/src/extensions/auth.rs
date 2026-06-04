@@ -49,6 +49,11 @@ impl RuntimeExtension for AuthExtension {
             "ALTER TABLE rootcx_system.users ADD COLUMN IF NOT EXISTS disabled_at TIMESTAMPTZ",
             "UPDATE rootcx_system.users SET kind = 'agent' WHERE email LIKE 'agent+%@localhost' AND kind <> 'agent'",
             "UPDATE rootcx_system.users SET kind = 'service' WHERE id = '00000000-0000-0000-0000-000000000001' AND kind <> 'service'",
+            // Invariant G4: every non-human identity must have a human owner of record.
+            "ALTER TABLE rootcx_system.users ADD COLUMN IF NOT EXISTS owner_of_record UUID REFERENCES rootcx_system.users(id)",
+            "UPDATE rootcx_system.users SET owner_of_record = (\
+                SELECT id FROM rootcx_system.users WHERE NOT is_system AND kind = 'human' ORDER BY created_at LIMIT 1\
+            ) WHERE kind IN ('service', 'agent') AND owner_of_record IS NULL",
         ] {
             sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
         }

@@ -248,7 +248,7 @@ impl WorkerManager {
             let app_id = entry.file_name().to_string_lossy().to_string();
 
             if let Some(def) = crate::extensions::agents::config::load_agent_json(&path).await {
-                if let Err(e) = crate::extensions::agents::register_agent(pool, &app_id, &def).await {
+                if let Err(e) = crate::extensions::agents::register_agent(pool, &app_id, &def, None).await {
                     error!(app_id = %app_id, "re-register agent: {e}");
                 }
             }

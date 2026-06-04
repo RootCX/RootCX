@@ -107,7 +107,7 @@ impl RuntimeExtension for AgentExtension {
 
         if !exists { return Ok(()); }
 
-        sync_agent_rbac(pool, app_id).await?;
+        sync_agent_rbac(pool, app_id, None).await?;
         info!(app = %app_id, "agent RBAC synced");
         Ok(())
     }
@@ -129,7 +129,7 @@ impl RuntimeExtension for AgentExtension {
     }
 }
 
-pub async fn register_agent(pool: &PgPool, app_id: &str, def: &AgentDefinition) -> Result<(), RuntimeError> {
+pub async fn register_agent(pool: &PgPool, app_id: &str, def: &AgentDefinition, deployer: Option<Uuid>) -> Result<(), RuntimeError> {
     let config = serde_json::json!({
         "systemPrompt": def.system_prompt,
         "memory": def.memory,
@@ -152,7 +152,7 @@ pub async fn register_agent(pool: &PgPool, app_id: &str, def: &AgentDefinition) 
     .await
     .map_err(RuntimeError::Schema)?;
 
-    sync_agent_rbac(pool, app_id).await?;
+    sync_agent_rbac(pool, app_id, deployer).await?;
     info!(app = %app_id, "agent registered from agent.json");
     Ok(())
 }
@@ -160,13 +160,14 @@ pub async fn register_agent(pool: &PgPool, app_id: &str, def: &AgentDefinition) 
 /// Ensure the agent has a system user identity and a least-privilege role
 /// derived from the app's data contract. Does not overwrite existing role
 /// assignments (admin may have already scoped the agent differently).
-async fn sync_agent_rbac(pool: &PgPool, app_id: &str) -> Result<(), RuntimeError> {
+async fn sync_agent_rbac(pool: &PgPool, app_id: &str, deployer: Option<Uuid>) -> Result<(), RuntimeError> {
     let agent_uid = agent_user_id(app_id);
 
     sqlx::query(
-        "INSERT INTO rootcx_system.users (id, email, is_system, kind) \
-         VALUES ($1, $2, true, 'agent') ON CONFLICT (id) DO NOTHING"
-    ).bind(agent_uid).bind(format!("agent+{app_id}@localhost"))
+        "INSERT INTO rootcx_system.users (id, email, is_system, kind, owner_of_record) \
+         VALUES ($1, $2, true, 'agent', $3) ON CONFLICT (id) DO UPDATE SET \
+         owner_of_record = COALESCE(rootcx_system.users.owner_of_record, EXCLUDED.owner_of_record)"
+    ).bind(agent_uid).bind(format!("agent+{app_id}@localhost")).bind(deployer)
     .execute(pool).await.map_err(RuntimeError::Schema)?;
 
     // Only assign role on first deploy; after that the admin governs via RBAC API.
