@@ -49,7 +49,7 @@ Two identity classes: **human** and **non-human**. Identity (who it is) is gover
 | Behaviour | **Deterministic** (runs fixed code) | **Non-deterministic** (reasons, picks tools) |
 | Authority operator | Own grant (REPLACE) | Intersection with responsible principal |
 | May be a responsible principal? | Yes | Yes (in autonomous mode, governed identically to a SA) |
-| Extra gate | None | **Sensitive-action step-up** (because non-determinism = confused-deputy surface) |
+| Extra gate | None | **Supervision policy** (opt-in per-tool approval, because non-determinism = confused-deputy surface) |
 
 **An agent is dual-mode.** Acting on a principal's behalf, its authority is the intersection. Acting autonomously (cron, hook, scheduled), it runs on its own grant ∩ task scope, governed exactly like a service account. Every chain, attended or not, terminates in an accountable human via the owner of record.
 
@@ -85,8 +85,8 @@ run authority = agent's own grant
 - When an agent acts on a principal's behalf, the responsible principal's permissions are an operand.
 - When it acts autonomously (own credentials, like a SA), that operand drops out; the run is bounded by own grant ∩ task scope.
 - **Empty intersection = zero authority.**
-- **Task scope** is ephemeral: at invoke time the run is bound to specific entities and action classes. Default when unset = **read-only plus the single action the trigger names** (resolved from the trigger's definition, never from a payload). Expires with the run.
-- **Down a chain, authority is monotone non-increasing.** A sub-invoke intersects against the parent's already-frozen set, never re-derived from the root. A cycle re-intersects a set already applied and gains nothing; depth is bounded by a ceiling set at the root and lowered by each hop.
+- **Task scope** is ephemeral: at invoke time the run is bound to specific entities and action classes. Default when unset = `app:{id}:*` (the automation's own app, narrowed by the owner intersection). A payload never widens scope. Expires with the run.
+- **Down a chain, authority is monotone non-increasing.** A sub-invoke intersects against the parent's already-frozen set, never re-derived from the root. A cycle re-intersects a set already applied and gains nothing; depth is bounded (max 1 level of nesting).
 
 ---
 
@@ -114,16 +114,18 @@ The run executes under `agent ∩ responsible ∩ task scope`.
 | Job runs (one-shot) | The job owner | Yes | same |
 | Channel message (Slack/Telegram) | The linked user | No | linked + enabled + holds `invoke` + authentic (Family H) |
 
-- **B1 — The owned-automation gate.** Cron, hook, webhook, job, and channel all obey one gate: *owner present AND enabled AND holds `app:{id}:invoke`*, else **refused, fail-closed**. An owner stripped of invoke, disabled, or deleted stops firing immediately.
+Channel is an authenticated transport, equivalent to the app UI. The linked user is the responsible principal directly, same as a click.
+
+- **B1 — The owned-automation gate.** Cron, hook, webhook, and job obey one gate: *owner present AND enabled AND holds `app:{id}:invoke`*, else **refused, fail-closed**. An owner stripped of invoke, disabled, or deleted stops firing immediately.
 - **B1b — Consent is a delegation grant (RFC 8693 `may_act`).** When a trigger is created, a delegation grant captures the consent. The trigger *references* the grant. Revoking the grant immediately disables every trigger that references it without deleting them. The audit log records each exercise (`act`) but is never the authorization (`may_act`).
 - **B2 — A user click carries no stored owner.** The human is present directly as the responsible principal; it cannot be `runAs` a service account.
-- **B3 — Channel messages are unattended for sensitive actions.** The linked user is the responsible principal, but a channel message can never *itself* authorize a sensitive action (Family F). A message is input, not authorization.
-- **B4 — Task scope applies.** Default = read-only + the trigger's named action. A payload never widens authority.
+- **B3 — Channel messages are attended.** The linked user is the responsible principal directly (same as a UI click). The channel is an authenticated transport (HMAC-verified, identity linked); it carries the same trust level as the app's own UI.
+- **B4 — Task scope applies.** Default = `app:{id}:*` (full app, narrowed by owner intersection). A payload never widens authority.
 
 ### Family C — Composition (chains and cross-app)
 
 - **C1 — Sub-invoke.** An agent invokes another. The hop is gated against the **parent's frozen set** (`app:{target}:invoke` must be inside it). The child runs at `child_agent ∩ effective(parent) ∩ child_scope`. Authority narrows against the parent, never re-widens against the root.
-- **C2 — Deep chains and cycles.** Each hop is a subset. A cycle re-intersects and gains nothing. A depth ceiling, set at the root and lowered per hop, terminates the tree.
+- **C2 — Deep chains and cycles.** Each hop is a subset. A cycle re-intersects and gains nothing. Depth is bounded (currently max 1 level of sub-invocation).
 - **C3 — Cross-app data.** RLS filters each app's schema per-principal; unauthorized schemas return 0 rows.
 - **C4 — Cross-app action call.** The frozen intersection is carried to the target.
 
@@ -144,15 +146,15 @@ Every way new authority is created is capped at the actor's own authority.
 - **E2 — Create automation `runAs` a service account.**
   - **Default: subset-by-construction.** If `perms(SA) ⊆ perms(creator)`, no extra grant needed. Most automation lives here.
   - **Above subset: one act-as grant.** A narrow, explicit, SA-specific, revocable, audited delegation grant, fenced by: **no one may issue act-as on an identity more privileged than the granting authority's own.** This keeps the capability GCP/AWS deliberately keep (`actAs`/`PassRole`) while closing the unscoped escalation vector (a well-documented cloud privilege-escalation path). [Tenable, Rhino Security Labs]
-  - **No standing escalate-override permission.** No `admin:rbac.escalate` as a permanent grant. If the residual case arises (creating an SA more privileged than any current admin), it is a **break-glass procedure**: time-boxed, dual-authorized, alerting, auto-expiring, reviewed at closure. Not a role anyone carries. [ISO 27001 A.8.2, Microsoft Entra emergency-access]
+  - **No standing escalate-override permission.** No `admin:rbac.escalate` as a permanent grant. The anti-escalation fence (no one may grant act-as on an identity more privileged than their own) structurally prevents this case.
 - **E3 — Install an app.** The installer auto-receives `app:{id}:*` over the new app only (self-service), never platform authority.
 
 ### Family F — Sensitive actions and the confused-deputy boundary
 
-The intersection bounds the maximum. It does not stop an agent from being *steered* by malicious input into a harmful action within that maximum. So a sensitive action is **deny-by-default even inside the run authority**.
+The intersection bounds the maximum. It does not stop an agent from being *steered* by malicious input into a harmful action within that maximum. A **supervision policy** (per-app, configurable) gates tool calls that the app admin designates as sensitive.
 
-- **F1 — Attended (human present, e.g. a user click).** Proceeds only on explicit, fresh, single-use confirmation bound to the exact action and target. Never inferred from free-text.
-- **F2 — Unattended (cron, hook, webhook, job, channel).** Proceeds only under the owner's **standing pre-authorization** naming the exact action class and bounds (count, amount, recipient). No valid pre-authorization = **refused, fail-closed**, recorded, approval request raised. Never blocks forever.
+- **F1 — Supervision modes.** `autonomous` (all tools allowed within run authority), `supervised` (designated tools require human approval before execution). Default is autonomous; app admins opt-in to supervision per tool or tool category.
+- **F2 — Approval flow.** When a supervised tool is called, execution pauses and an `ApprovalRequired` event is raised. The responsible principal (or a designated approver) confirms or denies. Denied = tool call refused, agent continues with remaining tools.
 
 All app data, integration payloads, and channel content are **untrusted input**: may inform reasoning, never the sole source of authority.
 
@@ -227,12 +229,11 @@ The permission engine is not the only line. Even if bypassed, independent layers
 
 ## PART 6 — AUDIT
 
-The audit log is the backbone of named accountability; if it can be edited, accountability is fiction.
+The audit log is the backbone of named accountability.
 
-- Every record carries: **who acted** (the actor), **who authorized** (the responsible principal whose consent activated the action), the trigger, the action, the target, the task scope, the result (allowed/denied), and the delegation grant id consumed.
-- Records are **append-only** for every principal including `*`: no path, raw SQL included, can update or delete them.
-- Records are **tamper-evident** (hash-chained; any edit or gap is detectable). No identity both performs an action and can erase its record.
-- Records are **retained** >= 1 year and streamed to a write-once external sink.
+- Every record carries: **who acted** (the actor), **who authorized** (the responsible principal / delegator), the trigger reference, the action, the target entity, and a timestamp.
+- Records are **append-only** for every principal including `*`: the `audit_log` table has no UPDATE/DELETE permissions for app roles. Only INSERT via trigger functions.
+- Records are set via GUCs (`rootcx.user_id`, `rootcx.delegator_uid`, `rootcx.trigger_ref`) posed by the core before each transaction, below the app's reach.
 
 ---
 
@@ -241,18 +242,18 @@ The audit log is the backbone of named accountability; if it can be edited, acco
 1. **No principal = denied.** Every unit of work names a responsible principal or it does not run.
 2. **Disabled = denied instantly.** No path exempt; never waits for token expiry.
 3. **A run never exceeds `agent ∩ responsible principal ∩ task scope`.** Empty intersection = zero authority.
-4. **Authority is monotone non-increasing down a chain.** A child never regains what a parent dropped; a cycle gains nothing; depth is bounded.
+4. **Authority is monotone non-increasing down a chain.** A child never regains what a parent dropped; a cycle gains nothing; depth is bounded (max 1).
 5. **Owned automation with a disabled, non-invoking, or absent owner is refused.** Consent is a first-class grant: revoking it disables referencing triggers without deleting them.
 6. **You cannot grant authority beyond what you hold.** `runAs` is subset-by-default; exceeding it requires a narrow, fenced act-as grant. No standing escalate-override.
 7. **Every non-human identity has a human owner of record.** An ownerless identity is refused; offboarding reassigns. Every chain terminates in an accountable human.
-8. **An agent is dual-mode.** Its authority is always bounded: intersection when acting for another, own grant when autonomous. Its behavioural non-determinism is why sensitive actions require step-up.
-9. **A sensitive action is denied unless explicitly authorized** (fresh confirmation when attended, standing pre-authorization when unattended). Fails closed, never blocks forever.
+8. **An agent is dual-mode.** Its authority is always bounded: intersection when acting for another, own grant when autonomous.
+9. **Supervision gates sensitive tool calls** when the app admin enables it (per-tool or per-category).
 10. **Untrusted input informs but never authorizes.** A payload never carries authority.
 11. **External events are authenticated before any principal is reached.**
 12. **Integration credentials run as their connected principal**, audience-restricted, never borrowed.
 13. **App code cannot forge, override, or read the identity context.**
 14. **`app:A:*` never matches `app:B:*` or `admin:*`.** App isolation is structural.
-15. **Every action is recorded with who acted and who authorized.** Append-only, tamper-evident, hash-chained.
+15. **Every action is recorded with who acted and who authorized.** Append-only.
 
 ---
 
@@ -263,14 +264,28 @@ This model satisfies the following controls (verified against primary sources):
 | Framework | Key controls satisfied |
 |---|---|
 | **SOC 2** | CC6.1 (identity verification, immediate revocation, audit trail), CC6.3 (periodic review, SoD, named privileged access), CC7.2 (monitoring) |
-| **ISO 27001:2022** | A.5.3 (SoD), A.5.15 (access control), A.5.16 (identity lifecycle incl. non-human), A.5.17 (authentication), A.5.18 (provisioning + review + revocation), A.8.2 (privileged access, break-glass, expiry) |
+| **ISO 27001:2022** | A.5.3 (SoD), A.5.15 (access control), A.5.16 (identity lifecycle incl. non-human), A.5.17 (authentication), A.5.18 (provisioning + review + revocation), A.8.2 (privileged access, expiry) |
 | **NIST 800-53 r5** | AC-2 (account management), AC-3(2) (dual authorization), AC-5 (SoD), AC-6 (least privilege), AC-6(7) (review), AU-9 (audit protection), AU-10 (non-repudiation), IA-9 (service identification), PS-4/PS-5 (termination/transfer) |
 | **NIST 800-207** | Zero-trust tenets: per-request, dynamic policy, least privilege, no implicit trust |
 | **EU AI Act Art 14** | Human oversight capability, intervenability (G1/G3 disable/stop), proportionate to risk (Family F) |
 | **OWASP NHI 2025** | NHI1 (offboarding/G4), NHI5 (overprivileged/deny-by-default), NHI7 (long-lived secrets/Part 5 expiry), NHI10 (human use of NHI/identity separation) |
 | **OWASP Agentic 2026** | ASI01 (goal hijack/Family F untrusted-input rule), ASI02 (tool budget/per-run resource budget), ASI03 (privilege abuse/Composition Law), ASI09 (trust exploitation/Family F attended gate) |
 | **RFC 8693** | `may_act` (delegation grant) vs `act` (audit record) distinction; nested actor chains |
-| **IETF attenuating-agent-tokens** | `del_depth`, `par_hash`, `jti` cycle detection, monotone narrowing (Part 3, Family C) |
+| **IETF attenuating-agent-tokens** | Monotone narrowing, intersection-per-hop (Part 3, Family C) |
+
+---
+
+## PART 9 — ROADMAP (not yet implemented)
+
+The following are design goals for future iterations. They are NOT enforced today.
+
+| Item | What it would add | Blocked by |
+|------|-------------------|------------|
+| Per-trigger task scope | Each cron/hook/webhook declares exactly which permissions it needs (instead of `app:*`) | Needs manifest schema + migration |
+| Configurable depth ceiling | Per-root configurable nesting depth with per-hop decrement | No use case yet (depth=1 suffices) |
+| Break-glass procedure | Time-boxed, dual-authorized, auto-expiring super-admin SA creation | Needs UX design + dual-auth flow |
+| Hash-chained audit | Tamper-evident audit log (SHA-256 chain linking records) | Needs external sink + retention policy |
+| Mandatory supervision | Sensitive actions deny-by-default even when supervision is not explicitly configured | Needs "sensitive action" classification per tool |
 
 ---
 
