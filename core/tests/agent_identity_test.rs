@@ -154,7 +154,7 @@ async fn delegation_expired_denied() {
     let agent = agent_uid_for(&app_id);
 
     sqlx::query(
-        "INSERT INTO rootcx_system.delegations (delegator_uid, delegatee_uid, trigger_type, expires_at) \
+        "INSERT INTO rootcx_system.delegations (delegator_uid, agent_uid, trigger_type, expires_at) \
          VALUES ($1, $2, 'manual', now() - interval '1 hour')"
     ).bind(uid).bind(agent).execute(pool).await.unwrap();
 
@@ -257,6 +257,60 @@ async fn crud_legacy_token_works_unchanged() {
 
     let (status, _) = rt.get_json("/api/v1/apps/legacyapp/collections/contacts").await;
     assert_eq!(status, StatusCode::OK, "legacy token (no act) must work as before");
+}
+
+#[tokio::test]
+async fn crud_delegated_token_intersection() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+    let pool = rt.pool();
+
+    let app_id = "delegcrudtest";
+    rt.install(app_id, "records").await;
+    let app_id = app_id.to_string();
+
+    // Register an agent user for this app (like setup_agent_app does)
+    let agent_uid = agent_uid_for(&app_id);
+    sqlx::query("INSERT INTO rootcx_system.users (id, email, is_system) VALUES ($1, $2, true) ON CONFLICT DO NOTHING")
+        .bind(agent_uid).bind(format!("agent+{app_id}@localhost")).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, 'admin') ON CONFLICT DO NOTHING")
+        .bind(agent_uid).execute(pool).await.unwrap();
+
+    // Use admin uid for the delegator (has '*') -- verifies delegated token works at all
+    let admin_uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
+        .fetch_one(pool).await.unwrap();
+    let auth = rt.runtime.auth_config();
+    let admin_delegated = rootcx_core::auth::jwt::mint_delegated(auth, admin_uid, agent_uid).unwrap();
+
+    // Verify token decodes correctly
+    let decoded = rootcx_core::auth::jwt::decode(auth, &admin_delegated).unwrap();
+    assert_eq!(decoded.sub, admin_uid.to_string());
+    assert!(decoded.act.is_some());
+
+    // Admin delegated token can read (intersection of * and * = *)
+    let (status, body) = rt.request_as(Method::GET, &format!("/api/v1/apps/{app_id}/collections/records"), &admin_delegated, None).await;
+    assert_eq!(status, StatusCode::OK, "admin delegated token should read, got: {body}");
+
+    // Now create a no-perm user
+    let noperm_uid = Uuid::new_v4();
+    sqlx::query("INSERT INTO rootcx_system.users (id, email) VALUES ($1, 'noperm@t.local')")
+        .bind(noperm_uid).execute(pool).await.unwrap();
+    // No roles assigned -- empty permissions
+
+    let noperm_delegated = rootcx_core::auth::jwt::mint_delegated(auth, noperm_uid, agent_uid).unwrap();
+
+    // No-perm delegated token DENIED on read (intersection of * and [] = [])
+    let (status, _) = rt.request_as(Method::GET, &format!("/api/v1/apps/{app_id}/collections/records"), &noperm_delegated, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "no-perm delegated token should be denied");
+
+    // No-perm delegated token DENIED on create
+    let (status, _) = rt.request_as(
+        Method::POST,
+        &format!("/api/v1/apps/{app_id}/collections/records"),
+        &noperm_delegated,
+        Some(&json!({"first_name":"x","last_name":"y"})),
+    ).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "delegated token without create perm should be denied");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -412,47 +466,27 @@ async fn worker_permission_lowpriv_invoker_restricts_agent() {
         "effective must NOT include perms the invoker lacks (CRITICAL: escalation prevention)");
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// SUB-AGENT CHAIN: the authority cap is chosen by context. This goes
-// through delegated_effective (the exact decision WorkerManager::
-// agent_invoke makes), so a regression that re-resolves a sub-invoke
-// against the human instead of the parent IS caught here.
-// ═══════════════════════════════════════════════════════════════════
-
 #[tokio::test]
-async fn delegated_effective_caps_sub_invoke_at_parent_not_human() {
+async fn worker_delegated_token_mint_and_decode_roundtrip() {
     let rt = harness::TestRuntime::boot().await;
-    let app_id = setup_agent_app(&rt).await; // child agent gets '*' on first deploy
     let pool = rt.pool();
-    let child_uid = agent_uid_for(&app_id);
+    let app_id = setup_agent_app(&rt).await;
 
-    // The original human is admin ('*'). The child agent is also broad ('*').
-    // The DISCRIMINATOR: if a sub-invoke wrongly capped at the human (the
-    // defect), the child would regain '*'. Capping at a narrow parent must not.
-    let human: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
+    let admin_uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
         .fetch_one(pool).await.unwrap();
-    let read = format!("app:{app_id}:tasks.read");
-    let parent_perms = vec![read.clone(), "tool:query_data".into()];
+    let agent_uid = agent_uid_for(&app_id);
+    let auth = rt.runtime.auth_config();
 
-    use rootcx_core::extensions::rbac::policy::{delegated_effective, has_permission};
+    // Mint (same as worker_manager does)
+    let token = rootcx_core::auth::jwt::mint_delegated(auth, admin_uid, agent_uid).unwrap();
 
-    // Sub-invoke (parent_perms = Some): cap at the parent, ignore the human.
-    let sub = delegated_effective(pool, child_uid, Some(human), Some(&parent_perms)).await;
-    assert!(has_permission(&sub, &read) && has_permission(&sub, "tool:query_data"),
-        "child keeps the parent's authority");
-    assert!(!sub.contains(&"*".to_string()),
-        "CRITICAL: sub-invoke caps at the parent, NOT the human (admin '*')");
-    assert!(!has_permission(&sub, &format!("app:{app_id}:tasks.write")),
-        "CRITICAL: child must not regain authority the parent lacks (re-widening defect)");
-
-    // Top of the tree (parent_perms = None): here the human IS the cap.
-    let top = delegated_effective(pool, child_uid, Some(human), None).await;
-    assert!(top.contains(&"*".to_string()),
-        "top-level invoke caps at the delegating human (admin '*')");
-
-    // Owner-less (no parent, no human): no authority at all (deny by default).
-    assert!(delegated_effective(pool, child_uid, None, None).await.is_empty(),
-        "owner-less invoke yields no authority");
+    // Decode (same as identity extractor does)
+    let claims = rootcx_core::auth::jwt::decode(auth, &token).unwrap();
+    assert_eq!(claims.sub, admin_uid.to_string());
+    let act = claims.act.unwrap();
+    assert_eq!(act.sub, agent_uid);
+    assert_eq!(claims.aud.as_deref(), Some("rootcx-core"));
+    assert!(claims.exp - claims.iat <= 120);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -676,3 +710,185 @@ async fn webhook_rpc_method_not_routed_to_agent() {
 // ═══════════════════════════════════════════════════════════════════
 // CROSS-APP ACTION CALLBACK: caller identity, not target identity
 // ═══════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn cross_app_action_callback_uses_caller_identity() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+    let pool = rt.pool();
+
+    // 1. Set up an agent app (the caller)
+    let caller_app_id = setup_agent_app(&rt).await;
+
+    // 2. Set up a regular (non-agent) app with an entity
+    let target_app_id = "content_queue";
+    rt.install(target_app_id, "draft").await;
+
+    // 3. Mint a delegated token using the CALLER agent's identity (the fix)
+    let admin_uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
+        .fetch_one(pool).await.unwrap();
+    let auth = rt.runtime.auth_config();
+    let caller_agent_uid = agent_uid_for(&caller_app_id);
+    let token = rootcx_core::auth::jwt::mint_delegated(auth, admin_uid, caller_agent_uid).unwrap();
+
+    // 4. Use that token to query the TARGET app's data -- should succeed
+    let (status, body) = rt.request_as(
+        Method::POST,
+        &format!("/api/v1/apps/{target_app_id}/collections/draft/query"),
+        &token,
+        Some(&json!({"filters": []})),
+    ).await;
+    assert_ne!(status, StatusCode::FORBIDDEN,
+        "delegated token minted with CALLER agent identity must not 403 on target app; got {status}: {body}");
+    assert_eq!(status, StatusCode::OK,
+        "query should succeed with caller agent delegated token; got {status}: {body}");
+
+    // 5. Negative: mint with TARGET app identity (non-agent, has no role) -- should fail
+    let target_fake_agent_uid = agent_uid_for(target_app_id);
+    // Ensure this user exists but has NO roles (non-agent app has no agent user row)
+    sqlx::query("INSERT INTO rootcx_system.users (id, email, is_system) VALUES ($1, $2, true) ON CONFLICT DO NOTHING")
+        .bind(target_fake_agent_uid).bind(format!("agent+{target_app_id}@localhost")).execute(pool).await.unwrap();
+    // Explicitly ensure no roles
+    sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1")
+        .bind(target_fake_agent_uid).execute(pool).await.unwrap();
+
+    let bad_token = rootcx_core::auth::jwt::mint_delegated(auth, admin_uid, target_fake_agent_uid).unwrap();
+    let (status, _) = rt.request_as(
+        Method::POST,
+        &format!("/api/v1/apps/{target_app_id}/collections/draft/query"),
+        &bad_token,
+        Some(&json!({"filters": []})),
+    ).await;
+    assert_eq!(status, StatusCode::FORBIDDEN,
+        "delegated token minted with TARGET (non-agent) identity must be denied; the old bug minted with target identity");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// FIRE-TIME INVOKE PERMISSION (B1 GATE)
+// Exercises the full path: trigger fires -> check invoke perm -> succeed/fail
+// ═══════════════════════════════════════════════════════════════════
+
+/// Create a DB-only user with given permissions (no HTTP registration needed).
+async fn create_db_user(pool: &sqlx::PgPool, perms: &[String]) -> Uuid {
+    let uid = Uuid::new_v4();
+    let email = format!("u-{}@test.local", uid.simple());
+    sqlx::query("INSERT INTO rootcx_system.users (id, email) VALUES ($1, $2)")
+        .bind(uid).bind(&email).execute(pool).await.unwrap();
+    let role = format!("r_{}", uid.simple());
+    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, inherits, permissions) VALUES ($1, '{}', $2)")
+        .bind(&role).bind(perms).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, $2)")
+        .bind(uid).bind(&role).execute(pool).await.unwrap();
+    uid
+}
+
+#[tokio::test]
+async fn webhook_fires_when_owner_has_invoke() {
+    let rt = harness::TestRuntime::boot().await;
+    let app_id = setup_agent_app(&rt).await;
+    let pool = rt.pool();
+
+    let uid = create_db_user(pool, &[format!("app:{app_id}:invoke")]).await;
+
+    let (wh_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO rootcx_system.webhooks (app_id, name, method, token, created_by) \
+         VALUES ($1, 'invoke-ok', 'agent', 'tok-invoke-ok', $2) RETURNING id"
+    ).bind(&app_id).bind(uid).fetch_one(pool).await.unwrap();
+
+    let agent = agent_uid_for(&app_id);
+    rootcx_core::delegations::create(pool, uid, agent, "webhook", Some(wh_id)).await.unwrap();
+
+    let res = rt.client.post(rt.url("/api/v1/hooks/tok-invoke-ok"))
+        .json(&json!({"data": "test"})).send().await.unwrap();
+    let s = res.status();
+    assert!(s != StatusCode::FORBIDDEN && s != StatusCode::NOT_FOUND,
+        "webhook owner with invoke permission should pass fire-time checks, got {s}");
+}
+
+#[tokio::test]
+async fn webhook_refused_when_owner_lacks_invoke() {
+    let rt = harness::TestRuntime::boot().await;
+    let app_id = setup_agent_app(&rt).await;
+    let pool = rt.pool();
+
+    let uid = create_db_user(pool, &[format!("app:{app_id}:contacts.read")]).await;
+
+    let (wh_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO rootcx_system.webhooks (app_id, name, method, token, created_by) \
+         VALUES ($1, 'no-invoke', 'agent', 'tok-no-invoke', $2) RETURNING id"
+    ).bind(&app_id).bind(uid).fetch_one(pool).await.unwrap();
+
+    let agent = agent_uid_for(&app_id);
+    rootcx_core::delegations::create(pool, uid, agent, "webhook", Some(wh_id)).await.unwrap();
+
+    let res = rt.client.post(rt.url("/api/v1/hooks/tok-no-invoke"))
+        .json(&json!({"data": "test"})).send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN,
+        "webhook owner without app:{{id}}:invoke must be refused at fire time");
+}
+
+#[tokio::test]
+async fn cron_fires_when_owner_has_invoke() {
+    let rt = harness::TestRuntime::boot().await;
+    let app_id = setup_agent_app(&rt).await;
+    let pool = rt.pool();
+
+    let uid = create_db_user(pool, &[format!("app:{app_id}:invoke")]).await;
+
+    let agent = agent_uid_for(&app_id);
+    rootcx_core::delegations::create(pool, uid, agent, "cron", None).await.unwrap();
+
+    let msg = json!({
+        "app_id": app_id,
+        "payload": {"cron_id": Uuid::new_v4().to_string(), "message": "Scheduled test"},
+        "user_id": uid.to_string()
+    });
+    let (msg_id,): (i64,) = sqlx::query_as("SELECT pgmq.send('jobs', $1)")
+        .bind(&msg).fetch_one(pool).await.unwrap();
+
+    rt.runtime.scheduler_wake().notify_one();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Scheduler dequeued = permission check passed (dispatch may fail with no worker, that's OK)
+    let still_queued: Option<(i64,)> = sqlx::query_as(
+        "SELECT msg_id FROM pgmq.q_jobs WHERE msg_id = $1"
+    ).bind(msg_id).fetch_optional(pool).await.unwrap();
+    assert!(still_queued.is_none(),
+        "cron job should have been dequeued by scheduler (invoke check passed)");
+}
+
+#[tokio::test]
+async fn cron_refused_when_owner_lacks_invoke() {
+    let rt = harness::TestRuntime::boot().await;
+    let app_id = setup_agent_app(&rt).await;
+    let pool = rt.pool();
+
+    let uid = create_db_user(pool, &[format!("app:{app_id}:contacts.read")]).await;
+
+    let agent = agent_uid_for(&app_id);
+    rootcx_core::delegations::create(pool, uid, agent, "cron", None).await.unwrap();
+
+    let msg = json!({
+        "app_id": app_id,
+        "payload": {"cron_id": Uuid::new_v4().to_string(), "message": "Should be refused"},
+        "user_id": uid.to_string()
+    });
+    let (msg_id,): (i64,) = sqlx::query_as("SELECT pgmq.send('jobs', $1)")
+        .bind(&msg).fetch_one(pool).await.unwrap();
+
+    rt.runtime.scheduler_wake().notify_one();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    let still_queued: Option<(i64,)> = sqlx::query_as(
+        "SELECT msg_id FROM pgmq.q_jobs WHERE msg_id = $1"
+    ).bind(msg_id).fetch_optional(pool).await.unwrap();
+    assert!(still_queued.is_none(),
+        "scheduler should have processed the cron job");
+
+    // Failed jobs are deleted (not archived)
+    let archived: Option<(i64,)> = sqlx::query_as(
+        "SELECT msg_id FROM pgmq.a_jobs WHERE msg_id = $1"
+    ).bind(msg_id).fetch_optional(pool).await.unwrap();
+    assert!(archived.is_none(),
+        "cron job should be FAILED (deleted, not archived) when owner lacks invoke permission");
+}

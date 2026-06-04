@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::extensions::agents::persistence;
+use crate::extensions::rbac::policy::{resolve_permissions, has_permission};
 use crate::ipc::{AgentInvokePayload, LlmModelRef, RpcCaller};
 use crate::{jobs, worker_manager::WorkerManager};
 
@@ -65,6 +66,24 @@ async fn dispatch_agent_job(
         }
         Err(e) => {
             warn!(msg_id, app_id = %target_app, "delegation check failed: {e}");
+            let _ = jobs::fail(pool, msg_id).await;
+            return;
+        }
+    }
+
+    // B1 gate: owner must still hold app:{id}:invoke
+    let required_perm = format!("app:{target_app}:invoke");
+    match resolve_permissions(pool, delegator).await {
+        Ok((_, perms)) if has_permission(&perms, &required_perm) => {}
+        Ok(_) => {
+            warn!(msg_id, app_id = %target_app,
+                "{label} agent denied: owner lacks {required_perm}");
+            let _ = jobs::fail(pool, msg_id).await;
+            return;
+        }
+        Err(e) => {
+            warn!(msg_id, app_id = %target_app,
+                "{label} invoke permission check failed: {e:?}");
             let _ = jobs::fail(pool, msg_id).await;
             return;
         }
