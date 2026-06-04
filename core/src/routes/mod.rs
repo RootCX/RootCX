@@ -145,21 +145,15 @@ pub async fn install_app(
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
     Json(manifest): Json<AppManifest>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = pool(&rt);
-    // First-boot bootstrap: the very first human install is open and promotes
-    // the installer to admin. After that, installing requires the permission.
-    // (The seeded system user holds admin, so "first boot" = no non-system
-    // assignment yet.)
+    let (pool, secrets) = pool_and_secrets(&rt);
     if !crate::extensions::rbac::is_first_boot(&pool).await? {
-        // Self-service: `platform:apps.create` lets any employee install their
-        // own app. `admin:apps.install` remains for platform admins (superset).
         let ok = crate::extensions::rbac::policy::has_permission_db(&pool, identity.user_id, "admin:apps.install").await?
             || crate::extensions::rbac::policy::has_permission_db(&pool, identity.user_id, "platform:apps.create").await?;
         if !ok {
             return Err(ApiError::Forbidden("permission denied: admin:apps.install or platform:apps.create".into()));
         }
     }
-    crate::manifest::install_app(&pool, &manifest, rt.extensions(), identity.user_id).await?;
+    crate::manifest::install_app(&pool, &manifest, rt.extensions(), identity.user_id, &secrets).await?;
     Ok(Json(json!({ "message": format!("app '{}' installed", manifest.app_id) })))
 }
 

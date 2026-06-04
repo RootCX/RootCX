@@ -20,6 +20,7 @@ pub async fn install_app(
     manifest: &AppManifest,
     extensions: &[Box<dyn RuntimeExtension>],
     installed_by: Uuid,
+    secrets: &crate::secrets::SecretManager,
 ) -> Result<(), RuntimeError> {
     validate_manifest(manifest)?;
     let app_id = &manifest.app_id;
@@ -74,7 +75,7 @@ pub async fn install_app(
     }
 
     if !manifest.webhooks.is_empty() {
-        crate::webhooks::sync_webhooks(pool, app_id, &manifest.webhooks, Some(installed_by)).await?;
+        crate::webhooks::sync_webhooks(pool, app_id, &manifest.webhooks, Some(installed_by), secrets).await?;
     }
 
     if !manifest.actions.is_empty() {

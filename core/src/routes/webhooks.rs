@@ -17,7 +17,7 @@ struct WebhookResponse {
     id: Uuid,
     name: String,
     method: String,
-    token: String,
+    prefix: String,
     url: String,
     created_at: chrono::DateTime<chrono::Utc>,
 }
@@ -38,12 +38,13 @@ pub async fn list_webhooks(
     let rows = webhooks::list_webhooks(&db, &app_id).await?;
 
     let result: Vec<WebhookResponse> = rows.into_iter().map(|r| {
-        let url = format!("/api/v1/hooks/{}", r.token);
+        let prefix = r.prefix.unwrap_or_else(|| r.token.chars().take(12).collect());
+        let url = format!("/api/v1/hooks/{}...", &prefix);
         WebhookResponse {
             id: r.id,
             name: r.name,
             method: r.method,
-            token: r.token,
+            prefix,
             url,
             created_at: r.created_at,
         }

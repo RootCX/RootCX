@@ -176,6 +176,24 @@ pub async fn webhook_ingress(
     let raw_body = base64::engine::general_purpose::STANDARD.encode(&body);
 
     if let Some(wh) = crate::webhooks::lookup_token(&pool, &token).await? {
+        // HMAC verification when signature headers are present
+        let sig_header = headers.get("x-webhook-signature").and_then(|v| v.to_str().ok());
+        let ts_header = headers.get("x-webhook-timestamp").and_then(|v| v.to_str().ok());
+
+        if let (Some(signature), Some(timestamp)) = (sig_header, ts_header) {
+            if !crate::webhooks::is_timestamp_fresh(timestamp, 300) {
+                return Err(ApiError::Forbidden("webhook timestamp too old (replay rejected)".into()));
+            }
+
+            let signing_secret = crate::webhooks::get_signing_secret(&pool, &secrets, wh.id)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?
+                .ok_or_else(|| ApiError::Forbidden("webhook has no signing secret configured".into()))?;
+
+            if !crate::webhooks::verify_hmac(&signing_secret, timestamp, &body, signature) {
+                return Err(ApiError::Forbidden("invalid webhook signature".into()));
+            }
+        }
         // Route by webhook method: "agent" dispatches to the app's agent;
         // anything else is a standard RPC call to the app worker.
         let is_agent_webhook = wh.method == "agent";
