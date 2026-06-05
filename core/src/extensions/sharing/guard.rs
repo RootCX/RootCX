@@ -74,14 +74,14 @@ impl FromRequestParts<SharedRuntime> for CallerAuth {
             let claims = jwt::decode(&auth_config, &bearer)
                 .map_err(|_| ApiError::Unauthorized("invalid token".into()))?;
 
-            if claims.act.is_none() && claims.email.is_empty() {
+            if claims.email.is_empty() {
                 return Err(ApiError::Unauthorized("invalid token type".into()));
             }
 
             let user_id = claims.sub.parse()
                 .map_err(|_| ApiError::Unauthorized("invalid token subject".into()))?;
 
-            return Ok(CallerAuth::User(Identity { user_id, email: claims.email, actor: claims.act }));
+            return Ok(CallerAuth::User(Identity { user_id, email: claims.email }));
         }
 
         // No dot → either a share token or a malformed Bearer.

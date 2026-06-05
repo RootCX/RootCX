@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::auth::{AuthConfig, jwt};
+use crate::auth::{AuthConfig, jwt, token_delivery};
 use crate::extensions::rbac::policy::require_admin;
 use crate::routes::{self, SharedRuntime};
 use crate::secrets::SecretManager;
@@ -58,7 +58,7 @@ pub(crate) struct UpsertProviderRequest {
 
 fn default_scopes() -> Vec<String> { vec!["openid".into(), "email".into(), "profile".into()] }
 fn default_true() -> bool { true }
-fn default_role() -> String { "admin".into() }
+fn default_role() -> String { "base".into() }
 
 /// GET /api/v1/auth/oidc/providers — public, for login screen
 pub(crate) async fn list_providers(
@@ -266,6 +266,7 @@ pub(crate) async fn token_exchange(
 #[derive(Deserialize)]
 pub(crate) struct AuthorizeParams {
     redirect_uri: Option<String>,
+    token_delivery: Option<String>,
 }
 
 /// GET /api/v1/auth/oidc/{provider_id}/authorize
@@ -278,6 +279,8 @@ pub(crate) async fn authorize(
     let provider = load_provider(&pool, &secrets, &provider_id).await?;
 
     let redirect_uri = params.redirect_uri.unwrap_or_default();
+    validate_redirect_uri(&redirect_uri, &core_public_url())?;
+    let token_delivery = params.token_delivery.unwrap_or_else(|| "query".to_string());
 
     let issuer = IssuerUrl::new(provider.issuer_url.clone())
         .map_err(|e| ApiError::Internal(format!("invalid issuer_url: {e}")))?;
@@ -307,14 +310,15 @@ pub(crate) async fn authorize(
         .url();
 
     sqlx::query(
-        "INSERT INTO rootcx_system.oidc_state (state, provider_id, nonce, pkce_verifier, redirect_uri)
-         VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO rootcx_system.oidc_state (state, provider_id, nonce, pkce_verifier, redirect_uri, token_delivery)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(state.secret())
     .bind(&provider_id)
     .bind(nonce.secret())
     .bind(pkce_verifier.secret())
     .bind(&redirect_uri)
+    .bind(&token_delivery)
     .execute(&pool)
     .await?;
 
@@ -336,17 +340,17 @@ pub(crate) async fn callback(
     let (pool, secrets) = routes::pool_and_secrets(&rt);
 
     // Look up and delete the state (single-use)
-    let state_row: Option<(String, String, String, String, chrono::DateTime<chrono::Utc>)> =
+    let state_row: Option<(String, String, String, String, String, chrono::DateTime<chrono::Utc>)> =
         sqlx::query_as(
             "DELETE FROM rootcx_system.oidc_state
              WHERE state = $1
-             RETURNING provider_id, nonce, pkce_verifier, redirect_uri, created_at",
+             RETURNING provider_id, nonce, pkce_verifier, redirect_uri, token_delivery, created_at",
         )
         .bind(&params.state)
         .fetch_optional(&pool)
         .await?;
 
-    let (provider_id, nonce_str, pkce_verifier_str, client_redirect_uri, created_at) =
+    let (provider_id, nonce_str, pkce_verifier_str, client_redirect_uri, token_delivery, created_at) =
         state_row.ok_or_else(|| ApiError::Unauthorized("invalid or expired state".into()))?;
 
     if chrono::Utc::now() - created_at > chrono::Duration::minutes(10) {
@@ -404,7 +408,6 @@ pub(crate) async fn callback(
 
     let user_id = find_or_create_user(&pool, &provider, &sub, &email, name.as_deref(), role.as_deref()).await?;
 
-    // Issue Core JWT (access + refresh)
     let session_id = Uuid::new_v4();
     let expires_at = chrono::Utc::now() + auth_config.refresh_ttl;
     sqlx::query("INSERT INTO rootcx_system.sessions (id, user_id, expires_at) VALUES ($1, $2, $3)")
@@ -414,10 +417,11 @@ pub(crate) async fn callback(
         .execute(&pool)
         .await?;
 
-    let access_token = jwt::encode_access(&auth_config, user_id, &email)?;
-    let refresh_token = jwt::encode_refresh(&auth_config, user_id, session_id)?;
+    let mode = token_delivery::Delivery::from_param(&token_delivery);
 
     if client_redirect_uri.is_empty() {
+        let access_token = jwt::encode_access(&auth_config, user_id, &email)?;
+        let refresh_token = jwt::encode_refresh(&auth_config, user_id, session_id)?;
         return Ok(Json(json!({
             "accessToken": access_token,
             "refreshToken": refresh_token,
@@ -426,20 +430,42 @@ pub(crate) async fn callback(
         .into_response());
     }
 
-    let mut redirect_url = url::Url::parse(&client_redirect_uri)
+    let redirect_url = url::Url::parse(&client_redirect_uri)
         .map_err(|_| ApiError::Internal("invalid redirect_uri".into()))?;
-    let expires_in = auth_config.access_ttl.as_secs();
-    redirect_url
-        .query_pairs_mut()
-        .append_pair("access_token", &access_token)
-        .append_pair("refresh_token", &refresh_token)
-        .append_pair("expires_in", &expires_in.to_string());
-    let fragment = format!(
-        "access_token={access_token}&refresh_token={refresh_token}&expires_in={expires_in}"
-    );
-    redirect_url.set_fragment(Some(&fragment));
 
-    Ok(Redirect::temporary(redirect_url.as_str()).into_response())
+    token_delivery::deliver(
+        &pool,
+        redirect_url,
+        user_id,
+        session_id,
+        &auth_config,
+        &email,
+        mode,
+    )
+    .await
+}
+
+// ── Nonce Exchange ────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub(crate) struct NonceExchangeBody {
+    nonce: String,
+}
+
+/// POST /api/v1/auth/nonce-exchange
+pub(crate) async fn nonce_exchange(
+    State(rt): State<SharedRuntime>,
+    axum::Extension(auth_config): axum::Extension<Arc<AuthConfig>>,
+    Json(body): Json<NonceExchangeBody>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let (access_token, refresh_token, expires_in) =
+        token_delivery::exchange(&routes::pool(&rt), &auth_config, &body.nonce).await?;
+
+    Ok(Json(json!({
+        "accessToken": access_token,
+        "refreshToken": refresh_token,
+        "expiresIn": expires_in,
+    })))
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -481,6 +507,41 @@ fn core_public_url() -> String {
         .unwrap_or_else(|_| "http://localhost:9100".to_string())
 }
 
+/// Validate the post-login `redirect_uri`. Default rule: it must be same-origin
+/// with the core's public URL, so tokens can never be redirected to an external
+/// origin (open-redirect exfiltration). One exception: loopback redirects, which
+/// are always allowed with any port — this is the native/CLI app flow mandated
+/// by RFC 8252 §7.3 ("The authorization server MUST allow any port ... for
+/// loopback IP redirect URIs"). The loopback exemption keeps the external-origin
+/// block intact while letting `rootcx auth login` receive its callback.
+fn validate_redirect_uri(redirect_uri: &str, public_url: &str) -> Result<(), ApiError> {
+    if redirect_uri.is_empty() {
+        return Ok(());
+    }
+    let target = url::Url::parse(redirect_uri)
+        .map_err(|_| ApiError::BadRequest("invalid redirect_uri".into()))?;
+    if is_loopback_redirect(&target) {
+        return Ok(());
+    }
+    let public = url::Url::parse(public_url)
+        .map_err(|_| ApiError::Internal("invalid ROOTCX_PUBLIC_URL".into()))?;
+    if target.origin() != public.origin() {
+        return Err(ApiError::BadRequest("redirect_uri must be same-origin".into()));
+    }
+    Ok(())
+}
+
+/// Loopback redirect host per RFC 8252 §7.3: IPv4 loopback (127.0.0.0/8), IPv6
+/// `::1`, or the literal `localhost`.
+fn is_loopback_redirect(u: &url::Url) -> bool {
+    match u.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
 fn build_oidc_client(
     provider: &ProviderRow,
     metadata: CoreProviderMetadata,
@@ -520,6 +581,21 @@ fn extract_role_claim(raw_token: &str, provider: &ProviderRow) -> Result<Option<
         .map_err(|_| ApiError::Internal("failed to parse id_token payload".into()))?;
 
     Ok(claims.get(claim_name).and_then(|v| v.as_str()).map(|s| s.to_string()))
+}
+
+/// Initial RBAC role for a newly auto-registered OIDC user. The first
+/// non-system user of a tenant bootstraps as `admin` so the tenant is
+/// administrable; everyone else takes the token's role claim when it resolves
+/// to a real role, otherwise the provider default — never `admin`. This is what
+/// keeps invited members deny-by-default (governance-philosophy.md, Invariant #1).
+fn pick_initial_role(first_boot: bool, claim_role: Option<&str>, claim_role_exists: bool, default_role: &str) -> String {
+    if first_boot {
+        return "admin".to_string();
+    }
+    match claim_role {
+        Some(r) if claim_role_exists => r.to_string(),
+        _ => default_role.to_string(),
+    }
 }
 
 /// Find or create a Core user from OIDC claims.
@@ -598,22 +674,19 @@ async fn find_or_create_user(
         }
     })?;
 
-    // Assign role
-    let assigned_role = role.unwrap_or(&provider.default_role);
-    let role_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_roles WHERE name = $1)",
-    )
-    .bind(assigned_role)
-    .fetch_one(pool)
-    .await?;
-
-    let final_role = if role_exists { assigned_role } else { &provider.default_role };
+    // Role assignment (decision extracted to `pick_initial_role` for unit testing).
+    let first_boot = crate::extensions::rbac::is_first_boot(pool).await.unwrap_or(false);
+    let claim_role_exists = match role {
+        Some(r) => crate::extensions::rbac::policy::role_exists(pool, r).await?,
+        None => false,
+    };
+    let final_role = pick_initial_role(first_boot, role, claim_role_exists, &provider.default_role);
 
     sqlx::query(
         "INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING",
     )
     .bind(user_id)
-    .bind(final_role)
+    .bind(&final_role)
     .execute(pool)
     .await?;
 
@@ -646,6 +719,59 @@ mod tests {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(payload_json);
         format!("{header}.{payload}.fakesig")
+    }
+
+    // ── validate_redirect_uri (same-origin + RFC 8252 loopback exemption) ──
+
+    #[test]
+    fn redirect_uri_same_origin_allowed() {
+        assert!(validate_redirect_uri("https://tenant.rootcx.com/cb", "https://tenant.rootcx.com").is_ok());
+    }
+
+    #[test]
+    fn redirect_uri_external_origin_rejected() {
+        assert!(validate_redirect_uri("https://evil.com/cb", "https://tenant.rootcx.com").is_err());
+    }
+
+    #[test]
+    fn redirect_uri_loopback_allowed_any_port() {
+        // RFC 8252 §7.3: loopback with any ephemeral port, regardless of the core origin.
+        for uri in [
+            "http://127.0.0.1:54321/callback",
+            "http://127.0.0.1:8080/callback",
+            "http://[::1]:54321/callback",
+            "http://localhost:9999/callback",
+        ] {
+            assert!(validate_redirect_uri(uri, "https://tenant.rootcx.com").is_ok(), "should allow {uri}");
+        }
+    }
+
+    #[test]
+    fn redirect_uri_empty_is_ok() {
+        // No redirect_uri = JSON token response path, nothing to validate.
+        assert!(validate_redirect_uri("", "https://tenant.rootcx.com").is_ok());
+    }
+
+    #[test]
+    fn redirect_uri_garbage_rejected() {
+        assert!(validate_redirect_uri("not a url", "https://tenant.rootcx.com").is_err());
+    }
+
+    // ── pick_initial_role (the role decision the governance fix introduced) ──
+
+    #[test]
+    fn pick_initial_role_decisions() {
+        // (first_boot, claim, claim_exists, default) -> expected, why
+        let cases: &[(bool, Option<&str>, bool, &str, &str, &str)] = &[
+            (true,  None,           false, "base", "admin",  "first user bootstraps admin"),
+            (true,  Some("base"),   true,  "base", "admin",  "first user is admin even with a claim"),
+            (false, None,           false, "base", "base",   "invited user, no claim -> default, never admin"),
+            (false, Some("editor"), true,  "base", "editor", "invited user honours an existing claim role"),
+            (false, Some("ghost"),  false, "base", "base",   "claim role missing -> safe fallback to default"),
+        ];
+        for (first_boot, claim, exists, default, expected, why) in cases {
+            assert_eq!(pick_initial_role(*first_boot, *claim, *exists, default), *expected, "{why}");
+        }
     }
 
     // ── extract_role_claim ─────────────────────────────────────────────

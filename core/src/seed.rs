@@ -76,13 +76,13 @@ pub async fn seed_assistant(
 
     sqlx::query(
         "INSERT INTO rootcx_system.apps (id, name, version, status, manifest)
-         VALUES ($1, 'Assistant', '0.1.0', 'installed', $2) ON CONFLICT (id) DO NOTHING",
+         VALUES ($1, 'Assistant', '0.1.0', 'system', $2) ON CONFLICT (id) DO NOTHING",
     ).bind(APP_ID).bind(serde_json::json!({
         "appId": APP_ID, "name": "Assistant", "version": "0.1.0", "type": "agent",
     })).execute(pool).await.map_err(RuntimeError::Schema)?;
 
     if let Some(def) = agents::config::load_agent_json(&app_dir).await {
-        agents::register_agent(pool, APP_ID, &def).await?;
+        agents::register_agent(pool, APP_ID, &def, None).await?;
     }
 
     wm.start_app(pool, secrets, APP_ID).await?;

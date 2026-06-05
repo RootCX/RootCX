@@ -18,10 +18,11 @@ pub struct SchemaInfo {
 }
 
 pub async fn list_schemas(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<SchemaInfo>>, ApiError> {
     let pool = pool(&rt);
+    let is_admin = crate::extensions::rbac::policy::has_permission_db(&pool, identity.user_id, "admin:db.query").await?;
     let rows = sqlx::query_as::<_, (String, i64)>(
         "SELECT s.schema_name, COUNT(t.table_name)::bigint
          FROM information_schema.schemata s
@@ -37,7 +38,10 @@ pub async fn list_schemas(
     .fetch_all(&pool)
     .await?;
 
-    Ok(Json(rows.into_iter().map(|(schema_name, table_count)| SchemaInfo { schema_name, table_count }).collect()))
+    Ok(Json(rows.into_iter()
+        .filter(|(name, _)| is_admin || name != "rootcx_system")
+        .map(|(schema_name, table_count)| SchemaInfo { schema_name, table_count })
+        .collect()))
 }
 
 #[derive(Serialize)]
@@ -55,12 +59,19 @@ pub struct TableInfo {
     pub columns: Vec<ColumnInfo>,
 }
 
+fn is_system_schema(s: &str) -> bool {
+    s == "rootcx_system" || s == "information_schema" || s.starts_with("pg_")
+}
+
 pub async fn list_tables(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(schema): Path<String>,
 ) -> Result<Json<Vec<TableInfo>>, ApiError> {
     let pool = pool(&rt);
+    if is_system_schema(&schema.to_ascii_lowercase()) {
+        crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:db.query").await?;
+    }
 
     let tables: Vec<(String,)> = sqlx::query_as(
         "SELECT table_name FROM information_schema.tables
@@ -119,11 +130,12 @@ pub struct QueryResult {
 }
 
 pub async fn execute_query(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Json(body): Json<QueryRequest>,
 ) -> Result<Json<QueryResult>, ApiError> {
     let pool = pool(&rt);
+    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:db.query").await?;
     let sql = body.sql.trim();
 
     if sql.is_empty() {
@@ -134,16 +146,20 @@ pub async fn execute_query(
         return Err(ApiError::BadRequest("only SELECT queries are allowed".into()));
     }
 
-    let mut conn = pool.acquire().await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    let mut tx = pool.begin().await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    sqlx::query("SET TRANSACTION READ ONLY").execute(&mut *tx).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    sqlx::query("SET LOCAL statement_timeout = '120000'").execute(&mut *tx).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    sqlx::query("SET LOCAL idle_in_transaction_session_timeout = '120000'").execute(&mut *tx).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     if let Some(ref schema) = body.schema {
-        sqlx::query(&format!("SET search_path TO {}, public", crate::manifest::quote_ident(schema)))
-            .execute(&mut *conn)
+        sqlx::query(&format!("SET LOCAL search_path TO {}, public", crate::manifest::quote_ident(schema)))
+            .execute(&mut *tx)
             .await
             .map_err(|e| ApiError::BadRequest(e.to_string()))?;
     }
 
-    let rows = sqlx::query(sql).fetch_all(&mut *conn).await.map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    let rows = sqlx::query(sql).fetch_all(&mut *tx).await.map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    tx.commit().await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     if rows.is_empty() {
         return Ok(Json(QueryResult { columns: vec![], rows: vec![], row_count: 0 }));
@@ -167,7 +183,7 @@ fn try_json<'r, T: sqlx::Decode<'r, sqlx::Postgres> + sqlx::Type<sqlx::Postgres>
     row.try_get::<T, _>(idx).map(f).unwrap_or(JsonValue::Null)
 }
 
-fn pg_val(row: &PgRow, idx: usize, ti: &PgTypeInfo) -> JsonValue {
+pub(crate) fn pg_val(row: &PgRow, idx: usize, ti: &PgTypeInfo) -> JsonValue {
     use sqlx::types::chrono;
 
     if row.try_get_raw(idx).map(|v| v.is_null()).unwrap_or(true) {

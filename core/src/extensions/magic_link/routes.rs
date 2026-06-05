@@ -12,7 +12,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -20,6 +20,7 @@ use uuid::Uuid;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::auth::secure_tokens as tokens;
+use crate::auth::token_delivery::{Delivery, deliver};
 use crate::auth::{AuthConfig, jwt};
 use crate::extensions::rbac::policy::{has_permission, resolve_permissions};
 use crate::routes::{SharedRuntime, pool};
@@ -41,6 +42,9 @@ pub struct GenerateRequest {
     pub roles: Vec<String>,
     pub redirect_uri: Option<String>,
     pub expires_in_seconds: Option<i64>,
+    /// `"nonce"` opts into secure nonce-exchange delivery (SDK >= 0.19).
+    /// Absent/anything else stays legacy (tokens in URL) for old clients.
+    pub token_delivery: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -116,15 +120,17 @@ pub async fn generate(
     let raw = tokens::generate();
     let hash = tokens::hash(&raw);
 
+    let token_delivery = req.token_delivery.as_deref().unwrap_or("query");
     sqlx::query(
         "INSERT INTO rootcx_system.magic_link_tokens \
-            (token_hash, email, roles, redirect_uri, created_by, expires_at) \
-         VALUES ($1, $2, $3, $4, $5, $6)",
+            (token_hash, email, roles, redirect_uri, token_delivery, created_by, expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(&hash[..])
     .bind(&email)
     .bind(&req.roles)
     .bind(&req.redirect_uri)
+    .bind(token_delivery)
     .bind(identity.user_id)
     .bind(expires_at)
     .execute(&pool)
@@ -174,8 +180,8 @@ pub async fn consume(
     axum::Extension(auth_config): axum::Extension<Arc<AuthConfig>>,
     Json(req): Json<ConsumeRequest>,
 ) -> Result<Json<ConsumeResponse>, ApiError> {
-    let result = consume_inner(&rt, &auth_config, &req.token).await?;
-    Ok(Json(result))
+    let cr = consume_inner(&rt, &auth_config, &req.token).await?;
+    Ok(Json(cr.response))
 }
 
 #[derive(Deserialize)]
@@ -188,29 +194,38 @@ pub async fn consume_get(
     axum::Extension(auth_config): axum::Extension<Arc<AuthConfig>>,
     Query(q): Query<ConsumeQuery>,
 ) -> Result<Response, ApiError> {
-    let result = consume_inner(&rt, &auth_config, &q.token).await?;
+    let cr = consume_inner(&rt, &auth_config, &q.token).await?;
 
-    if let Some(ref uri) = result.redirect_uri {
-        let mut redirect_url = url::Url::parse(uri)
+    if let Some(ref uri) = cr.response.redirect_uri {
+        let redirect_url = url::Url::parse(uri)
             .map_err(|_| ApiError::Internal("invalid stored redirect_uri".into()))?;
-        // Tokens in URL fragment: never sent to the server, never in Referer,
-        // never in proxy logs. The client-side JS reads them from location.hash.
-        let fragment = format!(
-            "access_token={}&refresh_token={}&expires_in={}",
-            result.access_token, result.refresh_token, result.expires_in
-        );
-        redirect_url.set_fragment(Some(&fragment));
-        Ok(Redirect::temporary(redirect_url.as_str()).into_response())
+        deliver(
+            &pool(&rt),
+            redirect_url,
+            cr.user_id,
+            cr.session_id,
+            &auth_config,
+            &cr.response.user.email,
+            cr.delivery,
+        )
+        .await
     } else {
-        Ok(Json(result).into_response())
+        Ok(Json(cr.response).into_response())
     }
+}
+
+struct ConsumeResult {
+    response: ConsumeResponse,
+    delivery: Delivery,
+    user_id: Uuid,
+    session_id: Uuid,
 }
 
 async fn consume_inner(
     rt: &SharedRuntime,
     auth_config: &AuthConfig,
     raw_token: &str,
-) -> Result<ConsumeResponse, ApiError> {
+) -> Result<ConsumeResult, ApiError> {
     if !tokens::is_well_formed(raw_token) {
         return Err(ApiError::Unauthorized("invalid token".into()));
     }
@@ -219,19 +234,19 @@ async fn consume_inner(
     let pool = pool(rt);
     let mut tx = pool.begin().await?;
 
-    let row: Option<(String, Vec<String>, Option<String>)> = sqlx::query_as(
+    let row: Option<(String, Vec<String>, Option<String>, String)> = sqlx::query_as(
         "UPDATE rootcx_system.magic_link_tokens \
             SET consumed_at = now() \
           WHERE token_hash = $1 \
             AND consumed_at IS NULL \
             AND expires_at > now() \
-        RETURNING email, roles, redirect_uri",
+        RETURNING email, roles, redirect_uri, token_delivery",
     )
     .bind(&candidate[..])
     .fetch_optional(&mut *tx)
     .await?;
 
-    let (email, roles, redirect_uri) = row.ok_or_else(|| {
+    let (email, roles, redirect_uri, token_delivery) = row.ok_or_else(|| {
         tracing::warn!("magic-link consume failed: token invalid, consumed, or expired");
         ApiError::Unauthorized("token invalid, already used, or expired".into())
     })?;
@@ -299,17 +314,22 @@ async fn consume_inner(
 
     tracing::info!(user_id = %user_id, email = %email, roles_conferred = ?roles, "magic-link consumed");
 
-    Ok(ConsumeResponse {
-        access_token,
-        refresh_token,
-        expires_in: auth_config.access_ttl.as_secs() as i64,
-        user: UserPayload {
-            id: user_id.to_string(),
-            email,
-            display_name,
-            created_at: created_at.to_rfc3339(),
+    Ok(ConsumeResult {
+        response: ConsumeResponse {
+            access_token,
+            refresh_token,
+            expires_in: auth_config.access_ttl.as_secs() as i64,
+            user: UserPayload {
+                id: user_id.to_string(),
+                email,
+                display_name,
+                created_at: created_at.to_rfc3339(),
+            },
+            redirect_uri,
         },
-        redirect_uri,
+        delivery: Delivery::from_param(&token_delivery),
+        user_id,
+        session_id,
     })
 }
 

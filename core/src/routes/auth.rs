@@ -137,20 +137,26 @@ pub async fn login(
 
     let pool = super::pool(&rt);
 
-    let row: Option<(Uuid, String, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>)> =
+    let row: Option<(Uuid, String, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>, String)> =
         sqlx::query_as(
-            "SELECT id, email, display_name, password_hash, created_at
+            "SELECT id, email, display_name, password_hash, created_at, kind
              FROM rootcx_system.users WHERE email = $1",
         )
         .bind(&req.email)
         .fetch_optional(&pool)
         .await?;
 
-    let (user_id, email, display_name, pw_hash, created_at) =
+    let (user_id, email, display_name, pw_hash, created_at, kind) =
         row.ok_or_else(|| {
             tracing::warn!(email = %req.email, "login failed: unknown user");
             ApiError::Unauthorized("invalid credentials".into())
         })?;
+
+    // Interactive login is human-only. Agents and service accounts authenticate
+    // through their own paths (core-spawned worker / client credentials).
+    if kind != "human" {
+        return Err(ApiError::Unauthorized("invalid credentials".into()));
+    }
 
     let pw_hash = pw_hash.ok_or_else(|| ApiError::Unauthorized("password login not available".into()))?;
     if !password::verify(&req.password, &pw_hash) {

@@ -37,12 +37,13 @@
 //     The prelude owns a SINGLE stdin dispatcher and hands a `ctx` object
 //     to every handler. `ctx` exposes the full worker capability surface:
 //
-//       ctx.appId, ctx.runtimeUrl, ctx.databaseUrl,
+//       ctx.appId, ctx.runtimeUrl,
 //       ctx.credentials, ctx.agentConfig,
 //       ctx.log, ctx.emit,
+//       ctx.sql(text, params) → { columns, rows, rowCount },
+//       ctx.selfAction(action, params),
 //       ctx.uploadFile(content, filename, contentType),
-//       ctx.collection(entity).insert(data),
-//       ctx.collection(entity).update(data),
+//       ctx.collection(entity).insert(data) / .update / .find / .findOne,
 //
 //     A v2 worker MUST announce its version in the `discover` reply:
 //
@@ -126,6 +127,7 @@ console.debug = console.log;
 // ─── Internal state ──────────────────────────────────────────────────────────
 
 let _ctx = null;
+let _boot = null;
 let _handlers = null;
 let _started = false;
 
@@ -133,6 +135,10 @@ let _uploadSeq = 0;
 const _pendingUploads = new Map();
 let _opSeq = 0;
 const _pendingOps = new Map();
+let _sqlSeq = 0;
+const _pendingSql = new Map();
+let _saSeq = 0;
+const _pendingSelf = new Map();
 
 // ─── Primitives exposed via ctx ──────────────────────────────────────────────
 
@@ -173,16 +179,55 @@ function _collectionOp(op, entity, data) {
   });
 }
 
-function _makeCtx(msg) {
+// SQL proxy: app SQL is executed by the core under the caller's RLS identity.
+// The app never holds a DB connection. Returns { columns, rows, rowCount }.
+// No identity travels on the message: the core binds it to this worker's sole
+// in-flight unit of work, so the worker cannot name another user's identity.
+function _sqlQuery(sql, params) {
+  const id = `sql_${++_sqlSeq}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (_pendingSql.has(id)) {
+        _pendingSql.delete(id);
+        reject(new Error("ctx.sql: timeout (30s)"));
+      }
+    }, 30_000);
+    _pendingSql.set(id, { resolve, reject, timer });
+    _transport.send({ type: "sql_query", id, sql, params: params ?? [] });
+  });
+}
+
+// Privileged self-action over IPC (integrations). The core scopes the action
+// to this worker's sole in-flight unit-of-work identity — no token to replay.
+function _selfAction(action, params) {
+  const id = `sa_${++_saSeq}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (_pendingSelf.has(id)) {
+        _pendingSelf.delete(id);
+        reject(new Error(`selfAction ${action}: timeout (30s)`));
+      }
+    }, 30_000);
+    _pendingSelf.set(id, { resolve, reject, timer });
+    _transport.send({ type: "self_action", id, action, params: params ?? {} });
+  });
+}
+
+// Per-call ctx. It carries NO identity token: the core resolves the caller's
+// RLS identity from this worker's sole in-flight unit of work. During onStart
+// (no active unit) ctx.sql denies (no identity) and ctx.collection runs
+// BYPASSRLS on the self-schema.
+function _makeCtx() {
   return {
-    appId: msg.app_id,
-    runtimeUrl: msg.runtime_url,
-    databaseUrl: msg.database_url,
-    credentials: msg.credentials,
-    agentConfig: msg.agent_config,
+    appId: _boot.app_id,
+    runtimeUrl: _boot.runtime_url,
+    credentials: _boot.credentials,
+    agentConfig: _boot.agent_config,
     log: globalThis.log,
     emit: globalThis.emit,
     uploadFile: _uploadFile,
+    sql: (sql, params = []) => _sqlQuery(sql, params),
+    selfAction: (action, params = {}) => _selfAction(action, params),
     collection(entity) {
       return {
         insert: (data) => _collectionOp("insert", entity, data),
@@ -194,34 +239,6 @@ function _makeCtx(msg) {
     },
   };
 }
-
-// ─── Integration helpers ─────────────────────────────────────────────────────
-
-globalThis.syncAllConnectedUsers = async function syncAllConnectedUsers(caller, actionName) {
-  const token = caller?.authToken;
-  if (!token) return { error: "no token in job caller" };
-  const appId = _ctx.appId;
-  const usersRes = await fetch(`${_ctx.runtimeUrl}/api/v1/integrations/${appId}/connected-users`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!usersRes.ok) return { error: `connected-users: ${usersRes.status}` };
-  const users = await usersRes.json();
-  let synced = 0;
-  for (const userId of users) {
-    try {
-      const r = await fetch(`${_ctx.runtimeUrl}/api/v1/integrations/${appId}/actions/${actionName}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, "X-Run-As": userId },
-        body: "{}",
-      });
-      if (r.ok) synced++;
-      else log.warn(`sync ${userId}: ${r.status}`);
-    } catch (e) {
-      log.warn(`sync ${userId}: ${e.message}`);
-    }
-  }
-  return { ok: true, synced };
-};
 
 // ─── Message dispatch ────────────────────────────────────────────────────────
 
@@ -252,8 +269,29 @@ function _dispatch(msg) {
       return;
     }
 
+    case "sql_query_result": {
+      const p = _pendingSql.get(msg.id);
+      if (!p) return;
+      _pendingSql.delete(msg.id);
+      clearTimeout(p.timer);
+      msg.error
+        ? p.reject(new Error(msg.error))
+        : p.resolve({ columns: msg.columns ?? [], rows: msg.rows ?? [], rowCount: msg.row_count ?? 0 });
+      return;
+    }
+
+    case "self_action_result": {
+      const p = _pendingSelf.get(msg.id);
+      if (!p) return;
+      _pendingSelf.delete(msg.id);
+      clearTimeout(p.timer);
+      msg.error ? p.reject(new Error(msg.error)) : p.resolve(msg.result);
+      return;
+    }
+
     case "discover": {
-      _ctx = _makeCtx(msg);
+      _boot = msg;
+      _ctx = _makeCtx();
       // v1 legacy: no serve() → worker responds to discover itself.
       if (!_handlers) return;
       _transport.send({
@@ -261,7 +299,10 @@ function _dispatch(msg) {
         protocol: PROTOCOL_VERSION,
         methods: Object.keys(_handlers.rpc ?? {}),
       });
-      if (_handlers.onStart && !_started) {
+      // onStart runs ONLY in the per-app lifecycle worker (run_onstart). Per-user
+      // workers skip it: it seeds the self-schema under BYPASSRLS, which must not
+      // run under a user identity, and the seeding already happened once.
+      if (_handlers.onStart && !_started && msg.run_onstart) {
         _started = true;
         _resolve(_handlers.onStart, [_ctx],
           () => {},
@@ -279,7 +320,7 @@ function _dispatch(msg) {
         _transport.send({ type: "rpc_response", id: msg.id, error: `unknown method: ${msg.method}` });
         return;
       }
-      _resolve(fn, [msg.params, msg.caller ?? null, _ctx],
+      _resolve(fn, [msg.params, msg.caller ?? null, _makeCtx()],
         (r) => _transport.send({ type: "rpc_response", id: msg.id, result: r }),
         (e) => _transport.send({ type: "rpc_response", id: msg.id, error: _err(e) }),
       );
@@ -294,7 +335,7 @@ function _dispatch(msg) {
         _transport.send({ type: "job_result", id: msg.id, result: { ok: true } });
         return;
       }
-      _resolve(fn, [msg.payload, msg.caller ?? null, _ctx],
+      _resolve(fn, [msg.payload, msg.caller ?? null, _makeCtx()],
         (r) => _transport.send({ type: "job_result", id: msg.id, result: r ?? { ok: true } }),
         (e) => _transport.send({ type: "job_result", id: msg.id, error: _err(e) }),
       );

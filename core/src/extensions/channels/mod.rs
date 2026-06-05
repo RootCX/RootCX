@@ -8,10 +8,25 @@ use axum::Router;
 use axum::routing::{delete, get, post};
 use sqlx::PgPool;
 use tracing::info;
+use uuid::Uuid;
 
 use super::RuntimeExtension;
 use crate::RuntimeError;
 use crate::routes::SharedRuntime;
+
+/// Namespace for channel delegation trigger_ref derivation.
+/// Same pattern as AGENT_UUID_NAMESPACE in agents/mod.rs.
+const CHANNEL_UUID_NAMESPACE: Uuid = Uuid::from_bytes([
+    0xb1, 0x2c, 0x3d, 0x4e, 0x5f, 0x60, 0x41, 0x72,
+    0x83, 0x94, 0xa5, 0xb6, 0xc7, 0xd8, 0xe9, 0xfa,
+]);
+
+/// Deterministic trigger_ref for a channel delegation, derived from (channel_id, user_id).
+/// Enables revoke_by_trigger("channel", ref) when the link is removed.
+pub fn channel_delegation_ref(channel_id: &str, user_id: Uuid) -> Uuid {
+    let key = format!("{}:{user_id}", channel_id.to_ascii_lowercase());
+    Uuid::new_v5(&CHANNEL_UUID_NAMESPACE, key.as_bytes())
+}
 
 pub struct ChannelExtension;
 
@@ -70,7 +85,7 @@ impl RuntimeExtension for ChannelExtension {
             .route("/api/v1/channels/{channel_id}/activate", post(routes::activate_channel))
             .route("/api/v1/channels/{channel_id}/deactivate", post(routes::deactivate_channel))
             .route("/api/v1/channels/{channel_id}/link", post(routes::create_link_token))
-            .route("/api/v1/channels/{channel_id}/identity", get(routes::identity_status))
+            .route("/api/v1/channels/{channel_id}/identity", get(routes::identity_status).delete(routes::unlink_identity))
             .route("/api/v1/channels/{provider}/{channel_id}/webhook", post(routes::webhook)))
     }
 }

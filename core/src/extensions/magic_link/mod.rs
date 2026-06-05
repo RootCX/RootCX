@@ -38,16 +38,26 @@ impl RuntimeExtension for MagicLinkExtension {
 
         exec(pool,
             "CREATE TABLE IF NOT EXISTS rootcx_system.magic_link_tokens (
-                token_hash    BYTEA PRIMARY KEY,
-                email         TEXT NOT NULL,
-                roles         TEXT[] NOT NULL DEFAULT '{}',
-                redirect_uri  TEXT,
-                created_by    UUID NOT NULL REFERENCES rootcx_system.users(id) ON DELETE CASCADE,
-                created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-                consumed_at   TIMESTAMPTZ,
-                expires_at    TIMESTAMPTZ NOT NULL
+                token_hash     BYTEA PRIMARY KEY,
+                email          TEXT NOT NULL,
+                roles          TEXT[] NOT NULL DEFAULT '{}',
+                redirect_uri   TEXT,
+                token_delivery TEXT NOT NULL DEFAULT 'query',
+                created_by     UUID NOT NULL REFERENCES rootcx_system.users(id) ON DELETE CASCADE,
+                created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+                consumed_at    TIMESTAMPTZ,
+                expires_at     TIMESTAMPTZ NOT NULL
             )",
         ).await?;
+
+        // Existing deployments: backfill the column (defaults to legacy 'query').
+        exec(pool,
+            "ALTER TABLE rootcx_system.magic_link_tokens \
+             ADD COLUMN IF NOT EXISTS token_delivery TEXT NOT NULL DEFAULT 'query'",
+        ).await?;
+
+        // Shared nonce store (also bootstrapped by oidc; idempotent).
+        crate::auth::token_delivery::ensure_schema(pool).await?;
 
         exec(pool,
             "CREATE INDEX IF NOT EXISTS idx_magic_link_tokens_unconsumed \

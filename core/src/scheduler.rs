@@ -6,8 +6,8 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::auth::{AuthConfig, jwt};
 use crate::extensions::agents::persistence;
+use crate::extensions::rbac::policy::{resolve_permissions, has_permission};
 use crate::ipc::{AgentInvokePayload, LlmModelRef, RpcCaller};
 use crate::{jobs, worker_manager::WorkerManager};
 
@@ -18,11 +18,13 @@ pub struct SchedulerHandle {
     pub cancel: CancellationToken,
 }
 
-async fn resolve_caller(pool: &PgPool, auth: &AuthConfig, user_id: uuid::Uuid) -> Option<RpcCaller> {
-    let (email,): (String,) = sqlx::query_as("SELECT email FROM rootcx_system.users WHERE id = $1")
+async fn resolve_caller(pool: &PgPool, user_id: uuid::Uuid) -> Option<RpcCaller> {
+    // Disabled principals (deny-by-default) resolve to no caller: the job then
+    // runs with no identity and RLS denies every row.
+    let (email,): (String,) = sqlx::query_as(
+        "SELECT email FROM rootcx_system.users WHERE id = $1 AND disabled_at IS NULL")
         .bind(user_id).fetch_optional(pool).await.ok()??;
-    let token = jwt::encode_access(auth, user_id, &email).ok()?;
-    Some(RpcCaller { user_id: user_id.to_string(), email, auth_token: Some(token) })
+    Some(RpcCaller { user_id: user_id.to_string(), email, effective_perms: None })
 }
 
 async fn dispatch_agent_job(
@@ -45,6 +47,15 @@ async fn dispatch_agent_job(
 
     // Validate standing mandate (invoker_user_id guaranteed Some after early-return above)
     let delegator = invoker_user_id.unwrap();
+
+    // Deny-by-default: a disabled owner (e.g. a disabled service account) cannot
+    // drive automation.
+    if !crate::auth::identity::principal_enabled(pool, delegator).await {
+        warn!(msg_id, app_id = %target_app, "{label} agent denied: owner disabled or missing");
+        let _ = jobs::fail(pool, msg_id).await;
+        return;
+    }
+
     let agent_uid = crate::extensions::agents::agent_user_id(target_app);
     match crate::delegations::is_valid(pool, delegator, agent_uid).await {
         Ok(true) => {}
@@ -55,6 +66,24 @@ async fn dispatch_agent_job(
         }
         Err(e) => {
             warn!(msg_id, app_id = %target_app, "delegation check failed: {e}");
+            let _ = jobs::fail(pool, msg_id).await;
+            return;
+        }
+    }
+
+    // B1 gate: owner must still hold app:{id}:invoke
+    let required_perm = format!("app:{target_app}:invoke");
+    match resolve_permissions(pool, delegator).await {
+        Ok((_, perms)) if has_permission(&perms, &required_perm) => {}
+        Ok(_) => {
+            warn!(msg_id, app_id = %target_app,
+                "{label} agent denied: owner lacks {required_perm}");
+            let _ = jobs::fail(pool, msg_id).await;
+            return;
+        }
+        Err(e) => {
+            warn!(msg_id, app_id = %target_app,
+                "{label} invoke permission check failed: {e:?}");
             let _ = jobs::fail(pool, msg_id).await;
             return;
         }
@@ -76,13 +105,14 @@ async fn dispatch_agent_job(
         llm,
         invoker_user_id,
         attachments: None,
+        task_scope: Some(vec![format!("app:{target_app}:*")]),
     };
 
     let system_user = uuid::Uuid::nil();
     let _ = persistence::ensure_session(pool, &session_id, target_app, system_user).await;
     let _ = persistence::persist_message(pool, &session_id, "user", &user_message, None, false).await;
 
-    match wm.agent_invoke(target_app, invoke_payload).await {
+    match wm.agent_invoke(target_app, invoke_payload, None).await {
         Ok(mut rx) => {
             let pool_c = pool.clone();
             let target_app_c = target_app.to_string();
@@ -119,7 +149,7 @@ async fn dispatch_agent_job(
     }
 }
 
-pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, auth_config: Arc<AuthConfig>) -> SchedulerHandle {
+pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>) -> SchedulerHandle {
     let wake = Arc::new(Notify::new());
     let cancel = CancellationToken::new();
     let w = Arc::clone(&wake);
@@ -168,11 +198,16 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, auth_config: Arc<Au
                         continue;
                     }
 
-                    // Regular job dispatch
-                    let caller = match job_msg.user_id {
-                        Some(uid) => resolve_caller(&pool, &auth_config, uid).await,
-                        None => resolve_caller(&pool, &auth_config, crate::SYSTEM_USER_ID).await,
+                    // Regular job dispatch. Deny-by-default: a job with no owner
+                    // (created_by NULL) has no responsible human, so RLS would
+                    // see no identity. Refuse rather than fall back to admin.
+                    let Some(uid) = job_msg.user_id else {
+                        warn!(msg_id, app_id = %job_msg.app_id,
+                            "job denied: no owner (created_by is NULL)");
+                        let _ = jobs::fail(&pool, msg_id).await;
+                        continue;
                     };
+                    let caller = resolve_caller(&pool, uid).await;
                     if let Err(e) = wm.dispatch_job(&job_msg.app_id, msg_id.to_string(), job_msg.payload, caller).await {
                         warn!(msg_id, "dispatch failed: {e}");
                         let _ = jobs::fail(&pool, msg_id).await;

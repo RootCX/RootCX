@@ -9,6 +9,7 @@ pub mod magic_link;
 pub mod mcp;
 pub mod oidc;
 pub mod rbac;
+pub mod service_accounts;
 pub mod sharing;
 pub mod platform_storage;
 pub mod storage;
@@ -56,8 +57,10 @@ pub fn builtin_extensions(auth_config: Arc<AuthConfig>) -> Vec<Box<dyn RuntimeEx
         Box::new(audit::AuditExtension),
         Box::new(hooks::HooksExtension),
         Box::new(logs::LogsExtension),
-        Box::new(auth::AuthExtension { config: auth_config }),
+        Box::new(auth::AuthExtension { config: Arc::clone(&auth_config) }),
         Box::new(rbac::RbacExtension),
+        // After RBAC: registers core permission keys into rbac_permissions.
+        Box::new(service_accounts::ServiceAccountExtension { config: auth_config }),
         Box::new(sharing::SharingExtension),
         Box::new(oidc::OidcExtension),
         Box::new(magic_link::MagicLinkExtension),

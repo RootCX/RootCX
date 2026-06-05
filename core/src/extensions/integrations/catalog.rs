@@ -74,7 +74,7 @@ pub async fn deploy_from_catalog(
     let manifest: rootcx_types::AppManifest = serde_json::from_str(&manifest_raw)
         .map_err(|e| ApiError::Internal(format!("parse manifest: {e}")))?;
 
-    crate::manifest::install_app(&pool, &manifest, rt.extensions(), identity.user_id).await?;
+    crate::manifest::install_app(&pool, &manifest, rt.extensions(), identity.user_id, &secrets).await?;
     sync_integration_permissions(&pool, &id, &manifest).await?;
 
     sqlx::query("UPDATE rootcx_system.apps SET webhook_token = $1 WHERE id = $2 AND webhook_token IS NULL")

@@ -25,6 +25,8 @@ pub trait AgentDispatcher: Send + Sync {
         &self, pool: &PgPool, caller: &str, target: &str, message: &str,
         parent_tx: Option<tokio::sync::mpsc::Sender<crate::worker::AgentEvent>>,
         invoker_user_id: Option<Uuid>,
+        parent_perms: Vec<String>,
+        task_scope: Option<Vec<String>>,
     ) -> Result<String, String>;
 }
 
@@ -39,7 +41,8 @@ pub trait IntegrationCaller: Send + Sync {
 #[async_trait]
 pub trait ActionCaller: Send + Sync {
     async fn call(
-        &self, app_id: &str, action_id: &str, input: JsonValue, user_id: Uuid, caller_app_id: &str,
+        &self, app_id: &str, action_id: &str, input: JsonValue, user_id: Uuid,
+        caller_app_id: &str, effective_perms: Option<Vec<String>>,
     ) -> Result<JsonValue, String>;
 }
 
@@ -49,6 +52,7 @@ pub struct ToolContext {
     pub user_id: Uuid,
     pub invoker_user_id: Option<Uuid>,
     pub permissions: Vec<String>,
+    pub task_scope: Option<Vec<String>>,
     pub args: JsonValue,
     pub agent_dispatch: Option<Arc<dyn AgentDispatcher>>,
     pub integration_caller: Option<Arc<dyn IntegrationCaller>>,
