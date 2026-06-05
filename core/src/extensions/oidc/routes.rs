@@ -279,15 +279,7 @@ pub(crate) async fn authorize(
     let provider = load_provider(&pool, &secrets, &provider_id).await?;
 
     let redirect_uri = params.redirect_uri.unwrap_or_default();
-    if !redirect_uri.is_empty() {
-        let public = url::Url::parse(&core_public_url())
-            .map_err(|_| ApiError::Internal("invalid ROOTCX_PUBLIC_URL".into()))?;
-        let target = url::Url::parse(&redirect_uri)
-            .map_err(|_| ApiError::BadRequest("invalid redirect_uri".into()))?;
-        if target.origin() != public.origin() {
-            return Err(ApiError::BadRequest("redirect_uri must be same-origin".into()));
-        }
-    }
+    validate_redirect_uri(&redirect_uri, &core_public_url())?;
     let token_delivery = params.token_delivery.unwrap_or_else(|| "query".to_string());
 
     let issuer = IssuerUrl::new(provider.issuer_url.clone())
@@ -515,6 +507,41 @@ fn core_public_url() -> String {
         .unwrap_or_else(|_| "http://localhost:9100".to_string())
 }
 
+/// Validate the post-login `redirect_uri`. Default rule: it must be same-origin
+/// with the core's public URL, so tokens can never be redirected to an external
+/// origin (open-redirect exfiltration). One exception: loopback redirects, which
+/// are always allowed with any port — this is the native/CLI app flow mandated
+/// by RFC 8252 §7.3 ("The authorization server MUST allow any port ... for
+/// loopback IP redirect URIs"). The loopback exemption keeps the external-origin
+/// block intact while letting `rootcx auth login` receive its callback.
+fn validate_redirect_uri(redirect_uri: &str, public_url: &str) -> Result<(), ApiError> {
+    if redirect_uri.is_empty() {
+        return Ok(());
+    }
+    let target = url::Url::parse(redirect_uri)
+        .map_err(|_| ApiError::BadRequest("invalid redirect_uri".into()))?;
+    if is_loopback_redirect(&target) {
+        return Ok(());
+    }
+    let public = url::Url::parse(public_url)
+        .map_err(|_| ApiError::Internal("invalid ROOTCX_PUBLIC_URL".into()))?;
+    if target.origin() != public.origin() {
+        return Err(ApiError::BadRequest("redirect_uri must be same-origin".into()));
+    }
+    Ok(())
+}
+
+/// Loopback redirect host per RFC 8252 §7.3: IPv4 loopback (127.0.0.0/8), IPv6
+/// `::1`, or the literal `localhost`.
+fn is_loopback_redirect(u: &url::Url) -> bool {
+    match u.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        None => false,
+    }
+}
+
 fn build_oidc_client(
     provider: &ProviderRow,
     metadata: CoreProviderMetadata,
@@ -692,6 +719,42 @@ mod tests {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(payload_json);
         format!("{header}.{payload}.fakesig")
+    }
+
+    // ── validate_redirect_uri (same-origin + RFC 8252 loopback exemption) ──
+
+    #[test]
+    fn redirect_uri_same_origin_allowed() {
+        assert!(validate_redirect_uri("https://tenant.rootcx.com/cb", "https://tenant.rootcx.com").is_ok());
+    }
+
+    #[test]
+    fn redirect_uri_external_origin_rejected() {
+        assert!(validate_redirect_uri("https://evil.com/cb", "https://tenant.rootcx.com").is_err());
+    }
+
+    #[test]
+    fn redirect_uri_loopback_allowed_any_port() {
+        // RFC 8252 §7.3: loopback with any ephemeral port, regardless of the core origin.
+        for uri in [
+            "http://127.0.0.1:54321/callback",
+            "http://127.0.0.1:8080/callback",
+            "http://[::1]:54321/callback",
+            "http://localhost:9999/callback",
+        ] {
+            assert!(validate_redirect_uri(uri, "https://tenant.rootcx.com").is_ok(), "should allow {uri}");
+        }
+    }
+
+    #[test]
+    fn redirect_uri_empty_is_ok() {
+        // No redirect_uri = JSON token response path, nothing to validate.
+        assert!(validate_redirect_uri("", "https://tenant.rootcx.com").is_ok());
+    }
+
+    #[test]
+    fn redirect_uri_garbage_rejected() {
+        assert!(validate_redirect_uri("not a url", "https://tenant.rootcx.com").is_err());
     }
 
     // ── pick_initial_role (the role decision the governance fix introduced) ──
