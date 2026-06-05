@@ -1,9 +1,11 @@
+pub mod act_as;
 mod api_error;
 pub mod auth;
 mod crons;
 pub mod delegations;
 mod error;
 pub mod extensions;
+pub mod governance;
 mod ipc;
 mod jobs;
 mod manifest;
@@ -13,17 +15,19 @@ mod scheduler;
 mod schema;
 mod schema_sync;
 mod secrets;
+pub mod sql_proxy;
 mod seed;
 pub mod server;
 pub mod tools;
 mod tool_executor;
 pub mod webhooks;
-mod worker;
+pub mod worker;
 mod worker_manager;
 
 pub use error::RuntimeError;
-
-pub(crate) const SYSTEM_USER_ID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-000000000001");
+/// Worker IPC wire types exposed for the governance contract suite (Category 4):
+/// the worker is never handed a token (`RpcCaller`) nor a DB URL (`Discover`).
+pub use ipc::{OutboundMessage, RpcCaller};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -90,6 +94,11 @@ impl Runtime {
         info!("runtime boot sequence starting");
 
         let pool = PgPool::connect(&self.database_url).await.map_err(RuntimeError::Database)?;
+
+        // Phase 0d: env_clear() on spawn + setuid(1001) already prevent workers
+        // from reading core secrets. remove_var was here as belt-and-suspenders
+        // but is UB in edition 2024 (not thread-safe with tokio running).
+
         schema::bootstrap(&pool).await?;
         sqlx::migrate!("./migrations").run(&pool).await.map_err(|e| RuntimeError::Schema(e.into()))?;
 
@@ -112,14 +121,14 @@ impl Runtime {
         let runtime_url = format!("http://127.0.0.1:{api_port}");
         let upload_nonces = Arc::new(std::sync::Mutex::new(extensions::storage::nonce::NonceStore::default()));
         let wm = Arc::new(WorkerManager::new(
-            apps_dir, runtime_url.clone(), self.database_url.clone(), self.bun_bin.clone(),
+            apps_dir, runtime_url.clone(), self.bun_bin.clone(), pool.clone(),
             Arc::clone(&self.tool_registry), self.pending_approvals.clone(),
             Arc::clone(&secret_manager), Arc::clone(&upload_nonces),
         ));
-        wm.init_self_ref(pool.clone(), Arc::clone(&self.auth_config));
+        wm.init_self_ref();
 
         seed::seed_assistant(&pool, &self.data_dir, &self.bun_bin, &wm, &secret_manager).await?;
-        let scheduler = scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm), Arc::clone(&self.auth_config));
+        let scheduler = scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm));
 
         wm.start_deployed_apps(&pool, &secret_manager).await;
 

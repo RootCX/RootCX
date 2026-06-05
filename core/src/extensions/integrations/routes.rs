@@ -107,38 +107,25 @@ pub async fn execute_action(
         return Err(ApiError::Forbidden(format!("permission denied: {perm}")));
     }
 
-    let run_as = headers.get("x-run-as").and_then(|v| v.to_str().ok());
-    let target_user = if let Some(uid_str) = run_as {
-        if !crate::extensions::rbac::policy::has_permission(&perms, "*") {
-            return Err(ApiError::Forbidden("x-run-as requires admin".into()));
-        }
-        uid_str.to_string()
-    } else {
-        identity.user_id.to_string()
-    };
-
+    // No impersonation: an integration action always runs as the authenticated
+    // caller. Acting for a connected user is handled in-process by
+    // execute_self_action (requester-scoped); owning automation is handled by
+    // run_as on crons/jobs. There is no HTTP "act as anyone" header.
     let config = resolve_config(&pool, &secrets, &integration_id).await?;
 
+    let target_user = identity.user_id.to_string();
     let caller_app = headers.get("x-app-id").and_then(|v| v.to_str().ok());
     let (user_credentials, effective_uid) = super::connections::resolve_credentials(
         &secrets, &pool, &integration_id, &target_user, caller_app,
     ).await;
 
-    let caller_uid = uuid::Uuid::parse_str(&target_user).unwrap_or(identity.user_id);
-    let caller_email = if run_as.is_some() {
-        sqlx::query_scalar::<_, String>("SELECT email FROM rootcx_system.users WHERE id = $1")
-            .bind(caller_uid).fetch_optional(&pool).await.ok().flatten().unwrap_or_default()
-    } else {
-        identity.email.clone()
-    };
+    let caller_email = identity.email.clone();
 
-    let caller = crate::auth::jwt::encode_access(rt.auth_config(), caller_uid, &caller_email)
-        .ok()
-        .map(|token| crate::ipc::RpcCaller {
-            user_id: target_user.clone(),
-            email: caller_email,
-            auth_token: Some(token),
-        });
+    let caller = Some(crate::ipc::RpcCaller {
+        user_id: target_user.clone(),
+        email: caller_email,
+        effective_perms: None,
+    });
 
     let result = wm
         .rpc(
@@ -189,6 +176,24 @@ pub async fn webhook_ingress(
     let raw_body = base64::engine::general_purpose::STANDARD.encode(&body);
 
     if let Some(wh) = crate::webhooks::lookup_token(&pool, &token).await? {
+        // HMAC verification when signature headers are present
+        let sig_header = headers.get("x-webhook-signature").and_then(|v| v.to_str().ok());
+        let ts_header = headers.get("x-webhook-timestamp").and_then(|v| v.to_str().ok());
+
+        if let (Some(signature), Some(timestamp)) = (sig_header, ts_header) {
+            if !crate::webhooks::is_timestamp_fresh(timestamp, 300) {
+                return Err(ApiError::Forbidden("webhook timestamp too old (replay rejected)".into()));
+            }
+
+            let signing_secret = crate::webhooks::get_signing_secret(&pool, &secrets, wh.id)
+                .await
+                .map_err(|e| ApiError::Internal(e.to_string()))?
+                .ok_or_else(|| ApiError::Forbidden("webhook has no signing secret configured".into()))?;
+
+            if !crate::webhooks::verify_hmac(&signing_secret, timestamp, &body, signature) {
+                return Err(ApiError::Forbidden("invalid webhook signature".into()));
+            }
+        }
         // Route by webhook method: "agent" dispatches to the app's agent;
         // anything else is a standard RPC call to the app worker.
         let is_agent_webhook = wh.method == "agent";
@@ -200,6 +205,13 @@ pub async fn webhook_ingress(
             if !crate::delegations::is_valid(&pool, delegator, agent_uid).await
                 .map_err(|e| ApiError::Internal(e.to_string()))? {
                 return Err(ApiError::Forbidden("no valid delegation for webhook agent".into()));
+            }
+            let required_perm = format!("app:{}:invoke", wh.app_id);
+            let (_, perms) = crate::extensions::rbac::policy::resolve_permissions(&pool, delegator).await?;
+            if !crate::extensions::rbac::policy::has_permission(&perms, &required_perm) {
+                return Err(ApiError::Forbidden(format!(
+                    "webhook agent denied: owner lacks {required_perm}"
+                )));
             }
             let message = format!("Webhook received: {}\n\nPayload:\n{payload}", wh.name);
             let llm = crate::routes::llm_models::fetch_default_llm(&pool).await
@@ -214,8 +226,9 @@ pub async fn webhook_ingress(
                 llm,
                 invoker_user_id: Some(delegator),
                 attachments: None,
+                task_scope: Some(vec![format!("app:{}:*", wh.app_id)]),
             };
-            let _ = wm.agent_invoke(&wh.app_id, invoke_payload).await
+            let _ = wm.agent_invoke(&wh.app_id, invoke_payload, None).await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             return Ok(Json(json!({"status": "accepted"})));
         }
@@ -224,7 +237,7 @@ pub async fn webhook_ingress(
         let caller = wh.created_by.map(|uid| crate::ipc::RpcCaller {
             user_id: uid.to_string(),
             email: String::new(),
-            auth_token: None,
+            effective_perms: None,
         });
         let result = wm
             .rpc(

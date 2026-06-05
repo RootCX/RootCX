@@ -12,19 +12,24 @@ use uuid::Uuid;
 use super::{SharedRuntime, parse_uuid, pool};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::extensions::audit;
-use crate::extensions::rbac::policy::{resolve_effective_permissions, has_permission};
 use crate::manifest::{entity_exists, entity_identity, field_type_map, find_entities_by_identity, is_system_field, map_field_type, quote_ident};
+use crate::sql_proxy::{self, ContextState};
 
-async fn set_audit_context_api(tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, identity: &Identity) {
-    let (actor, delegator) = identity.actor_pair();
-    audit::set_context(tx, actor, delegator, "api").await;
+/// RLS context for a direct HTTP user call: the user is the responsible party,
+/// not delegated — `check_access` resolves their permissions from the DB. The
+/// 9 former `check_app_perm` gates are gone; Postgres RLS is the sole arbiter.
+fn http_context(identity: &Identity) -> ContextState {
+    ContextState { user_id: Some(identity.user_id), is_delegated: false, effective_perms: vec![] }
 }
 
-fn check_app_perm(permissions: &[String], app_id: &str, perm: &str) -> Result<(), ApiError> {
-    let namespaced = format!("app:{app_id}:{perm}");
-    if has_permission(permissions, &namespaced) { Ok(()) }
-    else { Err(ApiError::Forbidden(format!("permission denied: {namespaced}"))) }
+/// Open an RLS-governed transaction for a direct HTTP user request.
+async fn http_tx<'a>(
+    pool: &'a PgPool,
+    app_id: &str,
+    identity: &Identity,
+) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, ApiError> {
+    let (actor, delegator) = identity.actor_pair();
+    Ok(sql_proxy::begin_app_tx(pool, app_id, &http_context(identity), actor, delegator, "api", sql_proxy::TIMEOUT_INTERACTIVE_MS).await?)
 }
 
 pub(crate) const MAX_BULK_SIZE: usize = 1000;
@@ -309,8 +314,6 @@ pub async fn list_records(
     validate_app_id(&app_id)?;
     let pool = pool(&rt);
     ensure_entity(&pool, &app_id, &entity).await?;
-    let perms = resolve_effective_permissions(&pool, &identity).await?;
-    check_app_perm(&perms, &app_id, &format!("{entity}.read"))?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
 
@@ -333,7 +336,10 @@ pub async fn list_records(
     let q = format!("SELECT to_jsonb(t.*) AS row FROM {tbl} t{wh} ORDER BY {sort} {order}{limit}{offset}");
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
     for s in &binds { query = query.bind(s.as_str()); }
-    let rows: Vec<(JsonValue,)> = query.fetch_all(&pool).await?;
+
+    // Reads now run inside an RLS transaction: no permission visible → 0 rows.
+    let mut tx = http_tx(&pool, &app_id, &identity).await?;
+    let rows: Vec<(JsonValue,)> = query.fetch_all(&mut *tx).await?;
     let mut data: Vec<JsonValue> = rows.into_iter().map(|(r,)| r).collect();
 
     if let Some(lp) = params.get("linked") {
@@ -341,20 +347,25 @@ pub async fn list_records(
             "true" => LinkedOption::All(true),
             apps => LinkedOption::Apps(apps.split(',').map(String::from).collect()),
         };
-        enrich_linked(&pool, &perms, &app_id, &entity, &mut data, &linked).await?;
+        enrich_linked(&pool, &mut tx, &app_id, &entity, &mut data, &linked).await?;
     }
+    tx.commit().await?;
 
     Ok(Json(data))
 }
 
 async fn enrich_linked(
     pool: &PgPool,
-    permissions: &[String],
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     source_app: &str,
     entity: &str,
     rows: &mut [JsonValue],
     linked: &LinkedOption,
 ) -> Result<(), ApiError> {
+    // entity_identity / find_entities_by_identity read system metadata via the
+    // superuser pool (the open tx runs as the restricted executor without
+    // rootcx_system access). The DATA reads below run on `tx` so RLS filters
+    // each cross-app target by the caller's identity (no perm → 0 rows).
     let Some((identity_kind, identity_key)) = entity_identity(pool, source_app, entity)
         .await.map_err(|e| ApiError::Internal(e.to_string()))?
     else { return Ok(()) };
@@ -376,16 +387,12 @@ async fn enrich_linked(
     if targets.is_empty() || key_values.is_empty() { return Ok(()) }
 
     for (target_app, target_entity, target_key) in &targets {
-        if check_app_perm(permissions, target_app, &format!("{target_entity}.read")).is_err() {
-            continue;
-        }
-
         let tbl = table(target_app, target_entity);
         let phs: String = (1..=key_values.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(",");
         let q = format!("SELECT to_jsonb(t.*) AS row FROM {tbl} t WHERE t.{} IN ({phs})", quote_ident(target_key));
         let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
         for v in &key_values { query = query.bind(v.as_str()); }
-        let Ok(linked_rows) = query.fetch_all(pool).await else { continue };
+        let Ok(linked_rows) = query.fetch_all(&mut **tx).await else { continue };
 
         let by_key: HashMap<&str, &JsonValue> = linked_rows.iter()
             .filter_map(|(row,)| row.get(target_key).and_then(|v| v.as_str()).map(|k| (k, row)))
@@ -419,8 +426,6 @@ pub async fn query_records(
     validate_app_id(&app_id)?;
     let pool = pool(&rt);
     ensure_entity(&pool, &app_id, &entity).await?;
-    let perms = resolve_effective_permissions(&pool, &identity).await?;
-    check_app_perm(&perms, &app_id, &format!("{entity}.read"))?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
 
@@ -443,14 +448,17 @@ pub async fn query_records(
     );
     let mut query = sqlx::query_as::<_, (JsonValue, i64)>(&q);
     for s in &binds { query = query.bind(s.as_str()); }
-    let rows: Vec<(JsonValue, i64)> = query.fetch_all(&pool).await?;
+
+    let mut tx = http_tx(&pool, &app_id, &identity).await?;
+    let rows: Vec<(JsonValue, i64)> = query.fetch_all(&mut *tx).await?;
 
     let total = rows.first().map(|(_, t)| *t).unwrap_or(0);
     let mut data: Vec<JsonValue> = rows.into_iter().map(|(r, _)| r).collect();
 
     if let Some(ref linked) = body.linked {
-        enrich_linked(&pool, &perms, &app_id, &entity, &mut data, linked).await?;
+        enrich_linked(&pool, &mut tx, &app_id, &entity, &mut data, linked).await?;
     }
+    tx.commit().await?;
 
     Ok(Json(serde_json::json!({ "data": data, "total": total })))
 }
@@ -464,8 +472,6 @@ pub async fn create_record(
     validate_app_id(&app_id)?;
     let pool = pool(&rt);
     ensure_entity(&pool, &app_id, &entity).await?;
-    let perms = resolve_effective_permissions(&pool, &identity).await?;
-    check_app_perm(&perms, &app_id, &format!("{entity}.create"))?;
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
@@ -483,8 +489,7 @@ pub async fn create_record(
         cols.join(", "),
         phs.join(", ")
     );
-    let mut tx = pool.begin().await?;
-    set_audit_context_api(&mut tx, &identity).await;
+    let mut tx = http_tx(&pool, &app_id, &identity).await?;
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
     for (k, v) in &entries {
         query = bind_typed(query, v, types.get(*k));
@@ -508,14 +513,18 @@ fn union_keys(objects: &[&serde_json::Map<String, JsonValue>]) -> Vec<String> {
     keys
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn bulk_insert(
     pool: &PgPool,
+    app_id: &str,
     tbl: &str,
     types: &HashMap<String, String>,
     objects: &[&serde_json::Map<String, JsonValue>],
+    state: &ContextState,
     actor_uid: Option<Uuid>,
     delegator_uid: Option<Uuid>,
     trigger_ref: &str,
+    timeout_ms: u32,
 ) -> Result<Vec<JsonValue>, ApiError> {
     let keys = union_keys(objects);
     if keys.is_empty() {
@@ -551,8 +560,7 @@ pub(crate) async fn bulk_insert(
         }
     }
 
-    let mut tx = pool.begin().await?;
-    audit::set_context(&mut tx, actor_uid, delegator_uid, trigger_ref).await;
+    let mut tx = sql_proxy::begin_app_tx(pool, app_id, state, actor_uid, delegator_uid, trigger_ref, timeout_ms).await?;
     let rows: Vec<(JsonValue,)> = query.fetch_all(&mut *tx).await?;
     tx.commit().await?;
     Ok(rows.into_iter().map(|(r,)| r).collect())
@@ -567,8 +575,6 @@ pub async fn bulk_create_records(
     validate_app_id(&app_id)?;
     let db = pool(&rt);
     ensure_entity(&db, &app_id, &entity).await?;
-    let perms = resolve_effective_permissions(&db, &identity).await?;
-    check_app_perm(&perms, &app_id, &format!("{entity}.create"))?;
     let records = body.as_array()
         .ok_or_else(|| ApiError::BadRequest("body must be a JSON array".into()))?;
     if records.is_empty() {
@@ -586,7 +592,7 @@ pub async fn bulk_create_records(
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&db, &app_id, &entity).await?;
     let (actor, delegator) = identity.actor_pair();
-    let created = bulk_insert(&db, &tbl, &types, &objects, actor, delegator, "api").await?;
+    let created = bulk_insert(&db, &app_id, &tbl, &types, &objects, &http_context(&identity), actor, delegator, "api", sql_proxy::TIMEOUT_INTERACTIVE_MS).await?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -598,15 +604,14 @@ pub async fn get_record(
     validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
     ensure_entity(&pool, &app_id, &entity).await?;
-    let perms = resolve_effective_permissions(&pool, &identity).await?;
-    check_app_perm(&perms, &app_id, &format!("{entity}.read"))?;
     let tbl = table(&app_id, &entity);
     let q = format!("SELECT to_jsonb(t.*) AS row FROM {tbl} t WHERE t.id = $1");
-    let query = sqlx::query_as::<_, (JsonValue,)>(&q).bind(uuid);
-    query
-        .fetch_optional(&pool)
-        .await?
-        .map(|(r,)| Json(r))
+
+    let mut tx = http_tx(&pool, &app_id, &identity).await?;
+    let row = sqlx::query_as::<_, (JsonValue,)>(&q).bind(uuid).fetch_optional(&mut *tx).await?;
+    tx.commit().await?;
+
+    row.map(|(r,)| Json(r))
         .ok_or_else(|| ApiError::NotFound(format!("record '{id}' not found")))
 }
 
@@ -619,8 +624,6 @@ pub async fn update_record(
     validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
     ensure_entity(&pool, &app_id, &entity).await?;
-    let perms = resolve_effective_permissions(&pool, &identity).await?;
-    check_app_perm(&perms, &app_id, &format!("{entity}.update"))?;
     let obj = require_object(&body)?;
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&pool, &app_id, &entity).await?;
@@ -634,8 +637,7 @@ pub async fn update_record(
         "UPDATE {tbl} SET {} WHERE id = ${id_param} RETURNING to_jsonb({tbl}.*) AS row",
         sets.join(", ")
     );
-    let mut tx = pool.begin().await?;
-    set_audit_context_api(&mut tx, &identity).await;
+    let mut tx = http_tx(&pool, &app_id, &identity).await?;
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
     for (k, v) in &entries {
         query = bind_typed(query, v, types.get(*k));
@@ -658,12 +660,9 @@ pub async fn delete_record(
     validate_app_id(&app_id)?;
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
     ensure_entity(&pool, &app_id, &entity).await?;
-    let perms = resolve_effective_permissions(&pool, &identity).await?;
-    check_app_perm(&perms, &app_id, &format!("{entity}.delete"))?;
     let tbl = table(&app_id, &entity);
     let q = format!("DELETE FROM {tbl} WHERE id = $1");
-    let mut tx = pool.begin().await?;
-    set_audit_context_api(&mut tx, &identity).await;
+    let mut tx = http_tx(&pool, &app_id, &identity).await?;
     let r = sqlx::query(&q).bind(uuid).execute(&mut *tx).await?;
     if r.rows_affected() == 0 {
         return Err(ApiError::NotFound(format!("record '{id}' not found")));
@@ -679,7 +678,6 @@ pub async fn federated_query(
     Json(body): Json<QueryRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = pool(&rt);
-    let perms = resolve_effective_permissions(&pool, &identity).await?;
     let targets = find_entities_by_identity(&pool, &identity_kind, None)
         .await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
@@ -688,10 +686,6 @@ pub async fn federated_query(
     let mut bind_offset = 0usize;
 
     for (app_id, entity_name, _key) in &targets {
-        if check_app_perm(&perms, app_id, &format!("{entity_name}.read")).is_err() {
-            continue;
-        }
-
         let tbl = table(app_id, entity_name);
         let types = field_type_map(&pool, app_id, entity_name).await?;
         let (mut idx, mut conditions, mut binds) = (bind_offset, Vec::new(), Vec::new());
@@ -738,7 +732,12 @@ pub async fn federated_query(
 
     let mut query = sqlx::query_as::<_, (JsonValue, i64)>(&q);
     for s in &all_binds { query = query.bind(s.as_str()); }
-    let rows: Vec<(JsonValue, i64)> = query.fetch_all(&pool).await?;
+
+    // Federated reads span schemas (fully qualified); RLS filters each UNION
+    // branch by the caller's identity. search_path is irrelevant here.
+    let mut tx = http_tx(&pool, "public", &identity).await?;
+    let rows: Vec<(JsonValue, i64)> = query.fetch_all(&mut *tx).await?;
+    tx.commit().await?;
 
     let total = rows.first().map(|(_, t)| *t).unwrap_or(0);
     let data: Vec<JsonValue> = rows.into_iter().map(|(r, _)| r).collect();

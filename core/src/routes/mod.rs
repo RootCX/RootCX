@@ -3,7 +3,7 @@ mod crons;
 pub(crate) mod crud;
 mod deploy;
 mod icon;
-mod introspection;
+pub(crate) mod introspection;
 mod jobs;
 pub mod llm_models;
 pub(crate) mod query_params;
@@ -145,8 +145,15 @@ pub async fn install_app(
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
     Json(manifest): Json<AppManifest>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = pool(&rt);
-    crate::manifest::install_app(&pool, &manifest, rt.extensions(), identity.user_id).await?;
+    let (pool, secrets) = pool_and_secrets(&rt);
+    if !crate::extensions::rbac::is_first_boot(&pool).await? {
+        let ok = crate::extensions::rbac::policy::has_permission_db(&pool, identity.user_id, "admin:apps.install").await?
+            || crate::extensions::rbac::policy::has_permission_db(&pool, identity.user_id, "platform:apps.create").await?;
+        if !ok {
+            return Err(ApiError::Forbidden("permission denied: admin:apps.install or platform:apps.create".into()));
+        }
+    }
+    crate::manifest::install_app(&pool, &manifest, rt.extensions(), identity.user_id, &secrets).await?;
     Ok(Json(json!({ "message": format!("app '{}' installed", manifest.app_id) })))
 }
 
@@ -226,11 +233,12 @@ pub async fn get_app(
 }
 
 pub async fn uninstall_app(
-    _identity: Identity,
+    identity: Identity,
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
     axum::extract::Path(app_id): axum::extract::Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = pool(&rt);
+    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:apps.install").await?;
     let data_dir = rt.data_dir().to_path_buf();
     let _ = wm(&rt).stop_app(&app_id).await;
     crate::manifest::uninstall_app(&pool, &app_id).await?;

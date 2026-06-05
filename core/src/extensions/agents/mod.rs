@@ -107,7 +107,7 @@ impl RuntimeExtension for AgentExtension {
 
         if !exists { return Ok(()); }
 
-        sync_agent_rbac(pool, app_id).await?;
+        sync_agent_rbac(pool, app_id, None).await?;
         info!(app = %app_id, "agent RBAC synced");
         Ok(())
     }
@@ -129,7 +129,7 @@ impl RuntimeExtension for AgentExtension {
     }
 }
 
-pub async fn register_agent(pool: &PgPool, app_id: &str, def: &AgentDefinition) -> Result<(), RuntimeError> {
+pub async fn register_agent(pool: &PgPool, app_id: &str, def: &AgentDefinition, deployer: Option<Uuid>) -> Result<(), RuntimeError> {
     let config = serde_json::json!({
         "systemPrompt": def.system_prompt,
         "memory": def.memory,
@@ -152,35 +152,72 @@ pub async fn register_agent(pool: &PgPool, app_id: &str, def: &AgentDefinition) 
     .await
     .map_err(RuntimeError::Schema)?;
 
-    sync_agent_rbac(pool, app_id).await?;
+    sync_agent_rbac(pool, app_id, deployer).await?;
     info!(app = %app_id, "agent registered from agent.json");
     Ok(())
 }
 
-/// Ensure the agent has a system user identity and a default role assignment.
-/// Permissions are governed via the standard RBAC API (same as humans).
-/// Does not overwrite existing role assignments (admin may have already scoped the agent).
-async fn sync_agent_rbac(pool: &PgPool, app_id: &str) -> Result<(), RuntimeError> {
+/// Ensure the agent has a system user identity and a least-privilege role
+/// derived from the app's data contract. Does not overwrite existing role
+/// assignments (admin may have already scoped the agent differently).
+async fn sync_agent_rbac(pool: &PgPool, app_id: &str, deployer: Option<Uuid>) -> Result<(), RuntimeError> {
     let agent_uid = agent_user_id(app_id);
 
     sqlx::query(
-        "INSERT INTO rootcx_system.users (id, email, is_system) \
-         VALUES ($1, $2, true) ON CONFLICT (id) DO NOTHING"
-    ).bind(agent_uid).bind(format!("agent+{app_id}@localhost"))
+        "INSERT INTO rootcx_system.users (id, email, is_system, kind, owner_of_record) \
+         VALUES ($1, $2, true, 'agent', $3) ON CONFLICT (id) DO UPDATE SET \
+         owner_of_record = COALESCE(rootcx_system.users.owner_of_record, EXCLUDED.owner_of_record)"
+    ).bind(agent_uid).bind(format!("agent+{app_id}@localhost")).bind(deployer)
     .execute(pool).await.map_err(RuntimeError::Schema)?;
 
-    // Only assign admin if the agent has no role yet (first deploy).
-    // After that, the admin governs the agent's role via the RBAC API.
+    // Only assign role on first deploy; after that the admin governs via RBAC API.
     let has_role: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_assignments WHERE user_id = $1)"
     ).bind(agent_uid).fetch_one(pool).await.map_err(RuntimeError::Schema)?;
 
     if !has_role {
+        let role_name = format!("app:{app_id}:agent");
+        let perms = derive_agent_permissions(pool, app_id).await?;
+
+        sqlx::query(
+            "INSERT INTO rootcx_system.rbac_roles (name, description, permissions) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (name) DO UPDATE SET permissions = EXCLUDED.permissions"
+        )
+        .bind(&role_name)
+        .bind(format!("Auto-generated least-privilege role for {app_id} agent"))
+        .bind(&perms)
+        .execute(pool).await.map_err(RuntimeError::Schema)?;
+
         sqlx::query(
             "INSERT INTO rootcx_system.rbac_assignments (user_id, role) \
-             VALUES ($1, 'admin') ON CONFLICT DO NOTHING"
-        ).bind(agent_uid).execute(pool).await.map_err(RuntimeError::Schema)?;
+             VALUES ($1, $2) ON CONFLICT DO NOTHING"
+        ).bind(agent_uid).bind(&role_name)
+        .execute(pool).await.map_err(RuntimeError::Schema)?;
     }
 
     Ok(())
+}
+
+/// Derive least-privilege permissions from the app's installed manifest.
+/// Grants CRUD on all entities + invoke. No wildcard, no admin.
+async fn derive_agent_permissions(pool: &PgPool, app_id: &str) -> Result<Vec<String>, RuntimeError> {
+    let manifest_json: Option<(Option<serde_json::Value>,)> = sqlx::query_as(
+        "SELECT manifest FROM rootcx_system.apps WHERE id = $1"
+    ).bind(app_id).fetch_optional(pool).await.map_err(RuntimeError::Schema)?;
+
+    let mut perms: Vec<String> = match manifest_json.and_then(|(j,)| j) {
+        Some(json) => {
+            let manifest: AppManifest = serde_json::from_value(json)
+                .map_err(|e| RuntimeError::Config(format!("bad manifest for {app_id}: {e}")))?;
+            manifest.data_contract.iter()
+                .flat_map(|e| ["create", "read", "update", "delete"]
+                    .map(|a| format!("app:{app_id}:{}.{a}", e.entity_name)))
+                .collect()
+        }
+        None => vec![],
+    };
+
+    perms.push(format!("app:{app_id}:invoke"));
+    Ok(perms)
 }

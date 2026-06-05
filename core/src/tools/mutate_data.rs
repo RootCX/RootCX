@@ -2,10 +2,10 @@ use async_trait::async_trait;
 use serde_json::{json, Value as JsonValue};
 use rootcx_types::ToolDescriptor;
 
-use super::{Tool, ToolContext, str_arg, check_permission};
-use crate::extensions::audit;
+use super::{Tool, ToolContext, str_arg};
 use crate::manifest::{field_type_map, quote_ident};
 use crate::routes::crud::{bind_typed, bulk_insert, filter_writable_fields, table, MAX_BULK_SIZE};
+use crate::sql_proxy::{self, ContextState};
 
 pub struct MutateDataTool;
 
@@ -36,10 +36,17 @@ impl Tool for MutateDataTool {
         let action = str_arg(&ctx.args, "action")?;
         let app = ctx.args.get("app").and_then(|v| v.as_str()).unwrap_or(&ctx.app_id);
 
-        let perm_action = if action == "bulk_create" { "create" } else { action };
-        check_permission(&ctx.permissions, &format!("app:{app}:{entity}.{perm_action}"))?;
-
         let tbl = table(app, entity);
+
+        // RLS context for the delegated agent: user_id = responsible human,
+        // effective_perms = pre-computed intersection. Audit attributes the
+        // write to the agent (actor) on behalf of the human (delegator).
+        let state = ContextState {
+            user_id: ctx.invoker_user_id,
+            is_delegated: true,
+            effective_perms: ctx.permissions.clone(),
+        };
+        let begin = || sql_proxy::begin_app_tx(&ctx.pool, app, &state, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool", sql_proxy::TIMEOUT_AGENT_TOOL_MS);
 
         match action {
             "create" => {
@@ -59,8 +66,7 @@ impl Tool for MutateDataTool {
                     "INSERT INTO {tbl} ({}) VALUES ({}) RETURNING to_jsonb({tbl}.*) AS row",
                     cols.join(", "), phs.join(", ")
                 );
-                let mut tx = ctx.pool.begin().await.map_err(|e| e.to_string())?;
-                audit::set_context(&mut tx, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool").await;
+                let mut tx = begin().await.map_err(|e| e.to_string())?;
                 let mut q = sqlx::query_as::<_, (JsonValue,)>(&sql);
                 for (k, v) in &entries { q = bind_typed(q, v, types.get(*k)); }
                 let (row,) = q.fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
@@ -85,8 +91,7 @@ impl Tool for MutateDataTool {
                     "UPDATE {tbl} SET {} WHERE id = ${id_param} RETURNING to_jsonb({tbl}.*) AS row",
                     sets.join(", ")
                 );
-                let mut tx = ctx.pool.begin().await.map_err(|e| e.to_string())?;
-                audit::set_context(&mut tx, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool").await;
+                let mut tx = begin().await.map_err(|e| e.to_string())?;
                 let mut q = sqlx::query_as::<_, (JsonValue,)>(&sql);
                 for (k, v) in &entries { q = bind_typed(q, v, types.get(*k)); }
                 q = q.bind(uuid);
@@ -108,15 +113,14 @@ impl Tool for MutateDataTool {
                     .map(|v| v.as_object().ok_or("each item in 'data' must be an object"))
                     .collect::<Result<_, _>>()?;
                 let types = field_type_map(&ctx.pool, app, entity).await.map_err(|e| e.to_string())?;
-                let rows = bulk_insert(&ctx.pool, &tbl, &types, &objects, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool").await.map_err(|e| format!("{e:?}"))?;
+                let rows = bulk_insert(&ctx.pool, app, &tbl, &types, &objects, &state, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool", sql_proxy::TIMEOUT_AGENT_TOOL_MS).await.map_err(|e| format!("{e:?}"))?;
                 Ok(json!(rows))
             }
             "delete" => {
                 let id = str_arg(&ctx.args, "id")?;
                 let uuid: sqlx::types::Uuid = id.parse().map_err(|_| format!("invalid UUID: '{id}'"))?;
                 let sql = format!("DELETE FROM {tbl} WHERE id = $1");
-                let mut tx = ctx.pool.begin().await.map_err(|e| e.to_string())?;
-                audit::set_context(&mut tx, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool").await;
+                let mut tx = begin().await.map_err(|e| e.to_string())?;
                 let r = sqlx::query(&sql).bind(uuid).execute(&mut *tx).await.map_err(|e| e.to_string())?;
                 if r.rows_affected() == 0 { return Err(format!("record '{id}' not found")); }
                 tx.commit().await.map_err(|e| e.to_string())?;

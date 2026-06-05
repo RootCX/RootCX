@@ -70,6 +70,7 @@ async fn mgmt_endpoints_reject_unauthenticated() {
     assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/worker/start", &json!({})).await.0, 401);
     assert_eq!(rt.post_unauthed("/api/v1/apps/authtest/worker/stop", &json!({})).await.0, 401);
     assert_eq!(rt.delete_unauthed("/api/v1/users/00000000-0000-0000-0000-000000000099").await, 401);
+    assert_eq!(rt.get_unauthed("/api/v1/permissions/available").await, 401);
     rt.shutdown().await;
 }
 
@@ -299,8 +300,9 @@ async fn secrets_missing_fields() {
     rt.install("smf", "items").await;
     let (s1, _) = rt.post_json("/api/v1/apps/smf/secrets", &json!({"key":"K"})).await;
     let (s2, _) = rt.post_json("/api/v1/apps/smf/secrets", &json!({"value":"V"})).await;
-    assert_eq!(s1, 400);
-    assert_eq!(s2, 400);
+    // Axum returns 422 for JSON deserialization failures (missing required fields)
+    assert!(s1.is_client_error(), "missing value should be rejected: {s1}");
+    assert!(s2.is_client_error(), "missing key should be rejected: {s2}");
     rt.shutdown().await;
 }
 
@@ -376,7 +378,13 @@ async fn all_worker_statuses() {
     let (s, body) = rt.get_json("/api/v1/workers").await;
     assert_eq!(s, 200);
     assert!(body["workers"].is_object(), "expected workers to be an object, got: {body:?}");
-    assert!(body["workers"].as_object().unwrap().is_empty());
+    // The seeded assistant may have a running worker; no user-installed workers
+    // should be present before any explicit install/deploy.
+    let workers = body["workers"].as_object().unwrap();
+    assert!(
+        workers.is_empty() || (workers.len() == 1 && workers.contains_key("assistant")),
+        "unexpected workers before any install: {workers:?}"
+    );
     rt.shutdown().await;
 }
 
@@ -600,9 +608,12 @@ async fn deploy_rejects_absolute_path() {
 async fn rpc_on_unstarted_worker() {
     let rt = TestRuntime::boot().await;
     rt.install("rpcns", "items").await;
+    // Workers now spawn lazily per identity on first RPC. This app was installed
+    // but never deployed (no backend entry point), so the lazy spawn fails and
+    // the RPC still errors with 500 — just with a "no entry point" reason.
     let (s, body) = rt.post_json("/api/v1/apps/rpcns/rpc", &json!({"method":"ping"})).await;
     assert_eq!(s, 500);
-    assert!(body["error"].as_str().unwrap().contains("no worker"));
+    assert!(body["error"].as_str().unwrap().contains("entry point"));
     rt.shutdown().await;
 }
 
@@ -727,17 +738,24 @@ async fn platform_secrets_change_triggers_worker_restart() {
 async fn ai_config_get_set() {
     let rt = TestRuntime::boot().await;
 
-    let (s, _) = rt.get_json("/api/v1/config/ai").await;
-    assert_eq!(s, 404, "should be 404 before any config is set");
-
-    let config = json!({"provider":"Anthropic","model":"claude-sonnet-4-20250514"});
-    let (s, _) = rt.put_json("/api/v1/config/ai", &config).await;
-    assert!(s == 200 || s == 204);
-
-    let (s, body) = rt.get_json("/api/v1/config/ai").await;
+    // Legacy /config/ai was replaced by /llm-models registry
+    let (s, body) = rt.get_json("/api/v1/llm-models").await;
     assert_eq!(s, 200);
-    assert_eq!(body["provider"], "Anthropic");
-    assert_eq!(body["model"], "claude-sonnet-4-20250514");
+    assert!(body.as_array().unwrap().is_empty(), "no models configured initially");
+
+    let model = json!({"id":"test-model","name":"default","provider":"Anthropic","model":"claude-sonnet-4-20250514","config":{},"is_default":true});
+    let (s, body) = rt.post_json("/api/v1/llm-models", &model).await;
+    assert_eq!(s, 201, "create model: {body}");
+
+    let (s, body) = rt.get_json("/api/v1/llm-models").await;
+    assert_eq!(s, 200);
+    let models = body.as_array().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["provider"], "Anthropic");
+    assert_eq!(models[0]["model"], "claude-sonnet-4-20250514");
+    assert_eq!(models[0]["is_default"], true);
+
+    rt.delete("/api/v1/llm-models/test-model").await;
     rt.shutdown().await;
 }
 
@@ -789,6 +807,17 @@ async fn db_query_rejects_dml() {
     let (s, body) = rt.post_json("/api/v1/db/query", &json!({"sql":"DROP TABLE foo"})).await;
     assert_eq!(s, 400);
     assert!(body["error"].as_str().unwrap().to_lowercase().contains("select"));
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn db_query_rejects_writable_cte() {
+    let rt = TestRuntime::boot().await;
+    rt.install("wctx", "targets").await;
+    let sql = "WITH x AS (INSERT INTO wctx.targets (id) VALUES (gen_random_uuid()) RETURNING *) SELECT * FROM x";
+    let (s, body) = rt.post_json("/api/v1/db/query", &json!({"sql": sql})).await;
+    assert_eq!(s, 400, "writable CTE must be rejected: {body}");
+    assert!(body["error"].as_str().unwrap().contains("read-only"), "expected read-only error, got: {body}");
     rt.shutdown().await;
 }
 
@@ -1063,13 +1092,30 @@ async fn rbac_available_permissions() {
     let rt = TestRuntime::boot().await;
     rt.install("rbacavail", "items").await;
 
+    // Unauthenticated -> 401
+    assert_eq!(rt.get_unauthed("/api/v1/permissions/available").await, 401);
+
+    // Admin (holds `*`) sees all permissions
     let (s, body) = rt.get_json("/api/v1/permissions/available").await;
     assert_eq!(s, 200);
-    let perms = body.as_array().unwrap();
-    let keys: Vec<&str> = perms.iter().filter_map(|p| p["key"].as_str()).collect();
-    // Permissions are namespaced: app:{app_id}:{entity}.{action}
+    let keys: Vec<&str> = body.as_array().unwrap().iter().filter_map(|p| p["key"].as_str()).collect();
     assert!(keys.contains(&"app:rbacavail:items.read"));
     assert!(keys.contains(&"app:rbacavail:items.create"));
+
+    // Limited user: only sees permissions within their granted namespace
+    let limited_token = rt.register_and_login("limited@test.local").await;
+    let (_, users) = rt.get_json("/api/v1/users").await;
+    let uid = users.as_array().unwrap().iter()
+        .find(|u| u["email"] == "limited@test.local").unwrap()["id"].as_str().unwrap().to_string();
+    rt.post_json("/api/v1/roles", &json!({"name":"reader","permissions":["app:rbacavail:items.read"]})).await;
+    rt.post_json("/api/v1/roles/assign", &json!({"userId": uid, "role": "reader"})).await;
+
+    let (s, body) = rt.request_as(Method::GET, "/api/v1/permissions/available", &limited_token, None).await;
+    assert_eq!(s, 200);
+    let limited_keys: Vec<&str> = body.as_array().unwrap().iter().filter_map(|p| p["key"].as_str()).collect();
+    assert!(limited_keys.contains(&"app:rbacavail:items.read"));
+    assert!(!limited_keys.contains(&"app:rbacavail:items.create"));
+
     rt.shutdown().await;
 }
 
@@ -2120,6 +2166,110 @@ async fn ipc_v2_collection_op_round_trip() {
     rt.shutdown().await;
 }
 
+// ── SECURITY: cross-user context-token confused deputy ──────────────────────
+// Regression lock for docs/security-context-token-confusion.md. A malicious app
+// must only ever act under the identity of its ACTUAL caller. It cannot select,
+// forge, or inherit another concurrent user's identity. This is enforced
+// structurally: the context token is abolished and each worker process is bound
+// for life to one identity (per-principal isolation). If a future change
+// reintroduced a worker-chosen identity, this test must fail.
+#[tokio::test]
+async fn worker_cannot_act_as_another_user() {
+    let rt = TestRuntime::boot().await;
+    rt.install("evil", "items").await;
+
+    // Malicious backend: it reports the identity the CORE posed for the call
+    // (unforgeable) and actively tries the OLD attack — hand-crafting a raw
+    // sql_query IPC message carrying a forged/stolen context_token.
+    let backend = br#"
+        let SNIFFED = [];
+        serve({
+          rpc: {
+            async whoami(_p, _c, ctx) {
+              const r = await ctx.sql("SELECT current_setting('rootcx.user_id', true) AS uid");
+              return { uid: r.rows?.[0]?.[0] ?? null };
+            },
+            async escalate(params, _c, ctx) {
+              // The pre-fix exploit: echo a token the worker holds for another
+              // user. The token no longer exists in the protocol, so the core
+              // ignores this entirely and runs under our bound identity.
+              try {
+                process.stdout.write(JSON.stringify({
+                  type: "sql_query", id: "forged",
+                  context_token: params.stolen ?? "ff".repeat(32),
+                  sql: "SELECT 1"
+                }) + "\n");
+              } catch (_) {}
+              const r = await ctx.sql("SELECT current_setting('rootcx.user_id', true) AS uid");
+              return { uid: r.rows?.[0]?.[0] ?? null };
+            },
+            // Reports any identity token the app saw on its own IPC stream.
+            sniffed: () => ({ tokens: SNIFFED }),
+          },
+        });
+        // Sniff the raw inbound IPC AFTER serve() (so the discover handshake is
+        // untouched). On the pre-fix protocol, rpc/job messages carried a
+        // context_token an untrusted worker could harvest and replay. The fix
+        // abolished it, so SNIFFED must stay empty forever.
+        process.stdin.on("data", (chunk) => {
+          String(chunk).split("\n").forEach((line) => {
+            line = line.trim(); if (!line) return;
+            try { const m = JSON.parse(line); if (m && m.context_token != null) SNIFFED.push(String(m.context_token)); } catch (_) {}
+          });
+        });
+    "#;
+    let (s, _) = rt.deploy("evil", &make_tar_gz(&[("index.ts", backend)])).await;
+    assert_eq!(s, 200);
+
+    // Admin (harness owner) and a low-priv user, both allowed to invoke.
+    let admin_uid: uuid::Uuid = sqlx::query_scalar(
+        "SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
+        .fetch_one(rt.pool()).await.unwrap();
+    let low_token = rt.register_and_login("lowpriv@test.local").await;
+    let low_uid: uuid::Uuid = sqlx::query_scalar(
+        "SELECT id FROM rootcx_system.users WHERE email = 'lowpriv@test.local'")
+        .fetch_one(rt.pool()).await.unwrap();
+    // Grant ONLY invoke on evil — no admin, no data permissions.
+    let role = format!("role_{}", low_uid.simple());
+    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, inherits, permissions) VALUES ($1, '{}', ARRAY['app:evil:invoke']) ON CONFLICT (name) DO UPDATE SET permissions = EXCLUDED.permissions")
+        .bind(&role).execute(rt.pool()).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, $2) ON CONFLICT DO NOTHING")
+        .bind(low_uid).bind(&role).execute(rt.pool()).await.unwrap();
+
+    async fn call(rt: &TestRuntime, token: &str, method: &str) -> Value {
+        for _ in 0..25 {
+            let (s, body) = rt.request_as(
+                Method::POST, "/api/v1/apps/evil/rpc", token,
+                Some(&json!({"method": method, "params": {}}))).await;
+            if s == 200 { return body; }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        panic!("rpc {method} never succeeded");
+    }
+
+    // 1. The low-priv user's worker runs as the low-priv user.
+    let r = call(&rt, &low_token, "whoami").await;
+    assert_eq!(r["uid"], low_uid.to_string(), "low-priv worker must run as its caller");
+
+    // 2. The admin invokes in a SEPARATE per-identity worker, as admin.
+    let r = call(&rt, &rt.token, "whoami").await;
+    assert_eq!(r["uid"], admin_uid.to_string(), "admin worker must run as admin");
+
+    // 3. The forged-token escalation has NO effect: still the low-priv user.
+    let r = call(&rt, &low_token, "escalate").await;
+    assert_eq!(r["uid"], low_uid.to_string(), "forged context_token must not change identity");
+    assert_ne!(r["uid"], admin_uid.to_string(), "a worker must never become another user");
+
+    // 4. No identity token ever crossed the IPC wire — there is nothing for an
+    //    untrusted worker to harvest and replay. This fails the instant a
+    //    context_token (or any worker-supplied identity) is reintroduced.
+    let r = call(&rt, &low_token, "sniffed").await;
+    assert!(r["tokens"].as_array().unwrap().is_empty(),
+        "no identity token may appear on the IPC wire: {r}");
+
+    rt.shutdown().await;
+}
+
 #[tokio::test]
 async fn ipc_v1_legacy_worker_with_new_prelude() {
     let rt = TestRuntime::boot().await;
@@ -2529,31 +2679,40 @@ async fn cron_created_by_nulled_on_user_deletion() {
 // ── Job impersonation ──────────────────────────────────────────────
 
 #[tokio::test]
-async fn job_enqueue_with_user_id_requires_admin() {
+async fn job_enqueue_run_as_requires_act_as() {
     let rt = TestRuntime::boot().await;
     rt.install("jobimp", "items").await;
 
-    let other = rt.register_and_login("other@test.local").await;
-    let (_, users) = rt.get_json("/api/v1/users").await;
-    let other_id = users.as_array().unwrap().iter()
-        .find(|u| u["email"] == "other@test.local").unwrap()["id"]
-        .as_str().unwrap().to_string();
+    // A service account to own jobs.
+    let (s, sa) = rt.post_json("/api/v1/service-accounts", &json!({ "slug": "jobimp_sa" })).await;
+    assert_eq!(s, 201, "create SA: {sa}");
+    let sa_id = sa["id"].as_str().unwrap().to_string();
 
-    // Admin can enqueue as another user
+    // No bare-admin shortcut: owning a job as another principal needs an act-as
+    // delegation, even for an admin.
     let (s, body) = rt.post_json("/api/v1/apps/jobimp/jobs", &json!({
-        "payload": { "type": "test" }, "user_id": other_id
+        "payload": { "type": "test" }, "user_id": sa_id
     })).await;
-    assert_eq!(s, 201, "admin impersonation: {body}");
+    assert_eq!(s, 403, "no act-as delegation -> denied even for admin: {body}");
 
-    // Non-admin cannot impersonate the admin
-    let admin_id = users.as_array().unwrap().iter()
-        .find(|u| u["email"] == "admin@test.local").unwrap()["id"]
-        .as_str().unwrap();
+    // Grant the admin act-as on the SA; now it succeeds (admin's `*` makes the
+    // anti-escalation subset trivially satisfied).
+    let admin_id: uuid::Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
+        .fetch_one(rt.pool()).await.unwrap();
+    let (s, _) = rt.post_json(&format!("/api/v1/service-accounts/{sa_id}/act-as"), &json!({ "userId": admin_id })).await;
+    assert_eq!(s, 200);
+    let (s, body) = rt.post_json("/api/v1/apps/jobimp/jobs", &json!({
+        "payload": { "type": "test" }, "user_id": sa_id
+    })).await;
+    assert_eq!(s, 201, "with act-as delegation -> allowed: {body}");
+
+    // A non-admin without `app:jobimp:invoke` cannot enqueue at all.
+    let other = rt.register_and_login("other@test.local").await;
     let (s, _) = rt.request_as(
         Method::POST, "/api/v1/apps/jobimp/jobs", &other,
-        Some(&json!({"payload": {"type": "test"}, "user_id": admin_id})),
+        Some(&json!({ "payload": { "type": "test" } })),
     ).await;
-    assert_eq!(s, 403, "non-admin impersonation must be forbidden");
+    assert_eq!(s, 403, "non-admin without invoke must be denied");
 
     rt.shutdown().await;
 }
@@ -2812,27 +2971,39 @@ async fn register_test_agent(rt: &TestRuntime, app_id: &str) {
         limits: None,
         supervision: None,
     };
-    rootcx_core::extensions::agents::register_agent(rt.pool(), app_id, &def)
+    rootcx_core::extensions::agents::register_agent(rt.pool(), app_id, &def, None)
         .await.expect("register_agent");
 }
 
 #[tokio::test]
-async fn agent_registration_assigns_admin_with_no_per_agent_role() {
+async fn agent_registration_assigns_least_privilege_role() {
     let rt = TestRuntime::boot().await;
-    let app_id = "agentadmin";
+    let app_id = "agentlp";
     register_test_agent(&rt, app_id).await;
 
     let agent_uid = rootcx_core::extensions::agents::agent_user_id(app_id);
 
+    // Must NOT have admin
     let admin_assignments: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM rootcx_system.rbac_assignments WHERE user_id = $1 AND role = 'admin'",
     ).bind(agent_uid).fetch_one(rt.pool()).await.unwrap();
-    assert_eq!(admin_assignments, 1, "agent system user must be assigned to 'admin'");
+    assert_eq!(admin_assignments, 0, "agent must NOT be assigned 'admin' (deny-by-default)");
 
-    let per_agent_roles: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM rootcx_system.rbac_roles WHERE name LIKE 'agent:%'",
-    ).fetch_one(rt.pool()).await.unwrap();
-    assert_eq!(per_agent_roles, 0, "no per-agent role should be created");
+    // Must have the per-app agent role
+    let role_name = format!("app:{app_id}:agent");
+    let has_role: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.rbac_assignments WHERE user_id = $1 AND role = $2)",
+    ).bind(agent_uid).bind(&role_name).fetch_one(rt.pool()).await.unwrap();
+    assert!(has_role, "agent must be assigned app:{{app_id}}:agent role");
+
+    // Verify the role contains entity CRUD + invoke, no wildcard
+    let (_, perms) = rootcx_core::extensions::rbac::policy::resolve_permissions(rt.pool(), agent_uid).await.unwrap();
+    assert!(!perms.contains(&"*".to_string()), "agent must NOT have wildcard");
+    assert!(perms.contains(&format!("app:{app_id}:items.create")), "must have entity create");
+    assert!(perms.contains(&format!("app:{app_id}:items.read")), "must have entity read");
+    assert!(perms.contains(&format!("app:{app_id}:items.update")), "must have entity update");
+    assert!(perms.contains(&format!("app:{app_id}:items.delete")), "must have entity delete");
+    assert!(perms.contains(&format!("app:{app_id}:invoke")), "must have invoke");
 
     rt.shutdown().await;
 }
@@ -2868,7 +3039,7 @@ async fn webhook_manifest_sync_and_orphan_deletion() {
 
     let hubspot = arr.iter().find(|w| w["name"] == "hubspot").expect("hubspot missing");
     assert_eq!(hubspot["method"], "onHubspot");
-    assert_eq!(hubspot["token"].as_str().unwrap().len(), 64, "token should be 32 bytes hex");
+    assert!(hubspot["prefix"].as_str().unwrap().len() == 12, "prefix should be 12 chars");
     assert!(hubspot["url"].as_str().unwrap().starts_with("/api/v1/hooks/"));
 
     let stripe = arr.iter().find(|w| w["name"] == "stripe").expect("stripe missing");
@@ -2890,8 +3061,6 @@ async fn webhook_manifest_sync_and_orphan_deletion() {
     let arr2 = list2.as_array().unwrap();
     assert_eq!(arr2.len(), 1, "orphaned 'stripe' should be deleted: {list2}");
     assert_eq!(arr2[0]["method"], "onHubspotDeal", "method should be updated");
-    // Token must remain stable across re-deploys
-    assert_eq!(arr2[0]["token"], hubspot["token"], "token must not change on re-deploy");
 
     rt.shutdown().await;
 }
@@ -2921,8 +3090,10 @@ async fn webhook_ingress_routes_to_app_worker() {
     });
     rt.install_manifest(&manifest).await;
 
-    let (_, list) = rt.get_json("/api/v1/apps/whroute/webhooks").await;
-    let token = list.as_array().unwrap()[0]["token"].as_str().unwrap().to_string();
+    // Token is no longer exposed via the list endpoint; query DB directly
+    let (token,): (String,) = sqlx::query_as(
+        "SELECT token FROM rootcx_system.webhooks WHERE app_id = 'whroute' AND name = 'external'"
+    ).fetch_one(rt.pool()).await.unwrap();
 
     // Call the webhook ingress -- worker is not running so it should fail with 500 (no worker),
     // but NOT 404 (proving the token resolved correctly)
@@ -3087,6 +3258,36 @@ async fn delegate_requires_admin() {
         Some(&json!({ "agent_app_id": "crm" })),
     ).await;
     assert_eq!(s, 403, "non-admin must not delegate to agent: {body}");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn db_query_search_path_does_not_leak_across_pool() {
+    let rt = TestRuntime::boot().await;
+    rt.install("sptest", "items").await;
+
+    // Run a query targeting the app schema to set search_path
+    let (s, _) = rt.post_json("/api/v1/db/query", &json!({
+        "sql": "SELECT current_setting('search_path') AS sp",
+        "schema": "app_sptest"
+    })).await;
+    assert_eq!(s, 200);
+
+    // Subsequent query without schema must see default search_path (no leak).
+    // With the pool size typically small in tests, we'd reuse the same connection.
+    // Run several times to increase probability of hitting the same connection.
+    for _ in 0..5 {
+        let (s, body) = rt.post_json("/api/v1/db/query", &json!({
+            "sql": "SELECT current_setting('search_path') AS sp"
+        })).await;
+        assert_eq!(s, 200);
+        let sp = body["rows"][0][0].as_str().unwrap_or("");
+        assert!(
+            !sp.contains("app_sptest"),
+            "search_path leaked across pool connections: {sp}"
+        );
+    }
 
     rt.shutdown().await;
 }

@@ -17,14 +17,44 @@ export interface UseAuthResult {
 function consumeCallbackTokensFromUrl(): { accessToken: string; refreshToken: string } | null {
   if (typeof window === "undefined") return null;
 
-  const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
-  const params = new URLSearchParams(hash);
-  const accessToken = params.get("access_token");
-  const refreshToken = params.get("refresh_token");
+  // Try query params first (new Core), fall back to hash fragment (old Core)
+  let params = new URLSearchParams(window.location.search);
+  let accessToken = params.get("access_token");
+  let refreshToken = params.get("refresh_token");
+  let fromHash = false;
+
+  if (!accessToken || !refreshToken) {
+    const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+    params = new URLSearchParams(hash);
+    accessToken = params.get("access_token");
+    refreshToken = params.get("refresh_token");
+    fromHash = true;
+  }
+
   if (!accessToken || !refreshToken) return null;
 
-  window.history.replaceState({}, "", window.location.pathname + window.location.search);
+  if (fromHash) {
+    window.history.replaceState({}, "", window.location.pathname + window.location.search);
+  } else {
+    params.delete("access_token");
+    params.delete("refresh_token");
+    params.delete("expires_in");
+    const clean = params.toString();
+    window.history.replaceState({}, "", window.location.pathname + (clean ? `?${clean}` : ""));
+  }
   return { accessToken, refreshToken };
+}
+
+function getAuthNonce(): string | null {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get("auth_nonce");
+}
+
+function clearAuthNonce(): void {
+  const params = new URLSearchParams(window.location.search);
+  params.delete("auth_nonce");
+  const clean = params.toString();
+  window.history.replaceState({}, "", window.location.pathname + (clean ? `?${clean}` : ""));
 }
 
 export function useAuth(): UseAuthResult {
@@ -34,14 +64,29 @@ export function useAuth(): UseAuthResult {
   const [authMode, setAuthMode] = useState<AuthMode | null>(null);
 
   useEffect(() => {
-    // Check for redirect callback tokens in URL (OIDC or magic-link browser flow)
+    let cancelled = false;
+
     const callbackTokens = consumeCallbackTokensFromUrl();
     if (callbackTokens) {
       client.setTokens(callbackTokens.accessToken, callbackTokens.refreshToken);
       localStorage.setItem(REFRESH_KEY, callbackTokens.refreshToken);
     }
 
+    const authNonce = !callbackTokens ? getAuthNonce() : null;
+
     const init = async () => {
+      if (authNonce) {
+        try {
+          const tokens = await client.exchangeNonce(authNonce);
+          if (cancelled) return;
+          client.setTokens(tokens.accessToken, tokens.refreshToken);
+          localStorage.setItem(REFRESH_KEY, tokens.refreshToken);
+          clearAuthNonce();
+        } catch {
+          if (cancelled) return;
+        }
+      }
+      if (cancelled) return;
       const [mode] = await Promise.all([
         client.authMode().catch(() => null),
         client.me().then(setUser).catch(() => {
@@ -49,10 +94,13 @@ export function useAuth(): UseAuthResult {
           localStorage.removeItem(REFRESH_KEY);
         }),
       ]);
+      if (cancelled) return;
       setAuthMode(mode);
       setLoading(false);
     };
     init();
+
+    return () => { cancelled = true; };
   }, [client]);
 
   const persistTokens = useCallback(() => {

@@ -1,5 +1,4 @@
 /// <reference path="../rootcx-worker.d.ts" />
-import { google } from "googleapis";
 import {
   type Config, type UserCreds,
   oauth2ClientFor, buildAuthUrl, exchangeCodeForRefreshToken, evictClient,
@@ -14,26 +13,16 @@ const EXCLUDE_QUERY = "-in:spam -in:trash -in:drafts -category:promotions -categ
 const MAX_THROTTLE = 5;
 const FETCH_CONCURRENCY = 15;
 
-let ctx: RootCxCtx;
-let db: any = null;
-
 serve({
-  async onStart(c) {
-    ctx = c;
-    const postgres = (await import("postgres")).default;
-    db = postgres(c.databaseUrl, { max: 10, idle_timeout: 30 });
-    ensureIndexes().catch(e => log.error(`indexes: ${e.message}`));
-  },
   rpc: {
     __auth_start: authStart,
     __auth_callback: authCallback,
-    async __integration(params, caller) {
+    async __integration(params, _caller, ctx) {
       const { action, input, config, userCredentials, userId } = params;
       if (!userCredentials?.refreshToken) return fail({ code: "INSUFFICIENT_PERMISSIONS", message: "user not connected" });
       const handler = actions[action];
       if (!handler) return fail({ code: "MISCONFIGURED", message: `unknown action: ${action}` });
-      const token = caller?.authToken ?? "";
-      return handler(config, userCredentials, input, userId, token);
+      return handler(config, userCredentials, input, userId, ctx);
     },
     async __webhook(params) {
       const data = params?.body?.message?.data;
@@ -46,19 +35,6 @@ serve({
   },
   onJob: handleJob,
 });
-
-async function ensureIndexes() {
-  if (!db) return;
-  await db`CREATE UNIQUE INDEX IF NOT EXISTS idx_gmail_msg_ext ON gmail.messages (external_id)`;
-  await db`CREATE UNIQUE INDEX IF NOT EXISTS idx_gmail_msg_hdr ON gmail.messages (header_message_id)`;
-  await db`CREATE INDEX IF NOT EXISTS idx_gmail_msg_thread ON gmail.messages (thread_external_id)`;
-  await db`CREATE INDEX IF NOT EXISTS idx_gmail_msg_user ON gmail.messages (user_id)`;
-  await db`CREATE UNIQUE INDEX IF NOT EXISTS idx_gmail_thread_ext ON gmail.threads (external_id)`;
-  await db`CREATE INDEX IF NOT EXISTS idx_gmail_part_msg ON gmail.participants (message_id)`;
-  await db`CREATE INDEX IF NOT EXISTS idx_gmail_part_addr ON gmail.participants (lower(address))`;
-  await db`CREATE INDEX IF NOT EXISTS idx_gmail_att_msg ON gmail.attachments (message_id)`;
-  await db`CREATE UNIQUE INDEX IF NOT EXISTS idx_gmail_cursor_user ON gmail.sync_cursors (user_id)`;
-}
 
 async function accessTokenFor(config: Config, creds: UserCreds, userId: string): Promise<string> {
   const access = await oauth2ClientFor(config, creds, userId).getAccessToken();
@@ -124,7 +100,7 @@ async function fetchAndCacheAliases(config: Config, creds: UserCreds, userId: st
 }
 
 async function composeAndSend(
-  config: Config, creds: UserCreds, input: SendInput, userId: string, asDraft: boolean, token: string,
+  config: Config, creds: UserCreds, input: SendInput, userId: string, asDraft: boolean, ctx: RootCxCtx,
 ): Promise<Result<any>> {
   if (!input.to && !input.bcc) return fail({ code: "MISCONFIGURED", message: "at least one recipient required" });
   const aliases = await fetchAndCacheAliases(config, creds, userId);
@@ -147,94 +123,98 @@ async function composeAndSend(
   if (!r.ok) return r;
 
   const msgId = asDraft ? r.data.message?.id : r.data.id;
-  if (msgId && token) await persistSingleMessage(token, userId, msgId);
+  if (msgId) await persistSingleMessage(ctx, userId, msgId);
 
   return asDraft
     ? ok({ draftId: r.data.id, messageId: msgId, threadId: r.data.message?.threadId, headerMessageId: composed.headerMessageId })
     : ok({ messageId: r.data.id, threadId: r.data.threadId, headerMessageId: composed.headerMessageId });
 }
 
-const sendEmail = (c: Config, u: UserCreds, i: any, uid: string, t: string) => composeAndSend(c, u, i, uid, false, t);
-const createDraft = (c: Config, u: UserCreds, i: any, uid: string, t: string) => composeAndSend(c, u, i, uid, true, t);
+const sendEmail = (c: Config, u: UserCreds, i: any, uid: string, ctx: RootCxCtx) => composeAndSend(c, u, i, uid, false, ctx);
+const createDraft = (c: Config, u: UserCreds, i: any, uid: string, ctx: RootCxCtx) => composeAndSend(c, u, i, uid, true, ctx);
 
-async function getAttachment(config: Config, creds: UserCreds, input: any, userId: string, _token: string): Promise<Result<any>> {
+async function getAttachment(config: Config, creds: UserCreds, input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
   if (!input.messageId || !input.attachmentId) return fail({ code: "MISCONFIGURED", message: "messageId and attachmentId required" });
   return callGmail(config, creds, `/messages/${input.messageId}/attachments/${input.attachmentId}`, undefined, userId);
 }
 
-async function syncConnect(config: Config, creds: UserCreds, _input: any, userId: string, token: string): Promise<Result<any>> {
+async function syncConnect(config: Config, creds: UserCreds, _input: any, userId: string, ctx: RootCxCtx): Promise<Result<any>> {
   const aliases = await fetchAndCacheAliases(config, creds, userId);
   if (!aliases.ok) return aliases;
   const { primary: handle, aliases: aliasList } = aliases.data;
 
-  const existing = await db`SELECT id, cron_id FROM gmail.sync_cursors WHERE user_id = ${userId}`;
+  const existing = await ctx.sql(
+    `SELECT id, cron_id FROM gmail.sync_cursors WHERE user_id = $1`, [userId]
+  );
   let cursorId: string;
-  let cronId: string | null = null;
-  if (existing.length) {
-    cursorId = existing[0].id;
-    cronId = existing[0].cron_id;
-    await db`UPDATE gmail.sync_cursors SET handle = ${handle}, handle_aliases = ${JSON.stringify(aliasList)}, enabled = true, status = 'idle', throttle_count = 0, throttle_after = null WHERE id = ${cursorId}`;
+  if (existing.rows.length) {
+    cursorId = existing.rows[0][0];
+    await ctx.sql(
+      `UPDATE gmail.sync_cursors SET handle = $1, handle_aliases = $2, enabled = true, status = 'idle', throttle_count = 0, throttle_after = null WHERE id = $3`,
+      [handle, JSON.stringify(aliasList), cursorId]
+    );
   } else {
-    const ins = await db`INSERT INTO gmail.sync_cursors (user_id, handle, handle_aliases, status, sync_stage, enabled, throttle_count) VALUES (${userId}, ${handle}, ${JSON.stringify(aliasList)}, 'idle', 'list_fetch', true, 0) RETURNING id`;
-    cursorId = ins[0].id;
+    const ins = await ctx.sql(
+      `INSERT INTO gmail.sync_cursors (user_id, handle, handle_aliases, status, sync_stage, enabled, throttle_count) VALUES ($1, $2, $3, 'idle', 'list_fetch', true, 0) RETURNING id`,
+      [userId, handle, JSON.stringify(aliasList)]
+    );
+    cursorId = ins.rows[0][0];
   }
 
-  await syncUserNow(userId, token);
+  await syncUserNow(userId, ctx);
   return ok({ cursor_id: cursorId, handle });
 }
 
-async function syncDisconnect(_config: Config, _creds: UserCreds, _input: any, userId: string, _token: string): Promise<Result<any>> {
-  await db`UPDATE gmail.sync_cursors SET enabled = false WHERE user_id = ${userId}`;
+async function syncDisconnect(_config: Config, _creds: UserCreds, _input: any, userId: string, ctx: RootCxCtx): Promise<Result<any>> {
+  await ctx.sql(`UPDATE gmail.sync_cursors SET enabled = false WHERE user_id = $1`, [userId]);
   return ok({});
 }
 
-async function syncNow(_config: Config, _creds: UserCreds, _input: any, userId: string, token: string): Promise<Result<any>> {
-  const cursor = await db`SELECT id, status, throttle_after FROM gmail.sync_cursors WHERE user_id = ${userId} AND enabled = true`;
-  if (!cursor.length) return fail({ code: "MISCONFIGURED", message: "no active sync" });
-  if (cursor[0].status === "syncing") return ok({ triggered: false });
-  if (cursor[0].throttle_after && new Date(cursor[0].throttle_after).getTime() > Date.now()) return ok({ triggered: false });
-  await syncUserNow(userId, token);
+async function syncNow(_config: Config, _creds: UserCreds, _input: any, userId: string, ctx: RootCxCtx): Promise<Result<any>> {
+  const cursor = await ctx.sql(
+    `SELECT id, status, throttle_after FROM gmail.sync_cursors WHERE user_id = $1 AND enabled = true`, [userId]
+  );
+  if (!cursor.rows.length) return fail({ code: "MISCONFIGURED", message: "no active sync" });
+  const [, status, throttle_after] = cursor.rows[0];
+  if (status === "syncing") return ok({ triggered: false });
+  if (throttle_after && new Date(throttle_after).getTime() > Date.now()) return ok({ triggered: false });
+  await syncUserNow(userId, ctx);
   return ok({ triggered: true });
 }
 
-async function syncUserNow(userId: string, token: string) {
-  await db`UPDATE gmail.sync_cursors SET status = 'syncing' WHERE user_id = ${userId}`;
-  const cursors = await db`SELECT * FROM gmail.sync_cursors WHERE user_id = ${userId} AND enabled = true`;
-  if (!cursors.length) return;
-  const sc = cursors[0];
+async function syncUserNow(userId: string, ctx: RootCxCtx) {
+  await ctx.sql(`UPDATE gmail.sync_cursors SET status = 'syncing' WHERE user_id = $1`, [userId]);
+  const cursors = await ctx.sql(
+    `SELECT id, cursor, sync_stage, throttle_count FROM gmail.sync_cursors WHERE user_id = $1 AND enabled = true`, [userId]
+  );
+  if (!cursors.rows.length) return;
+  const [id, cursor, , throttle_count] = cursors.rows[0];
+  const sc = { id, cursor, throttle_count };
   try {
-    if (!sc.cursor) await fullSync(token, userId, sc);
-    else await incrementalSync(token, userId, sc);
-    await db`UPDATE gmail.sync_cursors SET status = 'idle', last_synced_at = NOW(), throttle_count = 0, throttle_after = null WHERE id = ${sc.id}`;
+    if (!sc.cursor) await fullSync(ctx, userId, sc);
+    else await incrementalSync(ctx, userId, sc);
+    await ctx.sql(
+      `UPDATE gmail.sync_cursors SET status = 'idle', last_synced_at = NOW(), throttle_count = 0, throttle_after = null WHERE id = $1`, [sc.id]
+    );
   } catch (e: any) {
     log.error(`sync ${userId}: ${e.message}`);
-    await handleSyncError(sc, e);
+    await handleSyncError(ctx, sc, e);
   }
 }
 
-async function runtimeFetch(method: string, path: string, token: string, body?: any, extraHeaders?: Record<string, string>): Promise<any> {
-  const res = await fetch(`${ctx.runtimeUrl}${path}`, {
-    method,
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...extraHeaders },
-    ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-  if (!res.ok) throw new Error(`${method} ${path} -> ${res.status}`);
-  return res.json().catch(() => null);
-}
-
-async function getProfile(config: Config, creds: UserCreds, _input: any, userId: string, _token: string): Promise<Result<any>> {
+async function getProfile(config: Config, creds: UserCreds, _input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
   const r = await callGmail(config, creds, "/profile", undefined, userId);
   if (!r.ok) return r;
   return ok({ emailAddress: r.data.emailAddress, historyId: r.data.historyId });
 }
 
-async function listSendAs(config: Config, creds: UserCreds, _input: any, userId: string, _token: string): Promise<Result<any>> {
+async function listSendAs(config: Config, creds: UserCreds, _input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
   const r = await callGmail(config, creds, "/settings/sendAs", undefined, userId);
   if (!r.ok) return r;
   return ok({ sendAs: (r.data.sendAs ?? []).map((e: any) => ({ sendAsEmail: e.sendAsEmail, displayName: e.displayName ?? "", isDefault: !!e.isDefault, isPrimary: !!e.isPrimary })) });
 }
 
-async function watchAction(config: Config, creds: UserCreds, input: any, userId: string, _token: string): Promise<Result<any>> {
+async function watchAction(config: Config, creds: UserCreds, input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
   const topicName = input?.topicName ?? config.pubsubTopicName;
   if (!topicName) return fail({ code: "MISCONFIGURED", message: "topicName required" });
   const r = await callGmail(config, creds, "/watch", {
@@ -245,13 +225,13 @@ async function watchAction(config: Config, creds: UserCreds, input: any, userId:
   return ok({ historyId: r.data.historyId, expiration: r.data.expiration ? Number(r.data.expiration) : null });
 }
 
-async function stopWatch(config: Config, creds: UserCreds, _input: any, userId: string, _token: string): Promise<Result<any>> {
+async function stopWatch(config: Config, creds: UserCreds, _input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
   const r = await callGmail(config, creds, "/stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }, userId);
   if (!r.ok) return r;
   return ok({});
 }
 
-async function listMessages(config: Config, creds: UserCreds, input: any, userId: string, _token: string): Promise<Result<any>> {
+async function listMessages(config: Config, creds: UserCreds, input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
   const { query, maxResults = 100, pageToken, labelIds } = input ?? {};
   const params = new URLSearchParams({ maxResults: String(Math.min(Math.max(1, maxResults), 500)) });
   if (query) params.set("q", String(query).slice(0, 1024));
@@ -266,14 +246,14 @@ async function listMessages(config: Config, creds: UserCreds, input: any, userId
   });
 }
 
-async function getEmail(config: Config, creds: UserCreds, input: any, userId: string, _token: string): Promise<Result<any>> {
+async function getEmail(config: Config, creds: UserCreds, input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
   if (!input?.messageId) return fail({ code: "MISCONFIGURED", message: "messageId required" });
   const r = await callGmail(config, creds, `/messages/${input.messageId}?format=full`, undefined, userId);
   if (!r.ok) return r;
   return ok(parseMessage(r.data));
 }
 
-async function historyList(config: Config, creds: UserCreds, input: any, userId: string, _token: string): Promise<Result<any>> {
+async function historyList(config: Config, creds: UserCreds, input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
   const { startHistoryId, maxResults = 500, pageToken } = input ?? {};
   if (!startHistoryId) return fail({ code: "MISCONFIGURED", message: "startHistoryId required" });
   const params = new URLSearchParams({ startHistoryId: String(startHistoryId), maxResults: String(Math.min(maxResults, 500)) });
@@ -297,156 +277,163 @@ async function historyList(config: Config, creds: UserCreds, input: any, userId:
   });
 }
 
-const actions: Record<string, (c: Config, u: UserCreds, i: any, uid: string, token: string) => Promise<Result<any>>> = {
+const actions: Record<string, (c: Config, u: UserCreds, i: any, uid: string, ctx: RootCxCtx) => Promise<Result<any>>> = {
   send_email: sendEmail, create_draft: createDraft, get_attachment: getAttachment,
   sync_connect: syncConnect, sync_disconnect: syncDisconnect, sync_now: syncNow,
   get_profile: getProfile, list_send_as: listSendAs, watch: watchAction, stop_watch: stopWatch,
   list_messages: listMessages, get_email: getEmail, history_list: historyList,
 };
 
-async function handleJob(payload: any, caller: any) {
-  if (payload?.type === "sync_all") return syncAllConnectedUsers(caller, "sync_now");
+async function handleJob(payload: any, _caller: any, ctx: RootCxCtx) {
+  if (payload?.type === "sync_all") {
+    await ctx.selfAction("syncConnectedUsers", { actionName: "sync_now" });
+    return { ok: true };
+  }
   if (payload?.type === "sync") {
-    const token: string = caller?.authToken;
-    if (!token) return { error: "no auth token in job caller" };
-    await syncUserNow(payload.user_id, token);
+    await syncUserNow(payload.user_id, ctx);
     return { ok: true };
   }
   return { skipped: true };
 }
 
-async function selfAction(token: string, action: string, input: any): Promise<any> {
-  const res = await fetch(`${ctx.runtimeUrl}/api/v1/integrations/gmail/actions/${action}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-    body: JSON.stringify(input),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`gmail/${action} -> ${res.status}: ${text.slice(0, 200)}`);
-  }
-  const result = await res.json();
-  if (result?.ok === false && result?.error) {
-    const e: any = new Error(result.error.message ?? action);
-    e.code = result.error.code;
-    e.retryAfter = result.error.retryAfter;
-    throw e;
-  }
-  return result?.ok === true && "data" in result ? result.data : result;
-}
-
-async function fullSync(token: string, userId: string, sc: any) {
-  const profile = await selfAction(token, "get_profile", {});
+async function fullSync(ctx: RootCxCtx, userId: string, sc: any) {
+  const profile = await ctx.selfAction("get_profile", {});
   const snapshotCursor = profile.historyId;
 
   let pageToken: string | undefined;
   do {
-    const r = await selfAction(token, "list_messages", { query: EXCLUDE_QUERY, maxResults: 500, pageToken });
+    const r = await ctx.selfAction("list_messages", { query: EXCLUDE_QUERY, maxResults: 500, pageToken });
     const ids: string[] = (r.messages ?? []).map((m: any) => m.id);
-    await importBatch(token, userId, ids);
+    await importBatch(ctx, userId, ids);
     pageToken = r.nextPageToken ?? undefined;
   } while (pageToken);
 
-  await db`UPDATE gmail.sync_cursors SET cursor = ${snapshotCursor}, sync_stage = 'list_fetch' WHERE id = ${sc.id}`;
+  await ctx.sql(
+    `UPDATE gmail.sync_cursors SET cursor = $1, sync_stage = 'list_fetch' WHERE id = $2`,
+    [snapshotCursor, sc.id]
+  );
 }
 
-async function incrementalSync(token: string, userId: string, sc: any) {
+async function incrementalSync(ctx: RootCxCtx, userId: string, sc: any) {
   let pageToken: string | undefined;
   let latestHistoryId: string | null = null;
   do {
     let r: any;
     try {
-      r = await selfAction(token, "history_list", { startHistoryId: sc.cursor, maxResults: 500, pageToken });
+      r = await ctx.selfAction("history_list", { startHistoryId: sc.cursor, maxResults: 500, pageToken });
     } catch (e: any) {
       if (e.code === "SYNC_CURSOR_ERROR") {
-        await db`UPDATE gmail.sync_cursors SET cursor = null WHERE id = ${sc.id}`;
-        return fullSync(token, userId, { ...sc, cursor: null });
+        await ctx.sql(`UPDATE gmail.sync_cursors SET cursor = null WHERE id = $1`, [sc.id]);
+        return fullSync(ctx, userId, { ...sc, cursor: null });
       }
       throw e;
     }
     const added: string[] = r.messagesAdded ?? [];
     const deleted: string[] = r.messagesDeleted ?? [];
-    if (deleted.length) await db`DELETE FROM gmail.messages WHERE external_id = ANY(${deleted}) AND user_id = ${userId}`;
-    if (added.length) await importBatch(token, userId, added);
+    if (deleted.length) {
+      await ctx.sql(
+        `DELETE FROM gmail.messages WHERE external_id = ANY($1) AND user_id = $2`, [deleted, userId]
+      );
+    }
+    if (added.length) await importBatch(ctx, userId, added);
     latestHistoryId = r.historyId ?? latestHistoryId;
     pageToken = r.nextPageToken ?? undefined;
   } while (pageToken);
 
-  if (latestHistoryId) await db`UPDATE gmail.sync_cursors SET cursor = ${latestHistoryId} WHERE id = ${sc.id}`;
+  if (latestHistoryId) {
+    await ctx.sql(`UPDATE gmail.sync_cursors SET cursor = $1 WHERE id = $2`, [latestHistoryId, sc.id]);
+  }
 }
 
-async function importBatch(token: string, userId: string, externalIds: string[]) {
+async function importBatch(ctx: RootCxCtx, userId: string, externalIds: string[]) {
   if (!externalIds.length) return;
-  const existing = await db`SELECT external_id FROM gmail.messages WHERE external_id = ANY(${externalIds})`;
-  const existingSet = new Set(existing.map((r: any) => r.external_id));
+  const existing = await ctx.sql(
+    `SELECT external_id FROM gmail.messages WHERE external_id = ANY($1)`, [externalIds]
+  );
+  const existingSet = new Set(existing.rows.map((r: any) => r[0]));
   const missing = externalIds.filter(id => !existingSet.has(id));
   if (!missing.length) return;
 
   for (let i = 0; i < missing.length; i += FETCH_CONCURRENCY) {
     const chunk = missing.slice(i, i + FETCH_CONCURRENCY);
-    await Promise.allSettled(chunk.map(id => persistSingleMessage(token, userId, id)));
+    await Promise.allSettled(chunk.map(id => persistSingleMessage(ctx, userId, id)));
   }
 }
 
-async function persistSingleMessage(token: string, userId: string, externalId: string) {
+async function persistSingleMessage(ctx: RootCxCtx, userId: string, externalId: string) {
   let msg: any;
-  try { msg = await selfAction(token, "get_email", { messageId: externalId }); }
+  try { msg = await ctx.selfAction("get_email", { messageId: externalId }); }
   catch { return; }
 
   const headerMsgId = msg.headerMessageId || `fallback-${userId}-${externalId}`;
+  const internalDate = msg.internalDate ? new Date(msg.internalDate).toISOString() : null;
 
-  const inserted = await db`
-    INSERT INTO gmail.messages (external_id, thread_external_id, header_message_id, user_id, subject, body_text, body_html, snippet, internal_date, label_ids, in_reply_to, "references")
-    VALUES (${externalId}, ${msg.threadId}, ${headerMsgId}, ${userId}, ${msg.subject}, ${msg.bodyText}, ${msg.bodyHtml}, ${msg.snippet}, ${msg.internalDate ? new Date(msg.internalDate).toISOString() : null}, ${JSON.stringify(msg.labelIds)}, ${msg.inReplyTo}, ${JSON.stringify(msg.references)})
-    ON CONFLICT (external_id) DO NOTHING
-    RETURNING id
-  `;
-  if (!inserted.length) return;
-  const msgDbId = inserted[0].id;
+  const inserted = await ctx.sql(
+    `INSERT INTO gmail.messages (external_id, thread_external_id, header_message_id, user_id, subject, body_text, body_html, snippet, internal_date, label_ids, in_reply_to, "references")
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     ON CONFLICT (external_id) DO NOTHING
+     RETURNING id`,
+    [externalId, msg.threadId, headerMsgId, userId, msg.subject, msg.bodyText, msg.bodyHtml, msg.snippet, internalDate, JSON.stringify(msg.labelIds), msg.inReplyTo, JSON.stringify(msg.references)]
+  );
+  if (!inserted.rows.length) return;
+  const msgDbId = inserted.rows[0][0];
 
   if (msg.threadId) {
-    await db`
-      INSERT INTO gmail.threads (external_id, user_id, subject, last_message_at, message_count)
-      VALUES (${msg.threadId}, ${userId}, ${msg.subject}, ${msg.internalDate ? new Date(msg.internalDate).toISOString() : null}, 1)
-      ON CONFLICT (external_id) DO UPDATE SET
-        last_message_at = GREATEST(gmail.threads.last_message_at, EXCLUDED.last_message_at),
-        message_count = gmail.threads.message_count + 1
-    `;
+    await ctx.sql(
+      `INSERT INTO gmail.threads (external_id, user_id, subject, last_message_at, message_count)
+       VALUES ($1, $2, $3, $4, 1)
+       ON CONFLICT (external_id) DO UPDATE SET
+         last_message_at = GREATEST(gmail.threads.last_message_at, EXCLUDED.last_message_at),
+         message_count = gmail.threads.message_count + 1`,
+      [msg.threadId, userId, msg.subject, internalDate]
+    );
   }
 
-  const parts: Array<{ message_id: string; address: string; name: string; role: string }> = [];
-  if (msg.from) parts.push({ message_id: msgDbId, role: "from", address: msg.from.address, name: msg.from.name });
-  for (const p of msg.to) parts.push({ message_id: msgDbId, role: "to", address: p.address, name: p.name });
-  for (const p of msg.cc) parts.push({ message_id: msgDbId, role: "cc", address: p.address, name: p.name });
-  for (const p of msg.bcc) parts.push({ message_id: msgDbId, role: "bcc", address: p.address, name: p.name });
+  const parts: Array<[string, string, string, string]> = [];
+  if (msg.from) parts.push([msgDbId, "from", msg.from.address ?? msg.from, msg.from.name ?? ""]);
+  for (const p of msg.to ?? []) parts.push([msgDbId, "to", p.address ?? p, p.name ?? ""]);
+  for (const p of msg.cc ?? []) parts.push([msgDbId, "cc", p.address ?? p, p.name ?? ""]);
+  for (const p of msg.bcc ?? []) parts.push([msgDbId, "bcc", p.address ?? p, p.name ?? ""]);
   if (parts.length) {
-    await db`INSERT INTO gmail.participants ${db(parts)} ON CONFLICT DO NOTHING`;
+    const pCols = 4;
+    const pValues = parts.map((_, i) => `($${i*pCols+1}, $${i*pCols+2}, $${i*pCols+3}, $${i*pCols+4})`).join(", ");
+    const pParams = parts.flatMap(([mid, role, address, name]) => [mid, role, address, name]);
+    await ctx.sql(
+      `INSERT INTO gmail.participants (message_id, role, address, name) VALUES ${pValues} ON CONFLICT DO NOTHING`,
+      pParams
+    );
   }
 
-  if (msg.attachments.length) {
-    const attRows = msg.attachments.map(a => ({
-      message_id: msgDbId, external_id: a.id, filename: a.filename,
-      mime_type: a.mimeType, size: a.size, content_id: a.contentId, is_inline: a.isInline,
-    }));
-    await db`INSERT INTO gmail.attachments ${db(attRows)} ON CONFLICT DO NOTHING`;
+  const attachments = msg.attachments ?? [];
+  if (attachments.length) {
+    const atCols = 7;
+    const atValues = attachments.map((_: any, i: number) => `($${i*atCols+1}, $${i*atCols+2}, $${i*atCols+3}, $${i*atCols+4}, $${i*atCols+5}, $${i*atCols+6}, $${i*atCols+7})`).join(", ");
+    const atParams = attachments.flatMap((a: any) => [msgDbId, a.id, a.filename, a.mimeType, a.size, a.contentId, a.isInline]);
+    await ctx.sql(
+      `INSERT INTO gmail.attachments (message_id, external_id, filename, mime_type, size, content_id, is_inline) VALUES ${atValues} ON CONFLICT DO NOTHING`,
+      atParams
+    );
   }
 }
 
-async function handleSyncError(sc: any, err: any) {
+async function handleSyncError(ctx: RootCxCtx, sc: any, err: any) {
   if (err.code === "INSUFFICIENT_PERMISSIONS") {
-    await db`UPDATE gmail.sync_cursors SET status = 'needs_reauth' WHERE id = ${sc.id}`;
+    await ctx.sql(`UPDATE gmail.sync_cursors SET status = 'needs_reauth' WHERE id = $1`, [sc.id]);
     return;
   }
   if (err.code === "SYNC_CURSOR_ERROR") {
-    await db`UPDATE gmail.sync_cursors SET cursor = null, status = 'idle' WHERE id = ${sc.id}`;
+    await ctx.sql(`UPDATE gmail.sync_cursors SET cursor = null, status = 'idle' WHERE id = $1`, [sc.id]);
     return;
   }
   const count = (sc.throttle_count ?? 0) + 1;
   if (count >= MAX_THROTTLE) {
-    await db`UPDATE gmail.sync_cursors SET status = 'failed_permanent', throttle_count = ${count} WHERE id = ${sc.id}`;
+    await ctx.sql(`UPDATE gmail.sync_cursors SET status = 'failed_permanent', throttle_count = $1 WHERE id = $2`, [count, sc.id]);
     return;
   }
   const wait = 60_000 * Math.pow(2, Math.min(count - 1, 5));
   const after = new Date(Math.max(Date.now() + wait, err.retryAfter ?? 0)).toISOString();
-  await db`UPDATE gmail.sync_cursors SET status = 'failed_temporary', throttle_count = ${count}, throttle_after = ${after} WHERE id = ${sc.id}`;
+  await ctx.sql(
+    `UPDATE gmail.sync_cursors SET status = 'failed_temporary', throttle_count = $1, throttle_after = $2 WHERE id = $3`,
+    [count, after, sc.id]
+  );
 }

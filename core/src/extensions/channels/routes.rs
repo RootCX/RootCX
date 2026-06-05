@@ -18,6 +18,7 @@ use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::extensions::agents::{self, config as agent_config, persistence};
 use crate::extensions::agents::approvals::ApprovalResponse;
+use crate::extensions::rbac::policy::{resolve_permissions, has_permission};
 use crate::extensions::storage::backend::{PostgresBackend, StorageBackend};
 use crate::ipc::{AgentInvokePayload, FileAttachment, LlmModelRef};
 use crate::routes::{self, SharedRuntime, llm_models::fetch_default_llm};
@@ -300,6 +301,15 @@ async fn do_invoke(
         async { Ok(resolve_invoker(pool, channel_id, chat_id).await) },
     ).map_err(&e)?;
 
+    // B1 gate: invoker must hold app:{id}:invoke
+    if let Some(uid) = invoker_user_id {
+        let required_perm = format!("app:{app_id}:invoke");
+        let (_, perms) = resolve_permissions(pool, uid).await.map_err(&e)?;
+        if !has_permission(&perms, &required_perm) {
+            return Err(format!("channel agent denied: user lacks {required_perm}"));
+        }
+    }
+
     let agent_cfg: JsonValue = sqlx::query_scalar(
         "SELECT config FROM rootcx_system.agents WHERE app_id = $1",
     ).bind(&app_id).fetch_one(pool).await.map_err(&e)?;
@@ -328,15 +338,24 @@ async fn do_invoke(
     }
     let attachments = if attachment_list.is_empty() { None } else { Some(attachment_list) };
 
+    // Phase 6b: a channel message only drives the agent under a valid standing
+    // delegation from the linked human. No link, or a revoked delegation, → mute.
+    let delegator = invoker_user_id.ok_or("channel message: no linked user")?;
+    let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
+    if !crate::delegations::is_valid(pool, delegator, agent_uid).await.map_err(&e)? {
+        return Err("channel message: no valid delegation".into());
+    }
+
     let payload = AgentInvokePayload {
         invoke_id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.clone(),
         message: text.to_string(),
         history, is_sub_invoke: false, llm, invoker_user_id,
         attachments,
+        task_scope: None,
     };
 
-    let mut rx = wm.agent_invoke(&app_id, payload).await.map_err(&e)?;
+    let mut rx = wm.agent_invoke(&app_id, payload, None).await.map_err(&e)?;
     let typing = provider.start_typing(config, chat_id);
 
     let mut response = String::new();
@@ -627,7 +646,45 @@ async fn try_complete_link(
     ).bind(channel_id).bind(chat_id).bind(user_id)
     .execute(pool).await.ok()?;
 
+    // Phase 6b: linking grants a standing 'channel' delegation to the active
+    // app's agent. The deterministic trigger_ref enables revoke_by_trigger on unlink.
+    if let Ok((app_id, _)) = resolve_session(pool, channel_id, chat_id).await {
+        let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
+        let trigger_ref = super::channel_delegation_ref(channel_id, user_id);
+        let _ = crate::delegations::create(pool, user_id, agent_uid, "channel", Some(trigger_ref)).await;
+    }
+
     Some(user_id.to_string())
+}
+
+pub async fn unlink_identity(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path(channel_id): Path<String>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let pool = routes::pool(&rt);
+    let trigger_ref = super::channel_delegation_ref(&channel_id, identity.user_id);
+
+    // Atomic: delete identity + revoke delegation in one transaction
+    let mut tx = pool.begin().await?;
+    let deleted = sqlx::query(
+        "DELETE FROM rootcx_system.channel_identities
+         WHERE channel_id = $1::uuid AND user_id = $2",
+    ).bind(&channel_id).bind(identity.user_id)
+    .execute(&mut *tx).await?.rows_affected();
+
+    if deleted == 0 {
+        return Err(ApiError::NotFound("no linked identity for this channel".into()));
+    }
+
+    sqlx::query(
+        "UPDATE rootcx_system.delegations SET revoked_at = now() \
+         WHERE trigger_type = $1 AND trigger_ref = $2 AND revoked_at IS NULL"
+    ).bind("channel").bind(trigger_ref).execute(&mut *tx).await?;
+    tx.commit().await?;
+
+    info!(channel_id, user_id = %identity.user_id, "channel identity unlinked, delegation revoked");
+    Ok(Json(json!({ "status": "unlinked" })))
 }
 
 async fn resolve_invoker(

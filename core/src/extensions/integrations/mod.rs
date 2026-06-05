@@ -12,6 +12,53 @@ use tracing::info;
 use super::RuntimeExtension;
 use crate::RuntimeError;
 use crate::routes::SharedRuntime;
+use crate::tools::IntegrationCaller;
+
+/// Privileged self-action dispatched over IPC by an integration worker (no
+/// token replay). Replaces the old `syncAllConnectedUsers` HTTP callback that
+/// required forwarding the user's JWT. The core runs the action with the
+/// context it already owns.
+pub async fn execute_self_action(
+    pool: &PgPool,
+    caller: &dyn IntegrationCaller,
+    app_id: &str,
+    action: &str,
+    params: serde_json::Value,
+    requester: Option<uuid::Uuid>,
+) -> Result<serde_json::Value, String> {
+    // The requester is resolved from the IPC context_token. It is the only
+    // identity an action may act as — a worker can never name an arbitrary user.
+    let requester = requester.ok_or("self_action requires an authenticated context")?;
+    match action {
+        "syncConnectedUsers" => {
+            // Acting for ALL connected users is privileged. The old HTTP path
+            // gated this on admin (connected-users + x-run-as both admin-only);
+            // preserve that exactly via the shared require_admin helper.
+            crate::extensions::rbac::policy::require_admin(pool, requester)
+                .await.map_err(|_| "syncConnectedUsers requires admin".to_string())?;
+            let action_name = params.get("actionName").and_then(|v| v.as_str())
+                .ok_or("syncConnectedUsers: missing actionName")?;
+            let users = connections::connected_users(pool, app_id).await.map_err(|e| format!("{e:?}"))?;
+            let mut synced = 0u64;
+            for uid in users {
+                if let Ok(user_uuid) = uid.parse::<uuid::Uuid>()
+                    && caller.call(pool, user_uuid, app_id, action_name, serde_json::json!({})).await.is_ok()
+                {
+                    synced += 1;
+                }
+            }
+            Ok(serde_json::json!({ "ok": true, "synced": synced }))
+        }
+        "triggerAction" => {
+            // Scoped to the requester: runs the action for themselves only.
+            let action_name = params.get("actionName").and_then(|v| v.as_str())
+                .ok_or("triggerAction: missing actionName")?;
+            let input = params.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
+            caller.call(pool, requester, app_id, action_name, input).await
+        }
+        other => Err(format!("unknown self_action: {other}")),
+    }
+}
 
 pub struct IntegrationsExtension;
 

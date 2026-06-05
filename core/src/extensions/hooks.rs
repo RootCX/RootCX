@@ -212,6 +212,10 @@ struct CreateHookRequest {
     operation: String,
     action_type: String,
     action_config: Option<JsonValue>,
+    /// Optional: own the hook as another principal (a service account),
+    /// gated by the act-as guard. Survives the creator's departure.
+    #[serde(rename = "runAs", default)]
+    run_as: Option<String>,
 }
 
 // ── Route handlers ───────────────────────────────────────────────────────
@@ -267,6 +271,8 @@ async fn create_hook(
 
     let config = body.action_config.unwrap_or(serde_json::json!({}));
 
+    let owner = crate::act_as::resolve_owner(&pool, identity.user_id, body.run_as.as_deref()).await?;
+
     let (row,): (JsonValue,) = sqlx::query_as(
         r#"
         INSERT INTO rootcx_system.entity_hooks (app_id, entity, operation, action_type, action_config, created_by)
@@ -279,16 +285,16 @@ async fn create_hook(
     .bind(&operation)
     .bind(&body.action_type)
     .bind(&config)
-    .bind(identity.user_id)
+    .bind(owner)
     .fetch_one(&pool)
     .await?;
 
-    // Auto-create delegation for hook-triggered agents
+    // Auto-create the owner -> agent delegation for hook-triggered agents
     if body.action_type == "agent" {
         let hook_id: Option<uuid::Uuid> = row.get("id").and_then(|v| v.as_str()).and_then(|s| s.parse().ok());
         let target = config.get("app_id").and_then(|v| v.as_str()).unwrap_or(&app_id);
         let agent_uid = crate::extensions::agents::agent_user_id(target);
-        let _ = crate::delegations::create(&pool, identity.user_id, agent_uid, "hook", hook_id).await;
+        let _ = crate::delegations::create(&pool, owner, agent_uid, "hook", hook_id).await;
     }
 
     Ok(Json(row))

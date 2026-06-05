@@ -18,6 +18,7 @@ pub(crate) async fn execute(
     user_id: Uuid,
     invoker_user_id: Option<Uuid>,
     permissions: Vec<String>,
+    task_scope: Option<Vec<String>>,
     pool: PgPool,
     agent_dispatch: Option<Arc<dyn AgentDispatcher>>,
     integration_caller: Option<Arc<dyn IntegrationCaller>>,
@@ -35,7 +36,7 @@ pub(crate) async fn execute(
     let start = Instant::now();
     let (result, err) = match tool {
         Some(t) => {
-            let ctx = ToolContext { pool, app_id, user_id, invoker_user_id, permissions, args, agent_dispatch, integration_caller, action_caller, stream_tx: stream_tx.clone() };
+            let ctx = ToolContext { pool, app_id, user_id, invoker_user_id, permissions, task_scope, args, agent_dispatch, integration_caller, action_caller, stream_tx: stream_tx.clone() };
             match t.execute(&ctx).await {
                 Ok(v) => (Some(v), None),
                 Err(e) => (None, Some(e)),
