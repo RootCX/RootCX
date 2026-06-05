@@ -98,7 +98,8 @@ async fn install_and_list_apps() {
     rt.install("testapp", "contacts").await;
 
     let (_, body) = rt.get_json("/api/v1/apps").await;
-    let apps = body.as_array().unwrap();
+    let apps: Vec<_> = body.as_array().unwrap().iter()
+        .filter(|a| a["id"] != "assistant").collect();
     assert_eq!(apps.len(), 1);
     assert_eq!(apps[0]["id"], "testapp");
     assert_eq!(apps[0]["status"], "installed");
@@ -112,7 +113,9 @@ async fn install_idempotent() {
     rt.install("idem", "items").await;
 
     let (_, body) = rt.get_json("/api/v1/apps").await;
-    assert_eq!(body.as_array().unwrap().len(), 1);
+    let apps: Vec<_> = body.as_array().unwrap().iter()
+        .filter(|a| a["id"] != "assistant").collect();
+    assert_eq!(apps.len(), 1);
     rt.shutdown().await;
 }
 
@@ -123,7 +126,9 @@ async fn uninstall_app() {
     assert_eq!(rt.delete("/api/v1/apps/todel").await, 200);
 
     let (_, body) = rt.get_json("/api/v1/apps").await;
-    assert!(body.as_array().unwrap().is_empty());
+    let apps: Vec<_> = body.as_array().unwrap().iter()
+        .filter(|a| a["id"] != "assistant").collect();
+    assert!(apps.is_empty());
     rt.shutdown().await;
 }
 
