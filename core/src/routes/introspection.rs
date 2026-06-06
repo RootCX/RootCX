@@ -22,7 +22,7 @@ pub async fn list_schemas(
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<SchemaInfo>>, ApiError> {
     let pool = pool(&rt);
-    let is_admin = crate::extensions::rbac::policy::has_permission_db(&pool, identity.user_id, "admin:db.query").await?;
+    let is_admin = crate::governance::authority::has_permission_db(&pool, identity.user_id, "admin:db.query").await?;
     let rows = sqlx::query_as::<_, (String, i64)>(
         "SELECT s.schema_name, COUNT(t.table_name)::bigint
          FROM information_schema.schemata s
@@ -70,7 +70,7 @@ pub async fn list_tables(
 ) -> Result<Json<Vec<TableInfo>>, ApiError> {
     let pool = pool(&rt);
     if is_system_schema(&schema.to_ascii_lowercase()) {
-        crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:db.query").await?;
+        crate::governance::authority::require_perm(&pool, identity.user_id, "admin:db.query").await?;
     }
 
     let tables: Vec<(String,)> = sqlx::query_as(
@@ -135,7 +135,7 @@ pub async fn execute_query(
     Json(body): Json<QueryRequest>,
 ) -> Result<Json<QueryResult>, ApiError> {
     let pool = pool(&rt);
-    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:db.query").await?;
+    crate::governance::authority::require_perm(&pool, identity.user_id, "admin:db.query").await?;
     let sql = body.sql.trim();
 
     if sql.is_empty() {

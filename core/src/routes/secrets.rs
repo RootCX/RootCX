@@ -23,7 +23,7 @@ pub async fn set_secret(
     Json(body): Json<SetSecretBody>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, sm) = pool_and_secrets(&rt);
-    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:secrets.manage").await?;
+    crate::governance::authority::require_perm(&pool, identity.user_id, "admin:secrets.manage").await?;
     sm.set(&pool, &app_id, &body.key, &body.value).await?;
     Ok(Json(json!({ "message": format!("secret '{}' set", body.key) })))
 }
@@ -34,7 +34,7 @@ pub async fn delete_secret(
     Path((app_id, key)): Path<(String, String)>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, sm) = pool_and_secrets(&rt);
-    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:secrets.manage").await?;
+    crate::governance::authority::require_perm(&pool, identity.user_id, "admin:secrets.manage").await?;
     if sm.delete(&pool, &app_id, &key).await? {
         Ok(Json(json!({ "message": format!("secret '{key}' deleted") })))
     } else {
@@ -48,7 +48,7 @@ pub async fn list_secrets(
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<String>>, ApiError> {
     let (pool, _) = pool_and_secrets(&rt);
-    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:secrets.manage").await?;
+    crate::governance::authority::require_perm(&pool, identity.user_id, "admin:secrets.manage").await?;
     Ok(Json(SecretManager::list_keys(&pool, &app_id).await?))
 }
 
@@ -82,7 +82,7 @@ pub async fn set_platform_secret(
     reject_system_user(&identity, &rt).await?;
     validate_key_name(&body.key)?;
     let (pool, sm) = pool_and_secrets(&rt);
-    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:secrets.manage").await?;
+    crate::governance::authority::require_perm(&pool, identity.user_id, "admin:secrets.manage").await?;
     sm.set(&pool, PLATFORM_SCOPE, &body.key, &body.value).await?;
     let restarted = restart_workers(&rt).await;
     Ok(Json(json!({ "message": format!("platform secret '{}' set", body.key), "workers_restarted": restarted })))
@@ -95,7 +95,7 @@ pub async fn delete_platform_secret(
 ) -> Result<Json<JsonValue>, ApiError> {
     reject_system_user(&identity, &rt).await?;
     let (pool, sm) = pool_and_secrets(&rt);
-    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:secrets.manage").await?;
+    crate::governance::authority::require_perm(&pool, identity.user_id, "admin:secrets.manage").await?;
     if sm.delete(&pool, PLATFORM_SCOPE, &key_name).await? {
         let restarted = restart_workers(&rt).await;
         Ok(Json(json!({ "message": format!("platform secret '{key_name}' deleted"), "workers_restarted": restarted })))
@@ -110,7 +110,7 @@ pub async fn list_platform_secrets(
 ) -> Result<Json<Vec<String>>, ApiError> {
     reject_system_user(&identity, &rt).await?;
     let (pool, _) = pool_and_secrets(&rt);
-    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:secrets.manage").await?;
+    crate::governance::authority::require_perm(&pool, identity.user_id, "admin:secrets.manage").await?;
     Ok(Json(SecretManager::list_keys(&pool, PLATFORM_SCOPE).await?))
 }
 
@@ -125,7 +125,7 @@ pub async fn get_platform_env(
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<HashMap<String, String>>, ApiError> {
     let (pool, sm) = pool_and_secrets(&rt);
-    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, "admin:secrets.manage").await?;
+    crate::governance::authority::require_perm(&pool, identity.user_id, "admin:secrets.manage").await?;
     let env: HashMap<String, String> = sm.get_all_for_app(&pool, PLATFORM_SCOPE).await?.into_iter().collect();
     Ok(Json(env))
 }

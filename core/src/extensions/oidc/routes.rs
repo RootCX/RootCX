@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::auth::{AuthConfig, jwt, token_delivery};
-use crate::extensions::rbac::policy::require_admin;
+use crate::governance::authority::require_admin;
 use crate::routes::{self, SharedRuntime};
 use crate::secrets::SecretManager;
 
@@ -677,7 +677,7 @@ async fn find_or_create_user(
     // Role assignment (decision extracted to `pick_initial_role` for unit testing).
     let first_boot = crate::extensions::rbac::is_first_boot(pool).await.unwrap_or(false);
     let claim_role_exists = match role {
-        Some(r) => crate::extensions::rbac::policy::role_exists(pool, r).await?,
+        Some(r) => crate::governance::authority::role_exists(pool, r).await?,
         None => false,
     };
     let final_role = pick_initial_role(first_boot, role, claim_role_exists, &provider.default_role);

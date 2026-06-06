@@ -22,7 +22,7 @@ use crate::auth::identity::Identity;
 use crate::auth::secure_tokens as tokens;
 use crate::auth::token_delivery::{Delivery, deliver};
 use crate::auth::{AuthConfig, jwt};
-use crate::extensions::rbac::policy::{has_permission, resolve_permissions};
+use crate::governance::authority::{has_permission, resolve_permissions};
 use crate::routes::{SharedRuntime, pool};
 
 /// 15 minutes. Short enough to bound replay window if the email is leaked.

@@ -124,7 +124,7 @@ pub struct WorkerConfig {
     /// another user. A process only ever holds one identity, so concurrent and
     /// nested same-identity calls are safe and cross-user confusion is
     /// structurally impossible. See docs/security-context-token-confusion.md.
-    pub identity: crate::sql_proxy::ContextState,
+    pub identity: crate::governance::enforcement::ContextState,
     /// Only the per-app System (lifecycle) worker runs onStart with BYPASSRLS
     /// self-schema access. Anonymous and User workers never run onStart and never
     /// bypass — even though Anonymous, like System, carries the default (no-user)
@@ -382,7 +382,7 @@ async fn supervisor_loop(
                         // optionally narrowed by task_scope (the 3rd intersection operand).
                         let mut effective = config.identity.effective_perms.clone();
                         if let Some(ref scope) = payload.task_scope {
-                            effective = crate::extensions::rbac::policy::intersect_permissions(&effective, scope);
+                            effective = crate::governance::authority::intersect_permissions(&effective, scope);
                         }
                         effective_permissions.insert(invoke_id.clone(), effective);
                         task_scopes.insert(invoke_id.clone(), payload.task_scope.clone());
@@ -618,7 +618,7 @@ async fn supervisor_loop(
                             let aid = config.app_id.clone();
                             let tx = outbound_tx.clone();
                             tokio::spawn(async move {
-                                let msg = match crate::sql_proxy::run_sql(&pool, &aid, &state, &sql, &params).await {
+                                let msg = match crate::governance::enforcement::run_sql(&pool, &aid, &state, &sql, &params).await {
                                     Ok(ok) => OutboundMessage::SqlQueryResult {
                                         id, columns: Some(ok.columns), rows: Some(ok.rows),
                                         row_count: Some(ok.row_count), error: None,
@@ -950,7 +950,7 @@ async fn collection_op(
     op: &str,
     entity: &str,
     data: JsonValue,
-    state: Option<crate::sql_proxy::ContextState>,
+    state: Option<crate::governance::enforcement::ContextState>,
     allow_bypass: bool,
 ) -> Result<JsonValue, String> {
     use crate::manifest::field_type_map;
@@ -964,7 +964,7 @@ async fn collection_op(
         // a failed COMMIT surfaces as an error instead of silently dropping the
         // write or leaking an open transaction back to the pool.
         Some(st) => {
-            let mut tx = crate::sql_proxy::begin_app_tx(pool, app_id, &st, st.user_id, None, "collection", crate::sql_proxy::TIMEOUT_INTERACTIVE_MS)
+            let mut tx = crate::governance::enforcement::begin_app_tx(pool, app_id, &st, st.user_id, None, "collection", crate::governance::enforcement::TIMEOUT_INTERACTIVE_MS)
                 .await.map_err(|e| e.to_string())?;
             match collection_exec(&mut tx, &types, app_id, op, entity, data).await {
                 Ok(v) => { tx.commit().await.map_err(|e| e.to_string())?; Ok(v) }
@@ -1065,7 +1065,7 @@ pub async fn collection_op_test(
     op: &str,
     entity: &str,
     data: serde_json::Value,
-    state: Option<crate::sql_proxy::ContextState>,
+    state: Option<crate::governance::enforcement::ContextState>,
     allow_bypass: bool,
 ) -> Result<serde_json::Value, String> {
     collection_op(pool, app_id, op, entity, data, state, allow_bypass).await

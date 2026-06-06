@@ -8,7 +8,7 @@ use super::{SharedRuntime, pool};
 use super::crud::validate_app_id;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::extensions::rbac::policy::{resolve_permissions, has_permission};
+use crate::governance::authority::{resolve_permissions, has_permission};
 use crate::webhooks;
 
 #[derive(Serialize)]

@@ -23,7 +23,7 @@ use crate::RuntimeError;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::auth::{AuthConfig, jwt, secure_tokens};
-use crate::extensions::rbac::policy::require_perm;
+use crate::governance::authority::require_perm;
 use crate::routes::{self, SharedRuntime};
 
 const MANAGE: &str = "admin:service_accounts.manage";
@@ -333,7 +333,7 @@ async fn grant_act_as(
     let pool = routes::pool(&rt);
     require_perm(&pool, identity.user_id, MANAGE).await?;
     assert_is_service_account(&pool, id).await?;
-    crate::act_as::grant(&pool, body.user_id, id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    crate::governance::delegation::act_as::grant(&pool, body.user_id, id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({ "message": "act-as granted" })))
 }
 
@@ -345,7 +345,7 @@ async fn revoke_act_as(
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
     require_perm(&pool, identity.user_id, MANAGE).await?;
-    crate::act_as::revoke(&pool, body.user_id, id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    crate::governance::delegation::act_as::revoke(&pool, body.user_id, id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({ "message": "act-as revoked" })))
 }
 

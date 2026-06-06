@@ -39,13 +39,13 @@ enum Principal {
     /// untrusted anonymous traffic never shares the privileged onStart process.
     Anonymous,
     /// A real identity: a direct user, or an agent's delegated authority.
-    User(crate::sql_proxy::ContextState),
+    User(crate::governance::enforcement::ContextState),
 }
 
 impl Principal {
     /// Classify the identity resolved for an incoming request. A request never
     /// yields System; an empty identity (no user, not delegated) is Anonymous.
-    fn from_request(state: crate::sql_proxy::ContextState) -> Self {
+    fn from_request(state: crate::governance::enforcement::ContextState) -> Self {
         if state.user_id.is_none() && !state.is_delegated && state.effective_perms.is_empty() {
             Principal::Anonymous
         } else {
@@ -73,10 +73,10 @@ impl Principal {
 
     /// The RLS identity posed for this principal. System and Anonymous carry no
     /// user, so RLS denies every row; User poses its real identity.
-    fn rls_state(&self) -> crate::sql_proxy::ContextState {
+    fn rls_state(&self) -> crate::governance::enforcement::ContextState {
         match self {
             Principal::User(s) => s.clone(),
-            _ => crate::sql_proxy::ContextState::default(),
+            _ => crate::governance::enforcement::ContextState::default(),
         }
     }
 }
@@ -139,7 +139,7 @@ impl WorkerManager {
             sqlx::query_scalar::<_, serde_json::Value>(
                 "SELECT COALESCE(manifest->'dataContract', '[]'::jsonb) FROM rootcx_system.apps WHERE id = $1",
             ).bind(app_id).fetch_optional(pool),
-            crate::extensions::rbac::policy::resolve_permissions(pool, agent_uid),
+            crate::governance::authority::resolve_permissions(pool, agent_uid),
         );
 
         let data_contract = contract_res.ok()?.unwrap_or_default();
@@ -309,7 +309,7 @@ impl WorkerManager {
     pub async fn rpc(
         &self, app_id: &str, id: String, method: String, params: JsonValue, caller: Option<RpcCaller>,
     ) -> Result<JsonValue, RuntimeError> {
-        let principal = Principal::from_request(crate::sql_proxy::ContextState::from_caller(caller.as_ref()));
+        let principal = Principal::from_request(crate::governance::enforcement::ContextState::from_caller(caller.as_ref()));
         self.get_or_spawn(app_id, principal).await?.rpc(id, method, params, caller).await
     }
 
@@ -325,10 +325,10 @@ impl WorkerManager {
         // bound to exactly that authority. user_id stays the human (RLS row
         // ownership); effective_perms is the narrowed intersection.
         let agent_uid = crate::extensions::agents::agent_user_id(app_id);
-        let effective_perms = crate::extensions::rbac::policy::delegated_effective(
+        let effective_perms = crate::governance::authority::delegated_effective(
             &self.pool, agent_uid, payload.invoker_user_id, parent_perms.as_deref(),
         ).await;
-        let identity = crate::sql_proxy::ContextState {
+        let identity = crate::governance::enforcement::ContextState {
             user_id: payload.invoker_user_id, is_delegated: true, effective_perms,
         };
         // An agent invoke is always a delegated principal, never anonymous.
@@ -358,7 +358,7 @@ impl WorkerManager {
     }
 
     pub async fn dispatch_job(&self, app_id: &str, job_id: String, payload: JsonValue, caller: Option<RpcCaller>) -> Result<(), RuntimeError> {
-        let principal = Principal::from_request(crate::sql_proxy::ContextState::from_caller(caller.as_ref()));
+        let principal = Principal::from_request(crate::governance::enforcement::ContextState::from_caller(caller.as_ref()));
         self.get_or_spawn(app_id, principal).await?.dispatch_job(job_id, payload, caller).await
     }
 
@@ -531,7 +531,7 @@ fn resolve_entry_point(app_dir: &Path) -> Result<PathBuf, RuntimeError> {
 #[cfg(test)]
 mod tests {
     use super::Principal;
-    use crate::sql_proxy::ContextState;
+    use crate::governance::enforcement::ContextState;
     use uuid::Uuid;
 
     fn user(uid: Option<Uuid>, delegated: bool, perms: &[&str]) -> Principal {

@@ -34,7 +34,7 @@ pub async fn execute_self_action(
             // Acting for ALL connected users is privileged. The old HTTP path
             // gated this on admin (connected-users + x-run-as both admin-only);
             // preserve that exactly via the shared require_admin helper.
-            crate::extensions::rbac::policy::require_admin(pool, requester)
+            crate::governance::authority::require_admin(pool, requester)
                 .await.map_err(|_| "syncConnectedUsers requires admin".to_string())?;
             let action_name = params.get("actionName").and_then(|v| v.as_str())
                 .ok_or("syncConnectedUsers: missing actionName")?;

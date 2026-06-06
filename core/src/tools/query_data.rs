@@ -7,7 +7,7 @@ use crate::manifest::field_type_map;
 use crate::routes::crud::{
     build_where_clause, join_where, table, validate_order, validate_sort_field,
 };
-use crate::sql_proxy::{self, ContextState};
+use crate::governance::enforcement::{self, ContextState};
 
 pub struct QueryDataTool;
 
@@ -58,7 +58,7 @@ impl Tool for QueryDataTool {
             is_delegated: true,
             effective_perms: ctx.permissions.clone(),
         };
-        let mut tx = sql_proxy::begin_app_tx(&ctx.pool, app, &state, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool", sql_proxy::TIMEOUT_AGENT_TOOL_MS)
+        let mut tx = enforcement::begin_app_tx(&ctx.pool, app, &state, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool", enforcement::TIMEOUT_AGENT_TOOL_MS)
             .await.map_err(|e| e.to_string())?;
 
         let query_keys = ["where", "orderBy", "order", "limit", "offset"];

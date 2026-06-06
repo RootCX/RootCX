@@ -18,7 +18,6 @@ use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::extensions::agents::{self, config as agent_config, persistence};
 use crate::extensions::agents::approvals::ApprovalResponse;
-use crate::extensions::rbac::policy::{resolve_permissions, has_permission};
 use crate::extensions::storage::backend::{PostgresBackend, StorageBackend};
 use crate::ipc::{AgentInvokePayload, FileAttachment, LlmModelRef};
 use crate::routes::{self, SharedRuntime, llm_models::fetch_default_llm};
@@ -301,14 +300,12 @@ async fn do_invoke(
         async { Ok(resolve_invoker(pool, channel_id, chat_id).await) },
     ).map_err(&e)?;
 
-    // B1 gate: invoker must hold app:{id}:invoke
-    if let Some(uid) = invoker_user_id {
-        let required_perm = format!("app:{app_id}:invoke");
-        let (_, perms) = resolve_permissions(pool, uid).await.map_err(&e)?;
-        if !has_permission(&perms, &required_perm) {
-            return Err(format!("channel agent denied: user lacks {required_perm}"));
-        }
-    }
+    // Single owned-automation gate (B1): linked user present + enabled + valid
+    // channel-link delegation + holds app:{id}:invoke. Fail-fast before any media
+    // download. Authenticity (Family H) is verified upstream by the provider.
+    crate::governance::triggers::fire_gate::assert_can_fire(pool, invoker_user_id, &app_id)
+        .await
+        .map_err(|d| format!("channel agent denied: {d}"))?;
 
     let agent_cfg: JsonValue = sqlx::query_scalar(
         "SELECT config FROM rootcx_system.agents WHERE app_id = $1",
@@ -337,14 +334,6 @@ async fn do_invoke(
         attachment_list.push(FileAttachment { name, content_type, url });
     }
     let attachments = if attachment_list.is_empty() { None } else { Some(attachment_list) };
-
-    // Phase 6b: a channel message only drives the agent under a valid standing
-    // delegation from the linked human. No link, or a revoked delegation, → mute.
-    let delegator = invoker_user_id.ok_or("channel message: no linked user")?;
-    let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
-    if !crate::delegations::is_valid(pool, delegator, agent_uid).await.map_err(&e)? {
-        return Err("channel message: no valid delegation".into());
-    }
 
     let payload = AgentInvokePayload {
         invoke_id: uuid::Uuid::new_v4().to_string(),
@@ -651,7 +640,7 @@ async fn try_complete_link(
     if let Ok((app_id, _)) = resolve_session(pool, channel_id, chat_id).await {
         let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
         let trigger_ref = super::channel_delegation_ref(channel_id, user_id);
-        let _ = crate::delegations::create(pool, user_id, agent_uid, "channel", Some(trigger_ref)).await;
+        let _ = crate::governance::delegation::create(pool, user_id, agent_uid, "channel", Some(trigger_ref)).await;
     }
 
     Some(user_id.to_string())

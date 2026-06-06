@@ -9,7 +9,7 @@ use super::crud::validate_app_id;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::crons::{self, CreateCron};
-use crate::extensions::rbac::policy::{resolve_permissions, has_permission};
+use crate::governance::authority::{resolve_permissions, has_permission};
 
 async fn require_cron_perm(pool: &sqlx::PgPool, user_id: Uuid, app_id: &str, action: &str) -> Result<Vec<String>, ApiError> {
     let (_, perms) = resolve_permissions(pool, user_id).await?;
@@ -75,7 +75,7 @@ pub async fn create_cron(
 
     // Optional `runAs`: own the cron as another principal (a service account),
     // gated by the act-as guard. The owner survives the creator's departure.
-    let owner = crate::act_as::resolve_owner(&db, identity.user_id, body.get("runAs").and_then(|v| v.as_str())).await?;
+    let owner = crate::governance::delegation::act_as::resolve_owner(&db, identity.user_id, body.get("runAs").and_then(|v| v.as_str())).await?;
 
     let row = crons::create(&db, &app_id, CreateCron {
         name: name.into(),
@@ -88,7 +88,7 @@ pub async fn create_cron(
 
     // Auto-create the standing owner -> agent delegation for agent crons.
     let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
-    let _ = crate::delegations::create(&db, owner, agent_uid, "cron", Some(row.id)).await;
+    let _ = crate::governance::delegation::create(&db, owner, agent_uid, "cron", Some(row.id)).await;
 
     rt.scheduler_wake().notify_one();
     Ok((StatusCode::CREATED, Json(serde_json::to_value(row).unwrap())))
@@ -145,7 +145,7 @@ pub async fn delete_cron(
     let existing = crons::get(&db, &app_id, cron_id).await?;
     require_owner(&perms, &app_id, existing.created_by, identity.user_id)?;
     crons::delete(&db, &app_id, cron_id).await?;
-    let _ = crate::delegations::revoke_by_trigger(&db, "cron", cron_id).await;
+    let _ = crate::governance::delegation::revoke_by_trigger(&db, "cron", cron_id).await;
     Ok(Json(json!({ "message": "cron deleted" })))
 }
 

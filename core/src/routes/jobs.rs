@@ -18,10 +18,10 @@ pub async fn enqueue_job(
     let pool = pool(&rt);
     // Enqueuing makes the app run backend work: require the same "may trigger
     // this app" permission as the cross-app RPC gate.
-    crate::extensions::rbac::policy::require_perm(&pool, identity.user_id, &format!("app:{app_id}:invoke")).await?;
+    crate::governance::authority::require_perm(&pool, identity.user_id, &format!("app:{app_id}:invoke")).await?;
     let payload = body.get("payload").cloned().unwrap_or(json!({}));
     // Owning a job as another principal goes through the single act-as guard.
-    let run_as = Some(crate::act_as::resolve_owner(&pool, identity.user_id, body.get("user_id").and_then(|v| v.as_str())).await?);
+    let run_as = Some(crate::governance::delegation::act_as::resolve_owner(&pool, identity.user_id, body.get("user_id").and_then(|v| v.as_str())).await?);
     let msg_id = crate::jobs::enqueue(&pool, &app_id, payload, run_as).await?;
     rt.scheduler_wake().notify_one();
     Ok((StatusCode::CREATED, Json(json!({ "msg_id": msg_id }))))

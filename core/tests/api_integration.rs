@@ -3002,7 +3002,7 @@ async fn agent_registration_assigns_least_privilege_role() {
     assert!(has_role, "agent must be assigned app:{{app_id}}:agent role");
 
     // Verify the role contains entity CRUD + invoke, no wildcard
-    let (_, perms) = rootcx_core::extensions::rbac::policy::resolve_permissions(rt.pool(), agent_uid).await.unwrap();
+    let (_, perms) = rootcx_core::governance::authority::resolve_permissions(rt.pool(), agent_uid).await.unwrap();
     assert!(!perms.contains(&"*".to_string()), "agent must NOT have wildcard");
     assert!(perms.contains(&format!("app:{app_id}:items.create")), "must have entity create");
     assert!(perms.contains(&format!("app:{app_id}:items.read")), "must have entity read");

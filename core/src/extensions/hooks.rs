@@ -271,7 +271,7 @@ async fn create_hook(
 
     let config = body.action_config.unwrap_or(serde_json::json!({}));
 
-    let owner = crate::act_as::resolve_owner(&pool, identity.user_id, body.run_as.as_deref()).await?;
+    let owner = crate::governance::delegation::act_as::resolve_owner(&pool, identity.user_id, body.run_as.as_deref()).await?;
 
     let (row,): (JsonValue,) = sqlx::query_as(
         r#"
@@ -294,7 +294,7 @@ async fn create_hook(
         let hook_id: Option<uuid::Uuid> = row.get("id").and_then(|v| v.as_str()).and_then(|s| s.parse().ok());
         let target = config.get("app_id").and_then(|v| v.as_str()).unwrap_or(&app_id);
         let agent_uid = crate::extensions::agents::agent_user_id(target);
-        let _ = crate::delegations::create(&pool, owner, agent_uid, "hook", hook_id).await;
+        let _ = crate::governance::delegation::create(&pool, owner, agent_uid, "hook", hook_id).await;
     }
 
     Ok(Json(row))
@@ -339,7 +339,7 @@ async fn delete_hook(
     }
 
     if let Ok(uid) = hook_id.parse::<uuid::Uuid>() {
-        let _ = crate::delegations::revoke_by_trigger(&pool, "hook", uid).await;
+        let _ = crate::governance::delegation::revoke_by_trigger(&pool, "hook", uid).await;
     }
 
     Ok(Json(serde_json::json!({ "ok": true })))

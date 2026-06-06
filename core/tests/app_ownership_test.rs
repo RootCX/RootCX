@@ -296,7 +296,7 @@ async fn app_owner_uses_run_as_with_own_sa() {
         .bind(sa_uid).execute(rt.pool()).await.unwrap();
 
     // Grant act-as from employee to SA.
-    rootcx_core::act_as::grant(rt.pool(), uid, sa_uid).await.unwrap();
+    rootcx_core::governance::delegation::act_as::grant(rt.pool(), uid, sa_uid).await.unwrap();
 
     // Employee creates a cron owned by the SA.
     let (s, body) = rt.request_as(

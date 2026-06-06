@@ -475,10 +475,10 @@ async fn delegation_valid_for_all_trigger_types() {
     let agent_uid = rootcx_core::extensions::agents::agent_user_id("alerts");
 
     for trigger_type in ["cron", "hook", "channel"] {
-        let del_id = rootcx_core::delegations::create(pool, delegator, agent_uid, trigger_type, None).await.unwrap();
-        assert!(rootcx_core::delegations::is_valid(pool, delegator, agent_uid).await.unwrap(),
+        let del_id = rootcx_core::governance::delegation::create(pool, delegator, agent_uid, trigger_type, None).await.unwrap();
+        assert!(rootcx_core::governance::delegation::is_valid(pool, delegator, agent_uid).await.unwrap(),
             "delegation must be valid for trigger_type={trigger_type}");
-        rootcx_core::delegations::revoke(pool, del_id).await.unwrap();
+        rootcx_core::governance::delegation::revoke(pool, del_id).await.unwrap();
     }
     rt.shutdown().await;
 }
@@ -495,9 +495,9 @@ async fn delegation_revoked_denies_all_trigger_types() {
     let agent_uid = rootcx_core::extensions::agents::agent_user_id("alerts");
 
     for trigger_type in ["cron", "hook", "channel"] {
-        let del_id = rootcx_core::delegations::create(pool, delegator, agent_uid, trigger_type, None).await.unwrap();
-        rootcx_core::delegations::revoke(pool, del_id).await.unwrap();
-        assert!(!rootcx_core::delegations::is_valid(pool, delegator, agent_uid).await.unwrap(),
+        let del_id = rootcx_core::governance::delegation::create(pool, delegator, agent_uid, trigger_type, None).await.unwrap();
+        rootcx_core::governance::delegation::revoke(pool, del_id).await.unwrap();
+        assert!(!rootcx_core::governance::delegation::is_valid(pool, delegator, agent_uid).await.unwrap(),
             "revoked delegation must be invalid for trigger_type={trigger_type}");
     }
     rt.shutdown().await;
@@ -514,7 +514,7 @@ async fn t3_5_cron_no_owner_denied() {
     register_agent(pool, "analytics").await;
 
     let agent_uid = rootcx_core::extensions::agents::agent_user_id("analytics");
-    let valid = rootcx_core::delegations::is_valid(pool, Uuid::nil(), agent_uid).await.unwrap();
+    let valid = rootcx_core::governance::delegation::is_valid(pool, Uuid::nil(), agent_uid).await.unwrap();
     assert!(!valid, "non-existent delegator must have no valid delegation (deny-by-default)");
     rt.shutdown().await;
 }
@@ -538,7 +538,7 @@ async fn t3_8_webhook_valid_delegation_passes() {
         .bind(delegator).execute(rt.pool()).await.unwrap();
 
     let wh_id = create_webhook(rt.pool(), "alerts", "incoming", "agent", Some(delegator)).await;
-    rootcx_core::delegations::create(rt.pool(), delegator, agent_uid, "webhook", Some(wh_id)).await.unwrap();
+    rootcx_core::governance::delegation::create(rt.pool(), delegator, agent_uid, "webhook", Some(wh_id)).await.unwrap();
 
     let token = get_webhook_token(rt.pool(), wh_id).await;
     let r = rt.client.post(rt.url(&format!("/api/v1/hooks/{token}")))
@@ -564,9 +564,9 @@ async fn t3_9_webhook_revoked_delegation_denied() {
     let agent_uid = rootcx_core::extensions::agents::agent_user_id("alerts");
 
     let wh_id = create_webhook(rt.pool(), "alerts", "incoming2", "agent", Some(delegator)).await;
-    let del_id = rootcx_core::delegations::create(rt.pool(), delegator, agent_uid, "webhook", Some(wh_id)).await.unwrap();
+    let del_id = rootcx_core::governance::delegation::create(rt.pool(), delegator, agent_uid, "webhook", Some(wh_id)).await.unwrap();
 
-    rootcx_core::delegations::revoke(rt.pool(), del_id).await.unwrap();
+    rootcx_core::governance::delegation::revoke(rt.pool(), del_id).await.unwrap();
 
     let token = get_webhook_token(rt.pool(), wh_id).await;
     let r = rt.client.post(rt.url(&format!("/api/v1/hooks/{token}")))
@@ -651,7 +651,7 @@ async fn task_scope_blocks_cross_app_sub_invoke() {
         "app:billing:invoices.read".into(),
     ];
     let scope = vec!["app:crm:*".to_string()];
-    let narrowed = rootcx_core::extensions::rbac::policy::intersect_permissions(&full_perms, &scope);
+    let narrowed = rootcx_core::governance::authority::intersect_permissions(&full_perms, &scope);
 
     let ctx = rootcx_core::tools::ToolContext {
         pool: rt.pool().clone(),
@@ -1491,6 +1491,7 @@ fn t4_7_discover_wire_carries_no_database_url() {
     let minimal = serde_json::to_value(rootcx_core::OutboundMessage::Discover {
         app_id: "crm".into(), runtime_url: "http://127.0.0.1:9100".into(),
         credentials: std::collections::HashMap::new(), agent_config: None, run_onstart: true,
+        manifest: None,
     }).unwrap();
     expect_keys(&minimal, &["app_id", "run_onstart", "runtime_url", "type"]);
 
@@ -1498,6 +1499,7 @@ fn t4_7_discover_wire_carries_no_database_url() {
         app_id: "crm".into(), runtime_url: "http://127.0.0.1:9100".into(),
         credentials: std::collections::HashMap::from([("K".into(), "V".into())]),
         agent_config: None, run_onstart: false,
+        manifest: None,
     }).unwrap();
     expect_keys(&with_creds, &["app_id", "credentials", "runtime_url", "type"]);
 }
@@ -1646,12 +1648,12 @@ async fn regression_agent_tool_delegated_context_blocks_excess_perms() {
     let agent_intersection = vec!["app:crm:contacts.read".to_string()];
 
     // Simulate exactly what query_data.rs does: delegated=true, user_id=invoker (jean)
-    let state = rootcx_core::sql_proxy::ContextState {
+    let state = rootcx_core::governance::enforcement::ContextState {
         user_id: Some(jean),
         is_delegated: true,
         effective_perms: agent_intersection,
     };
-    let mut tx = rootcx_core::sql_proxy::begin_app_tx(pool, "crm", &state, Some(jean), None, "test", rootcx_core::sql_proxy::TIMEOUT_INTERACTIVE_MS)
+    let mut tx = rootcx_core::governance::enforcement::begin_app_tx(pool, "crm", &state, Some(jean), None, "test", rootcx_core::governance::enforcement::TIMEOUT_INTERACTIVE_MS)
         .await.unwrap();
     let contacts: i64 = sqlx::query_scalar("SELECT count(*) FROM crm.contacts")
         .fetch_one(&mut *tx).await.unwrap();
@@ -1772,7 +1774,7 @@ async fn sql_proxy_timeout_kills_long_running_query() {
     rt.install("crm", "contacts").await;
     let (_, uid) = user_with(&rt, "timeout@t.local", &["app:crm:contacts.read"]).await;
 
-    let state = rootcx_core::sql_proxy::ContextState {
+    let state = rootcx_core::governance::enforcement::ContextState {
         user_id: Some(uid),
         is_delegated: false,
         effective_perms: vec!["app:crm:contacts.read".into()],
@@ -1780,7 +1782,7 @@ async fn sql_proxy_timeout_kills_long_running_query() {
 
     // Use a 1-second timeout (minimum practical). pg_sleep(5) must be cancelled.
     let err_msg = {
-        let mut tx = rootcx_core::sql_proxy::begin_app_tx(
+        let mut tx = rootcx_core::governance::enforcement::begin_app_tx(
             rt.pool(), "crm", &state, Some(uid), None, "test", 1000,
         ).await.unwrap();
         let result = sqlx::query("SELECT pg_sleep(5)")
@@ -1804,7 +1806,7 @@ async fn sql_proxy_oversized_result_rolls_back() {
         "app:crm:contacts.read", "app:crm:contacts.create",
     ]).await;
 
-    let state = rootcx_core::sql_proxy::ContextState {
+    let state = rootcx_core::governance::enforcement::ContextState {
         user_id: Some(uid),
         is_delegated: false,
         effective_perms: vec![
@@ -1820,7 +1822,7 @@ async fn sql_proxy_oversized_result_rolls_back() {
         "FROM generate_series(1,1001) g ",
         "RETURNING id"
     );
-    let result = rootcx_core::sql_proxy::run_sql(rt.pool(), "crm", &state, sql, &[]).await;
+    let result = rootcx_core::governance::enforcement::run_sql(rt.pool(), "crm", &state, sql, &[]).await;
     assert!(result.is_err(), "over-limit result must error");
     assert!(result.unwrap_err().contains("exceeds limit"));
 
@@ -1840,7 +1842,7 @@ async fn sql_proxy_row_cap_boundary_1000_succeeds() {
         "app:crm:contacts.read", "app:crm:contacts.create",
     ]).await;
 
-    let state = rootcx_core::sql_proxy::ContextState {
+    let state = rootcx_core::governance::enforcement::ContextState {
         user_id: Some(uid),
         is_delegated: false,
         effective_perms: vec![
@@ -1856,7 +1858,7 @@ async fn sql_proxy_row_cap_boundary_1000_succeeds() {
         "FROM generate_series(1,1000) g ",
         "RETURNING id"
     );
-    let result = rootcx_core::sql_proxy::run_sql(rt.pool(), "crm", &state, sql, &[]).await;
+    let result = rootcx_core::governance::enforcement::run_sql(rt.pool(), "crm", &state, sql, &[]).await;
     assert!(result.is_ok(), "exactly 1000 rows must succeed: {:?}", result.err());
     assert_eq!(result.unwrap().row_count, 1000);
 
@@ -1997,13 +1999,13 @@ async fn t3_11b_channel_unlink_revokes_delegation() {
     let trigger_ref = rootcx_core::extensions::channels::channel_delegation_ref(channel_id, user_id);
 
     // Simulate link: create delegation with deterministic trigger_ref (same as try_complete_link)
-    rootcx_core::delegations::create(pool, user_id, agent_uid, "channel", Some(trigger_ref)).await.unwrap();
-    assert!(rootcx_core::delegations::is_valid(pool, user_id, agent_uid).await.unwrap(),
+    rootcx_core::governance::delegation::create(pool, user_id, agent_uid, "channel", Some(trigger_ref)).await.unwrap();
+    assert!(rootcx_core::governance::delegation::is_valid(pool, user_id, agent_uid).await.unwrap(),
         "delegation must be valid after channel link");
 
     // Simulate unlink: revoke_by_trigger with the same deterministic ref
-    rootcx_core::delegations::revoke_by_trigger(pool, "channel", trigger_ref).await.unwrap();
-    assert!(!rootcx_core::delegations::is_valid(pool, user_id, agent_uid).await.unwrap(),
+    rootcx_core::governance::delegation::revoke_by_trigger(pool, "channel", trigger_ref).await.unwrap();
+    assert!(!rootcx_core::governance::delegation::is_valid(pool, user_id, agent_uid).await.unwrap(),
         "delegation must be invalid after channel unlink (revoke_by_trigger)");
 
     rt.shutdown().await;
@@ -2023,7 +2025,7 @@ async fn public_caller_deny_all_on_data() {
 
     // Simulate the exact ContextState a public/share-token caller produces:
     // user_id="" parses to None, is_delegated=false, effective_perms=[]
-    let public_state = rootcx_core::sql_proxy::ContextState {
+    let public_state = rootcx_core::governance::enforcement::ContextState {
         user_id: "".parse().ok(), // None (empty string fails UUID parse)
         is_delegated: false,
         effective_perms: vec![],
@@ -2031,7 +2033,7 @@ async fn public_caller_deny_all_on_data() {
     assert!(public_state.user_id.is_none(), "precondition: empty string must parse to None");
 
     // ctx.sql: RLS denies all rows (check_access sees NULL user_id -> FALSE)
-    let result = rootcx_core::sql_proxy::run_sql(
+    let result = rootcx_core::governance::enforcement::run_sql(
         pool, "crm", &public_state, "SELECT * FROM crm.contacts", &[],
     ).await;
     assert!(result.is_ok(), "query executes without error");
@@ -2058,12 +2060,12 @@ async fn integration_worker_deny_all_on_sql_but_onstart_bypass_works() {
     let pool = rt.pool();
 
     // Integration caller: None -> ContextState::default()
-    let integration_state = rootcx_core::sql_proxy::ContextState::from_caller(None);
+    let integration_state = rootcx_core::governance::enforcement::ContextState::from_caller(None);
     assert!(integration_state.user_id.is_none(), "precondition: None caller -> None user_id");
     assert!(!integration_state.is_delegated, "precondition: not delegated");
 
     // ctx.sql with integration identity: deny-all (0 rows)
-    let sql_result = rootcx_core::sql_proxy::run_sql(
+    let sql_result = rootcx_core::governance::enforcement::run_sql(
         pool, "crm", &integration_state, "SELECT * FROM crm.contacts", &[],
     ).await;
     assert!(sql_result.is_ok(), "query executes without error");
@@ -2341,13 +2343,13 @@ async fn typed_bind_uuid_int_date_bool_array_jsonb() {
         json!(["a", "b", "c"]), // $5 TEXT[]
         json!({"key": "val"}),  // $6 JSONB
     ];
-    let result = rootcx_core::sql_proxy::run_sql(rt.pool(), "typebind", &state, insert, &params).await;
+    let result = rootcx_core::governance::enforcement::sql_proxy::run_sql(rt.pool(), "typebind", &state, insert, &params).await;
     assert!(result.is_ok(), "typed INSERT must succeed: {:?}", result.err());
     let id = result.unwrap().rows[0][0].as_str().unwrap().to_string();
 
     // Read back by UUID (the critical case: $1 bound as UUID, not TEXT).
     let select = "SELECT label, count, is_active, due_date, tags, meta FROM typebind.records WHERE id = $1";
-    let result = rootcx_core::sql_proxy::run_sql(rt.pool(), "typebind", &state, select, &[json!(id)]).await;
+    let result = rootcx_core::governance::enforcement::sql_proxy::run_sql(rt.pool(), "typebind", &state, select, &[json!(id)]).await;
     assert!(result.is_ok(), "typed SELECT by UUID must succeed: {:?}", result.err());
     let row = &result.unwrap().rows[0];
     assert_eq!(row[0], json!("test"));
@@ -2355,7 +2357,7 @@ async fn typed_bind_uuid_int_date_bool_array_jsonb() {
 
     // Query by ref_id (NULL UUID) — ensures NULL uuid binding works.
     let null_q = "SELECT id FROM typebind.records WHERE ref_id = $1";
-    let result = rootcx_core::sql_proxy::run_sql(rt.pool(), "typebind", &state, null_q, &[json!(null)]).await;
+    let result = rootcx_core::governance::enforcement::sql_proxy::run_sql(rt.pool(), "typebind", &state, null_q, &[json!(null)]).await;
     assert!(result.is_ok(), "NULL UUID param must succeed: {:?}", result.err());
 
     rt.shutdown().await;

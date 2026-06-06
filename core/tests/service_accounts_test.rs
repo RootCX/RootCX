@@ -152,17 +152,17 @@ async fn act_as_requires_delegation_and_subset() {
     let sa_small = db_user(pool, "sa+small@localhost", &["app:crm:contacts.read"]).await;
 
     // No delegation -> denied.
-    assert!(rootcx_core::act_as::assert_can_act_as(pool, human, sa_big).await.is_err(),
+    assert!(rootcx_core::governance::delegation::act_as::assert_can_act_as(pool, human, sa_big).await.is_err(),
         "no act-as delegation must deny");
 
     // Delegation exists but target exceeds the human -> anti-escalation denies.
-    rootcx_core::act_as::grant(pool, human, sa_big).await.unwrap();
-    assert!(rootcx_core::act_as::assert_can_act_as(pool, human, sa_big).await.is_err(),
+    rootcx_core::governance::delegation::act_as::grant(pool, human, sa_big).await.unwrap();
+    assert!(rootcx_core::governance::delegation::act_as::assert_can_act_as(pool, human, sa_big).await.is_err(),
         "target perms exceed human -> anti-escalation must deny");
 
     // Delegation + subset -> allowed.
-    rootcx_core::act_as::grant(pool, human, sa_small).await.unwrap();
-    assert!(rootcx_core::act_as::assert_can_act_as(pool, human, sa_small).await.is_ok(),
+    rootcx_core::governance::delegation::act_as::grant(pool, human, sa_small).await.unwrap();
+    assert!(rootcx_core::governance::delegation::act_as::assert_can_act_as(pool, human, sa_small).await.is_ok(),
         "subset target with delegation must be allowed");
 
     rt.shutdown().await;
@@ -248,8 +248,8 @@ async fn escalate_permission_does_not_bypass_subset_check() {
     let admin = db_user(pool, "escalator@t.local", &["admin:rbac.escalate"]).await;
     let sa_big = db_user(pool, "sa+huge@localhost", &["app:crm:*", "app:billing:*"]).await;
 
-    rootcx_core::act_as::grant(pool, admin, sa_big).await.unwrap();
-    assert!(rootcx_core::act_as::assert_can_act_as(pool, admin, sa_big).await.is_err(),
+    rootcx_core::governance::delegation::act_as::grant(pool, admin, sa_big).await.unwrap();
+    assert!(rootcx_core::governance::delegation::act_as::assert_can_act_as(pool, admin, sa_big).await.is_err(),
         "anti-escalation must deny even when caller holds admin:rbac.escalate");
     rt.shutdown().await;
 }
@@ -302,7 +302,7 @@ async fn delete_sa_cascades_credentials_and_delegations() {
 
     // Pre-condition: credential works, delegation valid.
     assert_eq!(token_status(&rt, sa, &key).await, StatusCode::OK);
-    assert!(rootcx_core::delegations::is_valid(rt.pool(), admin_id, sa).await.unwrap());
+    assert!(rootcx_core::governance::delegation::is_valid(rt.pool(), admin_id, sa).await.unwrap());
 
     // Delete SA.
     let s = rt.delete(&format!("/api/v1/service-accounts/{sa}")).await;
@@ -310,7 +310,7 @@ async fn delete_sa_cascades_credentials_and_delegations() {
 
     // Post-condition: credential dead, delegation revoked.
     assert_eq!(token_status(&rt, sa, &key).await, StatusCode::UNAUTHORIZED, "credential must die with SA");
-    assert!(!rootcx_core::delegations::is_valid(rt.pool(), admin_id, sa).await.unwrap(),
+    assert!(!rootcx_core::governance::delegation::is_valid(rt.pool(), admin_id, sa).await.unwrap(),
         "delegation must be revoked on SA deletion");
     rt.shutdown().await;
 }
@@ -324,11 +324,11 @@ async fn act_as_revoked_denies() {
     let human = db_user(pool, "revtest@t.local", &["app:crm:contacts.read"]).await;
     let sa = db_user(pool, "sa+revtest@localhost", &["app:crm:contacts.read"]).await;
 
-    rootcx_core::act_as::grant(pool, human, sa).await.unwrap();
-    assert!(rootcx_core::act_as::assert_can_act_as(pool, human, sa).await.is_ok());
+    rootcx_core::governance::delegation::act_as::grant(pool, human, sa).await.unwrap();
+    assert!(rootcx_core::governance::delegation::act_as::assert_can_act_as(pool, human, sa).await.is_ok());
 
-    rootcx_core::act_as::revoke(pool, human, sa).await.unwrap();
-    assert!(rootcx_core::act_as::assert_can_act_as(pool, human, sa).await.is_err(),
+    rootcx_core::governance::delegation::act_as::revoke(pool, human, sa).await.unwrap();
+    assert!(rootcx_core::governance::delegation::act_as::assert_can_act_as(pool, human, sa).await.is_err(),
         "revoked act-as must deny");
     rt.shutdown().await;
 }
@@ -347,7 +347,7 @@ async fn expired_delegation_denied() {
          VALUES ($1, $2, 'act_as', now() - interval '1 hour')")
         .bind(human).bind(sa).execute(pool).await.unwrap();
 
-    assert!(!rootcx_core::delegations::is_valid(pool, human, sa).await.unwrap(),
+    assert!(!rootcx_core::governance::delegation::is_valid(pool, human, sa).await.unwrap(),
         "expired delegation must not be valid");
     rt.shutdown().await;
 }
@@ -359,7 +359,7 @@ async fn act_as_self_always_allowed() {
     let rt = harness::TestRuntime::boot().await;
     let pool = rt.pool();
     let uid = db_user(pool, "self@t.local", &[]).await;
-    assert!(rootcx_core::act_as::assert_can_act_as(pool, uid, uid).await.is_ok(),
+    assert!(rootcx_core::governance::delegation::act_as::assert_can_act_as(pool, uid, uid).await.is_ok(),
         "acting as oneself must always pass without delegation");
     rt.shutdown().await;
 }
@@ -373,8 +373,8 @@ async fn wildcard_perm_no_cross_namespace_escalation() {
     let human = db_user(pool, "apponly@t.local", &["app:crm:*"]).await;
     let sa = db_user(pool, "sa+cross@localhost", &["admin:audit.read"]).await;
 
-    rootcx_core::act_as::grant(pool, human, sa).await.unwrap();
-    assert!(rootcx_core::act_as::assert_can_act_as(pool, human, sa).await.is_err(),
+    rootcx_core::governance::delegation::act_as::grant(pool, human, sa).await.unwrap();
+    assert!(rootcx_core::governance::delegation::act_as::assert_can_act_as(pool, human, sa).await.is_err(),
         "app:crm:* must not satisfy admin:audit.read (cross-namespace escalation)");
     rt.shutdown().await;
 }
@@ -455,9 +455,9 @@ async fn act_as_per_human_isolation() {
     let bob = db_user(pool, "bob-iso@t.local", &["app:x:invoke"]).await;
     let sa = db_user(pool, "sa+iso@localhost", &["app:x:invoke"]).await;
 
-    rootcx_core::act_as::grant(pool, alice, sa).await.unwrap();
-    assert!(rootcx_core::act_as::assert_can_act_as(pool, alice, sa).await.is_ok());
-    assert!(rootcx_core::act_as::assert_can_act_as(pool, bob, sa).await.is_err(),
+    rootcx_core::governance::delegation::act_as::grant(pool, alice, sa).await.unwrap();
+    assert!(rootcx_core::governance::delegation::act_as::assert_can_act_as(pool, alice, sa).await.is_ok());
+    assert!(rootcx_core::governance::delegation::act_as::assert_can_act_as(pool, bob, sa).await.is_err(),
         "Bob has no delegation to SA, must be denied even though Alice does");
     rt.shutdown().await;
 }

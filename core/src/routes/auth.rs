@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::auth::{AuthConfig, jwt, password};
-use crate::extensions::rbac::policy::require_admin;
+use crate::governance::authority::require_admin;
 use crate::routes::SharedRuntime;
 
 #[derive(Deserialize)]

@@ -9,7 +9,7 @@ use base64::Engine;
 
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::extensions::rbac::policy::{require_admin, resolve_permissions};
+use crate::governance::authority::{require_admin, resolve_permissions};
 use crate::routes::{self, SharedRuntime};
 
 const PLATFORM_SCOPE: &str = "_platform";
@@ -103,7 +103,7 @@ pub async fn execute_action(
 
     let perm = format!("integration:{integration_id}:{action_id}");
     let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
-    if !crate::extensions::rbac::policy::has_permission(&perms, &perm) {
+    if !crate::governance::authority::has_permission(&perms, &perm) {
         return Err(ApiError::Forbidden(format!("permission denied: {perm}")));
     }
 
@@ -199,20 +199,15 @@ pub async fn webhook_ingress(
         let is_agent_webhook = wh.method == "agent";
 
         if is_agent_webhook {
-            let delegator = wh.created_by
-                .ok_or_else(|| ApiError::Forbidden("webhook has no owner (created_by is NULL)".into()))?;
-            let agent_uid = crate::extensions::agents::agent_user_id(&wh.app_id);
-            if !crate::delegations::is_valid(&pool, delegator, agent_uid).await
-                .map_err(|e| ApiError::Internal(e.to_string()))? {
-                return Err(ApiError::Forbidden("no valid delegation for webhook agent".into()));
-            }
-            let required_perm = format!("app:{}:invoke", wh.app_id);
-            let (_, perms) = crate::extensions::rbac::policy::resolve_permissions(&pool, delegator).await?;
-            if !crate::extensions::rbac::policy::has_permission(&perms, &required_perm) {
-                return Err(ApiError::Forbidden(format!(
-                    "webhook agent denied: owner lacks {required_perm}"
-                )));
-            }
+            // Single owned-automation gate (B1): owner present + enabled + valid
+            // delegation + holds app:{id}:invoke. Authenticity (Family H) is proven
+            // above, before any owner authority is touched.
+            use crate::governance::triggers::fire_gate::{assert_can_fire, FireDenied};
+            let delegator = assert_can_fire(&pool, wh.created_by, &wh.app_id).await
+                .map_err(|d| match d {
+                    FireDenied::CheckFailed(e) => ApiError::Internal(e),
+                    other => ApiError::Forbidden(format!("webhook agent denied: {other}")),
+                })?;
             let message = format!("Webhook received: {}\n\nPayload:\n{payload}", wh.name);
             let llm = crate::routes::llm_models::fetch_default_llm(&pool).await
                 .ok().flatten()

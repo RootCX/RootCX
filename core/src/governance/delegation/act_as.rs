@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::RuntimeError;
 use crate::api_error::ApiError;
-use crate::extensions::rbac::policy::{has_permission, resolve_permissions};
+use crate::governance::authority::{has_permission, resolve_permissions};
 
 /// Authorize `human` to act as `target`. Deny-by-default; both required:
 ///   1. a standing act-as delegation `human -> target` exists, AND
@@ -19,7 +19,7 @@ pub async fn assert_can_act_as(pool: &PgPool, human: Uuid, target: Uuid) -> Resu
         return Ok(());
     }
 
-    let delegated = crate::delegations::is_valid(pool, human, target)
+    let delegated = crate::governance::delegation::is_valid(pool, human, target)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
     if !delegated {
@@ -53,10 +53,10 @@ pub async fn resolve_owner(pool: &PgPool, caller: Uuid, run_as: Option<&str>) ->
 
 /// Grant a standing act-as delegation `human -> sa`. Idempotent.
 pub async fn grant(pool: &PgPool, human: Uuid, sa: Uuid) -> Result<(), RuntimeError> {
-    if crate::delegations::is_valid(pool, human, sa).await? {
+    if crate::governance::delegation::is_valid(pool, human, sa).await? {
         return Ok(());
     }
-    crate::delegations::create(pool, human, sa, "act_as", None).await.map(|_| ())
+    crate::governance::delegation::create(pool, human, sa, "act_as", None).await.map(|_| ())
 }
 
 /// Revoke every standing act-as delegation `human -> sa`.

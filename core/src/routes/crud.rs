@@ -13,7 +13,7 @@ use super::{SharedRuntime, parse_uuid, pool};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::manifest::{entity_exists, entity_identity, field_type_map, find_entities_by_identity, is_system_field, map_field_type, quote_ident};
-use crate::sql_proxy::{self, ContextState};
+use crate::governance::enforcement::{self, ContextState};
 
 /// RLS context for a direct HTTP user call: the user is the responsible party,
 /// not delegated — `check_access` resolves their permissions from the DB. The
@@ -29,7 +29,7 @@ async fn http_tx<'a>(
     identity: &Identity,
 ) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, ApiError> {
     let (actor, delegator) = identity.actor_pair();
-    Ok(sql_proxy::begin_app_tx(pool, app_id, &http_context(identity), actor, delegator, "api", sql_proxy::TIMEOUT_INTERACTIVE_MS).await?)
+    Ok(enforcement::begin_app_tx(pool, app_id, &http_context(identity), actor, delegator, "api", enforcement::TIMEOUT_INTERACTIVE_MS).await?)
 }
 
 pub(crate) const MAX_BULK_SIZE: usize = 1000;
@@ -560,7 +560,7 @@ pub(crate) async fn bulk_insert(
         }
     }
 
-    let mut tx = sql_proxy::begin_app_tx(pool, app_id, state, actor_uid, delegator_uid, trigger_ref, timeout_ms).await?;
+    let mut tx = enforcement::begin_app_tx(pool, app_id, state, actor_uid, delegator_uid, trigger_ref, timeout_ms).await?;
     let rows: Vec<(JsonValue,)> = query.fetch_all(&mut *tx).await?;
     tx.commit().await?;
     Ok(rows.into_iter().map(|(r,)| r).collect())
@@ -592,7 +592,7 @@ pub async fn bulk_create_records(
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&db, &app_id, &entity).await?;
     let (actor, delegator) = identity.actor_pair();
-    let created = bulk_insert(&db, &app_id, &tbl, &types, &objects, &http_context(&identity), actor, delegator, "api", sql_proxy::TIMEOUT_INTERACTIVE_MS).await?;
+    let created = bulk_insert(&db, &app_id, &tbl, &types, &objects, &http_context(&identity), actor, delegator, "api", enforcement::TIMEOUT_INTERACTIVE_MS).await?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 

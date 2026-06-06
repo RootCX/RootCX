@@ -6,7 +6,7 @@ use serde_json::{Value as JsonValue, json};
 use super::{SharedRuntime, pool, pool_and_secrets, wm};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::extensions::rbac::policy::require_admin;
+use crate::governance::authority::require_admin;
 use crate::extensions::sharing::guard::{CallerAuth, authorize_public_rpc, find_public_rpc};
 use crate::ipc::RpcCaller;
 
@@ -77,7 +77,7 @@ pub async fn rpc_proxy(
             // before we forward. Core + RLS enforce governance downstream; the
             // worker is untrusted and never receives a token.
             let pool = pool(&rt);
-            if !crate::extensions::rbac::policy::has_permission_db(
+            if !crate::governance::authority::has_permission_db(
                 &pool, identity.user_id, &format!("app:{app_id}:invoke"),
             ).await? {
                 return Err(ApiError::Forbidden(format!("permission denied: app:{app_id}:invoke")));

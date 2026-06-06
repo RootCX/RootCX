@@ -49,7 +49,7 @@ pub async fn deploy_backend(
     if app_id == "core" {
         return Err(ApiError::BadRequest("reserved app_id".into()));
     }
-    crate::extensions::rbac::policy::require_perm(rt.pool(), identity.user_id, "admin:apps.deploy").await?;
+    crate::governance::authority::require_perm(rt.pool(), identity.user_id, "admin:apps.deploy").await?;
 
     let app_dir = rt.data_dir().join("apps").join(&app_id);
     let bun_bin = rt.bun_bin().to_path_buf();
@@ -210,7 +210,7 @@ pub async fn deploy_frontend(
     if app_id == "core" {
         return Err(ApiError::BadRequest("reserved app_id".into()));
     }
-    crate::extensions::rbac::policy::require_perm(rt.pool(), identity.user_id, "admin:apps.deploy").await?;
+    crate::governance::authority::require_perm(rt.pool(), identity.user_id, "admin:apps.deploy").await?;
 
     let frontend_dir = rt.data_dir().join("frontends").join(&app_id);
     let bytes = read_archive(&mut multipart).await?;

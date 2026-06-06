@@ -7,7 +7,6 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::extensions::agents::persistence;
-use crate::extensions::rbac::policy::{resolve_permissions, has_permission};
 use crate::ipc::{AgentInvokePayload, LlmModelRef, RpcCaller};
 use crate::{jobs, worker_manager::WorkerManager};
 
@@ -36,57 +35,14 @@ async fn dispatch_agent_job(
     invoker_user_id: Option<uuid::Uuid>,
     label: &'static str,
 ) {
-    // Deny-by-default: no delegator = no authority
-    if invoker_user_id.is_none() {
-        error!(msg_id, app_id = %target_app,
-            "{label} agent denied: trigger has no owner (created_by is NULL). \
-             Re-deploy the app or assign an owner to restore automatic execution.");
+    // Single owned-automation gate (B1): owner present + enabled + valid
+    // delegation + still holds app:{id}:invoke. Fail-closed.
+    if let Err(denied) = crate::governance::triggers::fire_gate::assert_can_fire(
+        pool, invoker_user_id, target_app,
+    ).await {
+        warn!(msg_id, app_id = %target_app, "{label} agent denied: {denied}");
         let _ = jobs::fail(pool, msg_id).await;
         return;
-    }
-
-    // Validate standing mandate (invoker_user_id guaranteed Some after early-return above)
-    let delegator = invoker_user_id.unwrap();
-
-    // Deny-by-default: a disabled owner (e.g. a disabled service account) cannot
-    // drive automation.
-    if !crate::auth::identity::principal_enabled(pool, delegator).await {
-        warn!(msg_id, app_id = %target_app, "{label} agent denied: owner disabled or missing");
-        let _ = jobs::fail(pool, msg_id).await;
-        return;
-    }
-
-    let agent_uid = crate::extensions::agents::agent_user_id(target_app);
-    match crate::delegations::is_valid(pool, delegator, agent_uid).await {
-        Ok(true) => {}
-        Ok(false) => {
-            warn!(msg_id, app_id = %target_app, "no valid delegation for {label} agent");
-            let _ = jobs::fail(pool, msg_id).await;
-            return;
-        }
-        Err(e) => {
-            warn!(msg_id, app_id = %target_app, "delegation check failed: {e}");
-            let _ = jobs::fail(pool, msg_id).await;
-            return;
-        }
-    }
-
-    // B1 gate: owner must still hold app:{id}:invoke
-    let required_perm = format!("app:{target_app}:invoke");
-    match resolve_permissions(pool, delegator).await {
-        Ok((_, perms)) if has_permission(&perms, &required_perm) => {}
-        Ok(_) => {
-            warn!(msg_id, app_id = %target_app,
-                "{label} agent denied: owner lacks {required_perm}");
-            let _ = jobs::fail(pool, msg_id).await;
-            return;
-        }
-        Err(e) => {
-            warn!(msg_id, app_id = %target_app,
-                "{label} invoke permission check failed: {e:?}");
-            let _ = jobs::fail(pool, msg_id).await;
-            return;
-        }
     }
 
     let llm = crate::routes::llm_models::fetch_default_llm(pool).await

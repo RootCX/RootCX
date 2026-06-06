@@ -131,8 +131,8 @@ async fn delegation_valid_active() {
         .fetch_one(pool).await.unwrap();
     let agent = agent_uid_for(&app_id);
 
-    rootcx_core::delegations::create(pool, uid, agent, "manual", None).await.unwrap();
-    assert!(rootcx_core::delegations::is_valid(pool, uid, agent).await.unwrap());
+    rootcx_core::governance::delegation::create(pool, uid, agent, "manual", None).await.unwrap();
+    assert!(rootcx_core::governance::delegation::is_valid(pool, uid, agent).await.unwrap());
 }
 
 #[tokio::test]
@@ -145,9 +145,9 @@ async fn delegation_revoked_denied() {
         .fetch_one(pool).await.unwrap();
     let agent = agent_uid_for(&app_id);
 
-    let id = rootcx_core::delegations::create(pool, uid, agent, "manual", None).await.unwrap();
-    rootcx_core::delegations::revoke(pool, id).await.unwrap();
-    assert!(!rootcx_core::delegations::is_valid(pool, uid, agent).await.unwrap());
+    let id = rootcx_core::governance::delegation::create(pool, uid, agent, "manual", None).await.unwrap();
+    rootcx_core::governance::delegation::revoke(pool, id).await.unwrap();
+    assert!(!rootcx_core::governance::delegation::is_valid(pool, uid, agent).await.unwrap());
 }
 
 #[tokio::test]
@@ -165,7 +165,7 @@ async fn delegation_expired_denied() {
          VALUES ($1, $2, 'manual', now() - interval '1 hour')"
     ).bind(uid).bind(agent).execute(pool).await.unwrap();
 
-    assert!(!rootcx_core::delegations::is_valid(pool, uid, agent).await.unwrap());
+    assert!(!rootcx_core::governance::delegation::is_valid(pool, uid, agent).await.unwrap());
 }
 
 #[tokio::test]
@@ -177,7 +177,7 @@ async fn delegation_nonexistent_denied() {
     sqlx::query("INSERT INTO rootcx_system.users (id, email) VALUES ($1, 'phantom@test.local') ON CONFLICT DO NOTHING")
         .bind(random_uid).execute(pool).await.unwrap();
 
-    assert!(!rootcx_core::delegations::is_valid(pool, random_uid, Uuid::new_v4()).await.unwrap());
+    assert!(!rootcx_core::governance::delegation::is_valid(pool, random_uid, Uuid::new_v4()).await.unwrap());
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -220,8 +220,8 @@ async fn webhook_agent_revoked_delegation_403() {
     ).bind(&app_id).bind(uid).fetch_one(pool).await.unwrap();
 
     let agent = agent_uid_for(&app_id);
-    let del_id = rootcx_core::delegations::create(pool, uid, agent, "webhook", Some(wh_id)).await.unwrap();
-    rootcx_core::delegations::revoke(pool, del_id).await.unwrap();
+    let del_id = rootcx_core::governance::delegation::create(pool, uid, agent, "webhook", Some(wh_id)).await.unwrap();
+    rootcx_core::governance::delegation::revoke(pool, del_id).await.unwrap();
 
     let res = rt.client.post(rt.url("/api/v1/hooks/tok-revoked"))
         .json(&json!({})).send().await.unwrap();
@@ -242,7 +242,7 @@ async fn webhook_agent_valid_delegation_accepted() {
     ).bind(&app_id).bind(uid).fetch_one(pool).await.unwrap();
 
     let agent = agent_uid_for(&app_id);
-    rootcx_core::delegations::create(pool, uid, agent, "webhook", Some(wh_id)).await.unwrap();
+    rootcx_core::governance::delegation::create(pool, uid, agent, "webhook", Some(wh_id)).await.unwrap();
 
     let res = rt.client.post(rt.url("/api/v1/hooks/tok-valid"))
         .json(&json!({})).send().await.unwrap();
@@ -324,7 +324,7 @@ async fn cron_creation_creates_delegation() {
         .fetch_one(pool).await.unwrap();
     let agent = agent_uid_for(&app_id);
 
-    assert!(rootcx_core::delegations::is_valid(pool, admin_uid, agent).await.unwrap(),
+    assert!(rootcx_core::governance::delegation::is_valid(pool, admin_uid, agent).await.unwrap(),
         "cron creation must auto-create a delegation");
 }
 
@@ -351,19 +351,19 @@ async fn worker_permission_intersection_computed_from_db() {
     let agent_uid = agent_uid_for(&app_id);
 
     // Verify: agent has '*'
-    let (_, agent_perms) = rootcx_core::extensions::rbac::policy::resolve_permissions(pool, agent_uid).await.unwrap();
+    let (_, agent_perms) = rootcx_core::governance::authority::resolve_permissions(pool, agent_uid).await.unwrap();
     assert!(agent_perms.contains(&"*".to_string()), "agent should have admin '*'");
 
     // Verify: admin has '*'
-    let (_, admin_perms) = rootcx_core::extensions::rbac::policy::resolve_permissions(pool, admin_uid).await.unwrap();
+    let (_, admin_perms) = rootcx_core::governance::authority::resolve_permissions(pool, admin_uid).await.unwrap();
     assert!(admin_perms.contains(&"*".to_string()), "admin should have '*'");
 
     // Intersection of ['*'] and ['*'] = ['*']
-    let effective = rootcx_core::extensions::rbac::policy::intersect_permissions(&agent_perms, &admin_perms);
+    let effective = rootcx_core::governance::authority::intersect_permissions(&agent_perms, &admin_perms);
     assert_eq!(effective, vec!["*"], "intersection of two '*' sets should be ['*']");
 
     // Verify: has_permission passes for any app:entity permission
-    assert!(rootcx_core::extensions::rbac::policy::has_permission(&effective, &format!("app:{app_id}:tasks.read")));
+    assert!(rootcx_core::governance::authority::has_permission(&effective, &format!("app:{app_id}:tasks.read")));
 }
 
 #[tokio::test]
@@ -377,8 +377,8 @@ async fn worker_permission_none_invoker_gives_empty() {
         None => vec![],
     };
     assert!(perms.is_empty());
-    assert!(!rootcx_core::extensions::rbac::policy::has_permission(&perms, "tool:query_data"));
-    assert!(!rootcx_core::extensions::rbac::policy::has_permission(&perms, "app:x:tasks.read"));
+    assert!(!rootcx_core::governance::authority::has_permission(&perms, "tool:query_data"));
+    assert!(!rootcx_core::governance::authority::has_permission(&perms, "app:x:tasks.read"));
 }
 
 #[tokio::test]
@@ -401,21 +401,21 @@ async fn worker_permission_lowpriv_invoker_restricts_agent() {
 
     // Resolve both sets (same as worker.rs does at invoke time)
     let agent_uid = agent_uid_for(&app_id);
-    let (_, agent_perms) = rootcx_core::extensions::rbac::policy::resolve_permissions(pool, agent_uid).await.unwrap();
-    let (_, invoker_perms) = rootcx_core::extensions::rbac::policy::resolve_permissions(pool, uid).await.unwrap();
+    let (_, agent_perms) = rootcx_core::governance::authority::resolve_permissions(pool, agent_uid).await.unwrap();
+    let (_, invoker_perms) = rootcx_core::governance::authority::resolve_permissions(pool, uid).await.unwrap();
 
     // Intersection restricts to invoker's permissions
-    let effective = rootcx_core::extensions::rbac::policy::intersect_permissions(&agent_perms, &invoker_perms);
+    let effective = rootcx_core::governance::authority::intersect_permissions(&agent_perms, &invoker_perms);
 
     // Should have the allowed permissions
-    assert!(rootcx_core::extensions::rbac::policy::has_permission(&effective, &allowed_perm),
+    assert!(rootcx_core::governance::authority::has_permission(&effective, &allowed_perm),
         "effective should include the allowed perm");
-    assert!(rootcx_core::extensions::rbac::policy::has_permission(&effective, "tool:query_data"),
+    assert!(rootcx_core::governance::authority::has_permission(&effective, "tool:query_data"),
         "effective should include tool:query_data");
 
     // Should NOT have permissions the invoker lacks
     let denied_perm = format!("app:{app_id}:tasks.write");
-    assert!(!rootcx_core::extensions::rbac::policy::has_permission(&effective, &denied_perm),
+    assert!(!rootcx_core::governance::authority::has_permission(&effective, &denied_perm),
         "effective must NOT include perms the invoker lacks (CRITICAL: escalation prevention)");
 }
 
@@ -441,18 +441,18 @@ async fn agent_restricted_via_rbac_bounded_below_admin() {
         .bind(agent_uid).bind(&role_name).execute(pool).await.unwrap();
 
     // Verify agent perms are narrow
-    let (_, agent_perms) = rootcx_core::extensions::rbac::policy::resolve_permissions(pool, agent_uid).await.unwrap();
+    let (_, agent_perms) = rootcx_core::governance::authority::resolve_permissions(pool, agent_uid).await.unwrap();
     assert!(!agent_perms.contains(&"*".to_string()), "agent must NOT have wildcard after restriction");
     assert!(agent_perms.contains(&format!("app:{app_id}:tasks.read")));
 
     // Admin invokes: effective = intersection(agent_narrow, admin_*)
     let admin_uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
         .fetch_one(pool).await.unwrap();
-    let effective = rootcx_core::extensions::rbac::policy::effective_for_pair(pool, agent_uid, admin_uid).await;
+    let effective = rootcx_core::governance::authority::effective_for_pair(pool, agent_uid, admin_uid).await;
 
-    assert!(rootcx_core::extensions::rbac::policy::has_permission(&effective, &format!("app:{app_id}:tasks.read")));
-    assert!(rootcx_core::extensions::rbac::policy::has_permission(&effective, "tool:query_data"));
-    assert!(!rootcx_core::extensions::rbac::policy::has_permission(&effective, &format!("app:{app_id}:tasks.create")),
+    assert!(rootcx_core::governance::authority::has_permission(&effective, &format!("app:{app_id}:tasks.read")));
+    assert!(rootcx_core::governance::authority::has_permission(&effective, "tool:query_data"));
+    assert!(!rootcx_core::governance::authority::has_permission(&effective, &format!("app:{app_id}:tasks.create")),
         "CRITICAL: agent must NOT exceed its RBAC-assigned grant");
 }
 
@@ -463,7 +463,7 @@ async fn agent_default_gets_admin_on_first_deploy() {
     let pool = rt.pool();
     let agent_uid = agent_uid_for(&app_id);
 
-    let (_, perms) = rootcx_core::extensions::rbac::policy::resolve_permissions(pool, agent_uid).await.unwrap();
+    let (_, perms) = rootcx_core::governance::authority::resolve_permissions(pool, agent_uid).await.unwrap();
     assert!(perms.contains(&"*".to_string()), "agent gets admin on first deploy for backward compat");
 }
 
@@ -494,7 +494,7 @@ async fn agent_redeploy_preserves_restricted_role() {
     rootcx_core::extensions::agents::register_agent(pool, &app_id, &def, None).await.unwrap();
 
     // Role must NOT be overwritten back to admin
-    let (_, perms) = rootcx_core::extensions::rbac::policy::resolve_permissions(pool, agent_uid).await.unwrap();
+    let (_, perms) = rootcx_core::governance::authority::resolve_permissions(pool, agent_uid).await.unwrap();
     assert!(!perms.contains(&"*".to_string()),
         "CRITICAL: redeploy must not overwrite admin-assigned restricted role");
 }
@@ -658,7 +658,7 @@ async fn legacy_cron_backfilled_to_admin() {
     ).bind(Uuid::new_v4()).bind(&app_id).execute(pool).await.unwrap();
 
     // Re-run the migration (simulates next boot)
-    rootcx_core::delegations::migrate_existing_triggers(pool).await.unwrap();
+    rootcx_core::governance::delegation::migrate_existing_triggers(pool).await.unwrap();
 
     // The cron should now have created_by set to admin
     let owner: Option<Uuid> = sqlx::query_scalar(
@@ -668,7 +668,7 @@ async fn legacy_cron_backfilled_to_admin() {
 
     // A delegation should exist
     let agent = agent_uid_for(&app_id);
-    assert!(rootcx_core::delegations::is_valid(pool, owner.unwrap(), agent).await.unwrap(),
+    assert!(rootcx_core::governance::delegation::is_valid(pool, owner.unwrap(), agent).await.unwrap(),
         "delegation should be created for backfilled cron");
 }
 
@@ -683,7 +683,7 @@ async fn legacy_webhook_backfilled_to_admin() {
         "INSERT INTO rootcx_system.webhooks (app_id, name, method, token) VALUES ($1, 'legacy-wh', 'agent', 'tok-legacy')"
     ).bind(&app_id).execute(pool).await.unwrap();
 
-    rootcx_core::delegations::migrate_existing_triggers(pool).await.unwrap();
+    rootcx_core::governance::delegation::migrate_existing_triggers(pool).await.unwrap();
 
     let owner: Option<Uuid> = sqlx::query_scalar(
         "SELECT created_by FROM rootcx_system.webhooks WHERE app_id = $1 AND name = 'legacy-wh'"
@@ -691,7 +691,7 @@ async fn legacy_webhook_backfilled_to_admin() {
     assert!(owner.is_some(), "legacy webhook should be backfilled with admin owner");
 
     let agent = agent_uid_for(&app_id);
-    assert!(rootcx_core::delegations::is_valid(pool, owner.unwrap(), agent).await.unwrap(),
+    assert!(rootcx_core::governance::delegation::is_valid(pool, owner.unwrap(), agent).await.unwrap(),
         "delegation should be created for backfilled webhook");
 }
 
@@ -816,7 +816,7 @@ async fn webhook_fires_when_owner_has_invoke() {
     ).bind(&app_id).bind(uid).fetch_one(pool).await.unwrap();
 
     let agent = agent_uid_for(&app_id);
-    rootcx_core::delegations::create(pool, uid, agent, "webhook", Some(wh_id)).await.unwrap();
+    rootcx_core::governance::delegation::create(pool, uid, agent, "webhook", Some(wh_id)).await.unwrap();
 
     let res = rt.client.post(rt.url("/api/v1/hooks/tok-invoke-ok"))
         .json(&json!({"data": "test"})).send().await.unwrap();
@@ -839,12 +839,40 @@ async fn webhook_refused_when_owner_lacks_invoke() {
     ).bind(&app_id).bind(uid).fetch_one(pool).await.unwrap();
 
     let agent = agent_uid_for(&app_id);
-    rootcx_core::delegations::create(pool, uid, agent, "webhook", Some(wh_id)).await.unwrap();
+    rootcx_core::governance::delegation::create(pool, uid, agent, "webhook", Some(wh_id)).await.unwrap();
 
     let res = rt.client.post(rt.url("/api/v1/hooks/tok-no-invoke"))
         .json(&json!({"data": "test"})).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN,
         "webhook owner without app:{{id}}:invoke must be refused at fire time");
+}
+
+#[tokio::test]
+async fn webhook_refused_when_owner_disabled() {
+    let rt = harness::TestRuntime::boot().await;
+    let app_id = setup_agent_app(&rt).await;
+    let pool = rt.pool();
+
+    // Owner holds invoke AND has a valid delegation — only the disabled flag
+    // should stop the run. Guards the single fire gate's enabled check (B1).
+    let uid = create_db_user(pool, &[format!("app:{app_id}:invoke")]).await;
+
+    let (wh_id,): (Uuid,) = sqlx::query_as(
+        "INSERT INTO rootcx_system.webhooks (app_id, name, method, token, created_by) \
+         VALUES ($1, 'disabled-owner', 'agent', 'tok-disabled-owner', $2) RETURNING id"
+    ).bind(&app_id).bind(uid).fetch_one(pool).await.unwrap();
+
+    let agent = agent_uid_for(&app_id);
+    rootcx_core::governance::delegation::create(pool, uid, agent, "webhook", Some(wh_id)).await.unwrap();
+
+    // Invariant #2: disabled = denied instantly, no path exempt.
+    sqlx::query("UPDATE rootcx_system.users SET disabled_at = now() WHERE id = $1")
+        .bind(uid).execute(pool).await.unwrap();
+
+    let res = rt.client.post(rt.url("/api/v1/hooks/tok-disabled-owner"))
+        .json(&json!({"data": "test"})).send().await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN,
+        "webhook with a disabled owner must be refused at fire time (invariant #2)");
 }
 
 #[tokio::test]
@@ -856,7 +884,7 @@ async fn cron_fires_when_owner_has_invoke() {
     let uid = create_db_user(pool, &[format!("app:{app_id}:invoke")]).await;
 
     let agent = agent_uid_for(&app_id);
-    rootcx_core::delegations::create(pool, uid, agent, "cron", None).await.unwrap();
+    rootcx_core::governance::delegation::create(pool, uid, agent, "cron", None).await.unwrap();
 
     let msg = json!({
         "app_id": app_id,
@@ -886,7 +914,7 @@ async fn cron_refused_when_owner_lacks_invoke() {
     let uid = create_db_user(pool, &[format!("app:{app_id}:contacts.read")]).await;
 
     let agent = agent_uid_for(&app_id);
-    rootcx_core::delegations::create(pool, uid, agent, "cron", None).await.unwrap();
+    rootcx_core::governance::delegation::create(pool, uid, agent, "cron", None).await.unwrap();
 
     let msg = json!({
         "app_id": app_id,

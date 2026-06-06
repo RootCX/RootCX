@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use super::perms::{expand_roles, has_permission, intersect_permissions};
+use super::perms::{expand_roles, intersect_permissions};
 
 pub async fn resolve_permissions(pool: &PgPool, user_id: Uuid) -> Result<(Vec<String>, Vec<String>), ApiError> {
     let assigned: Vec<(String,)> =

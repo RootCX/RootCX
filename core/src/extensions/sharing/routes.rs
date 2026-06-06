@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::extensions::rbac::policy::{has_permission, resolve_permissions};
+use crate::governance::authority::{has_permission, resolve_permissions};
 use crate::routes::{SharedRuntime, pool};
 
 use crate::auth::secure_tokens as tokens;

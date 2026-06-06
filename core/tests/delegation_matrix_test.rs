@@ -41,7 +41,7 @@ async fn delegation_matrix_kind_enforcement() {
         let delegator = user_for_kind(pool, c.delegator_kind, &format!("src-{i}")).await;
         let delegatee = user_for_kind(pool, c.delegatee_kind, &format!("dst-{i}")).await;
 
-        let result = rootcx_core::delegations::create(pool, delegator, delegatee, c.trigger, None).await;
+        let result = rootcx_core::governance::delegation::create(pool, delegator, delegatee, c.trigger, None).await;
         assert_eq!(result.is_ok(), c.ok, "case '{}': expected ok={}, got {:?}", c.label, c.ok, result);
     }
 }

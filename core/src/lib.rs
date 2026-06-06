@@ -1,9 +1,7 @@
-pub mod act_as;
 mod api_error;
 pub mod app_migrations;
 pub mod auth;
 mod crons;
-pub mod delegations;
 mod error;
 pub mod extensions;
 pub mod governance;
@@ -16,7 +14,6 @@ mod scheduler;
 mod schema;
 pub mod schema_sync;
 mod secrets;
-pub mod sql_proxy;
 mod seed;
 pub mod server;
 pub mod tools;
@@ -129,7 +126,7 @@ impl Runtime {
 
         // Backfill delegations for pre-existing triggers (runs after extensions
         // have added the created_by columns to hooks/webhooks/crons tables).
-        delegations::migrate_existing_triggers(&pool).await?;
+        crate::governance::delegation::migrate_existing_triggers(&pool).await?;
 
         extensions::oidc::seed_from_env(&pool, &secret_manager).await?;
 

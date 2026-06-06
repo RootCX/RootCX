@@ -61,7 +61,7 @@ pub struct ToolContext {
 }
 
 pub fn check_permission(permissions: &[String], required: &str) -> Result<(), String> {
-    if crate::extensions::rbac::policy::has_permission(permissions, required) { Ok(()) }
+    if crate::governance::authority::has_permission(permissions, required) { Ok(()) }
     else { Err(format!("permission denied: {required}")) }
 }
 
@@ -122,7 +122,7 @@ impl ToolRegistry {
     pub fn descriptors_for_permissions(&self, permissions: &[String], data_contract: &JsonValue) -> Vec<ToolDescriptor> {
         self.tools.read().unwrap().values().filter_map(|(tool, base)| {
             let perm = format!("tool:{}", base.name);
-            if !crate::extensions::rbac::policy::has_permission(permissions, &perm) { return None; }
+            if !crate::governance::authority::has_permission(permissions, &perm) { return None; }
             let mut desc = base.clone();
             if tool.enriches_with_schema() {
                 desc.description.push_str(&format_data_contract(data_contract));

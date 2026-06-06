@@ -11,7 +11,7 @@ use serde_json::{Value as JsonValue, json};
 use sha2::Sha256;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
-use crate::extensions::rbac::policy::require_admin;
+use crate::governance::authority::require_admin;
 use uuid::Uuid;
 
 use crate::api_error::ApiError;

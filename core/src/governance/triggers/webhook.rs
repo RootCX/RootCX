@@ -114,7 +114,7 @@ pub async fn sync_webhooks(
 
         if let Some(owner) = created_by {
             let agent_uid = crate::extensions::agents::agent_user_id(app_id);
-            let _ = crate::delegations::create(pool, owner, agent_uid, "webhook", Some(id)).await;
+            let _ = crate::governance::delegation::create(pool, owner, agent_uid, "webhook", Some(id)).await;
         }
 
         credentials.push(WebhookCredentials { id, token, signing_secret });
