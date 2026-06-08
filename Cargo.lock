@@ -5784,6 +5784,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "command-group",
+ "either",
  "flate2",
  "futures",
  "futures-util",
