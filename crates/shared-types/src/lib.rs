@@ -213,6 +213,61 @@ pub struct EntityContract {
     pub identity_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_key: Option<String>,
+    /// Declarative secondary indexes (reconciled by name against pg_indexes at
+    /// deploy). Covers the Prisma/Drizzle index surface: composite, unique,
+    /// partial, functional, method, operator class, sort/nulls order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indexes: Vec<IndexContract>,
+}
+
+/// A declarative index. Mirrors what Prisma/Drizzle let you declare for
+/// PostgreSQL. `where`/`expr`/`ops` are SQL fragments (bounded, not full
+/// statements); `name` is auto-derived when omitted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexContract {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub columns: Vec<IndexColumn>,
+    #[serde(default)]
+    pub unique: bool,
+    /// Index method: btree (default) | hash | gist | gin | spgist | brin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub using: Option<String>,
+    /// Partial-index predicate (the `WHERE ...` clause).
+    #[serde(rename = "where", default, skip_serializing_if = "Option::is_none")]
+    pub where_clause: Option<String>,
+    /// Storage parameters, e.g. {"fillfactor":"70"}.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub with: std::collections::BTreeMap<String, String>,
+}
+
+/// An index element: either a bare column name, or a spec carrying a column OR
+/// expression plus sort/nulls/operator-class.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum IndexColumn {
+    Name(String),
+    Spec(IndexColumnSpec),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexColumnSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    /// Functional-index expression (mutually exclusive with `column`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expr: Option<String>,
+    /// asc | desc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sort: Option<String>,
+    /// first | last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nulls: Option<String>,
+    /// Operator class, e.g. gin_trgm_ops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ops: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
