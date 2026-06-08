@@ -46,6 +46,13 @@ use worker_manager::WorkerManager;
 
 const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Max connections in the shared pool (HTTP, agents, app SQL, held-open app
+/// transactions). The TX-session cap (`sql_proxy::TX_MAX_CONCURRENT`) is held
+/// strictly below this — enforced by a compile-time assert there — so held-open
+/// transactions can never starve the auto-commit / HTTP / agent paths. Well
+/// under PG server `max_connections` (50).
+pub(crate) const POOL_MAX_CONNECTIONS: u32 = 20;
+
 pub struct Runtime {
     database_url: String,
     extensions: Vec<Box<dyn RuntimeExtension>>,
@@ -93,7 +100,17 @@ impl Runtime {
     pub async fn boot(self, api_port: u16) -> Result<ReadyRuntime, RuntimeError> {
         info!("runtime boot sequence starting");
 
-        let pool = PgPool::connect(&self.database_url).await.map_err(RuntimeError::Database)?;
+        // Explicit pool sizing: the sqlx default (10 conns, 30s acquire) is too
+        // small and too patient for a governed runtime where HTTP, agents, and
+        // app SQL (incl. held-open transactions, capped below by the TX
+        // semaphore) all share this pool. A 10s acquire fails fast instead of
+        // hanging callers. See POOL_MAX_CONNECTIONS.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(POOL_MAX_CONNECTIONS)
+            .acquire_timeout(std::time::Duration::from_secs(10))
+            .connect(&self.database_url)
+            .await
+            .map_err(RuntimeError::Database)?;
 
         // Phase 0d: env_clear() on spawn + setuid(1001) already prevent workers
         // from reading core secrets. remove_var was here as belt-and-suspenders

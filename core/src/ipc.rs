@@ -128,6 +128,33 @@ pub enum OutboundMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Response to SqlBegin. `tx_id` is core-generated (not app-supplied) to
+    /// prevent TX-hijacking between workers.
+    SqlBeginResult {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tx_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Response to SqlExec (same shape as SqlQueryResult but scoped to a TX).
+    SqlExecResult {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        columns: Option<Vec<String>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        rows: Option<Vec<Vec<JsonValue>>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        row_count: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// Response to SqlCommit / SqlRollback.
+    SqlEndResult {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     SelfActionResult {
         id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -236,6 +263,32 @@ pub enum InboundMessage {
         sql: String,
         #[serde(default)]
         params: Vec<JsonValue>,
+    },
+    /// Open a multi-statement transaction. The core calls `begin_app_tx` (same
+    /// sandbox as single-statement SqlQuery: RLS, role drop, search_path, audit
+    /// GUCs) and holds the TX open. The worker sends `SqlExec` messages against
+    /// this TX, then `SqlCommit` or `SqlRollback`. Max 1 open TX per worker.
+    /// TX auto-rollbacks on worker exit. Hard 60s wall-time limit.
+    SqlBegin {
+        id: String,
+    },
+    /// Execute a statement inside an open transaction (opened by `SqlBegin`).
+    SqlExec {
+        id: String,
+        tx_id: String,
+        sql: String,
+        #[serde(default)]
+        params: Vec<JsonValue>,
+    },
+    /// Commit the open transaction.
+    SqlCommit {
+        id: String,
+        tx_id: String,
+    },
+    /// Rollback the open transaction.
+    SqlRollback {
+        id: String,
+        tx_id: String,
     },
     /// Privileged self-action a worker can invoke. The requesting user is the
     /// worker's sole in-flight unit-of-work identity (bound by the core), so the

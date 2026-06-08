@@ -109,7 +109,7 @@ pub async fn begin_app_tx<'a>(
 const BLOCKED_PREFIXES: &[&str] =
     &["CREATE", "DROP", "ALTER", "TRUNCATE", "GRANT", "REVOKE", "REINDEX", "VACUUM", "COPY", "SET", "RESET", "DO"];
 
-fn validate_sql(sql: &str) -> Result<(), String> {
+pub fn validate_sql(sql: &str) -> Result<(), String> {
     let head = sql.trim_start().to_ascii_uppercase();
     for kw in BLOCKED_PREFIXES {
         if head.starts_with(kw) {
@@ -130,6 +130,44 @@ pub struct SqlOk {
     pub row_count: usize,
 }
 
+/// Bind JSON params to a sqlx query. Shared between single-statement and
+/// multi-statement TX paths.
+pub fn bind_json_params<'q>(
+    mut q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+    params: &'q [JsonValue],
+) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+    for p in params {
+        q = match p {
+            JsonValue::Null => q.bind(Option::<String>::None),
+            JsonValue::Bool(b) => q.bind(*b),
+            JsonValue::Number(n) => match n.as_i64() {
+                Some(i) => q.bind(i),
+                None => q.bind(n.as_f64().unwrap_or(0.0)),
+            },
+            JsonValue::String(s) => q.bind(s.clone()),
+            other => q.bind(other.to_string()),
+        };
+    }
+    q
+}
+
+/// Serialize PG rows to JSON with a row-count cap. Returns columns + rows or
+/// an error if the cap is exceeded.
+pub fn serialize_rows(rows: Vec<sqlx::postgres::PgRow>) -> Result<SqlOk, String> {
+    if rows.is_empty() {
+        return Ok(SqlOk { columns: vec![], rows: vec![], row_count: 0 });
+    }
+    if rows.len() > MAX_ROWS {
+        return Err(format!("query returned {} rows, exceeds limit {MAX_ROWS}; add LIMIT or paginate", rows.len()));
+    }
+    let columns: Vec<String> = rows[0].columns().iter().map(|c: &PgColumn| c.name().to_string()).collect();
+    let json_rows: Vec<Vec<JsonValue>> = rows
+        .iter()
+        .map(|row| row.columns().iter().enumerate().map(|(i, col)| pg_val(row, i, col.type_info())).collect())
+        .collect();
+    Ok(SqlOk { row_count: json_rows.len(), columns, rows: json_rows })
+}
+
 /// Execute one app statement under RLS. `app_schema` is a validated snake_case
 /// identifier. Returns rows (RETURNING / SELECT) or an empty set for plain DML.
 pub async fn run_sql(
@@ -144,38 +182,188 @@ pub async fn run_sql(
     let mut tx = begin_app_tx(pool, app_schema, state, state.user_id, None, "app_sql", TIMEOUT_INTERACTIVE_MS)
         .await.map_err(|e| e.to_string())?;
 
-    let mut q = sqlx::query(sql);
-    for p in params {
-        q = match p {
-            JsonValue::Null => q.bind(Option::<String>::None),
-            JsonValue::Bool(b) => q.bind(*b),
-            JsonValue::Number(n) => match n.as_i64() {
-                Some(i) => q.bind(i),
-                None => q.bind(n.as_f64().unwrap_or(0.0)),
-            },
-            JsonValue::String(s) => q.bind(s.clone()),
-            other => q.bind(other.to_string()),
-        };
-    }
-
+    let q = bind_json_params(sqlx::query(sql), params);
     let rows = q.fetch_all(&mut *tx).await.map_err(|e| e.to_string())?;
 
-    if rows.is_empty() {
-        tx.commit().await.map_err(|e| e.to_string())?;
-        return Ok(SqlOk { columns: vec![], rows: vec![], row_count: 0 });
+    let result = serialize_rows(rows);
+    match &result {
+        Ok(_) => { tx.commit().await.map_err(|e| e.to_string())?; }
+        Err(_) => { let _ = tx.rollback().await; }
     }
-    // Row cap BEFORE commit: over-large DML RETURNING rolls back, not commit+error.
-    if rows.len() > MAX_ROWS {
-        let _ = tx.rollback().await;
-        return Err(format!("query returned {} rows, exceeds limit {MAX_ROWS}; add LIMIT or paginate", rows.len()));
+    result
+}
+
+// ── Multi-statement transaction session ─────────────────────────────
+
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio::time::{sleep_until, Instant as TokioInstant};
+
+/// Absolute wall-time budget for an entire transaction (begin → commit). Bounds
+/// TOTAL lifetime, independent of the per-statement `statement_timeout` (8s) and
+/// the between-statement `idle_in_transaction_session_timeout` (30s) already
+/// posed by `begin_app_tx`. Without it, an app could pace statements to keep a
+/// transaction (and its pooled connection) alive forever.
+const TX_MAX_WALL_TIME: Duration = Duration::from_secs(60);
+
+/// Process-global cap on concurrent held-open app transactions. Held strictly
+/// below the pool's `max_connections` so transactions can never starve the
+/// auto-commit (`run_sql`), HTTP CRUD, or agent paths that share the pool — the
+/// assert below makes the relationship a build break, not a comment.
+const TX_MAX_CONCURRENT: usize = 8;
+const _: () = assert!(TX_MAX_CONCURRENT < crate::POOL_MAX_CONNECTIONS as usize);
+static TX_SEMAPHORE: Semaphore = Semaphore::const_new(TX_MAX_CONCURRENT);
+
+enum TxCmd {
+    Exec { sql: String, params: Vec<JsonValue>, reply: oneshot::Sender<Result<SqlOk, String>> },
+    Commit { reply: oneshot::Sender<Result<(), String>> },
+    Rollback { reply: oneshot::Sender<Result<(), String>> },
+}
+
+const TX_GONE: &str = "transaction no longer active";
+pub const TX_NONE: &str = "no open transaction";
+pub const TX_MISMATCH: &str = "tx_id mismatch";
+
+async fn round_trip<R>(
+    cmd_tx: &mpsc::Sender<TxCmd>,
+    make: impl FnOnce(oneshot::Sender<Result<R, String>>) -> TxCmd,
+) -> Result<R, String> {
+    let (reply_tx, reply_rx) = oneshot::channel();
+    cmd_tx.send(make(reply_tx)).await.map_err(|_| TX_GONE.to_string())?;
+    reply_rx.await.unwrap_or_else(|_| Err(TX_GONE.into()))
+}
+
+/// Cloneable handle to send statements to an open transaction's task without
+/// borrowing the session. Lets the supervisor spawn an exec round-trip instead
+/// of awaiting it inline (which would head-of-line-block the worker's loop).
+#[derive(Clone)]
+pub struct TxExec {
+    cmd_tx: mpsc::Sender<TxCmd>,
+}
+
+impl TxExec {
+    pub async fn exec(&self, sql: String, params: Vec<JsonValue>) -> Result<SqlOk, String> {
+        round_trip(&self.cmd_tx, |reply| TxCmd::Exec { sql, params, reply }).await
     }
-    let columns: Vec<String> = rows[0].columns().iter().map(|c: &PgColumn| c.name().to_string()).collect();
-    let json_rows: Vec<Vec<JsonValue>> = rows
-        .iter()
-        .map(|row| row.columns().iter().enumerate().map(|(i, col)| pg_val(row, i, col.type_info())).collect())
-        .collect();
-    tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(SqlOk { row_count: json_rows.len(), columns, rows: json_rows })
+}
+
+/// Handle to a governed multi-statement transaction running on its own task.
+///
+/// The task owns the PG transaction AND the semaphore permit, and self-
+/// terminates on the first of: commit, rollback, the wall-time deadline, or this
+/// handle being dropped (worker crash/stop closes the command channel). On exit
+/// it reports its `tx_id` on the `done` channel so the supervisor can clear its
+/// slot. The pooled connection and the TX permit are therefore ALWAYS released
+/// within `TX_MAX_WALL_TIME`, no matter how the worker dies — there is no path
+/// that leaks them.
+pub struct TxSession {
+    pub tx_id: String,
+    cmd_tx: mpsc::Sender<TxCmd>,
+}
+
+impl TxSession {
+    /// Open a new governed transaction. Awaits until the TX is ready (or fails).
+    /// `done` receives this session's `tx_id` when its task exits, for whatever
+    /// reason — the supervisor's single source of truth for slot cleanup.
+    pub async fn begin(
+        pool: &PgPool,
+        app_schema: &str,
+        state: &ContextState,
+        done: mpsc::Sender<String>,
+    ) -> Result<Self, String> {
+        // Fail fast when all TX slots are taken — never queue (would hold the
+        // caller hostage) and never exceed the pool budget. The permit is moved
+        // into the task and released only when the task exits.
+        let permit = TX_SEMAPHORE
+            .try_acquire()
+            .map_err(|_| "too many concurrent transactions; retry".to_string())?;
+
+        let pool = pool.clone();
+        let app_schema = app_schema.to_string();
+        let state = state.clone();
+        let tx_id = uuid::Uuid::new_v4().to_string();
+        let task_tx_id = tx_id.clone();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<TxCmd>(8);
+        let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
+
+        tokio::spawn(async move {
+            let _permit = permit; // released on task exit → frees the TX slot
+
+            // Inner scope so `pg_tx` is fully finalized (committed, rolled back,
+            // or dropped → implicit rollback) BEFORE we signal `done`. A received
+            // `done` therefore guarantees the connection is returned on every
+            // path — including the channel-closed (worker crash/stop) path.
+            {
+                let mut pg_tx = match begin_app_tx(
+                    &pool, &app_schema, &state, state.user_id, None, "app_tx", TIMEOUT_INTERACTIVE_MS,
+                ).await {
+                    Ok(t) => { let _ = ready_tx.send(Ok(())); t }
+                    Err(e) => { let _ = ready_tx.send(Err(e.to_string())); return; }
+                };
+
+                let deadline = TokioInstant::now() + TX_MAX_WALL_TIME;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = sleep_until(deadline) => { let _ = pg_tx.rollback().await; break; }
+                        cmd = cmd_rx.recv() => match cmd {
+                            Some(TxCmd::Exec { sql, params, reply }) => {
+                                let result = match validate_sql(&sql) {
+                                    Err(e) => Err(e),
+                                    Ok(()) => match bind_json_params(sqlx::query(&sql), &params)
+                                        .fetch_all(&mut *pg_tx).await
+                                    {
+                                        Err(e) => Err(e.to_string()),
+                                        Ok(rows) => serialize_rows(rows),
+                                    },
+                                };
+                                let _ = reply.send(result);
+                            }
+                            Some(TxCmd::Commit { reply }) => {
+                                let _ = reply.send(pg_tx.commit().await.map_err(|e| e.to_string()));
+                                break;
+                            }
+                            Some(TxCmd::Rollback { reply }) => {
+                                let _ = reply.send(pg_tx.rollback().await.map_err(|e| e.to_string()));
+                                break;
+                            }
+                            // Channel closed (handle dropped on worker crash/stop):
+                            // pg_tx drops at scope end → implicit rollback.
+                            None => break,
+                        }
+                    }
+                }
+            }
+            let _ = done.send(task_tx_id).await;
+        });
+
+        match ready_rx.await {
+            Ok(Ok(())) => Ok(Self { tx_id, cmd_tx }),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err("begin_app_tx task died".into()),
+        }
+    }
+
+    /// A cloneable exec handle the supervisor can move into a spawned task.
+    pub fn executor(&self) -> TxExec {
+        TxExec { cmd_tx: self.cmd_tx.clone() }
+    }
+
+    /// Construct a handle with no live task, for unit-testing pure consumers
+    /// (e.g. the supervisor's tx_id-matching guard). Never opens a DB tx.
+    #[cfg(test)]
+    pub(crate) fn dummy(tx_id: &str) -> Self {
+        let (cmd_tx, _rx) = mpsc::channel(1);
+        Self { tx_id: tx_id.to_string(), cmd_tx }
+    }
+
+    pub async fn commit(self) -> Result<(), String> {
+        round_trip(&self.cmd_tx, |reply| TxCmd::Commit { reply }).await
+    }
+
+    pub async fn rollback(self) -> Result<(), String> {
+        round_trip(&self.cmd_tx, |reply| TxCmd::Rollback { reply }).await
+    }
 }
 
 #[cfg(test)]

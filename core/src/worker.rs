@@ -22,9 +22,39 @@ use crate::tools::{AgentDispatcher, ToolRegistry};
 const MAX_CRASHES: u32 = 5;
 const CRASH_WINDOW: Duration = Duration::from_secs(60);
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
+use crate::governance::enforcement::{TxSession, TX_NONE, TX_MISMATCH};
 
 fn dead() -> RuntimeError {
     RuntimeError::Worker("supervisor actor dead".into())
+}
+
+/// Resolve the active transaction for an inbound TX message: present AND its
+/// `tx_id` matches. Returns the matching session or a stable reason string.
+fn match_session<'a>(open: &'a Option<TxSession>, tx_id: &str) -> Result<&'a TxSession, &'static str> {
+    match open {
+        Some(s) if s.tx_id == tx_id => Ok(s),
+        Some(_) => Err(TX_MISMATCH),
+        None => Err(TX_NONE),
+    }
+}
+
+/// Sliding-window rate limit (best-effort DoS guard). Trims entries older than
+/// 1s, then admits iff under `max` in the window. Shared by SqlQuery and SqlExec.
+fn rate_admit(times: &mut Vec<Instant>, max: usize) -> bool {
+    let now = Instant::now();
+    times.retain(|t| now.duration_since(*t) < Duration::from_secs(1));
+    if times.len() >= max { return false; }
+    times.push(now);
+    true
+}
+
+/// Finalize an owned TX session off the supervisor loop so commit/rollback
+/// latency never blocks other IPC. `commit=false` rolls back.
+fn finish_tx(session: TxSession, commit: bool, id: String, out: mpsc::Sender<OutboundMessage>) {
+    tokio::spawn(async move {
+        let r = if commit { session.commit().await } else { session.rollback().await };
+        let _ = out.send(OutboundMessage::SqlEndResult { id, error: r.err() }).await;
+    });
 }
 
 /// Fleet-wide event envelope for SSE fan-out.
@@ -200,6 +230,12 @@ async fn supervisor_loop(
     let mut task_scopes: HashMap<String, Option<Vec<String>>> = HashMap::new();
     // Per-worker SQL-proxy rate limiter (best-effort DoS guard).
     let mut sql_query_times: Vec<Instant> = Vec::new();
+    // Multi-statement transaction (max 1 open per worker). `tx_done_rx` receives
+    // a session's tx_id when its task exits for ANY reason (commit, rollback,
+    // wall-time deadline, crash) — the single source of truth for clearing the
+    // slot, so the supervisor never has to remember to do it on each path.
+    let mut open_tx: Option<TxSession> = None;
+    let (tx_done_tx, mut tx_done_rx) = mpsc::channel::<String>(4);
     // Marks the end of the onStart phase (first Rpc/Job/AgentInvoke dispatched).
     // Only the lifecycle worker (config.run_onstart) bypasses RLS for self-schema
     // access, and only before this flips. After it, collection ops run under the
@@ -227,6 +263,14 @@ async fn supervisor_loop(
             Some(msg) = outbound_rx.recv() => {
                 if let Some(ref mut w) = ipc_writer {
                     let _ = w.send(&msg).await;
+                }
+            }
+
+            // A TX task ended (commit, rollback, deadline, or worker death).
+            // Clear the slot iff it's still the active session.
+            Some(done_id) = tx_done_rx.recv() => {
+                if open_tx.as_ref().map(|s| s.tx_id.as_str()) == Some(done_id.as_str()) {
+                    open_tx = None;
                 }
             }
 
@@ -274,6 +318,9 @@ async fn supervisor_loop(
                         }
                         policy_evaluators.clear();
                         effective_permissions.clear(); task_scopes.clear();
+                        // Drop any open TX handle → its task rolls back and frees
+                        // the connection + slot at once (the deadline is the backstop).
+                        open_tx = None;
                         status = WorkerStatus::Stopped;
                         crash_times.clear();
                         info!(app_id = %app_id, "worker stopped");
@@ -556,17 +603,13 @@ async fn supervisor_loop(
                             });
                         }
                         InboundMessage::SqlQuery { id, sql, params } => {
-                            // Per-worker rate limit (best-effort DoS guard).
-                            let now = Instant::now();
-                            sql_query_times.retain(|t| now.duration_since(*t) < Duration::from_secs(1));
-                            if sql_query_times.len() >= 100 {
+                            if !rate_admit(&mut sql_query_times, 100) {
                                 let _ = outbound_tx.send(OutboundMessage::SqlQueryResult {
                                     id, columns: None, rows: None, row_count: None,
                                     error: Some("rate limited (100 queries/s)".into()),
                                 }).await;
                                 continue;
                             }
-                            sql_query_times.push(now);
                             // Identity = this worker's fixed identity (system
                             // worker = default → user_id None → check_access
                             // denies every row). Fail-closed; no token to forge.
@@ -586,6 +629,72 @@ async fn supervisor_loop(
                                 };
                                 let _ = tx.send(msg).await;
                             });
+                        }
+                        InboundMessage::SqlBegin { id } => {
+                            if open_tx.is_some() {
+                                let _ = outbound_tx.send(OutboundMessage::SqlBeginResult {
+                                    id, tx_id: None, error: Some("a transaction is already open".into()),
+                                }).await;
+                                continue;
+                            }
+                            let msg = match TxSession::begin(
+                                &config.pool, &config.app_id, &config.identity, tx_done_tx.clone(),
+                            ).await {
+                                Ok(session) => {
+                                    let tid = session.tx_id.clone();
+                                    open_tx = Some(session);
+                                    OutboundMessage::SqlBeginResult { id, tx_id: Some(tid), error: None }
+                                }
+                                Err(e) => OutboundMessage::SqlBeginResult { id, tx_id: None, error: Some(e) },
+                            };
+                            let _ = outbound_tx.send(msg).await;
+                        }
+                        InboundMessage::SqlExec { id, tx_id, sql, params } => {
+                            let exec_err = |e: &str| OutboundMessage::SqlExecResult {
+                                id: id.clone(), columns: None, rows: None, row_count: None,
+                                error: Some(e.into()),
+                            };
+                            let session = match match_session(&open_tx, &tx_id) {
+                                Ok(s) => s,
+                                Err(e) => { let _ = outbound_tx.send(exec_err(e)).await; continue; }
+                            };
+                            // Same per-worker rate limit as single-statement SqlQuery.
+                            if !rate_admit(&mut sql_query_times, 100) {
+                                let _ = outbound_tx.send(exec_err("rate limited (100 queries/s)")).await;
+                                continue;
+                            }
+                            // Spawn the round-trip so a slow statement (up to 8s) never
+                            // head-of-line-blocks the worker's other IPC (agent streams,
+                            // RPC responses). `open_tx` stays put; the cloned exec handle
+                            // routes to the same TX task.
+                            let exec = session.executor();
+                            let out = outbound_tx.clone();
+                            tokio::spawn(async move {
+                                let msg = match exec.exec(sql, params).await {
+                                    Ok(ok) => OutboundMessage::SqlExecResult {
+                                        id, columns: Some(ok.columns), rows: Some(ok.rows),
+                                        row_count: Some(ok.row_count), error: None,
+                                    },
+                                    Err(e) => OutboundMessage::SqlExecResult {
+                                        id, columns: None, rows: None, row_count: None, error: Some(e),
+                                    },
+                                };
+                                let _ = out.send(msg).await;
+                            });
+                        }
+                        InboundMessage::SqlCommit { id, tx_id } => {
+                            // `.err()` keeps only the 'static reason, dropping the open_tx
+                            // borrow so `take()` is free below.
+                            match match_session(&open_tx, &tx_id).err() {
+                                None => finish_tx(open_tx.take().unwrap(), true, id, outbound_tx.clone()),
+                                Some(e) => { let _ = outbound_tx.send(OutboundMessage::SqlEndResult { id, error: Some(e.into()) }).await; }
+                            }
+                        }
+                        InboundMessage::SqlRollback { id, tx_id } => {
+                            match match_session(&open_tx, &tx_id).err() {
+                                None => finish_tx(open_tx.take().unwrap(), false, id, outbound_tx.clone()),
+                                Some(e) => { let _ = outbound_tx.send(OutboundMessage::SqlEndResult { id, error: Some(e.into()) }).await; }
+                            }
                         }
                         InboundMessage::SelfAction { id, action, params } => {
                             let pool = config.pool.clone();
@@ -648,6 +757,9 @@ async fn supervisor_loop(
                         // onStart from scratch (if it is the lifecycle worker).
                         effective_permissions.clear(); task_scopes.clear();
                         onstart_done = false;
+                        // Drop the stale TX handle so the respawned process can
+                        // open a fresh one (its task rolls back + frees the slot).
+                        open_tx = None;
 
                         let now = Instant::now();
                         crash_times.retain(|t| now.duration_since(*t) < CRASH_WINDOW);
@@ -960,5 +1072,37 @@ mod tests {
             assert_eq!(backoff_delay(count), Duration::from_secs(secs), "backoff_delay({count})");
         }
         let _ = backoff_delay(34); // saturates without panic
+    }
+
+    #[test]
+    fn rate_admit_count_boundary() {
+        // Admits exactly `max` in the window, rejects the (max+1)th. The `>=`
+        // boundary is the off-by-one that a refactor could flip.
+        let mut times = Vec::new();
+        for i in 0..3 {
+            assert!(rate_admit(&mut times, 3), "call {i} within budget must admit");
+        }
+        assert!(!rate_admit(&mut times, 3), "4th call in window must be rejected");
+    }
+
+    #[test]
+    fn rate_admit_trims_expired() {
+        // Entries older than the 1s window are dropped before counting, so a
+        // full-but-stale buffer admits again. Catches a missing/!inverted retain.
+        let stale = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
+        let mut times = vec![stale; 5];
+        assert!(rate_admit(&mut times, 3), "stale entries must be trimmed, then admit");
+        assert_eq!(times.len(), 1, "only the fresh push remains");
+    }
+
+    #[test]
+    fn match_session_resolves_active_tx() {
+        // The mismatch branch is a security guard: a stale/replayed TX message
+        // must not land on a newer session that reused the slot. Pin all three
+        // outcomes so a swapped TX_NONE/TX_MISMATCH or a wrong comparison fails.
+        let open = Some(TxSession::dummy("tx-current"));
+        assert!(matches!(match_session(&open, "tx-current"), Ok(s) if s.tx_id == "tx-current"));
+        assert_eq!(match_session(&open, "tx-stale").err().unwrap(), TX_MISMATCH);
+        assert_eq!(match_session(&None, "tx-current").err().unwrap(), TX_NONE);
     }
 }
