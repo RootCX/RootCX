@@ -74,10 +74,24 @@ pub async fn deploy_backend(
 
     store_manifest_icon(&pool, &app_id, &app_dir).await;
 
+    // Deploy-time DDL: apply backend/migrations/*.sql as owner before the worker
+    // (which cannot do DDL) starts. A failure aborts here, leaving the previous
+    // worker stopped and the new one unstarted, rather than serving a half-built
+    // schema. The app schema is the validated app_id.
+    let applied = crate::app_migrations::run(&pool, &app_id, &app_dir)
+        .await
+        .map_err(|e| ApiError::Internal(format!("migrations: {e}")))?;
+    if !applied.is_empty() {
+        info!(app_id = %app_id, count = applied.len(), "applied deploy-time migrations");
+    }
+
     let _ = wm.stop_app(&app_id).await;
     wm.start_app(&pool, &secrets, &app_id).await?;
 
-    Ok(Json(json!({ "message": format!("app '{app_id}' deployed and started") })))
+    Ok(Json(json!({
+        "message": format!("app '{app_id}' deployed and started"),
+        "migrationsApplied": applied,
+    })))
 }
 
 fn safe_unpack(bytes: &[u8], dest: &std::path::Path) -> Result<(), ApiError> {

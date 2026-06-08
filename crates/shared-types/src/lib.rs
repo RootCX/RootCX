@@ -475,3 +475,19 @@ pub struct ToolDef {
     pub input_schema: serde_json::Value,
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn index_column_deserializes_bare_string_and_spec() {
+        let json = r#"{"entityName":"program","fields":[],"indexes":[{"name":"test","columns":["slug"],"unique":true}]}"#;
+        let e: EntityContract = serde_json::from_str(json).expect("deser failed");
+        assert_eq!(e.indexes.len(), 1, "indexes should parse");
+        assert_eq!(e.indexes[0].columns.len(), 1, "columns should parse");
+        match &e.indexes[0].columns[0] {
+            IndexColumn::Name(n) => assert_eq!(n, "slug"),
+            other => panic!("expected Name('slug'), got {:?}", other),
+        }
+    }
+}
