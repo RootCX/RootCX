@@ -1868,6 +1868,120 @@ async fn sql_proxy_row_cap_boundary_1000_succeeds() {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// MULTI-STATEMENT TRANSACTION SESSION (TxSession)
+//
+// The held-open TX path is reachable only via worker IPC, so these drive
+// TxSession directly against a real pool — the same seam the run_sql tests use.
+// They assert the contracts the lifecycle fixes turn on: atomic commit, discard
+// on rollback, rollback-on-drop (no data/connection leak when a worker dies),
+// and that the governance gate (validate_sql) still bites inside a TX.
+// ══════════════════════════════════════════════════════════════════════════════
+
+use rootcx_core::governance::enforcement::{ContextState, TxSession};
+
+fn writer_state(uid: Uuid) -> ContextState {
+    ContextState {
+        user_id: Some(uid),
+        is_delegated: false,
+        effective_perms: vec!["app:crm:contacts.create".into(), "app:crm:contacts.read".into()],
+    }
+}
+
+const INS_A: &str = "INSERT INTO crm.contacts (first_name, last_name, email) VALUES ('a','a','a@x.com')";
+const INS_B: &str = "INSERT INTO crm.contacts (first_name, last_name, email) VALUES ('b','b','b@x.com')";
+
+async fn contact_count(rt: &harness::TestRuntime) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM crm.contacts").fetch_one(rt.pool()).await.unwrap()
+}
+
+#[tokio::test]
+async fn tx_commit_persists_all_statements_atomically() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let (_, uid) = user_with(&rt, "txc@t.local", &["app:crm:contacts.create"]).await;
+    let (done, _done_rx) = tokio::sync::mpsc::channel::<String>(4);
+
+    let session = TxSession::begin(rt.pool(), "crm", &writer_state(uid), done).await.unwrap();
+    // Two writes in ONE transaction prove the statements share a tx, not two
+    // auto-commits: nothing is visible until commit.
+    session.executor().exec(INS_A.into(), vec![]).await.unwrap();
+    session.executor().exec(INS_B.into(), vec![]).await.unwrap();
+    assert_eq!(contact_count(&rt).await, 0, "uncommitted writes must be invisible");
+    session.commit().await.unwrap();
+    assert_eq!(contact_count(&rt).await, 2, "commit persists every statement");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn tx_rollback_discards_writes() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let (_, uid) = user_with(&rt, "txr@t.local", &["app:crm:contacts.create"]).await;
+    let (done, _done_rx) = tokio::sync::mpsc::channel::<String>(4);
+
+    let session = TxSession::begin(rt.pool(), "crm", &writer_state(uid), done).await.unwrap();
+    session.executor().exec(INS_A.into(), vec![]).await.unwrap();
+    session.rollback().await.unwrap();
+    assert_eq!(contact_count(&rt).await, 0, "rollback discards the write");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn tx_drop_without_commit_rolls_back() {
+    // The leak-safety fix: when a worker dies mid-TX it drops the handle without
+    // committing. The task must roll back. `done` fires only after the inner
+    // scope drops pg_tx (which also releases the connection + semaphore permit,
+    // same scope), so awaiting it is a precise "rollback completed" barrier. We
+    // assert the observable half — the data rolled back; the connection/permit
+    // ride the same drop and so are released by construction.
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let (_, uid) = user_with(&rt, "txd@t.local", &["app:crm:contacts.create"]).await;
+    let (done, mut done_rx) = tokio::sync::mpsc::channel::<String>(4);
+
+    let session = TxSession::begin(rt.pool(), "crm", &writer_state(uid), done).await.unwrap();
+    session.executor().exec(INS_A.into(), vec![]).await.unwrap();
+    // The temporary executor above is already dropped; dropping the session
+    // closes the last command sender → task hits the None arm.
+    let tx_id = session.tx_id.clone();
+    drop(session);
+
+    let signalled = done_rx.recv().await;
+    assert_eq!(signalled.as_deref(), Some(tx_id.as_str()), "task reports its tx_id on exit");
+    assert_eq!(contact_count(&rt).await, 0, "dropped (uncommitted) TX must roll back");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn tx_exec_still_blocks_ddl() {
+    // validate_sql must run on every SqlExec, not just single-statement SqlQuery
+    // — otherwise a held-open TX would be a DDL escape hatch past the executor
+    // role's restrictions.
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let (_, uid) = user_with(&rt, "txddl@t.local", &["app:crm:contacts.create"]).await;
+    let (done, _done_rx) = tokio::sync::mpsc::channel::<String>(4);
+
+    let session = TxSession::begin(rt.pool(), "crm", &writer_state(uid), done).await.unwrap();
+    let err = session
+        .executor()
+        .exec("ALTER TABLE crm.contacts ADD COLUMN x int".into(), vec![])
+        .await
+        .unwrap_err();
+    assert!(err.contains("ALTER"), "DDL inside a TX must be rejected: {err}");
+    session.rollback().await.unwrap();
+
+    rt.shutdown().await;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // CHANNEL DELEGATION REVOCATION
 // ══════════════════════════════════════════════════════════════════════════════
 
