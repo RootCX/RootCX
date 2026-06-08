@@ -331,25 +331,21 @@ pub async fn sync_schema(
 
         let diff = compute_diff(app_id, &entity.entity_name, &db_columns, &entity.fields, pk_types);
 
-        if diff.changes.is_empty() {
+        if !diff.changes.is_empty() {
+            has_type_changes |= diff.changes.iter().any(|c| matches!(c, ColumnDiff::AlterType { .. }));
+            let stmts = generate_ddl(&diff);
             info!(
                 table = %format!("{}.{}", app_id, entity.entity_name),
-                "schema in sync"
+                changes = diff.changes.len(),
+                statements = stmts.len(),
+                "applying schema sync"
             );
-            continue;
+            apply_ddl(pool, &stmts).await?;
         }
 
-        has_type_changes |= diff.changes.iter().any(|c| matches!(c, ColumnDiff::AlterType { .. }));
-
-        let stmts = generate_ddl(&diff);
-        info!(
-            table = %format!("{}.{}", app_id, entity.entity_name),
-            changes = diff.changes.len(),
-            statements = stmts.len(),
-            "applying schema sync"
-        );
-
-        apply_ddl(pool, &stmts).await?;
+        // Reconcile indexes in the same pass — columns are already applied above,
+        // so new columns that an index references exist. No second introspection.
+        reconcile_indexes(pool, app_id, entity).await?;
     }
 
     // Invalidate sqlx prepared-statement caches after column type changes
@@ -365,6 +361,320 @@ pub async fn sync_schema(
     }
 
     Ok(())
+}
+
+// ── Declarative secondary indexes ────────────────────────────────────
+//
+// Reconciled against pg_indexes. We only ever touch indexes WE own, tagged with
+// a `rootcx:idx:<hash>` comment carrying a hash of the declared spec — so the
+// PK, identity, and FK indexes are never touched, AND a changed definition under
+// the same name is detected (hash differs) and replaced. Add/keep/change/remove
+// are decided by the pure `compute_index_diff`, then applied.
+
+const MANAGED_INDEX_PREFIX: &str = "rootcx:idx:";
+
+/// Stable hash of an index's DEFINITION (not its name): columns + per-column
+/// sort/nulls/ops/expr, unique, method, partial predicate, storage params.
+/// Same name + different definition → different hash → replace.
+fn index_spec_hash(idx: &rootcx_types::IndexContract) -> String {
+    use rootcx_types::IndexColumn;
+    let mut s = String::new();
+    s.push_str(if idx.unique { "u|" } else { "_|" });
+    s.push_str(idx.using.as_deref().unwrap_or("btree"));
+    s.push('|');
+    for c in &idx.columns {
+        match c {
+            IndexColumn::Name(n) => s.push_str(n),
+            IndexColumn::Spec(sp) => {
+                for f in [&sp.column, &sp.expr, &sp.sort, &sp.nulls, &sp.ops] {
+                    s.push_str(f.as_deref().unwrap_or(""));
+                    s.push(':');
+                }
+            }
+        }
+        s.push(',');
+    }
+    s.push('|');
+    s.push_str(idx.where_clause.as_deref().unwrap_or(""));
+    s.push('|');
+    for (k, v) in &idx.with {
+        s.push_str(k);
+        s.push('=');
+        s.push_str(v);
+        s.push(';');
+    }
+    let mut h = 0xcbf29ce484222325u64; // FNV-1a
+    for b in s.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{h:016x}")
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum IndexOp {
+    /// Declared, not currently managed — create it.
+    Create(String),
+    /// Declared and managed, but the spec changed — drop + recreate.
+    Replace(String),
+    /// Present with the exact declared spec — no churn.
+    Keep(String),
+    /// Managed but no longer declared — drop it.
+    Drop(String),
+}
+
+impl IndexOp {
+    pub fn name(&self) -> &str {
+        match self {
+            IndexOp::Create(n) | IndexOp::Replace(n) | IndexOp::Keep(n) | IndexOp::Drop(n) => n,
+        }
+    }
+}
+
+/// Pure add/keep/change/remove decision. `desired` = (name, spec-hash) for each
+/// declared index; `managed` = name → stored spec-hash for indexes we own.
+pub fn compute_index_diff(
+    desired: &[(String, String)],
+    managed: &HashMap<String, String>,
+) -> Vec<IndexOp> {
+    let mut ops = Vec::new();
+    let desired_names: HashSet<&str> = desired.iter().map(|(n, _)| n.as_str()).collect();
+    for (name, hash) in desired {
+        match managed.get(name) {
+            None => ops.push(IndexOp::Create(name.clone())),
+            Some(h) if h == hash => ops.push(IndexOp::Keep(name.clone())),
+            Some(_) => ops.push(IndexOp::Replace(name.clone())),
+        }
+    }
+    for name in managed.keys() {
+        if !desired_names.contains(name.as_str()) {
+            ops.push(IndexOp::Drop(name.clone()));
+        }
+    }
+    ops
+}
+
+fn index_method(using: Option<&str>) -> Result<&str, String> {
+    match using.unwrap_or("btree").to_lowercase().as_str() {
+        "btree" => Ok("btree"),
+        "hash" => Ok("hash"),
+        "gist" => Ok("gist"),
+        "gin" => Ok("gin"),
+        "spgist" => Ok("spgist"),
+        "brin" => Ok("brin"),
+        other => Err(format!("unknown index method '{other}'")),
+    }
+}
+
+/// Render one index element: `col|（expr)` [opclass] [ASC|DESC] [NULLS …].
+fn render_index_element(col: &rootcx_types::IndexColumn) -> Result<String, String> {
+    use rootcx_types::IndexColumn;
+    let (base, sort, nulls, ops) = match col {
+        IndexColumn::Name(n) => (quote_ident(n), None, None, None),
+        IndexColumn::Spec(s) => {
+            let base = match (&s.column, &s.expr) {
+                (Some(c), None) => quote_ident(c),
+                (None, Some(e)) => format!("({e})"),
+                (Some(_), Some(_)) => return Err("index column has both 'column' and 'expr'".into()),
+                (None, None) => return Err("index column has neither 'column' nor 'expr'".into()),
+            };
+            (base, s.sort.as_deref(), s.nulls.as_deref(), s.ops.as_deref())
+        }
+    };
+    let mut out = base;
+    if let Some(o) = ops {
+        out.push(' ');
+        out.push_str(o); // operator class — a bare identifier fragment
+    }
+    if let Some(s) = sort {
+        out.push_str(match s.to_lowercase().as_str() {
+            "asc" => " ASC",
+            "desc" => " DESC",
+            other => return Err(format!("invalid sort '{other}' (asc|desc)")),
+        });
+    }
+    if let Some(n) = nulls {
+        out.push_str(match n.to_lowercase().as_str() {
+            "first" => " NULLS FIRST",
+            "last" => " NULLS LAST",
+            other => return Err(format!("invalid nulls '{other}' (first|last)")),
+        });
+    }
+    Ok(out)
+}
+
+/// Deterministic index name when the manifest omits one: `ix_<entity>_<n>` with
+/// a short hash of the full spec so two unnamed indexes never collide. Capped at
+/// Postgres's 63-byte identifier limit.
+fn resolve_index_name(entity: &str, idx: &rootcx_types::IndexContract) -> String {
+    if let Some(n) = &idx.name {
+        return n.clone();
+    }
+    use rootcx_types::IndexColumn;
+    let parts: Vec<String> = idx.columns.iter().map(|c| match c {
+        IndexColumn::Name(n) => n.clone(),
+        IndexColumn::Spec(s) => s.column.clone().unwrap_or_else(|| "expr".into()),
+    }).collect();
+    let mut hash = 0u64;
+    for b in format!("{:?}{}{:?}", parts, idx.unique, idx.where_clause).bytes() {
+        hash = hash.wrapping_mul(31).wrapping_add(b as u64);
+    }
+    let base = format!("ix_{entity}_{}{}", parts.join("_"), if idx.unique { "_uq" } else { "" });
+    let suffix = format!("_{:x}", hash & 0xffffff);
+    let max = 63 - suffix.len();
+    format!("{}{}", base.chars().take(max).collect::<String>(), suffix)
+}
+
+/// Build the `CREATE INDEX` statement for one declared index.
+pub fn generate_create_index(
+    schema: &str,
+    table: &str,
+    idx: &rootcx_types::IndexContract,
+) -> Result<String, String> {
+    let name = resolve_index_name(table, idx);
+    let method = index_method(idx.using.as_deref())?;
+    if idx.columns.is_empty() {
+        return Err(format!("index '{name}' has no columns"));
+    }
+    let elems: Vec<String> = idx.columns.iter().map(render_index_element).collect::<Result<_, _>>()?;
+    let fq = format!("{}.{}", quote_ident(schema), quote_ident(table));
+    let mut sql = format!(
+        "CREATE {}INDEX {} ON {fq} USING {method} ({})",
+        if idx.unique { "UNIQUE " } else { "" },
+        quote_ident(&name),
+        elems.join(", "),
+    );
+    if !idx.with.is_empty() {
+        let params: Vec<String> = idx.with.iter().map(|(k, v)| format!("{k} = {v}")).collect();
+        sql.push_str(&format!(" WITH ({})", params.join(", ")));
+    }
+    if let Some(w) = &idx.where_clause {
+        sql.push_str(&format!(" WHERE {w}"));
+    }
+    Ok(sql)
+}
+
+/// Resolved name → declared spec, rejecting duplicate names. Shared by reconcile
+/// and verify so both see the same desired set.
+fn desired_indexes(
+    entity: &EntityContract,
+) -> Result<HashMap<String, &rootcx_types::IndexContract>, String> {
+    let mut by_name = HashMap::new();
+    for i in &entity.indexes {
+        let name = resolve_index_name(&entity.entity_name, i);
+        if by_name.insert(name.clone(), i).is_some() {
+            return Err(format!("duplicate index name '{name}' on '{}'", entity.entity_name));
+        }
+    }
+    Ok(by_name)
+}
+
+/// name → stored spec-hash for the indexes WE manage, read from our
+/// `rootcx:idx:<hash>` comments. PK / identity / FK indexes carry no such
+/// comment, so they never appear here — and are thus never reconciled away.
+async fn read_managed_index_hashes(
+    pool: &PgPool,
+    schema: &str,
+    table: &str,
+) -> Result<HashMap<String, String>, RuntimeError> {
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT c.relname, obj_description(c.oid, 'pg_class') \
+         FROM pg_index x \
+         JOIN pg_class c ON c.oid = x.indexrelid \
+         JOIN pg_class t ON t.oid = x.indrelid \
+         JOIN pg_namespace n ON n.oid = t.relnamespace \
+         WHERE n.nspname = $1 AND t.relname = $2 \
+           AND obj_description(c.oid, 'pg_class') LIKE $3",
+    )
+    .bind(schema).bind(table).bind(format!("{MANAGED_INDEX_PREFIX}%"))
+    .fetch_all(pool).await.map_err(RuntimeError::Schema)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(name, comment)| {
+            comment.and_then(|c| c.strip_prefix(MANAGED_INDEX_PREFIX).map(|h| (name, h.to_string())))
+        })
+        .collect())
+}
+
+/// Reconcile declared indexes for one entity: add new, replace changed, drop
+/// removed. Idempotent (unchanged indexes are kept untouched).
+async fn reconcile_indexes(
+    pool: &PgPool,
+    schema: &str,
+    entity: &EntityContract,
+) -> Result<(), RuntimeError> {
+    let proto = |m: String| RuntimeError::Schema(sqlx::Error::Protocol(m));
+    let by_name = desired_indexes(entity).map_err(proto)?;
+    let desired: Vec<(String, String)> =
+        by_name.iter().map(|(n, i)| (n.clone(), index_spec_hash(i))).collect();
+    let managed = read_managed_index_hashes(pool, schema, &entity.entity_name).await?;
+
+    let ops = compute_index_diff(&desired, &managed);
+    if ops.iter().all(|o| matches!(o, IndexOp::Keep(_))) {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
+    for op in &ops {
+        let drop = |name: &str| format!("DROP INDEX IF EXISTS {}.{}", quote_ident(schema), quote_ident(name));
+        match op {
+            IndexOp::Keep(_) => {}
+            IndexOp::Drop(name) => {
+                sqlx::query(&drop(name)).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
+            }
+            // Create and Replace both drop-then-create: covers a changed spec and
+            // adoption of a pre-existing same-named (unmanaged) index alike.
+            IndexOp::Create(name) | IndexOp::Replace(name) => {
+                let idx = by_name[name];
+                let create = generate_create_index(schema, &entity.entity_name, idx).map_err(proto)?;
+                sqlx::query(&drop(name)).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
+                sqlx::query(&create).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
+                sqlx::query(&format!(
+                    "COMMENT ON INDEX {}.{} IS '{}{}'",
+                    quote_ident(schema), quote_ident(name), MANAGED_INDEX_PREFIX, index_spec_hash(idx)
+                )).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
+            }
+        }
+    }
+    tx.commit().await.map_err(RuntimeError::Schema)?;
+    Ok(())
+}
+
+/// Drift report for declared indexes (the verify counterpart to reconcile).
+/// No introspection needed: `read_managed_index_hashes` returns empty for a
+/// nonexistent table (the pg_index join yields nothing), so missing tables
+/// naturally produce no drift.
+async fn verify_indexes(
+    pool: &PgPool,
+    app_id: &str,
+    entities: &[EntityContract],
+) -> Result<Vec<SchemaChange>, RuntimeError> {
+    let mut changes = Vec::new();
+    for entity in entities {
+        let by_name = desired_indexes(entity)
+            .map_err(|m| RuntimeError::Schema(sqlx::Error::Protocol(m)))?;
+        let desired: Vec<(String, String)> =
+            by_name.iter().map(|(n, i)| (n.clone(), index_spec_hash(i))).collect();
+        let managed = read_managed_index_hashes(pool, app_id, &entity.entity_name).await?;
+        if desired.is_empty() && managed.is_empty() {
+            continue;
+        }
+        for op in compute_index_diff(&desired, &managed) {
+            let change_type = match &op {
+                IndexOp::Keep(_) => continue,
+                IndexOp::Create(_) => "add_index",
+                IndexOp::Replace(_) => "replace_index",
+                IndexOp::Drop(_) => "drop_index",
+            };
+            changes.push(SchemaChange {
+                entity: entity.entity_name.clone(),
+                change_type: change_type.to_string(),
+                column: op.name().to_string(),
+                detail: None,
+            });
+        }
+    }
+    Ok(changes)
 }
 
 pub async fn introspect_table(
@@ -516,6 +826,7 @@ pub async fn verify_all(
     }
 
     changes.extend(verify_identity_indexes(pool, app_id, entities).await?);
+    changes.extend(verify_indexes(pool, app_id, entities).await?);
 
     Ok(SchemaVerification { compliant: changes.is_empty(), changes })
 }
@@ -627,7 +938,7 @@ mod tests {
     }
 
     fn mentity(name: &str, fields: Vec<FieldContract>) -> EntityContract {
-        EntityContract { entity_name: name.to_string(), fields, identity_kind: None, identity_key: None }
+        EntityContract { entity_name: name.to_string(), fields, identity_kind: None, identity_key: None, indexes: vec![] }
     }
 
     // ── normalize / defaults ─────────────────────────────────────────
@@ -1180,6 +1491,155 @@ mod tests {
             !diff.changes.iter().any(|c| matches!(c, ColumnDiff::ReplaceFkConstraint { .. })),
             "no existing FK in DB → should not produce ReplaceFkConstraint"
         );
+    }
+
+    // ── declarative indexes ──────────────────────────────────────────
+
+    use rootcx_types::{IndexColumn, IndexColumnSpec, IndexContract};
+
+    fn idx(columns: Vec<IndexColumn>) -> IndexContract {
+        IndexContract { name: None, columns, unique: false, using: None, where_clause: None, with: Default::default() }
+    }
+    fn col(name: &str) -> IndexColumn { IndexColumn::Name(name.into()) }
+    fn spec(s: IndexColumnSpec) -> IndexColumn { IndexColumn::Spec(s) }
+    fn blank_spec() -> IndexColumnSpec {
+        IndexColumnSpec { column: None, expr: None, sort: None, nulls: None, ops: None }
+    }
+
+    #[test]
+    fn index_simple_composite() {
+        let sql = generate_create_index("crm", "person", &idx(vec![col("last_name"), col("first_name")])).unwrap();
+        assert!(sql.starts_with("CREATE INDEX "), "{sql}");
+        assert!(sql.contains("ON \"crm\".\"person\" USING btree (\"last_name\", \"first_name\")"), "{sql}");
+        assert!(!sql.contains("UNIQUE"), "{sql}");
+    }
+
+    #[test]
+    fn index_unique_partial_named() {
+        let mut i = idx(vec![col("email")]);
+        i.unique = true;
+        i.name = Some("person_email_uq".into());
+        i.where_clause = Some("email IS NOT NULL".into());
+        let sql = generate_create_index("crm", "person", &i).unwrap();
+        assert!(sql.contains("CREATE UNIQUE INDEX \"person_email_uq\""), "{sql}");
+        assert!(sql.ends_with("WHERE email IS NOT NULL"), "{sql}");
+    }
+
+    #[test]
+    fn index_functional_gin_with_storage() {
+        let mut i = idx(vec![spec(IndexColumnSpec { expr: Some("lower(last_name)".into()), ..blank_spec() })]);
+        i.using = Some("gin".into());
+        i.with.insert("fillfactor".into(), "70".into());
+        let sql = generate_create_index("crm", "person", &i).unwrap();
+        assert!(sql.contains("USING gin ((lower(last_name)))"), "{sql}");
+        assert!(sql.contains("WITH (fillfactor = 70)"), "{sql}");
+    }
+
+    #[test]
+    fn index_sort_nulls_ops() {
+        let i = idx(vec![spec(IndexColumnSpec {
+            column: Some("created_at".into()), sort: Some("desc".into()),
+            nulls: Some("last".into()), ops: Some("text_ops".into()), ..blank_spec()
+        })]);
+        let sql = generate_create_index("crm", "person", &i).unwrap();
+        assert!(sql.contains("(\"created_at\" text_ops DESC NULLS LAST)"), "{sql}");
+    }
+
+    #[test]
+    fn index_rejects_bad_vocab_and_shapes() {
+        // bad method
+        let mut bad = idx(vec![col("x")]); bad.using = Some("bogus".into());
+        assert!(generate_create_index("crm", "t", &bad).is_err());
+        // bad sort
+        let s = idx(vec![spec(IndexColumnSpec { column: Some("x".into()), sort: Some("sideways".into()), ..blank_spec() })]);
+        assert!(generate_create_index("crm", "t", &s).is_err());
+        // both column and expr
+        let both = idx(vec![spec(IndexColumnSpec { column: Some("x".into()), expr: Some("f(x)".into()), ..blank_spec() })]);
+        assert!(generate_create_index("crm", "t", &both).is_err());
+        // neither
+        let neither = idx(vec![spec(blank_spec())]);
+        assert!(generate_create_index("crm", "t", &neither).is_err());
+        // no columns
+        assert!(generate_create_index("crm", "t", &idx(vec![])).is_err());
+    }
+
+    #[test]
+    fn index_spec_hash_reflects_definition() {
+        let base = idx(vec![col("a"), col("b")]);
+        let h = index_spec_hash(&base);
+        assert_eq!(h, index_spec_hash(&base.clone()), "same spec → same hash");
+        // every definitional axis must move the hash
+        let mut uq = base.clone(); uq.unique = true;
+        assert_ne!(index_spec_hash(&uq), h, "unique changes hash");
+        let mut cols = base.clone(); cols.columns = vec![col("a")];
+        assert_ne!(index_spec_hash(&cols), h, "columns change hash");
+        let mut whr = base.clone(); whr.where_clause = Some("a IS NOT NULL".into());
+        assert_ne!(index_spec_hash(&whr), h, "where changes hash");
+        let mut using = base.clone(); using.using = Some("gin".into());
+        assert_ne!(index_spec_hash(&using), h, "method changes hash");
+        let mut with = base.clone(); with.with.insert("fillfactor".into(), "70".into());
+        assert_ne!(index_spec_hash(&with), h, "storage params change hash");
+        // name is NOT part of the hash (it's the key, not the definition)
+        let mut named = base.clone(); named.name = Some("whatever".into());
+        assert_eq!(index_spec_hash(&named), h, "name is not part of the spec hash");
+    }
+
+    #[test]
+    fn index_diff_add_keep_change_remove() {
+        let h = |s: &str| s.to_string();
+        // add: desired present, nothing managed
+        assert_eq!(
+            compute_index_diff(&[("a".into(), h("1"))], &HashMap::new()),
+            vec![IndexOp::Create("a".into())]
+        );
+        // keep: same name + same hash
+        assert_eq!(
+            compute_index_diff(&[("a".into(), h("1"))], &HashMap::from([("a".into(), h("1"))])),
+            vec![IndexOp::Keep("a".into())]
+        );
+        // change: same name, different hash → replace
+        assert_eq!(
+            compute_index_diff(&[("a".into(), h("2"))], &HashMap::from([("a".into(), h("1"))])),
+            vec![IndexOp::Replace("a".into())]
+        );
+        // remove: managed, no longer desired
+        assert_eq!(
+            compute_index_diff(&[], &HashMap::from([("a".into(), h("1"))])),
+            vec![IndexOp::Drop("a".into())]
+        );
+    }
+
+    #[test]
+    fn index_diff_mixed() {
+        let ops = compute_index_diff(
+            &[("keep".into(), "h".into()), ("changed".into(), "new".into()), ("added".into(), "h".into())],
+            &HashMap::from([
+                ("keep".into(), "h".into()),
+                ("changed".into(), "old".into()),
+                ("removed".into(), "h".into()),
+            ]),
+        );
+        assert!(ops.contains(&IndexOp::Keep("keep".into())));
+        assert!(ops.contains(&IndexOp::Replace("changed".into())));
+        assert!(ops.contains(&IndexOp::Create("added".into())));
+        assert!(ops.contains(&IndexOp::Drop("removed".into())));
+        assert_eq!(ops.len(), 4);
+    }
+
+    #[test]
+    fn index_name_derivation_deterministic_and_capped() {
+        let i = idx(vec![col("last_name"), col("first_name")]);
+        let a = resolve_index_name("person", &i);
+        let b = resolve_index_name("person", &i);
+        assert_eq!(a, b, "auto name must be deterministic");
+        assert!(a.starts_with("ix_person_last_name_first_name"), "{a}");
+        assert!(a.len() <= 63, "must respect pg identifier limit: {a}");
+        // explicit name wins
+        let mut named = i.clone(); named.name = Some("custom".into());
+        assert_eq!(resolve_index_name("person", &named), "custom");
+        // unique changes the derived name
+        let mut uq = i.clone(); uq.unique = true;
+        assert_ne!(resolve_index_name("person", &uq), a);
     }
 
     #[test]

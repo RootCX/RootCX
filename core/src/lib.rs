@@ -1,5 +1,6 @@
 pub mod act_as;
 mod api_error;
+pub mod app_migrations;
 pub mod auth;
 mod crons;
 pub mod delegations;
@@ -13,7 +14,7 @@ pub mod mcp;
 mod routes;
 mod scheduler;
 mod schema;
-mod schema_sync;
+pub mod schema_sync;
 mod secrets;
 pub mod sql_proxy;
 mod seed;

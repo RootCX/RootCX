@@ -595,7 +595,7 @@ mod tests {
     }
 
     fn entity(name: &str, fields: Vec<FieldContract>) -> EntityContract {
-        EntityContract { entity_name: name.to_string(), fields, identity_kind: None, identity_key: None }
+        EntityContract { entity_name: name.to_string(), fields, identity_kind: None, identity_key: None, indexes: vec![] }
     }
 
     #[test]
