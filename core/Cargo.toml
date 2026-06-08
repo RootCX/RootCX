@@ -48,6 +48,7 @@ url = "2"
 # Job Engine
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+either = "1"
 
 reqwest = { version = "0.12", features = ["json"] }
 libc = "0.2"

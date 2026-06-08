@@ -2287,3 +2287,76 @@ async fn t1_9_custom_permissions_app_still_mints_entity_keys() {
 
     rt.shutdown().await;
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TYPED PARAMETER BINDING (build_typed_args via Describe)
+//
+// Proves that JSON params are correctly bound to PG-typed columns (uuid, int4,
+// date, bool, text[], jsonb) via the Describe+typed-bind path. A failure here
+// means the proxy would produce "operator does not exist: uuid = text" or
+// similar at runtime.
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn typed_bind_uuid_int_date_bool_array_jsonb() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+
+    // Install a schema with typed columns that exercise every critical bind path.
+    rt.install_manifest(&json!({
+        "appId": "typebind",
+        "name": "typebind",
+        "version": "1.0.0",
+        "dataContract": [{
+            "entityName": "records",
+            "fields": [
+                { "name": "label", "type": "text", "required": true },
+                { "name": "count", "type": "number" },
+                { "name": "is_active", "type": "boolean" },
+                { "name": "due_date", "type": "date" },
+                { "name": "tags", "type": "[text]" },
+                { "name": "meta", "type": "json" },
+                { "name": "ref_id", "type": "entity_link", "references": { "entity": "records", "field": "id" } }
+            ]
+        }]
+    })).await;
+
+    let (_, uid) = user_with(&rt, "typed@t.local", &[
+        "app:typebind:records.create", "app:typebind:records.read",
+    ]).await;
+    let state = rootcx_core::governance::enforcement::ContextState {
+        user_id: Some(uid),
+        is_delegated: false,
+        effective_perms: vec!["app:typebind:records.create".into(), "app:typebind:records.read".into()],
+    };
+
+    // Insert a row with all typed columns via run_sql (exercises build_typed_args).
+    let insert = "INSERT INTO typebind.records (label, count, is_active, due_date, tags, meta) \
+                  VALUES ($1, $2, $3, $4, $5, $6) RETURNING id";
+    let params: Vec<serde_json::Value> = vec![
+        json!("test"),           // $1 TEXT
+        json!(42),               // $2 FLOAT8 (number maps to DOUBLE PRECISION)
+        json!(true),             // $3 BOOL
+        json!("2026-06-08"),     // $4 DATE
+        json!(["a", "b", "c"]), // $5 TEXT[]
+        json!({"key": "val"}),  // $6 JSONB
+    ];
+    let result = rootcx_core::sql_proxy::run_sql(rt.pool(), "typebind", &state, insert, &params).await;
+    assert!(result.is_ok(), "typed INSERT must succeed: {:?}", result.err());
+    let id = result.unwrap().rows[0][0].as_str().unwrap().to_string();
+
+    // Read back by UUID (the critical case: $1 bound as UUID, not TEXT).
+    let select = "SELECT label, count, is_active, due_date, tags, meta FROM typebind.records WHERE id = $1";
+    let result = rootcx_core::sql_proxy::run_sql(rt.pool(), "typebind", &state, select, &[json!(id)]).await;
+    assert!(result.is_ok(), "typed SELECT by UUID must succeed: {:?}", result.err());
+    let row = &result.unwrap().rows[0];
+    assert_eq!(row[0], json!("test"));
+    assert_eq!(row[2], json!(true));
+
+    // Query by ref_id (NULL UUID) — ensures NULL uuid binding works.
+    let null_q = "SELECT id FROM typebind.records WHERE ref_id = $1";
+    let result = rootcx_core::sql_proxy::run_sql(rt.pool(), "typebind", &state, null_q, &[json!(null)]).await;
+    assert!(result.is_ok(), "NULL UUID param must succeed: {:?}", result.err());
+
+    rt.shutdown().await;
+}

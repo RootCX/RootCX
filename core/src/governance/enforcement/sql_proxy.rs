@@ -130,26 +130,119 @@ pub struct SqlOk {
     pub row_count: usize,
 }
 
-/// Bind JSON params to a sqlx query. Shared between single-statement and
-/// multi-statement TX paths.
-pub fn bind_json_params<'q>(
-    mut q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
-    params: &'q [JsonValue],
-) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
-    for p in params {
-        q = match p {
-            JsonValue::Null => q.bind(Option::<String>::None),
-            JsonValue::Bool(b) => q.bind(*b),
-            JsonValue::Number(n) => match n.as_i64() {
-                Some(i) => q.bind(i),
-                None => q.bind(n.as_f64().unwrap_or(0.0)),
-            },
-            JsonValue::String(s) => q.bind(s.clone()),
-            other => q.bind(other.to_string()),
-        };
+/// Build typed PgArguments from JSON params using PG's inferred parameter types.
+/// Calls `describe` on the connection to learn what each `$N` expects, then binds
+/// the JSON values with the correct Rust type. Cached by sqlx per SQL string, so
+/// only the first call per unique query pays a Describe round-trip.
+pub async fn build_typed_args(
+    conn: &mut sqlx::PgConnection,
+    sql: &str,
+    params: &[JsonValue],
+) -> Result<sqlx::postgres::PgArguments, String> {
+    use sqlx::postgres::PgArguments;
+    use sqlx::{Executor, TypeInfo};
+
+    let desc = conn.describe(sql).await.map_err(|e| format!("describe: {e}"))?;
+    let pg_types: &[_] = match desc.parameters() {
+        Some(either::Either::Left(ref types)) => types,
+        _ => &[],
+    };
+
+    let mut args = PgArguments::default();
+    for (i, value) in params.iter().enumerate() {
+        let type_name = pg_types.get(i).map(|t| t.name()).unwrap_or("TEXT");
+        bind_typed_value(&mut args, value, type_name)
+            .map_err(|e| format!("param ${}: {e}", i + 1))?;
     }
-    q
+    Ok(args)
 }
+
+fn bind_typed_value(
+    args: &mut sqlx::postgres::PgArguments,
+    value: &JsonValue,
+    type_name: &str,
+) -> Result<(), String> {
+    use sqlx::Arguments;
+
+    if value.is_null() {
+        args.add(Option::<String>::None).map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    match type_name {
+        "BOOL" => {
+            let v = value.as_bool().ok_or("expected bool")?;
+            args.add(v).map_err(|e| e.to_string())?;
+        }
+        "INT2" => {
+            let v = value.as_i64().ok_or("expected integer")? as i16;
+            args.add(v).map_err(|e| e.to_string())?;
+        }
+        "INT4" => {
+            let v = value.as_i64().ok_or("expected integer")? as i32;
+            args.add(v).map_err(|e| e.to_string())?;
+        }
+        "INT8" => {
+            let v = value.as_i64().ok_or("expected integer")?;
+            args.add(v).map_err(|e| e.to_string())?;
+        }
+        "FLOAT4" => {
+            let v = value.as_f64().ok_or("expected number")? as f32;
+            args.add(v).map_err(|e| e.to_string())?;
+        }
+        "FLOAT8" => {
+            let v = value.as_f64().ok_or("expected number")?;
+            args.add(v).map_err(|e| e.to_string())?;
+        }
+        "UUID" => {
+            let s = value.as_str().ok_or("expected string for uuid")?;
+            let v: uuid::Uuid = s.parse().map_err(|e| format!("invalid uuid: {e}"))?;
+            args.add(v).map_err(|e| e.to_string())?;
+        }
+        "TIMESTAMPTZ" => {
+            let s = value.as_str().ok_or("expected string for timestamptz")?;
+            let v: chrono::DateTime<chrono::Utc> = s.parse().map_err(|e| format!("invalid timestamptz: {e}"))?;
+            args.add(v).map_err(|e| e.to_string())?;
+        }
+        "TIMESTAMP" => {
+            let s = value.as_str().ok_or("expected string for timestamp")?;
+            let v: chrono::NaiveDateTime = s.parse().map_err(|e| format!("invalid timestamp: {e}"))?;
+            args.add(v).map_err(|e| e.to_string())?;
+        }
+        "DATE" => {
+            let s = value.as_str().ok_or("expected string for date")?;
+            let v: chrono::NaiveDate = s.parse().map_err(|e| format!("invalid date: {e}"))?;
+            args.add(v).map_err(|e| e.to_string())?;
+        }
+        "JSONB" | "JSON" => {
+            args.add(sqlx::types::Json(value.clone())).map_err(|e| e.to_string())?;
+        }
+        "TEXT[]" => {
+            let arr: Vec<String> = match value {
+                JsonValue::Array(a) => a.iter().map(|v| v.as_str().unwrap_or("").to_string()).collect(),
+                _ => return Err("expected array for TEXT[]".into()),
+            };
+            args.add(arr).map_err(|e| e.to_string())?;
+        }
+        "UUID[]" => {
+            let arr: Vec<uuid::Uuid> = match value {
+                JsonValue::Array(a) => a.iter().map(|v| {
+                    v.as_str().unwrap_or("").parse::<uuid::Uuid>()
+                }).collect::<Result<_, _>>().map_err(|e| format!("invalid uuid in array: {e}"))?,
+                _ => return Err("expected array for UUID[]".into()),
+            };
+            args.add(arr).map_err(|e| e.to_string())?;
+        }
+        // Fallback: bind as text — works for TEXT, VARCHAR, and many types that
+        // accept text input format.
+        _ => {
+            let s = value.as_str().map(|s| s.to_string()).unwrap_or_else(|| value.to_string());
+            args.add(s).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 
 /// Serialize PG rows to JSON with a row-count cap. Returns columns + rows or
 /// an error if the cap is exceeded.
@@ -182,8 +275,8 @@ pub async fn run_sql(
     let mut tx = begin_app_tx(pool, app_schema, state, state.user_id, None, "app_sql", TIMEOUT_INTERACTIVE_MS)
         .await.map_err(|e| e.to_string())?;
 
-    let q = bind_json_params(sqlx::query(sql), params);
-    let rows = q.fetch_all(&mut *tx).await.map_err(|e| e.to_string())?;
+    let args = build_typed_args(&mut *tx, sql, params).await?;
+    let rows = sqlx::query_with(sql, args).fetch_all(&mut *tx).await.map_err(|e| e.to_string())?;
 
     let result = serialize_rows(rows);
     match &result {
@@ -310,11 +403,14 @@ impl TxSession {
                             Some(TxCmd::Exec { sql, params, reply }) => {
                                 let result = match validate_sql(&sql) {
                                     Err(e) => Err(e),
-                                    Ok(()) => match bind_json_params(sqlx::query(&sql), &params)
-                                        .fetch_all(&mut *pg_tx).await
-                                    {
-                                        Err(e) => Err(e.to_string()),
-                                        Ok(rows) => serialize_rows(rows),
+                                    Ok(()) => match build_typed_args(&mut *pg_tx, &sql, &params).await {
+                                        Err(e) => Err(e),
+                                        Ok(args) => match sqlx::query_with(&sql, args)
+                                            .fetch_all(&mut *pg_tx).await
+                                        {
+                                            Err(e) => Err(e.to_string()),
+                                            Ok(rows) => serialize_rows(rows),
+                                        },
                                     },
                                 };
                                 let _ = reply.send(result);
