@@ -218,6 +218,12 @@ pub struct EntityContract {
     /// partial, functional, method, operator class, sort/nulls order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexes: Vec<IndexContract>,
+    /// Declarative table-level CHECK constraints (reconciled by tag against
+    /// pg_constraint at deploy, exactly like `indexes`). Arbitrary boolean SQL
+    /// expressions: multi-column, conditional, format. Covers the Drizzle
+    /// `check()` / Atlas `check {}` surface.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<CheckContract>,
 }
 
 /// A declarative index. Mirrors what Prisma/Drizzle let you declare for
@@ -249,6 +255,17 @@ pub struct IndexContract {
 pub enum IndexColumn {
     Name(String),
     Spec(IndexColumnSpec),
+}
+
+/// A declarative table-level CHECK. `expr` is an arbitrary SQL boolean fragment
+/// (bounded, not a full statement); `name` is auto-derived when omitted. The
+/// core reconciles it by a hash of this DECLARED spec — never by comparing to
+/// Postgres's normalized stored definition — so there is no rewrite-churn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckContract {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub expr: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -510,5 +527,17 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&f).unwrap()).expect("round-trip failed");
         assert_eq!(round.enum_values, f.enum_values, "enum_values lost on round-trip");
         assert_eq!(round.on_delete, f.on_delete, "on_delete lost on round-trip");
+    }
+
+    #[test]
+    fn entity_parses_declarative_checks() {
+        let json = r#"{"entityName":"enrollment","fields":[],
+            "checks":[{"name":"enrollment_dates_chk","expr":"exit_date IS NULL OR exit_date >= intake_date"},
+                      {"expr":"x <> y"}]}"#;
+        let e: EntityContract = serde_json::from_str(json).expect("deser failed");
+        assert_eq!(e.checks.len(), 2);
+        assert_eq!(e.checks[0].name.as_deref(), Some("enrollment_dates_chk"));
+        assert_eq!(e.checks[1].name, None, "unnamed check keeps name None (auto-derived later)");
+        assert_eq!(e.checks[1].expr, "x <> y");
     }
 }

@@ -19,7 +19,6 @@ pub struct DbColumn {
     pub pg_type: String,
     pub not_null: bool,
     pub default_expr: Option<String>,
-    pub check_constraints: Vec<String>,
     pub fk: Option<FkInfo>,
 }
 
@@ -32,8 +31,8 @@ pub enum ColumnDiff {
     DropNotNull { column_name: String },
     SetDefault { column_name: String, default_sql: String },
     DropDefault { column_name: String },
-    ReplaceCheckConstraint { column_name: String, old_constraint_names: Vec<String>, new_values: Vec<String>, pg_type: String },
-    DropCheckConstraint { column_name: String, constraint_names: Vec<String> },
+    // CHECK constraints (enum-derived AND declarative) are NOT column-diffs — they
+    // are reconciled by tag in `reconcile_checks`, exactly like indexes.
     ReplaceFkConstraint { column_name: String, old_constraint_name: String, new_constraint_name: String, target_table: String, delete_rule: String },
 }
 
@@ -145,33 +144,8 @@ pub fn compute_diff(
                     (None, None) => {}
                 }
 
-                let has_old_check = !db_col.check_constraints.is_empty();
-                let has_new_enum = field.enum_values.as_ref().is_some_and(|v| !v.is_empty());
-                match (has_old_check, has_new_enum) {
-                    (true, true) => {
-                        changes.push(ColumnDiff::ReplaceCheckConstraint {
-                            column_name: field.name.clone(),
-                            old_constraint_names: db_col.check_constraints.clone(),
-                            new_values: field.enum_values.clone().unwrap(),
-                            pg_type: desired_pg_type.to_string(),
-                        });
-                    }
-                    (true, false) => {
-                        changes.push(ColumnDiff::DropCheckConstraint {
-                            column_name: field.name.clone(),
-                            constraint_names: db_col.check_constraints.clone(),
-                        });
-                    }
-                    (false, true) => {
-                        changes.push(ColumnDiff::ReplaceCheckConstraint {
-                            column_name: field.name.clone(),
-                            old_constraint_names: vec![],
-                            new_values: field.enum_values.clone().unwrap(),
-                            pg_type: desired_pg_type.to_string(),
-                        });
-                    }
-                    (false, false) => {}
-                }
+                // Enum CHECKs are reconciled by `reconcile_checks` (tag-owned),
+                // not here — see the declarative-checks section below.
 
                 if field.field_type == "entity_link" {
                     if let (Some(fk_info), Some(refs)) = (&db_col.fk, &field.references) {
@@ -231,24 +205,12 @@ pub fn generate_ddl(diff: &TableDiff) -> Vec<String> {
     // Phase ordering: drop constraints → alter types → add columns → nullability → defaults → add constraints → drop columns
     let mut phases: [Vec<String>; 7] = Default::default();
     for change in &diff.changes {
-        emit_ddl_phases(&fq, &diff.table_name, change, &mut phases);
+        emit_ddl_phases(&fq, change, &mut phases);
     }
     phases.into_iter().flatten().collect()
 }
 
-fn emit_check_sql(fq: &str, table: &str, col_name: &str, values: &[String], pg_type: &str) -> String {
-    let col = quote_ident(col_name);
-    let name = quote_ident(&format!("chk_{table}_{col_name}"));
-    let list = values.iter().map(|v| format!("'{}'", v.replace('\'', "''"))).collect::<Vec<_>>().join(", ");
-    // Array column (e.g. TEXT[]): every element must be in the allowed set
-    // (`<@` = contained-by). Scalar column: plain membership.
-    match pg_type.strip_suffix("[]") {
-        Some(elem) => format!("ALTER TABLE {fq} ADD CONSTRAINT {name} CHECK ({col} <@ ARRAY[{list}]::{elem}[])"),
-        None => format!("ALTER TABLE {fq} ADD CONSTRAINT {name} CHECK ({col} IN ({list}))"),
-    }
-}
-
-fn emit_ddl_phases(fq: &str, table: &str, change: &ColumnDiff, p: &mut [Vec<String>; 7]) {
+fn emit_ddl_phases(fq: &str, change: &ColumnDiff, p: &mut [Vec<String>; 7]) {
     match change {
         ColumnDiff::Add { field, pg_type } => {
             let col = quote_ident(&field.name);
@@ -259,10 +221,6 @@ fn emit_ddl_phases(fq: &str, table: &str, change: &ColumnDiff, p: &mut [Vec<Stri
             if let Some(ref val) = field.default_value
                 && let Some(sql) = json_to_sql_default(val, pg_type) {
                     p[4].push(format!("ALTER TABLE {fq} ALTER COLUMN {col} SET DEFAULT {sql}"));
-                }
-            if let Some(ref vals) = field.enum_values
-                && !vals.is_empty() {
-                    p[5].push(emit_check_sql(fq, table, &field.name, vals, pg_type));
                 }
         }
         ColumnDiff::Drop { column_name } => {
@@ -284,17 +242,6 @@ fn emit_ddl_phases(fq: &str, table: &str, change: &ColumnDiff, p: &mut [Vec<Stri
         }
         ColumnDiff::DropDefault { column_name } => {
             p[4].push(format!("ALTER TABLE {fq} ALTER COLUMN {} DROP DEFAULT", quote_ident(column_name)));
-        }
-        ColumnDiff::ReplaceCheckConstraint { column_name, old_constraint_names, new_values, pg_type } => {
-            for name in old_constraint_names {
-                p[0].push(format!("ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS {}", quote_ident(name)));
-            }
-            p[5].push(emit_check_sql(fq, table, column_name, new_values, pg_type));
-        }
-        ColumnDiff::DropCheckConstraint { constraint_names, .. } => {
-            for name in constraint_names {
-                p[0].push(format!("ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS {}", quote_ident(name)));
-            }
         }
         ColumnDiff::ReplaceFkConstraint { column_name, old_constraint_name, new_constraint_name, target_table, delete_rule } => {
             p[0].push(format!("ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS {}", quote_ident(old_constraint_name)));
@@ -347,9 +294,10 @@ pub async fn sync_schema(
             apply_ddl(pool, &stmts).await?;
         }
 
-        // Reconcile indexes in the same pass — columns are already applied above,
-        // so new columns that an index references exist. No second introspection.
+        // Reconcile indexes + CHECKs in the same pass — columns are already
+        // applied above, so anything they reference exists. No re-introspection.
         reconcile_indexes(pool, app_id, entity).await?;
+        reconcile_checks(pool, app_id, entity).await?;
     }
 
     // Invalidate sqlx prepared-statement caches after column type changes
@@ -373,7 +321,7 @@ pub async fn sync_schema(
 // a `rootcx:idx:<hash>` comment carrying a hash of the declared spec — so the
 // PK, identity, and FK indexes are never touched, AND a changed definition under
 // the same name is detected (hash differs) and replaced. Add/keep/change/remove
-// are decided by the pure `compute_index_diff`, then applied.
+// are decided by the pure `compute_managed_diff`, then applied.
 
 const MANAGED_INDEX_PREFIX: &str = "rootcx:idx:";
 
@@ -407,7 +355,12 @@ fn index_spec_hash(idx: &rootcx_types::IndexContract) -> String {
         s.push_str(v);
         s.push(';');
     }
-    let mut h = 0xcbf29ce484222325u64; // FNV-1a
+    fnv1a_hex(&s)
+}
+
+/// FNV-1a hex digest — the shared spec-hash primitive for indexes and checks.
+fn fnv1a_hex(s: &str) -> String {
+    let mut h = 0xcbf29ce484222325u64;
     for b in s.bytes() {
         h ^= b as u64;
         h = h.wrapping_mul(0x100000001b3);
@@ -416,7 +369,7 @@ fn index_spec_hash(idx: &rootcx_types::IndexContract) -> String {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum IndexOp {
+pub enum ManagedOp {
     /// Declared, not currently managed — create it.
     Create(String),
     /// Declared and managed, but the spec changed — drop + recreate.
@@ -427,32 +380,32 @@ pub enum IndexOp {
     Drop(String),
 }
 
-impl IndexOp {
+impl ManagedOp {
     pub fn name(&self) -> &str {
         match self {
-            IndexOp::Create(n) | IndexOp::Replace(n) | IndexOp::Keep(n) | IndexOp::Drop(n) => n,
+            ManagedOp::Create(n) | ManagedOp::Replace(n) | ManagedOp::Keep(n) | ManagedOp::Drop(n) => n,
         }
     }
 }
 
 /// Pure add/keep/change/remove decision. `desired` = (name, spec-hash) for each
 /// declared index; `managed` = name → stored spec-hash for indexes we own.
-pub fn compute_index_diff(
+pub fn compute_managed_diff(
     desired: &[(String, String)],
     managed: &HashMap<String, String>,
-) -> Vec<IndexOp> {
+) -> Vec<ManagedOp> {
     let mut ops = Vec::new();
     let desired_names: HashSet<&str> = desired.iter().map(|(n, _)| n.as_str()).collect();
     for (name, hash) in desired {
         match managed.get(name) {
-            None => ops.push(IndexOp::Create(name.clone())),
-            Some(h) if h == hash => ops.push(IndexOp::Keep(name.clone())),
-            Some(_) => ops.push(IndexOp::Replace(name.clone())),
+            None => ops.push(ManagedOp::Create(name.clone())),
+            Some(h) if h == hash => ops.push(ManagedOp::Keep(name.clone())),
+            Some(_) => ops.push(ManagedOp::Replace(name.clone())),
         }
     }
     for name in managed.keys() {
         if !desired_names.contains(name.as_str()) {
-            ops.push(IndexOp::Drop(name.clone()));
+            ops.push(ManagedOp::Drop(name.clone()));
         }
     }
     ops
@@ -613,8 +566,8 @@ async fn reconcile_indexes(
         by_name.iter().map(|(n, i)| (n.clone(), index_spec_hash(i))).collect();
     let managed = read_managed_index_hashes(pool, schema, &entity.entity_name).await?;
 
-    let ops = compute_index_diff(&desired, &managed);
-    if ops.iter().all(|o| matches!(o, IndexOp::Keep(_))) {
+    let ops = compute_managed_diff(&desired, &managed);
+    if ops.iter().all(|o| matches!(o, ManagedOp::Keep(_))) {
         return Ok(());
     }
 
@@ -622,13 +575,13 @@ async fn reconcile_indexes(
     for op in &ops {
         let drop = |name: &str| format!("DROP INDEX IF EXISTS {}.{}", quote_ident(schema), quote_ident(name));
         match op {
-            IndexOp::Keep(_) => {}
-            IndexOp::Drop(name) => {
+            ManagedOp::Keep(_) => {}
+            ManagedOp::Drop(name) => {
                 sqlx::query(&drop(name)).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
             }
             // Create and Replace both drop-then-create: covers a changed spec and
             // adoption of a pre-existing same-named (unmanaged) index alike.
-            IndexOp::Create(name) | IndexOp::Replace(name) => {
+            ManagedOp::Create(name) | ManagedOp::Replace(name) => {
                 let idx = by_name[name];
                 let create = generate_create_index(schema, &entity.entity_name, idx).map_err(proto)?;
                 sqlx::query(&drop(name)).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
@@ -663,12 +616,170 @@ async fn verify_indexes(
         if desired.is_empty() && managed.is_empty() {
             continue;
         }
-        for op in compute_index_diff(&desired, &managed) {
+        for op in compute_managed_diff(&desired, &managed) {
             let change_type = match &op {
-                IndexOp::Keep(_) => continue,
-                IndexOp::Create(_) => "add_index",
-                IndexOp::Replace(_) => "replace_index",
-                IndexOp::Drop(_) => "drop_index",
+                ManagedOp::Keep(_) => continue,
+                ManagedOp::Create(_) => "add_index",
+                ManagedOp::Replace(_) => "replace_index",
+                ManagedOp::Drop(_) => "drop_index",
+            };
+            changes.push(SchemaChange {
+                entity: entity.entity_name.clone(),
+                change_type: change_type.to_string(),
+                column: op.name().to_string(),
+                detail: None,
+            });
+        }
+    }
+    Ok(changes)
+}
+
+// ── Declarative CHECK constraints ────────────────────────────────────
+//
+// Same tag-owned model as indexes: we reconcile ONLY constraints carrying a
+// `rootcx:chk:<hash>` COMMENT, so app/DBA-defined CHECKs (untagged) are never
+// touched. Covers both enum-derived CHECKs (from `enum_values`) and declarative
+// `checks:` expressions, unified under one mechanism. The hash is of the
+// DECLARED expression (whitespace-normalized) — never Postgres's rewritten
+// stored definition — so `a IN (b,c)` → stored `a = ANY(ARRAY[...])` does not
+// churn (the trap that Drizzle/TypeORM hit; Atlas avoids it with a dev-database,
+// which we don't need because we never compare against the stored text).
+
+const MANAGED_CHECK_PREFIX: &str = "rootcx:chk:";
+
+/// Hash of the DECLARED expression (whitespace-normalized) — never Postgres's
+/// rewritten stored definition — so reformatting doesn't churn.
+fn check_spec_hash(expr: &str) -> String {
+    fnv1a_hex(&expr.split_whitespace().collect::<Vec<_>>().join(" "))
+}
+
+/// The boolean expression for a field's enum CHECK, or None if it has no enum.
+/// Array columns (TEXT[]) use `<@` (every element in the set); scalars use `IN`.
+fn enum_check_expr(field: &FieldContract) -> Option<String> {
+    let vals = field.enum_values.as_ref().filter(|v| !v.is_empty())?;
+    let col = quote_ident(&field.name);
+    let list = vals.iter().map(|v| format!("'{}'", v.replace('\'', "''"))).collect::<Vec<_>>().join(", ");
+    Some(match map_field_type(&field.field_type).strip_suffix("[]") {
+        Some(elem) => format!("{col} <@ ARRAY[{list}]::{elem}[]"),
+        None => format!("{col} IN ({list})"),
+    })
+}
+
+/// Resolved name → expression for every CHECK the core owns on an entity:
+/// enum-derived (`chk_<entity>_<field>`) + declarative (`entity.checks`, explicit
+/// name or `chk_<entity>_<hash>`). Rejects duplicate names. Hashes are derived on
+/// demand from the expression (mirrors `desired_indexes` returning the spec).
+fn desired_checks(entity: &EntityContract) -> Result<HashMap<String, String>, String> {
+    let mut by_name: HashMap<String, String> = HashMap::new();
+    for f in &entity.fields {
+        if let Some(expr) = enum_check_expr(f) {
+            let name = format!("chk_{}_{}", entity.entity_name, f.name);
+            if by_name.insert(name.clone(), expr).is_some() {
+                return Err(format!("duplicate check name '{name}' on '{}'", entity.entity_name));
+            }
+        }
+    }
+    for c in &entity.checks {
+        let name = c.name.clone().unwrap_or_else(|| format!("chk_{}_{}", entity.entity_name, check_spec_hash(&c.expr)));
+        if by_name.insert(name.clone(), c.expr.clone()).is_some() {
+            return Err(format!("duplicate check name '{name}' on '{}'", entity.entity_name));
+        }
+    }
+    Ok(by_name)
+}
+
+/// name → stored spec-hash for the CHECKs WE manage, from `rootcx:chk:` comments.
+/// App/DBA CHECKs carry no such comment, so they never appear and are untouched.
+async fn read_managed_check_hashes(
+    pool: &PgPool,
+    schema: &str,
+    table: &str,
+) -> Result<HashMap<String, String>, RuntimeError> {
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT con.conname, obj_description(con.oid, 'pg_constraint') \
+         FROM pg_constraint con \
+         JOIN pg_class t ON t.oid = con.conrelid \
+         JOIN pg_namespace n ON n.oid = t.relnamespace \
+         WHERE n.nspname = $1 AND t.relname = $2 AND con.contype = 'c' \
+           AND obj_description(con.oid, 'pg_constraint') LIKE $3",
+    )
+    .bind(schema).bind(table).bind(format!("{MANAGED_CHECK_PREFIX}%"))
+    .fetch_all(pool).await.map_err(RuntimeError::Schema)?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(name, comment)| {
+            comment.and_then(|c| c.strip_prefix(MANAGED_CHECK_PREFIX).map(|h| (name, h.to_string())))
+        })
+        .collect())
+}
+
+/// Reconcile owned CHECKs for one entity: add new, replace changed (drop-first,
+/// since `ADD CONSTRAINT` has no `IF NOT EXISTS`), drop removed. Idempotent.
+async fn reconcile_checks(
+    pool: &PgPool,
+    schema: &str,
+    entity: &EntityContract,
+) -> Result<(), RuntimeError> {
+    let proto = |m: String| RuntimeError::Schema(sqlx::Error::Protocol(m));
+    let by_name = desired_checks(entity).map_err(proto)?;
+    let desired: Vec<(String, String)> =
+        by_name.iter().map(|(n, expr)| (n.clone(), check_spec_hash(expr))).collect();
+    let managed = read_managed_check_hashes(pool, schema, &entity.entity_name).await?;
+
+    let ops = compute_managed_diff(&desired, &managed);
+    if ops.iter().all(|o| matches!(o, ManagedOp::Keep(_))) {
+        return Ok(());
+    }
+
+    let fq = format!("{}.{}", quote_ident(schema), quote_ident(&entity.entity_name));
+    let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
+    for op in &ops {
+        let drop = |name: &str| format!("ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS {}", quote_ident(name));
+        match op {
+            ManagedOp::Keep(_) => {}
+            ManagedOp::Drop(name) => {
+                sqlx::query(&drop(name)).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
+            }
+            // Drop-then-add: covers a changed expression AND adoption of a
+            // pre-existing same-named (untagged) CHECK alike.
+            ManagedOp::Create(name) | ManagedOp::Replace(name) => {
+                let expr = &by_name[name];
+                sqlx::query(&drop(name)).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
+                sqlx::query(&format!("ALTER TABLE {fq} ADD CONSTRAINT {} CHECK ({expr})", quote_ident(name)))
+                    .execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
+                sqlx::query(&format!(
+                    "COMMENT ON CONSTRAINT {} ON {fq} IS '{}{}'",
+                    quote_ident(name), MANAGED_CHECK_PREFIX, check_spec_hash(expr)
+                )).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
+            }
+        }
+    }
+    tx.commit().await.map_err(RuntimeError::Schema)?;
+    Ok(())
+}
+
+/// Drift report for owned CHECKs (the verify counterpart to reconcile).
+async fn verify_checks(
+    pool: &PgPool,
+    app_id: &str,
+    entities: &[EntityContract],
+) -> Result<Vec<SchemaChange>, RuntimeError> {
+    let mut changes = Vec::new();
+    for entity in entities {
+        let by_name = desired_checks(entity)
+            .map_err(|m| RuntimeError::Schema(sqlx::Error::Protocol(m)))?;
+        let desired: Vec<(String, String)> =
+            by_name.iter().map(|(n, expr)| (n.clone(), check_spec_hash(expr))).collect();
+        let managed = read_managed_check_hashes(pool, app_id, &entity.entity_name).await?;
+        if desired.is_empty() && managed.is_empty() {
+            continue;
+        }
+        for op in compute_managed_diff(&desired, &managed) {
+            let change_type = match &op {
+                ManagedOp::Keep(_) => continue,
+                ManagedOp::Create(_) => "add_check",
+                ManagedOp::Replace(_) => "replace_check",
+                ManagedOp::Drop(_) => "drop_check",
             };
             changes.push(SchemaChange {
                 entity: entity.entity_name.clone(),
@@ -699,20 +810,12 @@ pub async fn introspect_table(
         return Ok(vec![]);
     }
 
-    let rows: Vec<(String, String, bool, Option<String>, Vec<String>)> = sqlx::query_as(&format!(
+    let rows: Vec<(String, String, bool, Option<String>)> = sqlx::query_as(&format!(
         "SELECT \
             a.attname, \
             format_type(a.atttypid, a.atttypmod), \
             a.attnotnull, \
-            pg_get_expr(d.adbin, d.adrelid), \
-            COALESCE(\
-                (SELECT array_agg(con.conname) \
-                 FROM pg_constraint con \
-                 WHERE con.conrelid = a.attrelid \
-                   AND con.contype = 'c' \
-                   AND a.attnum = ANY(con.conkey)), \
-                ARRAY[]::text[]\
-            ) \
+            pg_get_expr(d.adbin, d.adrelid) \
          FROM pg_attribute a \
          LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum \
          WHERE a.attrelid = '{fq}'::regclass \
@@ -741,16 +844,9 @@ pub async fn introspect_table(
 
     Ok(rows
         .into_iter()
-        .map(|(name, pg_type, not_null, default_expr, checks)| {
+        .map(|(name, pg_type, not_null, default_expr)| {
             let fk = fk_map.get(&name).cloned();
-            DbColumn {
-                name,
-                pg_type,
-                not_null,
-                default_expr,
-                check_constraints: checks,
-                fk,
-            }
+            DbColumn { name, pg_type, not_null, default_expr, fk }
         })
         .collect())
 }
@@ -786,10 +882,6 @@ fn column_diff_to_schema_change(entity: &str, diff: &ColumnDiff) -> SchemaChange
         ColumnDiff::DropNotNull { column_name } => ("drop_not_null", column_name, None),
         ColumnDiff::SetDefault { column_name, default_sql } => ("set_default", column_name, Some(default_sql.clone())),
         ColumnDiff::DropDefault { column_name } => ("drop_default", column_name, None),
-        ColumnDiff::ReplaceCheckConstraint { column_name, new_values, .. } => {
-            ("update_enum", column_name, Some(new_values.join(", ")))
-        }
-        ColumnDiff::DropCheckConstraint { column_name, .. } => ("drop_enum", column_name, None),
         ColumnDiff::ReplaceFkConstraint { column_name, delete_rule, .. } => {
             ("alter_fk_delete_rule", column_name, Some(delete_rule.clone()))
         }
@@ -831,6 +923,7 @@ pub async fn verify_all(
 
     changes.extend(verify_identity_indexes(pool, app_id, entities).await?);
     changes.extend(verify_indexes(pool, app_id, entities).await?);
+    changes.extend(verify_checks(pool, app_id, entities).await?);
 
     Ok(SchemaVerification { compliant: changes.is_empty(), changes })
 }
@@ -873,40 +966,15 @@ async fn verify_identity_indexes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rootcx_types::{FieldContract, FieldReference};
+    use rootcx_types::{CheckContract, FieldContract, FieldReference};
     use serde_json::json;
 
     fn db_col(name: &str, pg_type: &str, not_null: bool) -> DbColumn {
-        DbColumn {
-            name: name.to_string(),
-            pg_type: pg_type.to_string(),
-            not_null,
-            default_expr: None,
-            check_constraints: vec![],
-            fk: None,
-        }
+        DbColumn { name: name.to_string(), pg_type: pg_type.to_string(), not_null, default_expr: None, fk: None }
     }
 
     fn db_col_with_default(name: &str, pg_type: &str, not_null: bool, default: &str) -> DbColumn {
-        DbColumn {
-            name: name.to_string(),
-            pg_type: pg_type.to_string(),
-            not_null,
-            default_expr: Some(default.to_string()),
-            check_constraints: vec![],
-            fk: None,
-        }
-    }
-
-    fn db_col_with_check(name: &str, pg_type: &str, not_null: bool, checks: Vec<&str>) -> DbColumn {
-        DbColumn {
-            name: name.to_string(),
-            pg_type: pg_type.to_string(),
-            not_null,
-            default_expr: None,
-            check_constraints: checks.into_iter().map(String::from).collect(),
-            fk: None,
-        }
+        DbColumn { name: name.to_string(), pg_type: pg_type.to_string(), not_null, default_expr: Some(default.to_string()), fk: None }
     }
 
     fn db_col_with_fk(name: &str, pg_type: &str, not_null: bool, fk_name: &str, delete_rule: &str) -> DbColumn {
@@ -915,7 +983,6 @@ mod tests {
             pg_type: pg_type.to_string(),
             not_null,
             default_expr: None,
-            check_constraints: vec![],
             fk: Some(FkInfo { constraint_name: fk_name.to_string(), delete_rule: delete_rule.to_string() }),
         }
     }
@@ -942,7 +1009,7 @@ mod tests {
     }
 
     fn mentity(name: &str, fields: Vec<FieldContract>) -> EntityContract {
-        EntityContract { entity_name: name.to_string(), fields, identity_kind: None, identity_key: None, indexes: vec![] }
+        EntityContract { entity_name: name.to_string(), fields, identity_kind: None, identity_key: None, indexes: vec![], checks: vec![] }
     }
 
     // ── normalize / defaults ─────────────────────────────────────────
@@ -1107,50 +1174,67 @@ mod tests {
         );
     }
 
+    // ── declarative CHECK reconcile (pure logic) ─────────────────────
+
     #[test]
-    fn diff_add_enum_check() {
-        let db = vec![db_col("color", "text", false)];
-        let mut f = mfield("color", "text");
-        f.enum_values = Some(vec!["red".into(), "blue".into()]);
-        let diff = compute_diff("app", "tbl", &db, &[f], &empty_pk_types());
-        let check = find_diff(&diff.changes, |c| matches!(c, ColumnDiff::ReplaceCheckConstraint { .. }));
-        match check {
-            ColumnDiff::ReplaceCheckConstraint { old_constraint_names, new_values, .. } => {
-                assert!(old_constraint_names.is_empty());
-                assert_eq!(new_values, &["red", "blue"]);
-            }
-            _ => unreachable!(),
-        }
+    fn enum_check_expr_scalar_and_array() {
+        let mut scalar = mfield("color", "text");
+        scalar.enum_values = Some(vec!["red".into(), "blue".into()]);
+        assert_eq!(enum_check_expr(&scalar).unwrap(), r#""color" IN ('red', 'blue')"#);
+
+        let mut arr = mfield("tags", "[text]");
+        arr.enum_values = Some(vec!["a".into(), "b".into()]);
+        assert_eq!(enum_check_expr(&arr).unwrap(), r#""tags" <@ ARRAY['a', 'b']::TEXT[]"#);
+
+        // single quotes in values are doubled — broken-SQL / injection guard
+        let mut quoted = mfield("note", "text");
+        quoted.enum_values = Some(vec!["a'b".into()]);
+        assert_eq!(enum_check_expr(&quoted).unwrap(), r#""note" IN ('a''b')"#);
+
+        assert!(enum_check_expr(&mfield("plain", "text")).is_none(), "no enum → no check");
+        // empty list → no check (guards against invalid `col IN ()`)
+        let mut empty = mfield("e", "text");
+        empty.enum_values = Some(vec![]);
+        assert!(enum_check_expr(&empty).is_none(), "empty enum_values → no check");
     }
 
     #[test]
-    fn diff_change_enum_check() {
-        let db = vec![db_col_with_check("color", "text", false, vec!["chk_tbl_color"])];
-        let mut f = mfield("color", "text");
-        f.enum_values = Some(vec!["red".into(), "green".into()]);
-        let diff = compute_diff("app", "tbl", &db, &[f], &empty_pk_types());
-        let check = find_diff(&diff.changes, |c| matches!(c, ColumnDiff::ReplaceCheckConstraint { .. }));
-        match check {
-            ColumnDiff::ReplaceCheckConstraint { old_constraint_names, new_values, .. } => {
-                assert_eq!(old_constraint_names, &["chk_tbl_color"]);
-                assert_eq!(new_values, &["red", "green"]);
-            }
-            _ => unreachable!(),
-        }
+    fn desired_checks_merges_enum_and_explicit() {
+        let mut gender = mfield("gender", "text");
+        gender.enum_values = Some(vec!["m".into(), "f".into()]);
+        let mut e = mentity("person", vec![gender]);
+        e.checks = vec![CheckContract { name: Some("person_dates_chk".into()), expr: "a >= b".into() }];
+        let d = desired_checks(&e).unwrap();
+        assert!(d.contains_key("chk_person_gender"), "enum-derived check present");
+        assert!(d.contains_key("person_dates_chk"), "explicit check present by name");
+        assert_eq!(d["chk_person_gender"], r#""gender" IN ('m', 'f')"#);
     }
 
     #[test]
-    fn diff_drop_enum_check() {
-        let db = vec![db_col_with_check("color", "text", false, vec!["chk_tbl_color"])];
-        let manifest = vec![mfield("color", "text")]; // no enum
-        let diff = compute_diff("app", "tbl", &db, &manifest, &empty_pk_types());
-        let check = find_diff(&diff.changes, |c| matches!(c, ColumnDiff::DropCheckConstraint { .. }));
-        match check {
-            ColumnDiff::DropCheckConstraint { constraint_names, .. } => {
-                assert_eq!(constraint_names, &["chk_tbl_color"]);
-            }
-            _ => unreachable!(),
-        }
+    fn desired_checks_auto_names_unnamed() {
+        // An explicit check with no name gets a deterministic chk_<entity>_<hash>.
+        let mut e = mentity("person", vec![]);
+        e.checks = vec![CheckContract { name: None, expr: "x > 0".into() }];
+        let d = desired_checks(&e).unwrap();
+        let name = d.keys().next().unwrap();
+        assert_eq!(name, &format!("chk_person_{}", check_spec_hash("x > 0")));
+    }
+
+    #[test]
+    fn desired_checks_rejects_duplicate_names() {
+        let mut e = mentity("t", vec![]);
+        e.checks = vec![
+            CheckContract { name: Some("dup".into()), expr: "x".into() },
+            CheckContract { name: Some("dup".into()), expr: "y".into() },
+        ];
+        assert!(desired_checks(&e).is_err(), "duplicate check names must be rejected");
+    }
+
+    #[test]
+    fn check_spec_hash_ignores_reformatting_only() {
+        // No churn on whitespace reformatting; a real expression change → new hash.
+        assert_eq!(check_spec_hash("a >= b"), check_spec_hash("a   >=  b"));
+        assert_ne!(check_spec_hash("a >= b"), check_spec_hash("a > b"));
     }
 
     #[test]
@@ -1247,35 +1331,13 @@ mod tests {
     }
 
     #[test]
-    fn ddl_enum_check_scalar_vs_array() {
-        // Scalar enum → membership; array enum (TEXT[]) → element containment
-        // (`<@`), so a multi-select column doesn't blow up with "malformed array".
-        let mk = |col: &str, ty: &str| generate_ddl(&TableDiff {
-            schema_name: "app".into(),
-            table_name: "t".into(),
-            changes: vec![ColumnDiff::ReplaceCheckConstraint {
-                column_name: col.into(),
-                old_constraint_names: vec![],
-                new_values: vec!["a".into(), "b".into()],
-                pg_type: ty.into(),
-            }],
-        });
-        assert!(mk("status", "TEXT").iter().any(|s| s.contains("CHECK (\"status\" IN ('a', 'b'))")));
-        assert!(mk("tags", "TEXT[]").iter().any(|s| s.contains("CHECK (\"tags\" <@ ARRAY['a', 'b']::TEXT[])")));
-    }
-
-    #[test]
     fn ddl_statement_ordering() {
+        // Column-level phases: alter type → add column → nullability → default →
+        // drop column. (CHECKs are no longer column-diffs; they reconcile apart.)
         let diff = TableDiff {
             schema_name: "app".into(),
             table_name: "tbl".into(),
             changes: vec![
-                ColumnDiff::ReplaceCheckConstraint {
-                    column_name: "status".into(),
-                    old_constraint_names: vec!["old_chk".into()],
-                    new_values: vec!["a".into(), "b".into()],
-                    pg_type: "TEXT".into(),
-                },
                 ColumnDiff::AlterType {
                     column_name: "score".into(),
                     from_type: "text".into(),
@@ -1288,44 +1350,16 @@ mod tests {
             ],
         };
         let stmts = generate_ddl(&diff);
-
-        let drop_check_pos = stmts.iter().position(|s| s.contains("DROP CONSTRAINT")).unwrap();
         let alter_type_pos = stmts.iter().position(|s| s.contains("TYPE DOUBLE PRECISION")).unwrap();
         let add_col_pos = stmts.iter().position(|s| s.contains("ADD COLUMN")).unwrap();
         let set_not_null_pos = stmts.iter().position(|s| s.contains("SET NOT NULL")).unwrap();
         let set_default_pos = stmts.iter().position(|s| s.contains("SET DEFAULT")).unwrap();
-        let add_check_pos = stmts.iter().position(|s| s.contains("ADD CONSTRAINT")).unwrap();
         let drop_col_pos = stmts.iter().position(|s| s.contains("DROP COLUMN")).unwrap();
 
-        assert!(drop_check_pos < alter_type_pos, "DROP CHECK before ALTER TYPE");
         assert!(alter_type_pos < add_col_pos, "ALTER TYPE before ADD COLUMN");
         assert!(add_col_pos < set_not_null_pos, "ADD COLUMN before SET NOT NULL");
         assert!(set_not_null_pos < set_default_pos, "SET NOT NULL before SET DEFAULT");
-        assert!(set_default_pos < add_check_pos, "SET DEFAULT before ADD CHECK");
-        assert!(add_check_pos < drop_col_pos, "ADD CHECK before DROP COLUMN");
-    }
-
-    #[test]
-    fn ddl_check_replacement() {
-        let diff = TableDiff {
-            schema_name: "app".into(),
-            table_name: "tbl".into(),
-            changes: vec![ColumnDiff::ReplaceCheckConstraint {
-                column_name: "status".into(),
-                old_constraint_names: vec!["old_chk".into()],
-                new_values: vec!["draft".into(), "active".into()],
-                pg_type: "TEXT".into(),
-            }],
-        };
-        let stmts = generate_ddl(&diff);
-        assert!(
-            stmts.iter().any(|s| s.contains("DROP CONSTRAINT IF EXISTS") && s.contains("\"old_chk\"")),
-            "should drop old constraint: {stmts:?}"
-        );
-        assert!(
-            stmts.iter().any(|s| s.contains("ADD CONSTRAINT") && s.contains("'draft'") && s.contains("'active'")),
-            "should add new constraint: {stmts:?}"
-        );
+        assert!(set_default_pos < drop_col_pos, "SET DEFAULT before DROP COLUMN");
     }
 
     // ── column_diff_to_schema_change ─────────────────────────────────
@@ -1359,23 +1393,6 @@ mod tests {
                 Some("'active'"),
             ),
             (ColumnDiff::DropDefault { column_name: "status".into() }, "drop_default", "status", None),
-            (
-                ColumnDiff::ReplaceCheckConstraint {
-                    column_name: "color".into(),
-                    old_constraint_names: vec![],
-                    new_values: vec!["red".into(), "blue".into()],
-                    pg_type: "TEXT".into(),
-                },
-                "update_enum",
-                "color",
-                Some("red, blue"),
-            ),
-            (
-                ColumnDiff::DropCheckConstraint { column_name: "color".into(), constraint_names: vec!["chk".into()] },
-                "drop_enum",
-                "color",
-                None,
-            ),
             (
                 ColumnDiff::ReplaceFkConstraint {
                     column_name: "list_id".into(),
@@ -1614,29 +1631,29 @@ mod tests {
         let h = |s: &str| s.to_string();
         // add: desired present, nothing managed
         assert_eq!(
-            compute_index_diff(&[("a".into(), h("1"))], &HashMap::new()),
-            vec![IndexOp::Create("a".into())]
+            compute_managed_diff(&[("a".into(), h("1"))], &HashMap::new()),
+            vec![ManagedOp::Create("a".into())]
         );
         // keep: same name + same hash
         assert_eq!(
-            compute_index_diff(&[("a".into(), h("1"))], &HashMap::from([("a".into(), h("1"))])),
-            vec![IndexOp::Keep("a".into())]
+            compute_managed_diff(&[("a".into(), h("1"))], &HashMap::from([("a".into(), h("1"))])),
+            vec![ManagedOp::Keep("a".into())]
         );
         // change: same name, different hash → replace
         assert_eq!(
-            compute_index_diff(&[("a".into(), h("2"))], &HashMap::from([("a".into(), h("1"))])),
-            vec![IndexOp::Replace("a".into())]
+            compute_managed_diff(&[("a".into(), h("2"))], &HashMap::from([("a".into(), h("1"))])),
+            vec![ManagedOp::Replace("a".into())]
         );
         // remove: managed, no longer desired
         assert_eq!(
-            compute_index_diff(&[], &HashMap::from([("a".into(), h("1"))])),
-            vec![IndexOp::Drop("a".into())]
+            compute_managed_diff(&[], &HashMap::from([("a".into(), h("1"))])),
+            vec![ManagedOp::Drop("a".into())]
         );
     }
 
     #[test]
     fn index_diff_mixed() {
-        let ops = compute_index_diff(
+        let ops = compute_managed_diff(
             &[("keep".into(), "h".into()), ("changed".into(), "new".into()), ("added".into(), "h".into())],
             &HashMap::from([
                 ("keep".into(), "h".into()),
@@ -1644,10 +1661,10 @@ mod tests {
                 ("removed".into(), "h".into()),
             ]),
         );
-        assert!(ops.contains(&IndexOp::Keep("keep".into())));
-        assert!(ops.contains(&IndexOp::Replace("changed".into())));
-        assert!(ops.contains(&IndexOp::Create("added".into())));
-        assert!(ops.contains(&IndexOp::Drop("removed".into())));
+        assert!(ops.contains(&ManagedOp::Keep("keep".into())));
+        assert!(ops.contains(&ManagedOp::Replace("changed".into())));
+        assert!(ops.contains(&ManagedOp::Create("added".into())));
+        assert!(ops.contains(&ManagedOp::Drop("removed".into())));
         assert_eq!(ops.len(), 4);
     }
 
