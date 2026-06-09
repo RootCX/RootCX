@@ -32,7 +32,7 @@ pub enum ColumnDiff {
     DropNotNull { column_name: String },
     SetDefault { column_name: String, default_sql: String },
     DropDefault { column_name: String },
-    ReplaceCheckConstraint { column_name: String, old_constraint_names: Vec<String>, new_values: Vec<String> },
+    ReplaceCheckConstraint { column_name: String, old_constraint_names: Vec<String>, new_values: Vec<String>, pg_type: String },
     DropCheckConstraint { column_name: String, constraint_names: Vec<String> },
     ReplaceFkConstraint { column_name: String, old_constraint_name: String, new_constraint_name: String, target_table: String, delete_rule: String },
 }
@@ -153,6 +153,7 @@ pub fn compute_diff(
                             column_name: field.name.clone(),
                             old_constraint_names: db_col.check_constraints.clone(),
                             new_values: field.enum_values.clone().unwrap(),
+                            pg_type: desired_pg_type.to_string(),
                         });
                     }
                     (true, false) => {
@@ -166,6 +167,7 @@ pub fn compute_diff(
                             column_name: field.name.clone(),
                             old_constraint_names: vec![],
                             new_values: field.enum_values.clone().unwrap(),
+                            pg_type: desired_pg_type.to_string(),
                         });
                     }
                     (false, false) => {}
@@ -234,14 +236,16 @@ pub fn generate_ddl(diff: &TableDiff) -> Vec<String> {
     phases.into_iter().flatten().collect()
 }
 
-fn emit_check_sql(fq: &str, table: &str, col_name: &str, values: &[String]) -> String {
+fn emit_check_sql(fq: &str, table: &str, col_name: &str, values: &[String], pg_type: &str) -> String {
     let col = quote_ident(col_name);
-    let list: Vec<String> = values.iter().map(|v| format!("'{}'", v.replace('\'', "''"))).collect();
-    format!(
-        "ALTER TABLE {fq} ADD CONSTRAINT {} CHECK ({col} IN ({}))",
-        quote_ident(&format!("chk_{table}_{col_name}")),
-        list.join(", ")
-    )
+    let name = quote_ident(&format!("chk_{table}_{col_name}"));
+    let list = values.iter().map(|v| format!("'{}'", v.replace('\'', "''"))).collect::<Vec<_>>().join(", ");
+    // Array column (e.g. TEXT[]): every element must be in the allowed set
+    // (`<@` = contained-by). Scalar column: plain membership.
+    match pg_type.strip_suffix("[]") {
+        Some(elem) => format!("ALTER TABLE {fq} ADD CONSTRAINT {name} CHECK ({col} <@ ARRAY[{list}]::{elem}[])"),
+        None => format!("ALTER TABLE {fq} ADD CONSTRAINT {name} CHECK ({col} IN ({list}))"),
+    }
 }
 
 fn emit_ddl_phases(fq: &str, table: &str, change: &ColumnDiff, p: &mut [Vec<String>; 7]) {
@@ -258,7 +262,7 @@ fn emit_ddl_phases(fq: &str, table: &str, change: &ColumnDiff, p: &mut [Vec<Stri
                 }
             if let Some(ref vals) = field.enum_values
                 && !vals.is_empty() {
-                    p[5].push(emit_check_sql(fq, table, &field.name, vals));
+                    p[5].push(emit_check_sql(fq, table, &field.name, vals, pg_type));
                 }
         }
         ColumnDiff::Drop { column_name } => {
@@ -281,11 +285,11 @@ fn emit_ddl_phases(fq: &str, table: &str, change: &ColumnDiff, p: &mut [Vec<Stri
         ColumnDiff::DropDefault { column_name } => {
             p[4].push(format!("ALTER TABLE {fq} ALTER COLUMN {} DROP DEFAULT", quote_ident(column_name)));
         }
-        ColumnDiff::ReplaceCheckConstraint { column_name, old_constraint_names, new_values } => {
+        ColumnDiff::ReplaceCheckConstraint { column_name, old_constraint_names, new_values, pg_type } => {
             for name in old_constraint_names {
                 p[0].push(format!("ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS {}", quote_ident(name)));
             }
-            p[5].push(emit_check_sql(fq, table, column_name, new_values));
+            p[5].push(emit_check_sql(fq, table, column_name, new_values, pg_type));
         }
         ColumnDiff::DropCheckConstraint { constraint_names, .. } => {
             for name in constraint_names {
@@ -1243,6 +1247,24 @@ mod tests {
     }
 
     #[test]
+    fn ddl_enum_check_scalar_vs_array() {
+        // Scalar enum → membership; array enum (TEXT[]) → element containment
+        // (`<@`), so a multi-select column doesn't blow up with "malformed array".
+        let mk = |col: &str, ty: &str| generate_ddl(&TableDiff {
+            schema_name: "app".into(),
+            table_name: "t".into(),
+            changes: vec![ColumnDiff::ReplaceCheckConstraint {
+                column_name: col.into(),
+                old_constraint_names: vec![],
+                new_values: vec!["a".into(), "b".into()],
+                pg_type: ty.into(),
+            }],
+        });
+        assert!(mk("status", "TEXT").iter().any(|s| s.contains("CHECK (\"status\" IN ('a', 'b'))")));
+        assert!(mk("tags", "TEXT[]").iter().any(|s| s.contains("CHECK (\"tags\" <@ ARRAY['a', 'b']::TEXT[])")));
+    }
+
+    #[test]
     fn ddl_statement_ordering() {
         let diff = TableDiff {
             schema_name: "app".into(),
@@ -1252,6 +1274,7 @@ mod tests {
                     column_name: "status".into(),
                     old_constraint_names: vec!["old_chk".into()],
                     new_values: vec!["a".into(), "b".into()],
+                    pg_type: "TEXT".into(),
                 },
                 ColumnDiff::AlterType {
                     column_name: "score".into(),
@@ -1291,6 +1314,7 @@ mod tests {
                 column_name: "status".into(),
                 old_constraint_names: vec!["old_chk".into()],
                 new_values: vec!["draft".into(), "active".into()],
+                pg_type: "TEXT".into(),
             }],
         };
         let stmts = generate_ddl(&diff);
@@ -1340,6 +1364,7 @@ mod tests {
                     column_name: "color".into(),
                     old_constraint_names: vec![],
                     new_values: vec!["red".into(), "blue".into()],
+                    pg_type: "TEXT".into(),
                 },
                 "update_enum",
                 "color",

@@ -270,8 +270,11 @@ pub struct IndexColumnSpec {
     pub ops: Option<String>,
 }
 
+// NOTE: no `rename_all = "camelCase"` here — at the FIELD level the manifest
+// format is snake_case (`enum_values`, `on_delete`, …). camelCase silently
+// dropped those keys at deser (→ null), so no enum CHECK constraints or FK
+// delete rules were ever generated. Snake_case mirrors the real format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct FieldContract {
     pub name: String,
     #[serde(rename = "type")]
@@ -489,5 +492,23 @@ mod tests {
             IndexColumn::Name(n) => assert_eq!(n, "slug"),
             other => panic!("expected Name('slug'), got {:?}", other),
         }
+    }
+
+    // Regression for the snake_case field keys (see FieldContract): they must
+    // survive deser AND a serialize round-trip, else the stored manifest loses
+    // them again.
+    #[test]
+    fn field_contract_preserves_snake_case_keys() {
+        let json = r#"{"name":"status","type":"text","enum_values":["draft","active"],"on_delete":"set_null"}"#;
+        let f: FieldContract = serde_json::from_str(json).expect("deser failed");
+        assert_eq!(f.enum_values.as_deref(), Some(&["draft".to_string(), "active".to_string()][..]));
+        assert_eq!(f.on_delete, Some(OnDeletePolicy::SetNull));
+
+        // Round-trip: re-serialize then deser — values must not be lost (proves
+        // serialization is snake_case too, so the stored manifest stays faithful).
+        let round: FieldContract =
+            serde_json::from_value(serde_json::to_value(&f).unwrap()).expect("round-trip failed");
+        assert_eq!(round.enum_values, f.enum_values, "enum_values lost on round-trip");
+        assert_eq!(round.on_delete, f.on_delete, "on_delete lost on round-trip");
     }
 }

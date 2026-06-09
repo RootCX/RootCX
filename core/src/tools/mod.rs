@@ -157,7 +157,7 @@ fn format_data_contract(contract: &JsonValue) -> String {
             let ftype = f.get("type")?.as_str()?;
             let mut s = format!("{fname}({ftype}");
             if f.get("required").and_then(|v| v.as_bool()) == Some(true) { s.push_str(", required"); }
-            if let Some(vals) = f.get("enumValues").and_then(|v| v.as_array()) {
+            if let Some(vals) = f.get("enum_values").and_then(|v| v.as_array()) {
                 let v: Vec<&str> = vals.iter().filter_map(|v| v.as_str()).collect();
                 if !v.is_empty() { s.push_str(&format!(": {}", v.join("|"))); }
             }
@@ -170,4 +170,25 @@ fn format_data_contract(contract: &JsonValue) -> String {
         Some(format!("- {name}: {}", fields.join(", ")))
     }).collect();
     format!("\nSchema:\n{}", lines.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // `enum_values` is read from raw JSON (not type-guarded), so a casing drift
+    // back to `enumValues` would silently drop enum options from agent prompts.
+    // Mirrors the stored-manifest shape: camelCase `entityName`, snake `enum_values`.
+    #[test]
+    fn format_data_contract_surfaces_enum_options() {
+        let contract = json!([{
+            "entityName": "person",
+            "fields": [{ "name": "gender", "type": "text", "enum_values": ["male", "female"] }],
+        }]);
+        assert!(
+            format_data_contract(&contract).contains("gender(text: male|female)"),
+            "enum options missing from schema description"
+        );
+    }
 }
