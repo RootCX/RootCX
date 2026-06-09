@@ -896,6 +896,14 @@ async fn spawn_worker(
     let stdout = child.inner().stdout.take().ok_or_else(|| RuntimeError::Worker("no stdout".into()))?;
     let stderr = child.inner().stderr.take().ok_or_else(|| RuntimeError::Worker("no stderr".into()))?;
 
+    // Hand the worker its own stored manifest so it can read its declared schema
+    // (e.g. enum vocabulary) at runtime — best-effort: a missing manifest just
+    // means the worker boots without it, exactly as before.
+    let manifest = crate::manifest::load_manifest_json(&config.pool, &config.app_id)
+        .await
+        .ok()
+        .flatten();
+
     let mut writer = IpcWriter::new(stdin);
     writer.send(&OutboundMessage::Discover {
         app_id: config.app_id.clone(),
@@ -903,6 +911,7 @@ async fn spawn_worker(
         credentials: config.credentials.clone(),
         agent_config: config.agent_boot_config.clone(),
         run_onstart: config.run_onstart,
+        manifest,
     }).await?;
 
     Ok((child, writer, IpcReader::new(stdout), stderr))

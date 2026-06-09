@@ -84,6 +84,13 @@ pub enum OutboundMessage {
         /// under a user identity. Absent → false (legacy/v1 workers ignore it).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         run_onstart: bool,
+        /// The app's own manifest, verbatim from `rootcx_system.apps`. The worker
+        /// authored it, so this exposes nothing it could not already obtain from
+        /// its own source — enforcement stays core/DB-side regardless. It lets the
+        /// worker read its own declared schema (e.g. enum vocabulary) at runtime
+        /// without a duplicated bundled copy. Absent → legacy workers ignore it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        manifest: Option<JsonValue>,
     },
     Rpc {
         id: String,
@@ -398,7 +405,7 @@ mod tests {
     #[test]
     fn outbound_messages_carry_type_tag() {
         let cases: Vec<(OutboundMessage, &str)> = vec![
-            (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), credentials: HashMap::new(), agent_config: None, run_onstart: true }, "discover"),
+            (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), credentials: HashMap::new(), agent_config: None, run_onstart: true, manifest: None }, "discover"),
             (OutboundMessage::Rpc { id: "r1".into(), method: "echo".into(), params: json!({}), caller: None }, "rpc"),
             (OutboundMessage::Job { id: "j1".into(), payload: json!({}), caller: None }, "job"),
             (OutboundMessage::CollectionOpResult { id: "c1".into(), result: Some(json!({})), error: None }, "collection_op_result"),
