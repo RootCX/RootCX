@@ -287,21 +287,27 @@ async fn load_entity(
     app_id: &str,
     entity: &str,
 ) -> Result<Option<EntityContract>, crate::RuntimeError> {
-    let Some((json,)): Option<(serde_json::Value,)> =
-        sqlx::query_as("SELECT manifest FROM rootcx_system.apps WHERE id = $1")
-            .bind(app_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(crate::RuntimeError::Schema)?
-    else {
-        return Ok(None);
-    };
+    let Some(json) = load_manifest_json(pool, app_id).await? else { return Ok(None) };
     let Ok(m) = serde_json::from_value::<AppManifest>(json) else { return Ok(None) };
     Ok(m.data_contract.into_iter().find(|e| e.entity_name == entity))
 }
 
 pub async fn entity_exists(pool: &PgPool, app_id: &str, entity: &str) -> Result<bool, crate::RuntimeError> {
     Ok(load_entity(pool, app_id, entity).await?.is_some())
+}
+
+/// The app's stored manifest as raw JSON, for handing back to its own worker at
+/// boot (see `OutboundMessage::Discover`). `None` if the app has no manifest.
+pub async fn load_manifest_json(
+    pool: &PgPool,
+    app_id: &str,
+) -> Result<Option<serde_json::Value>, crate::RuntimeError> {
+    Ok(sqlx::query_as::<_, (serde_json::Value,)>("SELECT manifest FROM rootcx_system.apps WHERE id = $1")
+        .bind(app_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(crate::RuntimeError::Schema)?
+        .map(|(j,)| j))
 }
 
 pub async fn field_type_map(
