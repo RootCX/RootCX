@@ -28,7 +28,7 @@ fn contacts(indexes: Vec<IndexContract>) -> Vec<EntityContract> {
             field("email", false), field("phone", false),
             field("company", false), field("notes", false),
         ],
-        identity_kind: None, identity_key: None, indexes,
+        identity_kind: None, identity_key: None, indexes, checks: vec![],
     }]
 }
 
