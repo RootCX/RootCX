@@ -86,6 +86,20 @@ pub async fn effective_under_parent(pool: &PgPool, child_agent_uid: Uuid, parent
     intersect_permissions(&child, parent_perms)
 }
 
+/// Resolve the effective read-only permissions for a public share: the
+/// creator's actual permissions intersected with the app's declared entities.
+pub async fn share_read_perms(
+    pool: &PgPool, app_id: &str, creator_id: Uuid,
+    entities: &[rootcx_types::EntityContract],
+) -> Result<Vec<String>, crate::api_error::ApiError> {
+    let (_, creator_perms) = resolve_permissions(pool, creator_id).await?;
+    Ok(entities
+        .iter()
+        .map(|e| format!("app:{app_id}:{}.read", e.entity_name))
+        .filter(|key| super::perms::has_permission(&creator_perms, key))
+        .collect())
+}
+
 pub async fn delegated_effective(
     pool: &PgPool, agent_uid: Uuid,
     invoker_user_id: Option<Uuid>, parent_perms: Option<&[String]>,

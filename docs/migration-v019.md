@@ -218,7 +218,8 @@ and apps.
 | User reads data without permission | HTTP 403 error | 200 with 0 rows (RLS silent filter) |
 | User writes data without permission | HTTP 403 error | Postgres error (RLS WITH CHECK) |
 | Cross-app linked/federated query | Silently skipped by Rust | 0 rows for unauthorized schemas (RLS) |
-| Public/share-token RPC reads data | Had full DB access via app | ctx.sql returns 0 rows (no identity = deny-all) |
+| Share-token RPC reads data | Had full DB access via app | Read-only delegation of the share creator: visible rows = what the creator may read, `.read` permissions only |
+| Anonymous RPC (no token) reads data | Had full DB access via app | ctx.sql returns 0 rows (no identity = deny-all) |
 
 ### App sandbox (breaking for app code)
 

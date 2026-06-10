@@ -24,6 +24,7 @@ async fn install_sharing_app(rt: &TestRuntime) {
         "public": {
             "rpcs": [
                 { "name": "get_public_board", "scope": ["board_id"] },
+                { "name": "vandalize", "scope": ["board_id"] },
                 { "name": "list_public", "scope": [] }
             ]
         }
@@ -297,6 +298,137 @@ async fn share_token_cannot_access_other_apps_rpc() {
         .json(&json!({"method": "list_items", "params": {}}))
         .send().await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    rt.shutdown().await;
+}
+
+// ── Share-token data path: read-only delegation of the creator ───────────────
+
+const BOARD_BACKEND: &[u8] = br#"
+serve({
+    rpc: {
+        async get_public_board(params, caller, ctx) {
+            const board = await ctx.collection("board").findOne({ id: params.board_id });
+            if (!board) throw new Error("board not found");
+            return { title: board.title, callerEmail: caller ? caller.email : null };
+        },
+        async vandalize(params, _caller, ctx) {
+            return await ctx.collection("board").update({ id: params.board_id, title: "HACKED" });
+        },
+    },
+});
+"#;
+
+async fn deploy_board_backend(rt: &TestRuntime) {
+    let (s, body) = rt.deploy("sharetest", &harness::make_tar_gz(&[("index.js", BOARD_BACKEND)])).await;
+    assert!(s.is_success(), "deploy failed: {body}");
+}
+
+/// Calls the RPC with the share token, retrying while the worker boots.
+async fn share_rpc(rt: &TestRuntime, token: &str, method: &str, board_id: &str) -> (StatusCode, Value) {
+    for _ in 0..40 {
+        let res = rt.client
+            .post(rt.url("/api/v1/apps/sharetest/rpc"))
+            .bearer_auth(token)
+            .json(&json!({"method": method, "params": {"board_id": board_id}}))
+            .send().await.unwrap();
+        let s = res.status();
+        let body: Value = res.json().await.unwrap_or(Value::Null);
+        // Worker still starting → retry; anything else is the real answer.
+        if s.is_server_error() && body["error"].as_str().unwrap_or("").contains("worker not running") {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            continue;
+        }
+        return (s, body);
+    }
+    panic!("worker never came up");
+}
+
+#[tokio::test]
+async fn share_token_rpc_reads_shared_record() {
+    let rt = TestRuntime::boot().await;
+    install_sharing_app(&rt).await;
+    deploy_board_backend(&rt).await;
+
+    let board = rt.create("sharetest", "board", &json!({"title": "Quarterly Roadmap"})).await;
+    let board_id = board["id"].as_str().unwrap();
+
+    let (_, share) = rt.post_json(
+        "/api/v1/apps/sharetest/public-shares",
+        &json!({"context": {"board_id": board_id}}),
+    ).await;
+    let token = share["token"].as_str().unwrap();
+
+    let (s, body) = share_rpc(&rt, token, "get_public_board", board_id).await;
+    assert_eq!(s, StatusCode::OK, "share-token RPC must read the shared record: {body}");
+    assert_eq!(body["title"].as_str(), Some("Quarterly Roadmap"), "unexpected RPC body: {body}");
+    // The caller handed to the app must never leak the creator's email to a visitor.
+    assert_eq!(body["callerEmail"].as_str().unwrap_or(""), "", "creator email leaked: {body}");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn share_token_rpc_cannot_write() {
+    let rt = TestRuntime::boot().await;
+    install_sharing_app(&rt).await;
+    deploy_board_backend(&rt).await;
+
+    let board = rt.create("sharetest", "board", &json!({"title": "Untouched"})).await;
+    let board_id = board["id"].as_str().unwrap();
+
+    let (_, share) = rt.post_json(
+        "/api/v1/apps/sharetest/public-shares",
+        &json!({"context": {"board_id": board_id}}),
+    ).await;
+    let token = share["token"].as_str().unwrap();
+
+    let (s, body) = share_rpc(&rt, token, "vandalize", board_id).await;
+    assert!(!s.is_success(), "write through a share token must fail, got {s}: {body}");
+
+    let (_, fresh) = rt.get_json(&format!("/api/v1/apps/sharetest/collections/board/{board_id}")).await;
+    assert_eq!(fresh["title"].as_str(), Some("Untouched"), "share token mutated data: {fresh}");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn share_dies_when_creator_loses_access() {
+    let rt = TestRuntime::boot().await;
+    install_sharing_app(&rt).await;
+    deploy_board_backend(&rt).await;
+
+    let board = rt.create("sharetest", "board", &json!({"title": "Secret Plan"})).await;
+    let board_id = board["id"].as_str().unwrap();
+
+    // A non-admin creator with just enough permission to read and share.
+    let creator_token = rt.register_and_login("creator@t.local").await;
+    let uid: uuid::Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'creator@t.local'")
+        .fetch_one(rt.pool()).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, inherits, permissions) VALUES ('sharer', '{}', $1)")
+        .bind(vec!["app:sharetest:board.read".to_string(), "app:sharetest:public.share".to_string()])
+        .execute(rt.pool()).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, 'sharer')")
+        .bind(uid).execute(rt.pool()).await.unwrap();
+
+    let (s, share) = rt.request_as(
+        Method::POST, "/api/v1/apps/sharetest/public-shares", &creator_token,
+        Some(&json!({"context": {"board_id": board_id}})),
+    ).await;
+    assert_eq!(s, StatusCode::CREATED, "creator share failed: {share}");
+    let token = share["token"].as_str().unwrap();
+
+    // Sanity: the link serves the record while the creator holds read access.
+    let (s, body) = share_rpc(&rt, token, "get_public_board", board_id).await;
+    assert_eq!(s, StatusCode::OK, "share should work before revocation: {body}");
+
+    // Revoke the creator's role: the delegated read set becomes empty.
+    sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1")
+        .bind(uid).execute(rt.pool()).await.unwrap();
+
+    let (s, body) = share_rpc(&rt, token, "get_public_board", board_id).await;
+    assert!(!s.is_success(), "share must die with the creator's access, got {s}: {body}");
+    assert!(!body.to_string().contains("Secret Plan"), "revoked share leaked data: {body}");
 
     rt.shutdown().await;
 }

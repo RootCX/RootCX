@@ -204,8 +204,15 @@ impl WorkerManager {
         &self, app_id: &str, principal: Principal,
     ) -> Result<SupervisorHandle, RuntimeError> {
         let key = (app_id.to_string(), principal.key());
-        if let Some(h) = self.workers.read().await.get(&key).cloned() {
+        // The read guard must drop at this semicolon: an `if let` scrutinee
+        // temporary lives through the then-block, so reading inline would hold
+        // the read lock across the write().await below — a self-deadlock that
+        // wedges every later caller (tokio's RwLock queues readers behind a
+        // waiting writer).
+        let cached = self.workers.read().await.get(&key).cloned();
+        if let Some(h) = cached {
             if h.status().await? == WorkerStatus::Running { return Ok(h); }
+            let _ = h.stop().await;
             self.workers.write().await.remove(&key);
         }
         let handle = self.spawn_for(&self.pool, &self.secret_manager, app_id, &principal).await?;

@@ -33,6 +33,7 @@ pub struct SharingExtension;
 pub struct ResolvedShare {
     pub share_id: Uuid,
     pub app_id: String,
+    pub created_by: Uuid,
     pub context: JsonValue,
 }
 
@@ -150,8 +151,8 @@ pub async fn resolve_token(pool: &PgPool, raw: &str) -> Option<ResolvedShare> {
     }
     let candidate = tokens::hash(raw);
 
-    let row: Option<(Uuid, String, JsonValue, Vec<u8>)> = sqlx::query_as(
-        "SELECT id, app_id, context, token_hash \
+    let row: Option<(Uuid, String, Uuid, JsonValue, Vec<u8>)> = sqlx::query_as(
+        "SELECT id, app_id, created_by, context, token_hash \
            FROM rootcx_system.public_shares \
           WHERE token_hash = $1 AND revoked_at IS NULL \
             AND (expires_at IS NULL OR expires_at > now())",
@@ -162,7 +163,7 @@ pub async fn resolve_token(pool: &PgPool, raw: &str) -> Option<ResolvedShare> {
     .ok()
     .flatten();
 
-    let (share_id, app_id, context, stored) = row?;
+    let (share_id, app_id, created_by, context, stored) = row?;
 
     // Defense in depth: re-verify constant-time even though the index lookup
     // already restricted us to a single matching hash.
@@ -180,5 +181,5 @@ pub async fn resolve_token(pool: &PgPool, raw: &str) -> Option<ResolvedShare> {
     .execute(pool)
     .await;
 
-    Some(ResolvedShare { share_id, app_id, context })
+    Some(ResolvedShare { share_id, app_id, created_by, context })
 }

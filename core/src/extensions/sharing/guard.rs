@@ -112,13 +112,18 @@ pub async fn load_manifest(pool: &PgPool, app_id: &str) -> Result<Option<AppMani
     Ok(Some(manifest))
 }
 
+/// Look up the public-RPC declaration, returning the full manifest alongside.
+pub async fn find_public_rpc_full(pool: &PgPool, app_id: &str, method: &str) -> Result<Option<(AppManifest, PublicRpc)>, ApiError> {
+    let Some(manifest) = load_manifest(pool, app_id).await? else { return Ok(None) };
+    let decl = manifest.public.as_ref()
+        .and_then(|p| p.rpcs.iter().find(|r| r.name == method))
+        .cloned();
+    Ok(decl.map(|d| (manifest, d)))
+}
+
 /// Look up the public-RPC declaration for `(app_id, method)`.
 pub async fn find_public_rpc(pool: &PgPool, app_id: &str, method: &str) -> Result<Option<PublicRpc>, ApiError> {
-    let manifest = load_manifest(pool, app_id).await?;
-    Ok(manifest
-        .and_then(|m| m.public)
-        .map(|p| p.rpcs)
-        .and_then(|rpcs| rpcs.into_iter().find(|r| r.name == method)))
+    Ok(find_public_rpc_full(pool, app_id, method).await?.map(|(_, d)| d))
 }
 
 /// Authorize an RPC call against the public surface.

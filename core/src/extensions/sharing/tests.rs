@@ -12,6 +12,7 @@ mod guard_tests {
         CallerAuth::ShareToken(ResolvedShare {
             share_id: Uuid::new_v4(),
             app_id: app.into(),
+            created_by: Uuid::new_v4(),
             context: ctx,
         })
     }

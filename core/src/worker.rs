@@ -22,6 +22,7 @@ use crate::tools::{AgentDispatcher, ToolRegistry};
 const MAX_CRASHES: u32 = 5;
 const CRASH_WINDOW: Duration = Duration::from_secs(60);
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
+const IPC_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 use crate::governance::enforcement::{TxSession, TX_NONE, TX_MISMATCH};
 
 fn dead() -> RuntimeError {
@@ -335,10 +336,17 @@ async fn supervisor_loop(
                         }
                         onstart_done = true;
                         let rx = pending_rpcs.register(id.clone());
-                        if let Some(ref mut w) = ipc_writer
-                            && let Err(e) = w.send(&OutboundMessage::Rpc { id: id.clone(), method, params, caller }).await {
-                                pending_rpcs.resolve(&id, Err(e.to_string()));
+                        if let Some(ref mut w) = ipc_writer {
+                            // Bounded send: a worker that stopped reading stdin
+                            // (full pipe) must fail this RPC, not freeze the
+                            // supervisor loop — nothing upstream would time out.
+                            let msg = OutboundMessage::Rpc { id: id.clone(), method, params, caller };
+                            match tokio::time::timeout(IPC_SEND_TIMEOUT, w.send(&msg)).await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(e)) => pending_rpcs.resolve(&id, Err(e.to_string())),
+                                Err(_) => pending_rpcs.resolve(&id, Err("worker unresponsive (ipc send timeout)".into())),
                             }
+                        }
                         tokio::spawn(async move {
                             let result = match tokio::time::timeout(Duration::from_secs(30), rx).await {
                                 Ok(Ok(r)) => r,

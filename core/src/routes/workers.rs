@@ -6,8 +6,8 @@ use serde_json::{Value as JsonValue, json};
 use super::{SharedRuntime, pool, pool_and_secrets, wm};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::governance::authority::require_admin;
-use crate::extensions::sharing::guard::{CallerAuth, authorize_public_rpc, find_public_rpc};
+use crate::governance::authority::{require_admin, share_read_perms};
+use crate::extensions::sharing::guard::{CallerAuth, authorize_public_rpc, find_public_rpc, find_public_rpc_full};
 use crate::ipc::RpcCaller;
 
 pub async fn start_worker(
@@ -71,14 +71,11 @@ pub async fn rpc_proxy(
         .map(String::from)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
+    let p = pool(&rt);
     let caller = match &auth {
         CallerAuth::User(identity) => {
-            // PEP-hop (Phase 6): the caller must be allowed to invoke this app
-            // before we forward. Core + RLS enforce governance downstream; the
-            // worker is untrusted and never receives a token.
-            let pool = pool(&rt);
             if !crate::governance::authority::has_permission_db(
-                &pool, identity.user_id, &format!("app:{app_id}:invoke"),
+                &p, identity.user_id, &format!("app:{app_id}:invoke"),
             ).await? {
                 return Err(ApiError::Forbidden(format!("permission denied: app:{app_id}:invoke")));
             }
@@ -88,20 +85,26 @@ pub async fn rpc_proxy(
                 effective_perms: None,
             })
         }
-        CallerAuth::ShareToken(_) | CallerAuth::Anonymous => {
-            // Anonymous / share-scoped call. Require explicit opt-in via the
-            // app's `public` manifest; the invoke gate above does not apply.
-            let pool = pool(&rt);
-            let decl = find_public_rpc(&pool, &app_id, &method).await?.ok_or_else(|| {
-                if matches!(auth, CallerAuth::Anonymous) {
-                    ApiError::Unauthorized("missing or invalid authorization header".into())
-                } else {
-                    ApiError::Forbidden(format!("rpc '{method}' is not public"))
-                }
-            })?;
-
+        CallerAuth::ShareToken(share) => {
+            let (manifest, decl) = find_public_rpc_full(&p, &app_id, &method)
+                .await?
+                .ok_or_else(|| ApiError::Forbidden(format!("rpc '{method}' is not public")))?;
             authorize_public_rpc(&decl, &auth, &app_id, &params)?;
 
+            let read_perms = share_read_perms(
+                &p, &app_id, share.created_by, &manifest.data_contract,
+            ).await?;
+            Some(RpcCaller {
+                user_id: share.created_by.to_string(),
+                email: String::new(),
+                effective_perms: Some(read_perms),
+            })
+        }
+        CallerAuth::Anonymous => {
+            let decl = find_public_rpc(&p, &app_id, &method)
+                .await?
+                .ok_or_else(|| ApiError::Unauthorized("missing or invalid authorization header".into()))?;
+            authorize_public_rpc(&decl, &auth, &app_id, &params)?;
             Some(RpcCaller {
                 user_id: String::new(),
                 email: String::new(),
