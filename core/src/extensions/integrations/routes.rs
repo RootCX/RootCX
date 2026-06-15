@@ -9,7 +9,7 @@ use base64::Engine;
 
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::governance::authority::{require_admin, resolve_permissions};
+use crate::governance::authority::{require_admin, require_perm, resolve_permissions};
 use crate::routes::{self, SharedRuntime};
 
 const PLATFORM_SCOPE: &str = "_platform";
@@ -115,9 +115,31 @@ pub async fn execute_action(
 
     let target_user = identity.user_id.to_string();
     let caller_app = headers.get("x-app-id").and_then(|v| v.to_str().ok());
-    let (user_credentials, effective_uid) = super::connections::resolve_credentials(
+
+    // An app may only borrow a connection via x-app-id if it has been bound to
+    // one. The SDK never sends x-app-id (its calls resolve to the caller's own
+    // connection), so this only gates the header path that would otherwise let
+    // any authenticated caller ride an app's app-wide connection unbound.
+    if let Some(app) = caller_app {
+        let allowed = super::connections::binding_allows(
+            &pool, app, &integration_id, identity.user_id, identity.user_id,
+        ).await.map_err(ApiError::Internal)?;
+        if !allowed {
+            return Err(ApiError::Forbidden(format!("no binding allows {app} to use {integration_id}")));
+        }
+    }
+
+    let (user_credentials, effective_uid, conn_id) = super::connections::resolve_credentials(
         &secrets, &pool, &integration_id, &target_user, caller_app,
     ).await;
+
+    // Resolving to a connection owned by someone else (via an app-wide shared
+    // binding) means sending AS that user — gated by the manage permission, not
+    // available to ordinary send-permission holders. Sending as oneself (the
+    // common case, incl. every SDK call) requires nothing extra.
+    if effective_uid != target_user {
+        require_perm(&pool, identity.user_id, &super::connections::manage_perm(&integration_id)).await?;
+    }
 
     let caller_email = identity.email.clone();
 
@@ -140,6 +162,8 @@ pub async fn execute_action(
             tracing::error!(integration = %integration_id, action = %action_id, "action failed: {e}");
             ApiError::Internal(e.to_string())
         })?;
+
+    super::connections::flag_if_auth_failed(&pool, &integration_id, conn_id.as_deref(), &result).await;
 
     Ok(Json(result))
 }

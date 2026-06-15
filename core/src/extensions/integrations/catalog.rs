@@ -155,11 +155,15 @@ async fn sync_integration_permissions(
     integration_id: &str,
     manifest: &rootcx_types::AppManifest,
 ) -> Result<(), ApiError> {
-    if manifest.actions.is_empty() { return Ok(()); }
-    let (keys, descs): (Vec<String>, Vec<String>) = manifest.actions.iter().map(|a| (
+    let (mut keys, mut descs): (Vec<String>, Vec<String>) = manifest.actions.iter().map(|a| (
         format!("integration:{integration_id}:{}", a.id),
         format!("{} via {integration_id}", a.name),
     )).unzip();
+    // The elevated permission: create app-wide (shared) bindings and send
+    // through another user's connection. Action perms (send_email, …) do NOT
+    // imply it, so an ordinary sender cannot ride a shared mailbox.
+    keys.push(super::connections::manage_perm(integration_id));
+    descs.push(format!("Manage shared connections and send as other users for {integration_id}"));
     sqlx::query(
         "INSERT INTO rootcx_system.rbac_permissions (key, description)
          SELECT unnest($1::text[]), unnest($2::text[])

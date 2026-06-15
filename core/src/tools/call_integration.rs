@@ -33,6 +33,17 @@ impl Tool for CallIntegrationTool {
             .ok_or("integration calling unavailable")?;
 
         let effective_user = ctx.invoker_user_id.unwrap_or(ctx.user_id);
-        caller.call(&ctx.pool, effective_user, integration_id, action, input).await
+
+        // Same binding-as-consent rule as the worker path: an agent may only
+        // drive an integration the app is bound to, and act as another user
+        // only when that user has their own (app × user) binding.
+        let allowed = crate::extensions::integrations::connections::binding_allows(
+            &ctx.pool, &ctx.app_id, integration_id, ctx.user_id, effective_user,
+        ).await?;
+        if !allowed {
+            return Err(format!("no binding allows {} to use {integration_id}", ctx.app_id));
+        }
+
+        caller.call(&ctx.pool, effective_user, Some(&ctx.app_id), integration_id, action, input).await
     }
 }

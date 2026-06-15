@@ -171,6 +171,78 @@ async fn app_binding_with_connection_selection() {
 }
 
 #[tokio::test]
+async fn status_excludes_dead_connections() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+
+    let _live = create_connection(&rt, &rt.token, "test-integ", "live@example.com").await;
+    let dead = create_connection(&rt, &rt.token, "test-integ", "dead@example.com").await;
+
+    // Simulate the provider having rejected this connection's credentials
+    // (what flag_if_auth_failed does on INSUFFICIENT_PERMISSIONS).
+    sqlx::query("UPDATE rootcx_system.integration_connections SET status = 'dead' WHERE id = $1")
+        .bind(&dead)
+        .execute(rt.pool()).await.unwrap();
+
+    let (s, body) = rt.get_json("/api/v1/integrations/test-integ/auth").await;
+    assert_eq!(s, StatusCode::OK);
+    // The silent-failure guard: a dead grant must not be counted as connected.
+    assert_eq!(body["connected"], json!(true), "one live connection remains: {body}");
+    assert_eq!(body["connectionCount"], json!(1), "dead connection excluded from live count: {body}");
+    assert_eq!(body["deadCount"], json!(1), "dead connection surfaced separately: {body}");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn reconnecting_revives_a_dead_connection() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+
+    let conn = create_connection(&rt, &rt.token, "test-integ", "mailbox@example.com").await;
+    sqlx::query("UPDATE rootcx_system.integration_connections SET status = 'dead', last_error = 'invalid_grant' WHERE id = $1")
+        .bind(&conn)
+        .execute(rt.pool()).await.unwrap();
+
+    // Reconnecting the same mailbox (same label) reuses the row and clears the dead flag.
+    let reconnected = create_connection(&rt, &rt.token, "test-integ", "mailbox@example.com").await;
+    assert_eq!(reconnected, conn, "same label reuses the connection");
+
+    let (_, body) = rt.get_json("/api/v1/integrations/test-integ/auth").await;
+    assert_eq!(body["connected"], json!(true), "connection revived: {body}");
+    assert_eq!(body["deadCount"], json!(0), "dead flag cleared on reconnect: {body}");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn app_wide_binding_requires_manage_permission() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+    rt.install("shared-app", "items").await;
+
+    // A non-admin user with their own connection, holding no elevated permission.
+    let user_b_token = rt.register_and_login("userb@test.local").await;
+    let conn_b = create_connection(&rt, &user_b_token, "test-integ", "userb@example.com").await;
+
+    // App-wide (shared) binding is refused without integration:<id>:manage.
+    let app_wide = json!({"integrationId": "test-integ", "connectionId": conn_b});
+    let (s, body) = rt.request_as(
+        Method::POST, "/api/v1/apps/shared-app/integrations", &user_b_token, Some(&app_wide),
+    ).await;
+    assert_eq!(s, StatusCode::FORBIDDEN, "app-wide bind without manage perm must be denied: {body}");
+
+    // A user-scoped binding of their OWN connection needs no elevated permission.
+    let user_scoped = json!({"integrationId": "test-integ", "connectionId": conn_b, "scope": "user"});
+    let (s, body) = rt.request_as(
+        Method::POST, "/api/v1/apps/shared-app/integrations", &user_b_token, Some(&user_scoped),
+    ).await;
+    assert_eq!(s, StatusCode::OK, "user-scoped self-bind needs no elevated perm: {body}");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
 async fn bind_rejects_connection_not_owned_by_caller() {
     let rt = TestRuntime::boot().await;
     setup_integration(&rt).await;

@@ -32,8 +32,10 @@ pub trait AgentDispatcher: Send + Sync {
 
 #[async_trait]
 pub trait IntegrationCaller: Send + Sync {
+    /// `app_id`: the calling app, threaded into credential resolution so
+    /// (app × user) and app-wide bindings can select the connection.
     async fn call(
-        &self, pool: &PgPool, user_id: Uuid,
+        &self, pool: &PgPool, user_id: Uuid, app_id: Option<&str>,
         integration_id: &str, action_id: &str, input: JsonValue,
     ) -> Result<JsonValue, String>;
 }

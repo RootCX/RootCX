@@ -720,7 +720,7 @@ struct RecordingCaller {
 #[async_trait::async_trait]
 impl rootcx_core::tools::IntegrationCaller for RecordingCaller {
     async fn call(
-        &self, _pool: &sqlx::PgPool, user_id: Uuid,
+        &self, _pool: &sqlx::PgPool, user_id: Uuid, _app_id: Option<&str>,
         _integration_id: &str, _action_id: &str, _input: Value,
     ) -> Result<Value, String> {
         *self.last_user.lock().unwrap() = Some(user_id);
@@ -760,6 +760,56 @@ async fn self_action_is_scoped_to_requester() {
     ).await;
     assert!(r.is_err() && r.as_ref().unwrap_err().contains("admin"),
         "non-admin syncConnectedUsers must be refused: {r:?}");
+    rt.shutdown().await;
+}
+
+// ── call_integration: bindings are the consent boundary ────────────────
+
+#[tokio::test]
+async fn call_integration_requires_binding_consent() {
+    let rt = harness::TestRuntime::boot().await;
+    let pool = rt.pool();
+    let caller = RecordingCaller { last_user: std::sync::Mutex::new(None) };
+
+    // The gate reads only app_integrations — no user rows needed.
+    let sandro = Uuid::new_v4();
+    let colleague = Uuid::new_v4();
+
+    let call = |params: Value, requester: Uuid| {
+        rootcx_core::extensions::integrations::execute_self_action(
+            pool, &caller, "prospection", "call_integration", params, Some(requester),
+        )
+    };
+    let base = json!({"integrationId": "gmail", "action": "send_email", "input": {}});
+
+    // 1. No binding at all → the app may not touch the integration.
+    let r = call(base.clone(), sandro).await;
+    assert!(r.is_err() && r.as_ref().unwrap_err().contains("no binding"),
+        "unbound app must be refused: {r:?}");
+
+    // 2. App-wide binding → acting as self is allowed.
+    sqlx::query("INSERT INTO rootcx_system.app_integrations (app_id, integration_id, user_id) VALUES ('prospection', 'gmail', '')")
+        .execute(pool).await.unwrap();
+    let r = call(base.clone(), sandro).await;
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(*caller.last_user.lock().unwrap(), Some(sandro), "acts as the requester by default");
+
+    // 3. asUser without THAT user's own binding → deny, even though the
+    //    app-wide binding exists. Another user's mailbox needs their consent.
+    let mut p = base.clone();
+    p["asUser"] = json!(colleague.to_string());
+    let r = call(p.clone(), sandro).await;
+    assert!(r.is_err() && r.as_ref().unwrap_err().contains("no binding"),
+        "asUser without user-scoped binding must be refused: {r:?}");
+
+    // 4. The colleague binds the integration to this app themselves → consent
+    //    granted, the app may now act through their connection.
+    sqlx::query("INSERT INTO rootcx_system.app_integrations (app_id, integration_id, user_id, connection_id) VALUES ('prospection', 'gmail', $1, 'conn-colleague')")
+        .bind(colleague.to_string()).execute(pool).await.unwrap();
+    let r = call(p, sandro).await;
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(*caller.last_user.lock().unwrap(), Some(colleague), "acts as the consenting user");
+
     rt.shutdown().await;
 }
 

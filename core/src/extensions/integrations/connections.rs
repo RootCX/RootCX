@@ -9,6 +9,9 @@ use crate::auth::identity::Identity;
 use crate::routes::{self, SharedRuntime};
 
 const CONN_PREFIX: &str = "_conn";
+/// Binding-scope sentinel in app_integrations.user_id: '' = app-wide default.
+pub(crate) const APP_WIDE: &str = "";
+const SCOPE_USER: &str = "user";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +40,17 @@ pub async fn bootstrap(pool: &sqlx::PgPool) -> Result<(), crate::RuntimeError> {
          ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'direct'"
     ).execute(pool).await.map_err(crate::RuntimeError::Schema)?;
 
+    // Health columns: a connection whose provider credentials have been rejected
+    // (e.g. Google invalid_grant) is flagged 'dead' so status() surfaces the
+    // failure instead of reporting it connected. Additive + idempotent.
+    for ddl in [
+        "ALTER TABLE rootcx_system.integration_connections ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'",
+        "ALTER TABLE rootcx_system.integration_connections ADD COLUMN IF NOT EXISTS last_error TEXT",
+        "ALTER TABLE rootcx_system.integration_connections ADD COLUMN IF NOT EXISTS last_error_at TIMESTAMPTZ",
+    ] {
+        sqlx::query(ddl).execute(pool).await.map_err(crate::RuntimeError::Schema)?;
+    }
+
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_ic_user_integration
          ON rootcx_system.integration_connections (user_id, integration_id)"
@@ -57,6 +71,26 @@ pub async fn bootstrap(pool: &sqlx::PgPool) -> Result<(), crate::RuntimeError> {
         "ALTER TABLE rootcx_system.app_integrations
          ADD COLUMN IF NOT EXISTS connection_id TEXT"
     ).execute(pool).await.map_err(crate::RuntimeError::Schema)?;
+
+    // Bindings are scoped per (app × user): '' = app-wide default, a user id =
+    // that user's own connection choice for this app. PK → unique triple.
+    // A user-scoped row without a connection would grant consent yet resolve
+    // through someone else's app-wide connection — forbidden at the data layer.
+    for ddl in [
+        "ALTER TABLE rootcx_system.app_integrations ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE rootcx_system.app_integrations DROP CONSTRAINT IF EXISTS app_integrations_pkey",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_app_integrations_scope
+         ON rootcx_system.app_integrations (app_id, integration_id, user_id)",
+        "DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_user_binding_has_connection') THEN
+                ALTER TABLE rootcx_system.app_integrations
+                    ADD CONSTRAINT chk_user_binding_has_connection
+                    CHECK (user_id = '' OR connection_id IS NOT NULL);
+            END IF;
+        END $$",
+    ] {
+        sqlx::query(ddl).execute(pool).await.map_err(crate::RuntimeError::Schema)?;
+    }
 
     // Migrate old __delegate__ label to kind column
     sqlx::query(
@@ -163,6 +197,12 @@ pub(crate) async fn upsert_connection(
         .fetch_optional(pool).await?;
 
         if let Some((id,)) = existing {
+            // Reconnecting a known mailbox: revive it. The credentials are
+            // overwritten by the caller, so any prior 'dead' flag is stale.
+            let _ = sqlx::query(
+                "UPDATE rootcx_system.integration_connections
+                 SET status = 'active', last_error = NULL, last_error_at = NULL WHERE id = $1"
+            ).bind(&id).execute(pool).await;
             return Ok(id);
         }
     }
@@ -170,17 +210,67 @@ pub(crate) async fn upsert_connection(
     create_connection(pool, integration_id, user_id, label, "direct").await
 }
 
+/// After an integration RPC, flag the connection dead if the result reports a
+/// credential/auth failure (the worker's `INSUFFICIENT_PERMISSIONS`). Every send
+/// path funnels through here instead of re-checking the result inline.
+///
+/// Only the active→dead transition is acted on (`status <> 'dead'`), so retries
+/// against an already-dead connection neither re-stamp `last_error_at` nor spam
+/// the log — the WARN fires exactly once, when a live mailbox first dies.
+/// Best-effort: flagging must never mask the underlying call's own error.
+pub(crate) async fn flag_if_auth_failed(
+    pool: &sqlx::PgPool, integration_id: &str, connection_id: Option<&str>, result: &JsonValue,
+) {
+    let (Some(cid), Some(msg)) = (connection_id, auth_failure_message(result)) else { return };
+
+    let transitioned: Option<(Option<String>,)> = sqlx::query_as(
+        "UPDATE rootcx_system.integration_connections
+         SET status = 'dead', last_error = $2, last_error_at = NOW()
+         WHERE id = $1 AND status <> 'dead'
+         RETURNING label"
+    )
+    .bind(cid)
+    .bind(&msg)
+    .fetch_optional(pool).await.ok().flatten();
+
+    if let Some((label,)) = transitioned {
+        tracing::warn!(
+            integration_id,
+            connection_id = cid,
+            label = label.as_deref().unwrap_or(""),
+            error = %msg,
+            "integration connection credentials rejected — flagged dead, reconnect required"
+        );
+    }
+}
+
+/// The integration worker's `INSUFFICIENT_PERMISSIONS` (which Gmail returns for
+/// `invalid_grant`) signals dead credentials; return its message, else None.
+fn auth_failure_message(result: &JsonValue) -> Option<String> {
+    if result.get("ok").and_then(|v| v.as_bool()) != Some(false) {
+        return None;
+    }
+    let err = result.get("error")?;
+    if err.get("code").and_then(|v| v.as_str()) == Some("INSUFFICIENT_PERMISSIONS") {
+        Some(err.get("message").and_then(|v| v.as_str()).unwrap_or_default().to_string())
+    } else {
+        None
+    }
+}
+
 pub(crate) fn credential_key(connection_id: &str) -> String {
     format!("{CONN_PREFIX}.{connection_id}")
 }
 
-/// Find user's first direct (non-delegation) connection for an integration.
+/// Find user's first live direct (non-delegation) connection for an integration.
+/// Excludes dead connections: this picks a mailbox on the user's behalf, so a
+/// rejected one must never be auto-selected.
 pub(super) async fn first_direct_connection(
     pool: &sqlx::PgPool, integration_id: &str, user_id: &str,
 ) -> Result<Option<String>, sqlx::Error> {
     let row: Option<(String,)> = sqlx::query_as(
         "SELECT id FROM rootcx_system.integration_connections
-         WHERE integration_id = $1 AND user_id = $2 AND kind = 'direct'
+         WHERE integration_id = $1 AND user_id = $2 AND kind = 'direct' AND status = 'active'
          ORDER BY created_at LIMIT 1"
     )
     .bind(integration_id)
@@ -189,31 +279,69 @@ pub(super) async fn first_direct_connection(
     Ok(row.map(|(id,)| id))
 }
 
+/// The binding-as-consent rule, owned by this module alongside the resolution
+/// rules: acting as oneself is allowed by one's own binding OR the app-wide
+/// one; acting as another user requires THAT user's own (app × user) binding.
+pub(crate) async fn binding_allows(
+    pool: &sqlx::PgPool, app_id: &str, integration_id: &str,
+    requester: uuid::Uuid, effective: uuid::Uuid,
+) -> Result<bool, String> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM rootcx_system.app_integrations
+         WHERE app_id = $1 AND integration_id = $2 AND enabled = true
+           AND (user_id = $3 OR ($4 AND user_id = $5)))")
+        .bind(app_id).bind(integration_id)
+        .bind(effective.to_string())
+        .bind(effective == requester)
+        .bind(APP_WIDE)
+        .fetch_one(pool).await.map_err(|e| e.to_string())
+}
+
+/// The permission gating an integration's elevated operations — creating
+/// app-wide (shared) bindings and sending as another user. One builder so the
+/// catalog (which registers it) and the gates (which check it) can't drift.
+pub(crate) fn manage_perm(integration_id: &str) -> String {
+    format!("integration:{integration_id}:manage")
+}
+
 /// Resolve which credentials to use for an integration action.
 /// Unified entry point: handles app binding lookup, delegation, and direct fallback.
+///
+/// Returns `(credentials, effective_user_id, connection_id)`. `connection_id`
+/// is `Some` whenever a stored connection was selected, so callers can flag it
+/// dead if the provider later rejects it.
 pub(crate) async fn resolve_credentials(
     secrets: &crate::secrets::SecretManager, pool: &sqlx::PgPool,
     integration_id: &str, user_id: &str, app_id: Option<&str>,
-) -> (JsonValue, String) {
-    // 1. Check explicit app binding
+) -> (JsonValue, String, Option<String>) {
+    // 1. Explicit app binding — the user's own (app × user) row wins over the
+    //    app-wide ('') default. This is what lets the same user route app A
+    //    through one mailbox and app B through another.
     if let Some(aid) = app_id {
-        let row: Option<(Option<String>,)> = sqlx::query_as(
+        let row: Option<(String,)> = sqlx::query_as(
             "SELECT connection_id FROM rootcx_system.app_integrations
-             WHERE app_id = $1 AND integration_id = $2 AND enabled = true"
+             WHERE app_id = $1 AND integration_id = $2 AND enabled = true
+               AND user_id IN ($4, $3) AND connection_id IS NOT NULL
+             ORDER BY (user_id = $3) DESC LIMIT 1"
         )
         .bind(aid)
         .bind(integration_id)
+        .bind(user_id)
+        .bind(APP_WIDE)
         .fetch_optional(pool).await.ok().flatten();
 
-        if let Some((Some(conn_id),)) = row {
+        if let Some((conn_id,)) = row {
             return resolve_by_connection_id(secrets, pool, integration_id, &conn_id, user_id).await;
         }
     }
 
-    // 2. Single query: fetch delegation + direct connections for this user
+    // 2. Fallback selection for the user. Only 'active' connections are
+    //    eligible: a dead mailbox must never be auto-picked here. (An explicit
+    //    binding above, or a delegation source below, is resolved by id as-is —
+    //    we honor the deliberate choice rather than silently reroute.)
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT id, kind FROM rootcx_system.integration_connections
-         WHERE integration_id = $1 AND user_id = $2
+         WHERE integration_id = $1 AND user_id = $2 AND status = 'active'
          ORDER BY (kind = 'delegation') DESC, created_at
          LIMIT 2"
     )
@@ -240,13 +368,13 @@ pub(crate) async fn resolve_credentials(
         return resolve_by_connection_id(secrets, pool, integration_id, conn_id, user_id).await;
     }
 
-    (JsonValue::Null, user_id.to_string())
+    (JsonValue::Null, user_id.to_string(), None)
 }
 
 async fn resolve_by_connection_id(
     secrets: &crate::secrets::SecretManager, pool: &sqlx::PgPool,
     integration_id: &str, connection_id: &str, fallback_user: &str,
-) -> (JsonValue, String) {
+) -> (JsonValue, String, Option<String>) {
     let conn_key = credential_key(connection_id);
     match secrets.get(pool, integration_id, &conn_key).await {
         Ok(Some(raw)) => {
@@ -255,9 +383,9 @@ async fn resolve_by_connection_id(
                 "SELECT user_id FROM rootcx_system.integration_connections WHERE id = $1"
             ).bind(connection_id).fetch_optional(pool).await.ok().flatten()
                 .unwrap_or_else(|| fallback_user.to_string());
-            (creds, effective_user)
+            (creds, effective_user, Some(connection_id.to_string()))
         }
-        _ => (JsonValue::Null, fallback_user.to_string()),
+        _ => (JsonValue::Null, fallback_user.to_string(), None),
     }
 }
 
@@ -353,18 +481,19 @@ pub async fn list_app_bindings(
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<JsonValue>>, ApiError> {
     let pool = routes::pool(&rt);
-    let rows: Vec<(String, bool, Option<String>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT integration_id, enabled, connection_id, created_at
+    let rows: Vec<(String, bool, Option<String>, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT integration_id, enabled, connection_id, user_id, created_at
          FROM rootcx_system.app_integrations WHERE app_id = $1"
     )
     .bind(&app_id)
     .fetch_all(&pool).await?;
 
-    let bindings: Vec<JsonValue> = rows.into_iter().map(|(iid, enabled, conn_id, created_at)| {
+    let bindings: Vec<JsonValue> = rows.into_iter().map(|(iid, enabled, conn_id, user_id, created_at)| {
         json!({
             "integrationId": iid,
             "enabled": enabled,
             "connectionId": conn_id,
+            "userId": (user_id != APP_WIDE).then_some(user_id),
             "createdAt": created_at.to_rfc3339(),
         })
     }).collect();
@@ -377,6 +506,14 @@ pub async fn list_app_bindings(
 pub struct BindBody {
     pub integration_id: String,
     pub connection_id: Option<String>,
+    /// "user" → binding scoped to the calling user (their consent for this app
+    /// to use the given connection, incl. from background jobs). Default: app-wide.
+    pub scope: Option<String>,
+}
+
+/// '' (app-wide) unless scope=user, then the caller's own id.
+fn scope_user_id(scope: Option<&str>, identity: &Identity) -> String {
+    if scope == Some(SCOPE_USER) { identity.user_id.to_string() } else { APP_WIDE.to_string() }
 }
 
 pub async fn bind_app(
@@ -386,6 +523,11 @@ pub async fn bind_app(
     Json(body): Json<BindBody>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
+    let binding_user = scope_user_id(body.scope.as_deref(), &identity);
+
+    if binding_user != APP_WIDE && body.connection_id.is_none() {
+        return Err(ApiError::BadRequest("a user-scoped binding requires connectionId".into()));
+    }
 
     if let Some(ref conn_id) = body.connection_id {
         let exists: Option<(String,)> = sqlx::query_as(
@@ -401,31 +543,51 @@ pub async fn bind_app(
         }
     }
 
+    // App-wide bindings expose a connection to every holder of the integration's
+    // send permission, so creating one requires the elevated manage permission.
+    // User-scoped bindings (your own connection, your own consent) stay open.
+    if binding_user == APP_WIDE {
+        crate::governance::authority::require_perm(
+            &pool, identity.user_id, &manage_perm(&body.integration_id),
+        ).await?;
+    }
+
     sqlx::query(
-        "INSERT INTO rootcx_system.app_integrations (app_id, integration_id, connection_id)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (app_id, integration_id)
+        "INSERT INTO rootcx_system.app_integrations (app_id, integration_id, connection_id, user_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (app_id, integration_id, user_id)
          DO UPDATE SET connection_id = EXCLUDED.connection_id, enabled = true"
     )
     .bind(&app_id)
     .bind(&body.integration_id)
     .bind(&body.connection_id)
+    .bind(&binding_user)
     .execute(&pool).await?;
 
     Ok(Json(json!({ "message": "bound" })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UnbindQuery {
+    pub scope: Option<String>,
+}
+
 pub async fn unbind_app(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path((app_id, integration_id)): Path<(String, String)>,
+    axum::extract::Query(q): axum::extract::Query<UnbindQuery>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
+    // ?scope=user removes only the caller's own binding; default removes the app-wide one.
+    let binding_user = scope_user_id(q.scope.as_deref(), &identity);
     sqlx::query(
-        "DELETE FROM rootcx_system.app_integrations WHERE app_id = $1 AND integration_id = $2"
+        "DELETE FROM rootcx_system.app_integrations
+         WHERE app_id = $1 AND integration_id = $2 AND user_id = $3"
     )
     .bind(&app_id)
     .bind(&integration_id)
+    .bind(&binding_user)
     .execute(&pool).await?;
 
     Ok(Json(json!({ "message": "unbound" })))
@@ -446,6 +608,28 @@ pub async fn connected_users(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_failure_message_classifies_worker_envelope() {
+        // (case, worker result envelope, expected dead-flagging message)
+        let cases: &[(&str, JsonValue, Option<&str>)] = &[
+            ("success is never a failure",
+                json!({ "ok": true, "data": {} }), None),
+            ("missing ok field is not a failure",
+                json!({ "data": {} }), None),
+            ("a non-auth error is not a credential failure",
+                json!({ "ok": false, "error": { "code": "TEMPORARY_ERROR", "message": "rate limited" } }), None),
+            ("failure without an error object is not classified",
+                json!({ "ok": false }), None),
+            ("INSUFFICIENT_PERMISSIONS flags dead and carries its message",
+                json!({ "ok": false, "error": { "code": "INSUFFICIENT_PERMISSIONS", "message": "invalid_grant" } }), Some("invalid_grant")),
+            ("INSUFFICIENT_PERMISSIONS with no message still flags dead",
+                json!({ "ok": false, "error": { "code": "INSUFFICIENT_PERMISSIONS" } }), Some("")),
+        ];
+        for (case, envelope, expected) in cases {
+            assert_eq!(auth_failure_message(envelope).as_deref(), *expected, "case: {case}");
+        }
+    }
 
     #[test]
     fn credential_key_format_is_stable() {

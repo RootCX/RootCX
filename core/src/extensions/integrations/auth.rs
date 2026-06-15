@@ -142,7 +142,7 @@ async fn try_auto_sync_connect(
         .bind(user_id).fetch_optional(pool).await.ok()??;
     if email.is_empty() { return None; }
 
-    let (user_credentials, effective_uid) = super::connections::resolve_credentials(
+    let (user_credentials, effective_uid, _conn_id) = super::connections::resolve_credentials(
         secrets, pool, &pending.integration_id, &pending.user_id, None,
     ).await;
     let caller = Some(crate::ipc::RpcCaller { user_id: pending.user_id.clone(), email: email.clone(), effective_perms: None });
@@ -197,19 +197,25 @@ pub async fn status(
     }
     let target_user = resolve_target_user(&identity, &qs);
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM rootcx_system.integration_connections
+    // 'active' connections are usable; 'dead' ones had their credentials
+    // rejected by the provider. `connected` reflects only live connections so a
+    // silently-dead grant no longer reports as connected.
+    let (active, dead): (i64, i64) = sqlx::query_as(
+        "SELECT
+            COUNT(*) FILTER (WHERE status = 'active'),
+            COUNT(*) FILTER (WHERE status = 'dead')
+         FROM rootcx_system.integration_connections
          WHERE integration_id = $1 AND user_id = $2 AND kind = 'direct'"
     )
     .bind(&integration_id)
     .bind(&target_user)
-    .fetch_one(&pool).await.unwrap_or(0);
+    .fetch_one(&pool).await.unwrap_or((0, 0));
 
-    if count > 0 {
-        Ok(Json(json!({ "connected": true, "connectionCount": count })))
-    } else {
-        Ok(Json(json!({ "connected": false })))
-    }
+    Ok(Json(json!({
+        "connected": active > 0,
+        "connectionCount": active,
+        "deadCount": dead,
+    })))
 }
 
 pub async fn submit_credentials(

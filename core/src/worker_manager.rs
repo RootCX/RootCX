@@ -504,17 +504,17 @@ struct IntegrationCallImpl {
 #[async_trait]
 impl IntegrationCaller for IntegrationCallImpl {
     async fn call(
-        &self, pool: &PgPool, user_id: uuid::Uuid,
+        &self, pool: &PgPool, user_id: uuid::Uuid, app_id: Option<&str>,
         integration_id: &str, action_id: &str, input: JsonValue,
     ) -> Result<JsonValue, String> {
         let config = crate::extensions::integrations::routes::resolve_config(pool, &self.secrets, integration_id)
             .await.map_err(|e| format!("{e:?}"))?;
 
-        let (user_credentials, effective_uid) = crate::extensions::integrations::connections::resolve_credentials(
-            &self.secrets, pool, integration_id, &user_id.to_string(), None,
+        let (user_credentials, effective_uid, conn_id) = crate::extensions::integrations::connections::resolve_credentials(
+            &self.secrets, pool, integration_id, &user_id.to_string(), app_id,
         ).await;
 
-        self.wm.rpc(
+        let result = self.wm.rpc(
             integration_id,
             uuid::Uuid::new_v4().to_string(),
             "__integration".into(),
@@ -523,7 +523,10 @@ impl IntegrationCaller for IntegrationCallImpl {
                 "userCredentials": user_credentials, "userId": effective_uid,
             }),
             None,
-        ).await.map_err(|e| e.to_string())
+        ).await.map_err(|e| e.to_string())?;
+
+        crate::extensions::integrations::connections::flag_if_auth_failed(pool, integration_id, conn_id.as_deref(), &result).await;
+        Ok(result)
     }
 }
 

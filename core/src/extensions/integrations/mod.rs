@@ -23,9 +23,10 @@ pub async fn execute_self_action(
     caller: &dyn IntegrationCaller,
     app_id: &str,
     action: &str,
-    params: serde_json::Value,
+    mut params: serde_json::Value,
     requester: Option<uuid::Uuid>,
 ) -> Result<serde_json::Value, String> {
+    use crate::tools::str_arg;
     // The requester is resolved from the IPC context_token. It is the only
     // identity an action may act as — a worker can never name an arbitrary user.
     let requester = requester.ok_or("self_action requires an authenticated context")?;
@@ -36,13 +37,12 @@ pub async fn execute_self_action(
             // preserve that exactly via the shared require_admin helper.
             crate::governance::authority::require_admin(pool, requester)
                 .await.map_err(|_| "syncConnectedUsers requires admin".to_string())?;
-            let action_name = params.get("actionName").and_then(|v| v.as_str())
-                .ok_or("syncConnectedUsers: missing actionName")?;
+            let action_name = str_arg(&params, "actionName")?;
             let users = connections::connected_users(pool, app_id).await.map_err(|e| format!("{e:?}"))?;
             let mut synced = 0u64;
             for uid in users {
                 if let Ok(user_uuid) = uid.parse::<uuid::Uuid>()
-                    && caller.call(pool, user_uuid, app_id, action_name, serde_json::json!({})).await.is_ok()
+                    && caller.call(pool, user_uuid, None, app_id, action_name, serde_json::json!({})).await.is_ok()
                 {
                     synced += 1;
                 }
@@ -51,10 +51,28 @@ pub async fn execute_self_action(
         }
         "triggerAction" => {
             // Scoped to the requester: runs the action for themselves only.
-            let action_name = params.get("actionName").and_then(|v| v.as_str())
-                .ok_or("triggerAction: missing actionName")?;
+            let action_name = str_arg(&params, "actionName")?;
             let input = params.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
-            caller.call(pool, requester, app_id, action_name, input).await
+            caller.call(pool, requester, None, app_id, action_name, input).await
+        }
+        "call_integration" => {
+            // A business-app worker calling ANOTHER integration's action.
+            // The binding-as-consent rule (connections::binding_allows) gates it:
+            // no token ever reaches the worker; the core executes with
+            // credentials it owns, even from background jobs.
+            let input = params.get_mut("input").map(serde_json::Value::take)
+                .unwrap_or_else(|| serde_json::json!({}));
+            let integration_id = str_arg(&params, "integrationId")?;
+            let action_name = str_arg(&params, "action")?;
+            let effective = match params.get("asUser").and_then(|v| v.as_str()) {
+                Some(s) => s.parse::<uuid::Uuid>().map_err(|_| "call_integration: asUser must be a uuid".to_string())?,
+                None => requester,
+            };
+
+            if !connections::binding_allows(pool, app_id, integration_id, requester, effective).await? {
+                return Err(format!("no binding allows {app_id} to use {integration_id} as user {effective}"));
+            }
+            caller.call(pool, effective, Some(app_id), integration_id, action_name, input).await
         }
         other => Err(format!("unknown self_action: {other}")),
     }

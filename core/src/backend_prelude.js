@@ -228,6 +228,11 @@ function _makeCtx() {
     uploadFile: _uploadFile,
     sql: (sql, params = []) => _sqlQuery(sql, params),
     selfAction: (action, params = {}) => _selfAction(action, params),
+    // Mediated integration call: the core resolves credentials via the
+    // (app × user) binding and executes — the worker never sees a token.
+    // `asUser` requires that user's own binding of this integration to this app.
+    callIntegration: (integrationId, action, input = {}, asUser) =>
+      _selfAction("call_integration", { integrationId, action, input, asUser }),
     collection(entity) {
       return {
         insert: (data) => _collectionOp("insert", entity, data),
