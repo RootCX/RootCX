@@ -257,6 +257,23 @@ pub async fn webhook_ingress(
     .await?
     .ok_or_else(|| ApiError::NotFound("invalid webhook token".into()))?;
 
+    // Resolve standing identity from the app's declared webhooks (created_by is
+    // set by sync_webhooks at deploy time — the installing admin). This gives the
+    // legacy path the same identity semantics as the proper webhooks path above.
+    let created_by: Option<Uuid> = sqlx::query_scalar(
+        "SELECT created_by FROM rootcx_system.webhooks WHERE app_id = $1 AND created_by IS NOT NULL LIMIT 1",
+    )
+    .bind(&integration_id)
+    .fetch_optional(&pool)
+    .await?
+    .flatten();
+
+    let caller = created_by.map(|uid| crate::ipc::RpcCaller {
+        user_id: uid.to_string(),
+        email: String::new(),
+        effective_perms: None,
+    });
+
     let config = resolve_config(&pool, &secrets, &integration_id).await?;
 
     let result = wm
@@ -265,7 +282,7 @@ pub async fn webhook_ingress(
             Uuid::new_v4().to_string(),
             "__webhook".into(),
             json!({ "headers": hdr_map, "body": payload, "rawBody": raw_body, "config": config }),
-            None,
+            caller,
         )
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
