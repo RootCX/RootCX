@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 async fn setup_integration(rt: &TestRuntime) {
     rt.install_manifest(&json!({
-        "appId": "test-integ",
+        "appId": "test_integ",
         "name": "Test Integration",
         "version": "1.0.0",
         "type": "integration",
@@ -36,12 +36,12 @@ async fn connection_lifecycle_crud() {
     setup_integration(&rt).await;
 
     // Create two connections via submit_credentials
-    let conn1 = create_connection(&rt, &rt.token, "test-integ", "Account A").await;
-    let conn2 = create_connection(&rt, &rt.token, "test-integ", "Account B").await;
+    let conn1 = create_connection(&rt, &rt.token, "test_integ", "Account A").await;
+    let conn2 = create_connection(&rt, &rt.token, "test_integ", "Account B").await;
     assert_ne!(conn1, conn2);
 
     // List connections
-    let (s, body) = rt.get_json("/api/v1/integrations/test-integ/connections").await;
+    let (s, body) = rt.get_json("/api/v1/integrations/test_integ/connections").await;
     assert_eq!(s, StatusCode::OK);
     let connections = body.as_array().unwrap();
     assert!(connections.len() >= 2, "expected at least 2 connections, got {}", connections.len());
@@ -52,22 +52,22 @@ async fn connection_lifecycle_crud() {
 
     // Update label
     let (s, _) = rt.patch_json(
-        &format!("/api/v1/integrations/test-integ/connections/{conn1}"),
+        &format!("/api/v1/integrations/test_integ/connections/{conn1}"),
         &json!({"label": "Primary"}),
     ).await;
     assert_eq!(s, StatusCode::OK);
 
     // Verify update
-    let (_, body) = rt.get_json("/api/v1/integrations/test-integ/connections").await;
+    let (_, body) = rt.get_json("/api/v1/integrations/test_integ/connections").await;
     let updated = body.as_array().unwrap().iter().find(|c| c["id"].as_str() == Some(&conn1)).unwrap();
     assert_eq!(updated["label"].as_str().unwrap(), "Primary");
 
     // Delete connection
-    let (s, _) = rt.delete_json(&format!("/api/v1/integrations/test-integ/connections/{conn1}")).await;
+    let (s, _) = rt.delete_json(&format!("/api/v1/integrations/test_integ/connections/{conn1}")).await;
     assert_eq!(s, StatusCode::OK);
 
     // Verify deletion
-    let (_, body) = rt.get_json("/api/v1/integrations/test-integ/connections").await;
+    let (_, body) = rt.get_json("/api/v1/integrations/test_integ/connections").await;
     let ids: Vec<&str> = body.as_array().unwrap().iter().filter_map(|c| c["id"].as_str()).collect();
     assert!(!ids.contains(&conn1.as_str()), "conn1 should be deleted");
 
@@ -80,13 +80,13 @@ async fn connection_ownership_enforced() {
     setup_integration(&rt).await;
 
     // User A creates a connection
-    let conn_id = create_connection(&rt, &rt.token, "test-integ", "User A account").await;
+    let conn_id = create_connection(&rt, &rt.token, "test_integ", "User A account").await;
 
     // User B tries to delete it
     let user_b_token = rt.register_and_login("userb@test.local").await;
     let (s, _) = rt.request_as(
         Method::DELETE,
-        &format!("/api/v1/integrations/test-integ/connections/{conn_id}"),
+        &format!("/api/v1/integrations/test_integ/connections/{conn_id}"),
         &user_b_token,
         None,
     ).await;
@@ -95,7 +95,7 @@ async fn connection_ownership_enforced() {
     // User B tries to update it
     let (s, _) = rt.request_as(
         Method::PATCH,
-        &format!("/api/v1/integrations/test-integ/connections/{conn_id}"),
+        &format!("/api/v1/integrations/test_integ/connections/{conn_id}"),
         &user_b_token,
         Some(&json!({"label": "hacked"})),
     ).await;
@@ -109,14 +109,14 @@ async fn duplicate_label_reuses_connection() {
     let rt = TestRuntime::boot().await;
     setup_integration(&rt).await;
 
-    let conn1 = create_connection(&rt, &rt.token, "test-integ", "same@example.com").await;
-    let conn2 = create_connection(&rt, &rt.token, "test-integ", "same@example.com").await;
+    let conn1 = create_connection(&rt, &rt.token, "test_integ", "same@example.com").await;
+    let conn2 = create_connection(&rt, &rt.token, "test_integ", "same@example.com").await;
     assert_eq!(conn1, conn2, "same label should return same connection_id");
 
-    let conn3 = create_connection(&rt, &rt.token, "test-integ", "different@example.com").await;
+    let conn3 = create_connection(&rt, &rt.token, "test_integ", "different@example.com").await;
     assert_ne!(conn1, conn3, "different label should create new connection");
 
-    let (_, body) = rt.get_json("/api/v1/integrations/test-integ/connections").await;
+    let (_, body) = rt.get_json("/api/v1/integrations/test_integ/connections").await;
     let connections = body.as_array().unwrap();
     assert_eq!(connections.len(), 2, "should have exactly 2 connections, not 3");
 
@@ -129,42 +129,42 @@ async fn app_binding_with_connection_selection() {
     setup_integration(&rt).await;
 
     // Install a consumer app
-    rt.install("consumer-app", "contacts").await;
+    rt.install("consumer_app", "contacts").await;
 
     // Create two connections
-    let conn1 = create_connection(&rt, &rt.token, "test-integ", "work@example.com").await;
-    let conn2 = create_connection(&rt, &rt.token, "test-integ", "personal@example.com").await;
+    let conn1 = create_connection(&rt, &rt.token, "test_integ", "work@example.com").await;
+    let conn2 = create_connection(&rt, &rt.token, "test_integ", "personal@example.com").await;
 
     // Bind app to integration with specific connection
     let (s, _) = rt.post_json(
-        "/api/v1/apps/consumer-app/integrations",
-        &json!({"integrationId": "test-integ", "connectionId": conn2}),
+        "/api/v1/apps/consumer_app/integrations",
+        &json!({"integrationId": "test_integ", "connectionId": conn2}),
     ).await;
     assert_eq!(s, StatusCode::OK);
 
     // List bindings - verify connection is set
-    let (s, body) = rt.get_json("/api/v1/apps/consumer-app/integrations").await;
+    let (s, body) = rt.get_json("/api/v1/apps/consumer_app/integrations").await;
     assert_eq!(s, StatusCode::OK);
     let bindings = body.as_array().unwrap();
     assert_eq!(bindings.len(), 1);
-    assert_eq!(bindings[0]["integrationId"].as_str().unwrap(), "test-integ");
+    assert_eq!(bindings[0]["integrationId"].as_str().unwrap(), "test_integ");
     assert_eq!(bindings[0]["connectionId"].as_str().unwrap(), &conn2);
 
     // Switch to different connection
     let (s, _) = rt.post_json(
-        "/api/v1/apps/consumer-app/integrations",
-        &json!({"integrationId": "test-integ", "connectionId": conn1}),
+        "/api/v1/apps/consumer_app/integrations",
+        &json!({"integrationId": "test_integ", "connectionId": conn1}),
     ).await;
     assert_eq!(s, StatusCode::OK);
 
-    let (_, body) = rt.get_json("/api/v1/apps/consumer-app/integrations").await;
+    let (_, body) = rt.get_json("/api/v1/apps/consumer_app/integrations").await;
     assert_eq!(body.as_array().unwrap()[0]["connectionId"].as_str().unwrap(), &conn1);
 
     // Unbind
-    let s = rt.delete("/api/v1/apps/consumer-app/integrations/test-integ").await;
+    let s = rt.delete("/api/v1/apps/consumer_app/integrations/test_integ").await;
     assert_eq!(s, StatusCode::OK);
 
-    let (_, body) = rt.get_json("/api/v1/apps/consumer-app/integrations").await;
+    let (_, body) = rt.get_json("/api/v1/apps/consumer_app/integrations").await;
     assert!(body.as_array().unwrap().is_empty());
 
     rt.shutdown().await;
@@ -175,8 +175,8 @@ async fn status_excludes_dead_connections() {
     let rt = TestRuntime::boot().await;
     setup_integration(&rt).await;
 
-    let _live = create_connection(&rt, &rt.token, "test-integ", "live@example.com").await;
-    let dead = create_connection(&rt, &rt.token, "test-integ", "dead@example.com").await;
+    let _live = create_connection(&rt, &rt.token, "test_integ", "live@example.com").await;
+    let dead = create_connection(&rt, &rt.token, "test_integ", "dead@example.com").await;
 
     // Simulate the provider having rejected this connection's credentials
     // (what flag_if_auth_failed does on INSUFFICIENT_PERMISSIONS).
@@ -184,7 +184,7 @@ async fn status_excludes_dead_connections() {
         .bind(&dead)
         .execute(rt.pool()).await.unwrap();
 
-    let (s, body) = rt.get_json("/api/v1/integrations/test-integ/auth").await;
+    let (s, body) = rt.get_json("/api/v1/integrations/test_integ/auth").await;
     assert_eq!(s, StatusCode::OK);
     // The silent-failure guard: a dead grant must not be counted as connected.
     assert_eq!(body["connected"], json!(true), "one live connection remains: {body}");
@@ -199,16 +199,16 @@ async fn reconnecting_revives_a_dead_connection() {
     let rt = TestRuntime::boot().await;
     setup_integration(&rt).await;
 
-    let conn = create_connection(&rt, &rt.token, "test-integ", "mailbox@example.com").await;
+    let conn = create_connection(&rt, &rt.token, "test_integ", "mailbox@example.com").await;
     sqlx::query("UPDATE rootcx_system.integration_connections SET status = 'dead', last_error = 'invalid_grant' WHERE id = $1")
         .bind(&conn)
         .execute(rt.pool()).await.unwrap();
 
     // Reconnecting the same mailbox (same label) reuses the row and clears the dead flag.
-    let reconnected = create_connection(&rt, &rt.token, "test-integ", "mailbox@example.com").await;
+    let reconnected = create_connection(&rt, &rt.token, "test_integ", "mailbox@example.com").await;
     assert_eq!(reconnected, conn, "same label reuses the connection");
 
-    let (_, body) = rt.get_json("/api/v1/integrations/test-integ/auth").await;
+    let (_, body) = rt.get_json("/api/v1/integrations/test_integ/auth").await;
     assert_eq!(body["connected"], json!(true), "connection revived: {body}");
     assert_eq!(body["deadCount"], json!(0), "dead flag cleared on reconnect: {body}");
 
@@ -219,23 +219,23 @@ async fn reconnecting_revives_a_dead_connection() {
 async fn app_wide_binding_requires_manage_permission() {
     let rt = TestRuntime::boot().await;
     setup_integration(&rt).await;
-    rt.install("shared-app", "items").await;
+    rt.install("shared_app", "items").await;
 
     // A non-admin user with their own connection, holding no elevated permission.
     let user_b_token = rt.register_and_login("userb@test.local").await;
-    let conn_b = create_connection(&rt, &user_b_token, "test-integ", "userb@example.com").await;
+    let conn_b = create_connection(&rt, &user_b_token, "test_integ", "userb@example.com").await;
 
     // App-wide (shared) binding is refused without integration:<id>:manage.
-    let app_wide = json!({"integrationId": "test-integ", "connectionId": conn_b});
+    let app_wide = json!({"integrationId": "test_integ", "connectionId": conn_b});
     let (s, body) = rt.request_as(
-        Method::POST, "/api/v1/apps/shared-app/integrations", &user_b_token, Some(&app_wide),
+        Method::POST, "/api/v1/apps/shared_app/integrations", &user_b_token, Some(&app_wide),
     ).await;
     assert_eq!(s, StatusCode::FORBIDDEN, "app-wide bind without manage perm must be denied: {body}");
 
     // A user-scoped binding of their OWN connection needs no elevated permission.
-    let user_scoped = json!({"integrationId": "test-integ", "connectionId": conn_b, "scope": "user"});
+    let user_scoped = json!({"integrationId": "test_integ", "connectionId": conn_b, "scope": "user"});
     let (s, body) = rt.request_as(
-        Method::POST, "/api/v1/apps/shared-app/integrations", &user_b_token, Some(&user_scoped),
+        Method::POST, "/api/v1/apps/shared_app/integrations", &user_b_token, Some(&user_scoped),
     ).await;
     assert_eq!(s, StatusCode::OK, "user-scoped self-bind needs no elevated perm: {body}");
 
@@ -246,18 +246,18 @@ async fn app_wide_binding_requires_manage_permission() {
 async fn bind_rejects_connection_not_owned_by_caller() {
     let rt = TestRuntime::boot().await;
     setup_integration(&rt).await;
-    rt.install("my-app", "items").await;
+    rt.install("my_app", "items").await;
 
     // User A creates a connection
-    let conn_a = create_connection(&rt, &rt.token, "test-integ", "admin account").await;
+    let conn_a = create_connection(&rt, &rt.token, "test_integ", "admin account").await;
 
     // User B tries to bind their app using User A's connection
     let user_b_token = rt.register_and_login("userb@test.local").await;
     let (s, body) = rt.request_as(
         Method::POST,
-        "/api/v1/apps/my-app/integrations",
+        "/api/v1/apps/my_app/integrations",
         &user_b_token,
-        Some(&json!({"integrationId": "test-integ", "connectionId": conn_a})),
+        Some(&json!({"integrationId": "test_integ", "connectionId": conn_a})),
     ).await;
     assert_eq!(s, StatusCode::BAD_REQUEST, "should reject unowned connection: {body}");
 

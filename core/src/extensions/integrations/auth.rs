@@ -228,7 +228,9 @@ pub async fn submit_credentials(
     let user_id = identity.user_id.to_string();
 
     let label = body.get("label").and_then(|v| v.as_str());
-    let conn_id = super::connections::create_connection(&pool, &integration_id, &user_id, label, "direct").await?;
+    // Reconnecting a known mailbox (same label) reuses its row and clears any
+    // stale 'dead' flag; the credentials below overwrite the rejected ones.
+    let conn_id = super::connections::upsert_connection(&pool, &integration_id, &user_id, label).await?;
     let conn_key = super::connections::credential_key(&conn_id);
     secrets.set(&pool, &integration_id, &conn_key, &creds.to_string()).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
