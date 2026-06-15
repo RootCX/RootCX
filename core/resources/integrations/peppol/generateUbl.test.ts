@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { generateInvoiceXml } from "./generateUbl";
+import { generateInvoiceXml, generateCreditNoteXml } from "./generateUbl";
 
 const baseSupplier = {
   peppolId: "0208:1034898146",
@@ -101,4 +101,163 @@ describe("generateInvoiceXml BR-CO-14 compliance", () => {
       expect(inclusive).toBe(Math.round((exclusive + totalVat) * 100) / 100);
     });
   }
+});
+
+describe("generateCreditNoteXml structure (Peppol BIS 3.0 CreditNote)", () => {
+  const lines = [
+    { id: "1", description: "Nourriture", quantity: 1, unitPrice: 623.25, taxPercent: 6, lineAmount: 623.25 },
+    { id: "2", description: "Service", quantity: 2, unitPrice: 100, taxPercent: 21, lineAmount: 200 },
+  ];
+  const taxableAmount = lines.reduce((s, l) => s + l.lineAmount, 0);
+
+  const build = (over: Record<string, unknown> = {}) =>
+    generateCreditNoteXml({
+      creditNoteNumber: "CN-20260615-001",
+      issueDate: "2026-06-15",
+      correctedInvoiceNumber: "INV-20260601-007",
+      correctedInvoiceDate: "2026-06-01",
+      supplier: baseSupplier,
+      customer: baseCustomer,
+      lines,
+      taxTotal: 0,
+      taxableAmount,
+      payableAmount: taxableAmount,
+      note: "TVA à reverser à l'État dans la mesure où elle a été initialement déduite",
+      ...over,
+    });
+
+  it("uses the CreditNote root, namespace and type code 381 (not Invoice/380)", () => {
+    const xml = build();
+    expect(xml).toContain("<CreditNote xmlns=\"urn:oasis:names:specification:ubl:schema:xsd:CreditNote-2\"");
+    expect(xml).toContain("<cbc:CreditNoteTypeCode>381</cbc:CreditNoteTypeCode>");
+    expect(xml).not.toContain("<cbc:InvoiceTypeCode>");
+    expect(xml).not.toContain("<Invoice ");
+    expect(xml.trimEnd().endsWith("</CreditNote>")).toBe(true);
+  });
+
+  it("references the corrected invoice number + date via BillingReference", () => {
+    const xml = build();
+    expect(xml).toMatch(
+      /<cac:BillingReference>\s*<cac:InvoiceDocumentReference>\s*<cbc:ID>INV-20260601-007<\/cbc:ID>\s*<cbc:IssueDate>2026-06-01<\/cbc:IssueDate>/,
+    );
+  });
+
+  it("uses CreditNoteLine / CreditedQuantity, never InvoiceLine / InvoicedQuantity", () => {
+    const xml = build();
+    expect(xml).toContain("<cac:CreditNoteLine>");
+    expect(xml).toContain("<cbc:CreditedQuantity");
+    expect(xml).not.toContain("<cac:InvoiceLine>");
+    expect(xml).not.toContain("<cbc:InvoicedQuantity");
+  });
+
+  it("emits PaymentTerms (BR-CO-25) and carries the user note verbatim, no hardcoded jurisdiction text", () => {
+    const xml = build();
+    expect(xml).toContain("<cac:PaymentTerms>");
+    expect(xml).toContain("TVA à reverser à l&apos;État dans la mesure où elle a été initialement déduite");
+    // No BillingReference text should leak unless provided; no hardcoded BE strings when note is empty
+    const plain = build({ note: undefined });
+    expect(plain).not.toMatch(/TVA à reverser|BTW terug te storten/);
+  });
+
+  it("has no root DueDate element (CreditNote has none)", () => {
+    expect(build()).not.toContain("<cbc:DueDate>");
+  });
+
+  it("throws when the corrected invoice number is missing", () => {
+    expect(() => build({ correctedInvoiceNumber: "" })).toThrow(/correctedInvoiceNumber/);
+  });
+
+  it("keeps element ordering: BillingReference after BuyerReference, before AccountingSupplierParty", () => {
+    const xml = build();
+    const buyer = xml.indexOf("<cbc:BuyerReference>");
+    const billing = xml.indexOf("<cac:BillingReference>");
+    const supplier = xml.indexOf("<cac:AccountingSupplierParty>");
+    const terms = xml.indexOf("<cac:PaymentTerms>");
+    const tax = xml.indexOf("<cac:TaxTotal>");
+    expect(buyer).toBeGreaterThan(-1);
+    expect(buyer).toBeLessThan(billing);
+    expect(billing).toBeLessThan(supplier);
+    expect(terms).toBeLessThan(tax);
+  });
+
+  it("BR-CO-14 / BR-CO-15: TaxTotal == sum(TaxSubtotal), Inclusive == Exclusive + Tax", () => {
+    const xml = build();
+    const totalVat = parseFloat(xml.match(/<cac:TaxTotal>\s*<cbc:TaxAmount[^>]*>([\d.]+)</)![1]);
+    const sumSub = Math.round(extractAllTaxSubtotalAmounts(xml).reduce((s, a) => s + a, 0) * 100) / 100;
+    expect(totalVat).toBe(sumSub);
+    const inclusive = parseFloat(xml.match(/<cbc:TaxInclusiveAmount[^>]*>([\d.]+)</)![1]);
+    const exclusive = parseFloat(xml.match(/<cbc:TaxExclusiveAmount[^>]*>([\d.]+)</)![1]);
+    expect(inclusive).toBe(Math.round((exclusive + totalVat) * 100) / 100);
+  });
+
+  it("omits IssueDate inside BillingReference when correctedInvoiceDate is absent", () => {
+    const xml = build({ correctedInvoiceDate: undefined });
+    expect(xml).toMatch(/<cac:InvoiceDocumentReference>\s*<cbc:ID>INV-20260601-007<\/cbc:ID>\s*<\/cac:InvoiceDocumentReference>/);
+    expect(xml).not.toMatch(/<cac:InvoiceDocumentReference>[\s\S]*<cbc:IssueDate><\/cbc:IssueDate>/);
+  });
+
+  it("emits optional references in correct CreditNote order (Order → Billing → Contract → Additional → Originator)", () => {
+    const xml = build({
+      orderReference: "PO-123",
+      contractReference: "CTR-456",
+      originatorReference: "ORIG-789",
+      documentReferences: [{ id: "ATT-1", description: "specs" }],
+    });
+    const order = xml.indexOf("PO-123");
+    const billing = xml.indexOf("<cac:BillingReference>");
+    const contract = xml.indexOf("CTR-456");
+    const additional = xml.indexOf("ATT-1");
+    const originator = xml.indexOf("ORIG-789");
+    const supplier = xml.indexOf("<cac:AccountingSupplierParty>");
+    // All present
+    for (const [name, pos] of [["order", order], ["billing", billing], ["contract", contract], ["additional", additional], ["originator", originator]] as const) {
+      expect(pos, `${name} must be present`).toBeGreaterThan(-1);
+    }
+    // Correct order per Peppol CreditNote tree
+    expect(order).toBeLessThan(billing);
+    expect(billing).toBeLessThan(contract);
+    expect(contract).toBeLessThan(additional);
+    expect(additional).toBeLessThan(originator);
+    expect(originator).toBeLessThan(supplier);
+  });
+
+  it("emits PaymentMeans with IBAN/BIC when paymentInfo is provided", () => {
+    const xml = build({ paymentInfo: { iban: "BE68539007547034", bic: "GKCCBEBB" } });
+    expect(xml).toContain("<cac:PaymentMeans>");
+    expect(xml).toContain("BE68539007547034");
+    expect(xml).toContain("GKCCBEBB");
+    // PaymentMeans must be before PaymentTerms
+    expect(xml.indexOf("<cac:PaymentMeans>")).toBeLessThan(xml.indexOf("<cac:PaymentTerms>"));
+  });
+
+  it("uses the specified currency throughout, not hardcoded EUR", () => {
+    const xml = build({ currency: "USD" });
+    expect(xml).toContain("<cbc:DocumentCurrencyCode>USD</cbc:DocumentCurrencyCode>");
+    expect(xml).toContain('currencyID="USD"');
+    expect(xml).not.toContain('currencyID="EUR"');
+  });
+
+  it("uses custom paymentTermsNote when provided, default when not", () => {
+    const custom = build({ paymentTermsNote: "Net 30 days" });
+    expect(custom).toContain("<cbc:Note>Net 30 days</cbc:Note>");
+    // Default (no paymentTermsNote key) — must still emit PaymentTerms for BR-CO-25
+    const defaults = build();
+    expect(defaults).toContain("Credit note relating to the referenced invoice.");
+  });
+
+  it("escapes XML-special characters in all user-provided fields", () => {
+    const xml = build({
+      creditNoteNumber: "CN&<01",
+      correctedInvoiceNumber: "INV-'\"&-007",
+      note: "A<B & C>D 'single' \"double\"",
+      supplier: { ...baseSupplier, name: "Firm & Co <SRL>" },
+      customer: { ...baseCustomer, name: "Client \"Best\" <SA>" },
+      lines: [{ id: "1", description: "Item <&> \"test\"", quantity: 1, unitPrice: 100, taxPercent: 21, lineAmount: 100 }],
+    });
+    expect(xml).toContain("CN&amp;&lt;01");
+    expect(xml).toContain("INV-&apos;&quot;&amp;-007");
+    expect(xml).toContain("A&lt;B &amp; C&gt;D &apos;single&apos; &quot;double&quot;");
+    expect(xml).toContain("Firm &amp; Co &lt;SRL&gt;");
+    expect(xml).toContain("Item &lt;&amp;&gt; &quot;test&quot;");
+  });
 });

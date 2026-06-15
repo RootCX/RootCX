@@ -1,8 +1,8 @@
 /// <reference path="../rootcx-worker.d.ts" />
 import { createHmac, timingSafeEqual } from "crypto";
 import { parseUbl, type ParsedUBLDocument } from "./parseUbl";
-import { generateInvoiceXml, escapeXml, extractIdentifier } from "./generateUbl";
-import type { InvoiceParams } from "./generateUbl";
+import { generateInvoiceXml, generateCreditNoteXml, escapeXml, extractIdentifier } from "./generateUbl";
+import type { InvoiceParams, CreditNoteParams } from "./generateUbl";
 import { handleWebhook as handleWebhookImpl, type WebhookDeps } from "./webhook-handler";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -224,14 +224,13 @@ async function refreshParticipantStatus(config: Config, input: any) {
   };
 }
 
-async function sendInvoice(config: Config, input: any) {
-  const { senderPeppolId, receiverPeppolId, countryCode = "BE" } = input;
-  if (!senderPeppolId) throw new Error("senderPeppolId is required");
-  if (!receiverPeppolId) throw new Error("receiverPeppolId is required");
-
-  let xml = input.xml;
-  if (!xml && input.invoiceParams) xml = generateInvoiceXml(input.invoiceParams);
-  if (!xml) throw new Error("Either xml or invoiceParams must be provided");
+// Shared Peppol send: resolve scheme/identifier, register the outgoing document
+// with Dokapi, then upload the UBL to the returned pre-signed URL.
+async function sendPeppolDocument(
+  config: Config,
+  input: { senderPeppolId: string; receiverPeppolId: string; countryCode?: string; xml: string; documentTypeIdentifier: string },
+) {
+  const { senderPeppolId, receiverPeppolId, countryCode = "BE", xml, documentTypeIdentifier } = input;
 
   const [senderScheme, senderRaw] = senderPeppolId.split(":");
   const [receiverScheme, receiverRaw] = receiverPeppolId.split(":");
@@ -242,11 +241,10 @@ async function sendInvoice(config: Config, input: any) {
     c1CountryCode: countryCode.toUpperCase(),
     sender: { scheme: "iso6523-actorid-upis", value: `${senderScheme}:${senderValue}` },
     receiver: { scheme: "iso6523-actorid-upis", value: `${receiverScheme}:${receiverValue}` },
-    documentTypeIdentifier: { scheme: "busdox-docid-qns", value: BIS3_INVOICE },
+    documentTypeIdentifier: { scheme: "busdox-docid-qns", value: documentTypeIdentifier },
     processIdentifier: { scheme: "cenbii-procid-ubl", value: BIS3_PROCESS },
   });
 
-  // Upload UBL XML to pre-signed URL
   const uploadRes = await fetch(sendResponse.preSignedUploadUrl, {
     method: "PUT",
     headers: { "Content-Type": "application/xml" },
@@ -258,6 +256,30 @@ async function sendInvoice(config: Config, input: any) {
     dokapiUlid: sendResponse.document.ulid,
     status: sendResponse.document.status || "sending",
   };
+}
+
+async function sendInvoice(config: Config, input: any) {
+  const { senderPeppolId, receiverPeppolId, countryCode } = input;
+  if (!senderPeppolId) throw new Error("senderPeppolId is required");
+  if (!receiverPeppolId) throw new Error("receiverPeppolId is required");
+
+  let xml = input.xml;
+  if (!xml && input.invoiceParams) xml = generateInvoiceXml(input.invoiceParams);
+  if (!xml) throw new Error("Either xml or invoiceParams must be provided");
+
+  return sendPeppolDocument(config, { senderPeppolId, receiverPeppolId, countryCode, xml, documentTypeIdentifier: BIS3_INVOICE });
+}
+
+async function sendCreditNote(config: Config, input: any) {
+  const { senderPeppolId, receiverPeppolId, countryCode } = input;
+  if (!senderPeppolId) throw new Error("senderPeppolId is required");
+  if (!receiverPeppolId) throw new Error("receiverPeppolId is required");
+
+  let xml = input.xml;
+  if (!xml && input.creditNoteParams) xml = generateCreditNoteXml(input.creditNoteParams);
+  if (!xml) throw new Error("Either xml or creditNoteParams must be provided");
+
+  return sendPeppolDocument(config, { senderPeppolId, receiverPeppolId, countryCode, xml, documentTypeIdentifier: BIS3_CREDIT });
 }
 
 async function sendTestInvoice(config: Config, input: any) {
@@ -294,6 +316,12 @@ function generateUbl(_config: Config, input: any) {
   const { invoiceParams } = input;
   if (!invoiceParams) throw new Error("invoiceParams is required");
   return { xml: generateInvoiceXml(invoiceParams) };
+}
+
+function generateCreditNoteUbl(_config: Config, input: any) {
+  const { creditNoteParams } = input;
+  if (!creditNoteParams) throw new Error("creditNoteParams is required");
+  return { xml: generateCreditNoteXml(creditNoteParams as CreditNoteParams) };
 }
 
 function parseUblAction(_config: Config, input: any) {
@@ -431,9 +459,11 @@ const actions: Record<string, (config: Config, input: any) => Promise<any> | any
   register_document_types: registerDocumentTypes,
   refresh_participant_status: refreshParticipantStatus,
   send_invoice: sendInvoice,
+  send_credit_note: sendCreditNote,
   send_test_invoice: sendTestInvoice,
   validate_document: validateDocument,
   generate_ubl: generateUbl,
+  generate_credit_note_ubl: generateCreditNoteUbl,
   parse_ubl: parseUblAction,
   list_webhooks: listWebhooks,
   register_webhook: registerWebhook,

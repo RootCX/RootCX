@@ -138,6 +138,54 @@
       }
     },
     {
+      "id": "send_credit_note",
+      "name": "Send Credit Note",
+      "description": "Send a UBL CreditNote (BIS Billing 3.0, CreditNoteTypeCode 381) via the Peppol network to correct/cancel a previously issued invoice",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "senderPeppolId": { "type": "string", "description": "Sender Peppol ID" },
+          "receiverPeppolId": { "type": "string", "description": "Receiver Peppol ID" },
+          "countryCode": { "type": "string", "default": "BE" },
+          "xml": { "type": "string", "description": "Pre-generated UBL CreditNote XML (provide this OR creditNoteParams)" },
+          "creditNoteParams": {
+            "type": "object",
+            "description": "Structured credit-note data for UBL generation",
+            "properties": {
+              "creditNoteNumber": { "type": "string" },
+              "issueDate": { "type": "string", "description": "YYYY-MM-DD" },
+              "currency": { "type": "string", "default": "EUR" },
+              "correctedInvoiceNumber": { "type": "string", "description": "Number of the invoice being corrected (EN16931 BT-25)" },
+              "correctedInvoiceDate": { "type": "string", "description": "Issue date of the corrected invoice (EN16931 BT-26), YYYY-MM-DD" },
+              "buyerReference": { "type": "string" },
+              "orderReference": { "type": "string" },
+              "contractReference": { "type": "string" },
+              "originatorReference": { "type": "string" },
+              "note": { "type": "string", "description": "Free-text note (carries any statutory mention typed by the user)" },
+              "paymentTermsNote": { "type": "string", "description": "Free-text payment terms (satisfies EN16931 BR-CO-25)" },
+              "supplier": { "type": "object", "description": "InvoiceParty: peppolId, name, vatNumber, street, city, postalCode, countryCode" },
+              "customer": { "type": "object", "description": "InvoiceParty: peppolId, name, vatNumber, street, city, postalCode, countryCode" },
+              "lines": { "type": "array", "description": "Array of {id, description, quantity, unitPrice, taxPercent, lineAmount}" },
+              "taxTotal": { "type": "number" },
+              "taxableAmount": { "type": "number" },
+              "payableAmount": { "type": "number" },
+              "paymentInfo": { "type": "object", "description": "{iban, bic?, bankName?, accountName?}" },
+              "documentReferences": { "type": "array", "description": "Additional document references with optional attachments" }
+            },
+            "required": ["creditNoteNumber", "issueDate", "correctedInvoiceNumber", "supplier", "customer", "lines", "taxTotal", "taxableAmount", "payableAmount"]
+          }
+        },
+        "required": ["senderPeppolId", "receiverPeppolId"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "dokapiUlid": { "type": "string" },
+          "status": { "type": "string" }
+        }
+      }
+    },
+    {
       "id": "send_test_invoice",
       "name": "Send Test Invoice",
       "description": "Send a test invoice to self for verifying the integration",
@@ -186,6 +234,24 @@
           "invoiceParams": { "type": "object", "description": "Full InvoiceParams object (see send_invoice schema)" }
         },
         "required": ["invoiceParams"]
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "xml": { "type": "string" }
+        }
+      }
+    },
+    {
+      "id": "generate_credit_note_ubl",
+      "name": "Generate UBL Credit Note XML",
+      "description": "Generate Peppol BIS Billing 3.0 compliant UBL 2.1 CreditNote XML (type 381) from structured credit-note data",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "creditNoteParams": { "type": "object", "description": "Full CreditNoteParams object (see send_credit_note schema)" }
+        },
+        "required": ["creditNoteParams"]
       },
       "outputSchema": {
         "type": "object",
@@ -348,7 +414,11 @@
       }
     }
   ],
-  "webhooks": ["document_status", "participant_status", "incoming_document"],
+  "webhooks": [
+    { "name": "document_status", "method": "__webhook" },
+    { "name": "participant_status", "method": "__webhook" },
+    { "name": "incoming_document", "method": "__webhook" }
+  ],
   "instructions": "Peppol e-invoicing integration via Dokapi access point.\n\nTypical registration flow:\n1. `register_participant` with VAT number and company name\n2. `register_document_types` to enable receiving documents\n3. `push_business_card` to appear in Peppol Directory\n4. `register_webhook` for async status updates\n\nSending an invoice:\n- Provide `invoiceParams` for automatic UBL 2.1 generation, or `xml` for pre-built UBL\n- InvoiceParams supplier/customer require: peppolId, name, vatNumber, street, city, postalCode, countryCode\n- Each invoice line: id, description, quantity, unitPrice, taxPercent, lineAmount\n- Optional: paymentInfo (IBAN/BIC), documentReferences (embedded PDF attachments)\n\nWebhook events from Dokapi:\n- `outgoing-peppol-documents.sent/delivered/failed` - document delivery status\n- `participant-registrations.active/failed` - registration completion\n- `incoming-peppol-documents.received` - new incoming document (must download and confirm)\n\nCountry support: BE, NL, FR, DE, IT, ES, AT, LU, PT, IE, FI, SE, NO, DK, PL, CZ, RO, BG, HR, SI, SK, EE, LV, LT, HU, CY, MT, GR, SG, AU, NZ, US, JP.\n\nPeppol ID format: `{ICD}:{identifier}` (e.g. `0208:0501598777` for Belgian KBO).",
   "dataContract": [
     {
