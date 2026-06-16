@@ -123,16 +123,30 @@ pub async fn callback(
     ).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
     if let Some(creds) = result.get("credentials") {
-        let label = result.get("email").and_then(|v| v.as_str())
-            .or_else(|| result.get("account").and_then(|v| v.as_str()));
         let conn_id = super::connections::upsert_connection(
-            &pool, &pending.integration_id, &pending.user_id, label, pending.config_id.as_deref(),
+            &pool, &pending.integration_id, &pending.user_id, None, pending.config_id.as_deref(),
         ).await?;
         let conn_key = super::connections::credential_key(&conn_id);
         secrets.set(&pool, &pending.integration_id, &conn_key, &creds.to_string()).await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-        info!(integration_id = %pending.integration_id, user_id = %pending.user_id, connection_id = %conn_id, "credentials stored");
+        // Resolve the account label (email) via get_profile now that creds are
+        // persisted and the token is stable.
+        let label: Option<String> = wm.rpc(
+            &pending.integration_id, Uuid::new_v4().to_string(), "__integration".into(),
+            json!({ "action": "get_profile", "input": {}, "config": config,
+                "userCredentials": creds, "userId": pending.user_id }),
+            None,
+        ).await.ok()
+            .and_then(|r| r.pointer("/data/emailAddress").and_then(|v| v.as_str()).map(|s| s.to_string()));
+        if let Some(ref l) = label {
+            let _ = sqlx::query(
+                "UPDATE rootcx_system.integration_connections SET label = $1 WHERE id = $2"
+            ).bind(l).bind(&conn_id).execute(&pool).await;
+        }
+
+        info!(integration_id = %pending.integration_id, user_id = %pending.user_id,
+            connection_id = %conn_id, label = label.as_deref().unwrap_or(""), "credentials stored");
 
         if let Some((code, msg)) = try_auto_sync_connect(&rt, &pool, &secrets, &wm, &pending).await {
             return Ok(Html(callback_html(&pending.integration_id, Some((&code, &msg)))));

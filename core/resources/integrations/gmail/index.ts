@@ -69,19 +69,7 @@ async function authStart(params: any) {
 async function authCallback(params: any) {
   const { config, query } = params;
   const refreshToken = await exchangeCodeForRefreshToken(config, query.code, query.redirect_uri ?? params.callbackUrl ?? "");
-
-  let email: string | undefined;
-  try {
-    const client = oauth2ClientFor(config, { refreshToken }, "auth-callback");
-    const token = await client.getAccessToken();
-    if (token.token) {
-      const res = await fetch(`${GMAIL_API}/profile`, { headers: { Authorization: `Bearer ${token.token}` } });
-      if (res.ok) { email = (await res.json()).emailAddress; }
-    }
-    evictClient("auth-callback");
-  } catch { /* non-critical — label will be null */ }
-
-  return { credentials: { refreshToken }, email };
+  return { credentials: { refreshToken } };
 }
 
 async function fetchAndCacheAliases(config: Config, creds: UserCreds, userId: string): Promise<Result<{ primary: string; aliases: string[] }>> {
