@@ -20,7 +20,7 @@ use crate::routes::SharedRuntime;
 
 type HmacSha256 = Hmac<Sha256>;
 
-struct Pending { integration_id: String, user_id: String, created: Instant }
+struct Pending { integration_id: String, user_id: String, config_id: Option<String>, created: Instant }
 
 static PENDING: LazyLock<Mutex<HashMap<String, Pending>>> = LazyLock::new(Default::default);
 const TTL_SECS: u64 = 600;
@@ -65,17 +65,30 @@ pub async fn start(
     identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(integration_id): Path<String>,
+    axum::extract::Query(qs): axum::extract::Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
     let wm = crate::routes::wm(&rt);
-    let config = super::routes::resolve_config(&pool, &secrets, &integration_id).await?;
+    // ?config_id=<id> selects a named provider config (a specific OAuth client);
+    // absent → the integration's default config.
+    let config_id = qs.get("config_id").cloned();
+    if let Some(ref cid) = config_id {
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM rootcx_system.integration_configs WHERE id = $1 AND integration_id = $2)"
+        ).bind(cid).bind(&integration_id).fetch_one(&pool).await?;
+        if !exists {
+            return Err(ApiError::NotFound("config_id not found for this integration".into()));
+        }
+    }
+    let config = super::routes::resolve_config_scoped(&pool, &secrets, &integration_id, config_id.as_deref()).await?;
 
     let nonce = Uuid::new_v4().to_string();
     let (cb, state) = build_callback_and_state(&headers, &nonce);
 
     PENDING.lock().await.insert(nonce, Pending {
-        integration_id: integration_id.clone(), user_id: identity.user_id.to_string(), created: Instant::now(),
+        integration_id: integration_id.clone(), user_id: identity.user_id.to_string(),
+        config_id, created: Instant::now(),
     });
 
     let result = wm.rpc(
@@ -102,7 +115,7 @@ pub async fn callback(
 
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
     let wm = crate::routes::wm(&rt);
-    let config = super::routes::resolve_config(&pool, &secrets, &pending.integration_id).await?;
+    let config = super::routes::resolve_config_scoped(&pool, &secrets, &pending.integration_id, pending.config_id.as_deref()).await?;
 
     let result = wm.rpc(
         &pending.integration_id, Uuid::new_v4().to_string(), "__auth_callback".into(),
@@ -114,7 +127,7 @@ pub async fn callback(
         let label = result.get("email").and_then(|v| v.as_str())
             .or_else(|| result.get("account").and_then(|v| v.as_str()));
         let conn_id = super::connections::upsert_connection(
-            &pool, &pending.integration_id, &pending.user_id, label,
+            &pool, &pending.integration_id, &pending.user_id, label, pending.config_id.as_deref(),
         ).await?;
         let conn_key = super::connections::credential_key(&conn_id);
         secrets.set(&pool, &pending.integration_id, &conn_key, &creds.to_string()).await
@@ -142,11 +155,10 @@ async fn try_auto_sync_connect(
         .bind(user_id).fetch_optional(pool).await.ok()??;
     if email.is_empty() { return None; }
 
-    let (user_credentials, effective_uid, _conn_id) = super::connections::resolve_credentials(
+    let (config, user_credentials, effective_uid, _conn_id) = super::connections::resolve_credentials(
         secrets, pool, &pending.integration_id, &pending.user_id, None,
     ).await;
     let caller = Some(crate::ipc::RpcCaller { user_id: pending.user_id.clone(), email: email.clone(), effective_perms: None });
-    let config = super::routes::resolve_config(pool, secrets, &pending.integration_id).await.unwrap_or(serde_json::Value::Null);
 
     match wm.rpc(
         &pending.integration_id, Uuid::new_v4().to_string(), "__integration".into(),
@@ -230,7 +242,7 @@ pub async fn submit_credentials(
     let label = body.get("label").and_then(|v| v.as_str());
     // Reconnecting a known mailbox (same label) reuses its row and clears any
     // stale 'dead' flag; the credentials below overwrite the rejected ones.
-    let conn_id = super::connections::upsert_connection(&pool, &integration_id, &user_id, label).await?;
+    let conn_id = super::connections::upsert_connection(&pool, &integration_id, &user_id, label, None).await?;
     let conn_key = super::connections::credential_key(&conn_id);
     secrets.set(&pool, &integration_id, &conn_key, &creds.to_string()).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -255,7 +267,7 @@ pub async fn delegate(
         .ok_or_else(|| ApiError::BadRequest("you must connect this integration first".into()))?;
 
     let delegate_conn_id = super::connections::create_connection(
-        &pool, &integration_id, &agent_uid, None, "delegation",
+        &pool, &integration_id, &agent_uid, None, "delegation", None,
     ).await?;
     let conn_key = super::connections::credential_key(&delegate_conn_id);
     let delegation = json!({ "_delegate": source_conn_id }).to_string();

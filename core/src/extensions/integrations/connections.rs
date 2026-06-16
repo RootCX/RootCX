@@ -43,13 +43,33 @@ pub async fn bootstrap(pool: &sqlx::PgPool) -> Result<(), crate::RuntimeError> {
     // Health columns: a connection whose provider credentials have been rejected
     // (e.g. Google invalid_grant) is flagged 'dead' so status() surfaces the
     // failure instead of reporting it connected. Additive + idempotent.
+    //
+    // config_id: which named provider config (OAuth client) authorized this
+    // connection. NULL = the integration's default config (legacy '_platform'
+    // secrets). A connection refreshes with the client that issued its token, so
+    // the config is pinned per connection, not per integration.
     for ddl in [
         "ALTER TABLE rootcx_system.integration_connections ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'",
         "ALTER TABLE rootcx_system.integration_connections ADD COLUMN IF NOT EXISTS last_error TEXT",
         "ALTER TABLE rootcx_system.integration_connections ADD COLUMN IF NOT EXISTS last_error_at TIMESTAMPTZ",
+        "ALTER TABLE rootcx_system.integration_connections ADD COLUMN IF NOT EXISTS config_id TEXT",
     ] {
         sqlx::query(ddl).execute(pool).await.map_err(crate::RuntimeError::Schema)?;
     }
+
+    // Named provider configs: additional OAuth clients for one integration (e.g.
+    // a second Google project). Each holds its own client_id/secret as secrets
+    // scoped under its id. The default config stays the legacy '_platform' scope
+    // (a NULL config_id on a connection), so existing installs are untouched.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rootcx_system.integration_configs (
+            id TEXT PRIMARY KEY,
+            integration_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE (integration_id, label)
+        )"
+    ).execute(pool).await.map_err(crate::RuntimeError::Schema)?;
 
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_ic_user_integration
@@ -162,17 +182,19 @@ pub(crate) async fn create_connection(
     user_id: &str,
     label: Option<&str>,
     kind: &str,
+    config_id: Option<&str>,
 ) -> Result<String, ApiError> {
     let id = Uuid::new_v4().to_string();
     sqlx::query(
-        "INSERT INTO rootcx_system.integration_connections (id, integration_id, user_id, label, kind)
-         VALUES ($1, $2, $3, $4, $5)"
+        "INSERT INTO rootcx_system.integration_connections (id, integration_id, user_id, label, kind, config_id)
+         VALUES ($1, $2, $3, $4, $5, $6)"
     )
     .bind(&id)
     .bind(integration_id)
     .bind(user_id)
     .bind(label)
     .bind(kind)
+    .bind(config_id)
     .execute(pool).await?;
     Ok(id)
 }
@@ -185,6 +207,7 @@ pub(crate) async fn upsert_connection(
     integration_id: &str,
     user_id: &str,
     label: Option<&str>,
+    config_id: Option<&str>,
 ) -> Result<String, ApiError> {
     if let Some(lbl) = label {
         let existing: Option<(String,)> = sqlx::query_as(
@@ -197,17 +220,18 @@ pub(crate) async fn upsert_connection(
         .fetch_optional(pool).await?;
 
         if let Some((id,)) = existing {
-            // Reconnecting a known mailbox: revive it. The credentials are
-            // overwritten by the caller, so any prior 'dead' flag is stale.
+            // Reconnecting a known mailbox: revive it and repin its config (the
+            // user may have re-authed via a different OAuth client). Credentials
+            // are overwritten by the caller, so any prior 'dead' flag is stale.
             let _ = sqlx::query(
                 "UPDATE rootcx_system.integration_connections
-                 SET status = 'active', last_error = NULL, last_error_at = NULL WHERE id = $1"
-            ).bind(&id).execute(pool).await;
+                 SET status = 'active', last_error = NULL, last_error_at = NULL, config_id = $2 WHERE id = $1"
+            ).bind(&id).bind(config_id).execute(pool).await;
             return Ok(id);
         }
     }
 
-    create_connection(pool, integration_id, user_id, label, "direct").await
+    create_connection(pool, integration_id, user_id, label, "direct", config_id).await
 }
 
 /// After an integration RPC, flag the connection dead if the result reports a
@@ -304,16 +328,18 @@ pub(crate) fn manage_perm(integration_id: &str) -> String {
     format!("integration:{integration_id}:manage")
 }
 
-/// Resolve which credentials to use for an integration action.
+/// Resolve which provider config + credentials to use for an integration action.
 /// Unified entry point: handles app binding lookup, delegation, and direct fallback.
 ///
-/// Returns `(credentials, effective_user_id, connection_id)`. `connection_id`
-/// is `Some` whenever a stored connection was selected, so callers can flag it
-/// dead if the provider later rejects it.
+/// Returns `(config, credentials, effective_user_id, connection_id)`. `config` is
+/// the OAuth client of the selected connection (pinned via its `config_id`), or
+/// the default `_platform` config when no stored connection is selected.
+/// `connection_id` is `Some` whenever a stored connection was selected, so
+/// callers can flag it dead if the provider later rejects it.
 pub(crate) async fn resolve_credentials(
     secrets: &crate::secrets::SecretManager, pool: &sqlx::PgPool,
     integration_id: &str, user_id: &str, app_id: Option<&str>,
-) -> (JsonValue, String, Option<String>) {
+) -> (JsonValue, JsonValue, String, Option<String>) {
     // 1. Explicit app binding — the user's own (app × user) row wins over the
     //    app-wide ('') default. This is what lets the same user route app A
     //    through one mailbox and app B through another.
@@ -368,24 +394,32 @@ pub(crate) async fn resolve_credentials(
         return resolve_by_connection_id(secrets, pool, integration_id, conn_id, user_id).await;
     }
 
-    (JsonValue::Null, user_id.to_string(), None)
+    let config = super::routes::resolve_config_scoped(pool, secrets, integration_id, None)
+        .await.unwrap_or(JsonValue::Null);
+    (config, JsonValue::Null, user_id.to_string(), None)
 }
 
 async fn resolve_by_connection_id(
     secrets: &crate::secrets::SecretManager, pool: &sqlx::PgPool,
     integration_id: &str, connection_id: &str, fallback_user: &str,
-) -> (JsonValue, String, Option<String>) {
+) -> (JsonValue, JsonValue, String, Option<String>) {
     let conn_key = credential_key(connection_id);
+    // The connection's config_id pins which OAuth client refreshes its token.
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT user_id, config_id FROM rootcx_system.integration_connections WHERE id = $1"
+    ).bind(connection_id).fetch_optional(pool).await.ok().flatten();
+    let (effective_user, config_id) = match row {
+        Some((uid, cfg)) => (uid, cfg),
+        None => (fallback_user.to_string(), None),
+    };
+    let config = super::routes::resolve_config_scoped(pool, secrets, integration_id, config_id.as_deref())
+        .await.unwrap_or(JsonValue::Null);
     match secrets.get(pool, integration_id, &conn_key).await {
         Ok(Some(raw)) => {
             let creds: JsonValue = serde_json::from_str(&raw).unwrap_or(JsonValue::Null);
-            let effective_user: String = sqlx::query_scalar(
-                "SELECT user_id FROM rootcx_system.integration_connections WHERE id = $1"
-            ).bind(connection_id).fetch_optional(pool).await.ok().flatten()
-                .unwrap_or_else(|| fallback_user.to_string());
-            (creds, effective_user, Some(connection_id.to_string()))
+            (config, creds, effective_user, Some(connection_id.to_string()))
         }
-        _ => (JsonValue::Null, fallback_user.to_string(), None),
+        _ => (config, JsonValue::Null, fallback_user.to_string(), None),
     }
 }
 

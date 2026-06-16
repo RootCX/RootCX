@@ -57,10 +57,11 @@ pub async fn deploy_from_catalog(
     State(rt): State<SharedRuntime>,
     Path(id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    let pool = rt.pool().clone();
+    crate::governance::authority::require_perm(&pool, identity.user_id, "admin:apps.install").await?;
     let catalog_path = rt.resources_dir().join("integrations").join(&id);
     let app_dir = rt.data_dir().join("apps").join(&id);
     let bun_bin = rt.bun_bin().to_path_buf();
-    let pool = rt.pool().clone();
     let secrets = rt.secret_manager().clone();
     let wm = rt.worker_manager().clone();
 
@@ -114,12 +115,13 @@ pub async fn deploy_from_catalog(
 }
 
 pub async fn undeploy(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let app_dir = rt.data_dir().join("apps").join(&id);
     let pool = rt.pool().clone();
+    crate::governance::authority::require_perm(&pool, identity.user_id, "admin:apps.install").await?;
+    let app_dir = rt.data_dir().join("apps").join(&id);
     let secrets = rt.secret_manager().clone();
     let wm = rt.worker_manager().clone();
 
@@ -130,6 +132,23 @@ pub async fn undeploy(
     for (_, secret_key) in &secret_map {
         let _ = secrets.delete(&pool, "_platform", secret_key).await;
     }
+
+    // Clean up named provider configs + their scoped secrets (bulk).
+    sqlx::query(
+        "DELETE FROM rootcx_system.secrets WHERE app_id IN
+         (SELECT id FROM rootcx_system.integration_configs WHERE integration_id = $1)"
+    ).bind(&id).execute(&pool).await?;
+    sqlx::query("DELETE FROM rootcx_system.integration_configs WHERE integration_id = $1")
+        .bind(&id).execute(&pool).await?;
+
+    // Clean up connections, their credential secrets, and bindings.
+    sqlx::query(
+        "DELETE FROM rootcx_system.secrets WHERE app_id = $1 AND key_name LIKE '_conn.%'"
+    ).bind(&id).execute(&pool).await?;
+    sqlx::query("DELETE FROM rootcx_system.integration_connections WHERE integration_id = $1")
+        .bind(&id).execute(&pool).await?;
+    sqlx::query("DELETE FROM rootcx_system.app_integrations WHERE integration_id = $1")
+        .bind(&id).execute(&pool).await?;
 
     sqlx::query(
         "DELETE FROM rootcx_system.rbac_permissions WHERE key LIKE $1",

@@ -75,16 +75,16 @@ pub async fn save_platform_config(
     require_admin(&pool, identity.user_id).await?;
     let manifest = get_integration_manifest(&pool, &integration_id).await?;
     let secret_map = platform_secret_map(&manifest);
-    save_config_secrets(&pool, &secrets, &secret_map, &config).await?;
+    save_config_secrets_at(&pool, &secrets, PLATFORM_SCOPE, &secret_map, &config).await?;
 
     let wm = routes::wm(&rt);
-    let full_config = fetch_config(&pool, &secrets, &secret_map).await?;
+    let full_config = fetch_config_at(&pool, &secrets, PLATFORM_SCOPE, &secret_map).await?;
     if let Ok(result) = wm.rpc(
         &integration_id, Uuid::new_v4().to_string(), "__bind".into(),
         json!({ "config": full_config }), None,
     ).await {
         if let Some(merge) = result.get("mergeConfig").and_then(|v| v.as_object()) {
-            save_config_secrets(&pool, &secrets, &secret_map, &json!(merge)).await?;
+            save_config_secrets_at(&pool, &secrets, PLATFORM_SCOPE, &secret_map, &json!(merge)).await?;
         }
     }
 
@@ -111,8 +111,6 @@ pub async fn execute_action(
     // caller. Acting for a connected user is handled in-process by
     // execute_self_action (requester-scoped); owning automation is handled by
     // run_as on crons/jobs. There is no HTTP "act as anyone" header.
-    let config = resolve_config(&pool, &secrets, &integration_id).await?;
-
     let target_user = identity.user_id.to_string();
     let caller_app = headers.get("x-app-id").and_then(|v| v.to_str().ok());
 
@@ -129,7 +127,8 @@ pub async fn execute_action(
         }
     }
 
-    let (user_credentials, effective_uid, conn_id) = super::connections::resolve_credentials(
+    // config + creds resolve together: the chosen connection pins its OAuth client.
+    let (config, user_credentials, effective_uid, conn_id) = super::connections::resolve_credentials(
         &secrets, &pool, &integration_id, &target_user, caller_app,
     ).await;
 
@@ -324,15 +323,16 @@ pub(super) async fn get_integration_manifest(pool: &sqlx::PgPool, integration_id
     Ok(row.map(|(m,)| m).unwrap_or(JsonValue::Null))
 }
 
-async fn save_config_secrets(
+async fn save_config_secrets_at(
     pool: &sqlx::PgPool,
     secrets: &crate::secrets::SecretManager,
+    scope: &str,
     secret_map: &[(String, String)],
     config: &JsonValue,
 ) -> Result<(), ApiError> {
     for (field, secret_key) in secret_map {
         let Some(val) = config.get(field).and_then(|v| v.as_str()) else { continue };
-        secrets.set_or_delete(pool, PLATFORM_SCOPE, secret_key, val)
+        secrets.set_or_delete(pool, scope, secret_key, val)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
     }
@@ -388,23 +388,129 @@ fn is_configured(
     })
 }
 
+#[derive(serde::Deserialize)]
+pub struct CreateConfigBody {
+    pub label: String,
+    /// Field-keyed credentials (same shape as the platform config), e.g.
+    /// `{ "clientId": "...", "clientSecret": "..." }`.
+    pub credentials: JsonValue,
+}
+
+/// Named provider configs = additional OAuth clients for one integration (e.g.
+/// a second Google project). The default config remains the `_platform` scope.
+pub async fn list_configs(
+    _identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path(integration_id): Path<String>,
+) -> Result<Json<Vec<JsonValue>>, ApiError> {
+    // Read-only: labels + configured flag, no secrets. Members need this to pick
+    // which provider config (OAuth client) to connect through. Create/delete stay admin.
+    let pool = routes::pool(&rt);
+    let manifest = get_integration_manifest(&pool, &integration_id).await?;
+    let map = platform_secret_map(&manifest);
+    let rows: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+        "SELECT id, label, created_at FROM rootcx_system.integration_configs
+         WHERE integration_id = $1 ORDER BY created_at",
+    ).bind(&integration_id).fetch_all(&pool).await?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for (id, label, created_at) in rows {
+        let present: std::collections::HashSet<String> =
+            crate::secrets::SecretManager::list_keys(&pool, &id).await
+                .map_err(|e| ApiError::Internal(e.to_string()))?
+                .into_iter().collect();
+        out.push(json!({
+            "id": id,
+            "label": label,
+            "configured": is_configured(&manifest, &map, &present),
+            "createdAt": created_at.to_rfc3339(),
+        }));
+    }
+    Ok(Json(out))
+}
+
+pub async fn create_config(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path(integration_id): Path<String>,
+    Json(body): Json<CreateConfigBody>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let (pool, secrets) = routes::pool_and_secrets(&rt);
+    require_admin(&pool, identity.user_id).await?;
+    let manifest = get_integration_manifest(&pool, &integration_id).await?;
+    if manifest.is_null() {
+        return Err(ApiError::NotFound(format!("integration '{integration_id}' not installed")));
+    }
+    let id = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO rootcx_system.integration_configs (id, integration_id, label) VALUES ($1, $2, $3)")
+        .bind(&id).bind(&integration_id).bind(&body.label).execute(&pool).await?;
+    save_config_secrets_at(&pool, &secrets, &id, &platform_secret_map(&manifest), &body.credentials).await?;
+    tracing::info!(integration_id, config_id = %id, label = %body.label, user = %identity.user_id, "provider config created");
+    Ok(Json(json!({ "id": id, "label": body.label })))
+}
+
+pub async fn delete_config(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path((integration_id, config_id)): Path<(String, String)>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let (pool, secrets) = routes::pool_and_secrets(&rt);
+    require_admin(&pool, identity.user_id).await?;
+    // Verify ownership before touching secrets.
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.integration_configs WHERE id = $1 AND integration_id = $2)"
+    ).bind(&config_id).bind(&integration_id).fetch_one(&pool).await?;
+    if !exists {
+        return Err(ApiError::NotFound("config not found".into()));
+    }
+    // Connections pinned to this config would lose their OAuth client — refuse
+    // while any exist so the admin removes those connections first.
+    let in_use: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM rootcx_system.integration_connections WHERE config_id = $1",
+    ).bind(&config_id).fetch_one(&pool).await?;
+    if in_use > 0 {
+        return Err(ApiError::BadRequest(format!("{in_use} connection(s) still use this config")));
+    }
+    let manifest = get_integration_manifest(&pool, &integration_id).await?;
+    for (_, key) in platform_secret_map(&manifest) {
+        let _ = secrets.delete(&pool, &config_id, &key).await;
+    }
+    sqlx::query("DELETE FROM rootcx_system.integration_configs WHERE id = $1")
+        .bind(&config_id).execute(&pool).await?;
+    tracing::info!(integration_id, config_id, user = %identity.user_id, "provider config deleted");
+    Ok(Json(json!({ "message": "config deleted" })))
+}
+
 pub async fn resolve_config(
     pool: &sqlx::PgPool,
     secrets: &crate::secrets::SecretManager,
     integration_id: &str,
 ) -> Result<JsonValue, ApiError> {
-    let manifest = get_integration_manifest(pool, integration_id).await?;
-    fetch_config(pool, secrets, &platform_secret_map(&manifest)).await
+    resolve_config_scoped(pool, secrets, integration_id, None).await
 }
 
-async fn fetch_config(
+/// Resolve a provider config (OAuth client creds) for an integration.
+/// `config_id` None → the default `_platform` scope; Some → a named config's
+/// own scope. This is what lets one integration carry several OAuth clients.
+pub(crate) async fn resolve_config_scoped(
     pool: &sqlx::PgPool,
     secrets: &crate::secrets::SecretManager,
+    integration_id: &str,
+    config_id: Option<&str>,
+) -> Result<JsonValue, ApiError> {
+    let manifest = get_integration_manifest(pool, integration_id).await?;
+    fetch_config_at(pool, secrets, config_id.unwrap_or(PLATFORM_SCOPE), &platform_secret_map(&manifest)).await
+}
+
+async fn fetch_config_at(
+    pool: &sqlx::PgPool,
+    secrets: &crate::secrets::SecretManager,
+    scope: &str,
     secret_map: &[(String, String)],
 ) -> Result<JsonValue, ApiError> {
     let mut config = serde_json::Map::new();
     for (field, secret_key) in secret_map {
-        if let Some(val) = secrets.get(pool, PLATFORM_SCOPE, secret_key)
+        if let Some(val) = secrets.get(pool, scope, secret_key)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?
         {

@@ -507,10 +507,8 @@ impl IntegrationCaller for IntegrationCallImpl {
         &self, pool: &PgPool, user_id: uuid::Uuid, app_id: Option<&str>,
         integration_id: &str, action_id: &str, input: JsonValue,
     ) -> Result<JsonValue, String> {
-        let config = crate::extensions::integrations::routes::resolve_config(pool, &self.secrets, integration_id)
-            .await.map_err(|e| format!("{e:?}"))?;
-
-        let (user_credentials, effective_uid, conn_id) = crate::extensions::integrations::connections::resolve_credentials(
+        // config + creds resolve together: the chosen connection pins its OAuth client.
+        let (config, user_credentials, effective_uid, conn_id) = crate::extensions::integrations::connections::resolve_credentials(
             &self.secrets, pool, integration_id, &user_id.to_string(), app_id,
         ).await;
 

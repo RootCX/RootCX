@@ -243,6 +243,37 @@ async fn app_wide_binding_requires_manage_permission() {
 }
 
 #[tokio::test]
+async fn provider_configs_are_isolated_per_instance() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+
+    // Two named provider configs = two OAuth clients for the same integration.
+    let (s, a) = rt.post_json("/api/v1/integrations/test_integ/configs",
+        &json!({"label": "Project A", "credentials": {"apiKey": "key-a"}})).await;
+    assert_eq!(s, StatusCode::OK, "create A: {a}");
+    let cfg_a = a["id"].as_str().unwrap().to_string();
+    let (s, b) = rt.post_json("/api/v1/integrations/test_integ/configs",
+        &json!({"label": "Project B", "credentials": {"apiKey": "key-b"}})).await;
+    assert_eq!(s, StatusCode::OK, "create B: {b}");
+    assert_ne!(cfg_a, b["id"].as_str().unwrap(), "each config has its own id");
+
+    // Both listed and configured (credentials live at their own scope, not shared).
+    let (s, list) = rt.get_json("/api/v1/integrations/test_integ/configs").await;
+    assert_eq!(s, StatusCode::OK);
+    let arr = list.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "two configs: {list}");
+    assert!(arr.iter().all(|c| c["configured"] == json!(true)), "both configured: {list}");
+
+    // Delete one (no connection references it) — the other survives.
+    let s = rt.delete(&format!("/api/v1/integrations/test_integ/configs/{cfg_a}")).await;
+    assert_eq!(s, StatusCode::OK);
+    let (_, list) = rt.get_json("/api/v1/integrations/test_integ/configs").await;
+    assert_eq!(list.as_array().unwrap().len(), 1, "one config remains after delete");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
 async fn bind_rejects_connection_not_owned_by_caller() {
     let rt = TestRuntime::boot().await;
     setup_integration(&rt).await;
