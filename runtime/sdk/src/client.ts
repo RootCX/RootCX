@@ -807,9 +807,11 @@ export class RuntimeClient {
 
   async integrationAuthStart(
     integrationId: string,
+    configId?: string,
   ): Promise<{ type: string; url?: string; [key: string]: unknown }> {
+    const qs = configId ? `?config_id=${encodeURIComponent(configId)}` : "";
     const res = await this.authFetch(
-      `${this.baseUrl}/api/v1/integrations/${enc(integrationId)}/auth/start`,
+      `${this.baseUrl}/api/v1/integrations/${enc(integrationId)}/auth/start${qs}`,
       { method: "POST" },
     );
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());

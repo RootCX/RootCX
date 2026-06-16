@@ -20,7 +20,7 @@ export interface UseIntegrationResult {
   connected: boolean;
   connections: IntegrationConnection[];
   loading: boolean;
-  connect: () => Promise<{ type: string; schema?: Record<string, unknown> } | void>;
+  connect: (configId?: string) => Promise<{ type: string; schema?: Record<string, unknown> } | void>;
   submitCredentials: (credentials: Record<string, string>) => Promise<void>;
   remove: (connectionId: string) => Promise<void>;
   call: (action: string, input?: Record<string, unknown>) => Promise<unknown>;
@@ -45,8 +45,8 @@ export function useIntegration(integrationId: string): UseIntegrationResult {
 
   useEffect(() => { fetchConnections().finally(() => setLoading(false)); }, [fetchConnections]);
 
-  const connect = useCallback(async () => {
-    const result = await client.integrationAuthStart(integrationId);
+  const connect = useCallback(async (configId?: string) => {
+    const result = await client.integrationAuthStart(integrationId, configId);
 
     if (result.type === "redirect" && result.url) {
       const url = result.url as string;
