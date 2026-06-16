@@ -20,7 +20,7 @@ use crate::routes::SharedRuntime;
 
 type HmacSha256 = Hmac<Sha256>;
 
-struct Pending { integration_id: String, user_id: String, config_id: Option<String>, created: Instant }
+struct Pending { integration_id: String, user_id: String, config_id: Option<String>, callback_url: String, created: Instant }
 
 static PENDING: LazyLock<Mutex<HashMap<String, Pending>>> = LazyLock::new(Default::default);
 const TTL_SECS: u64 = 600;
@@ -88,7 +88,7 @@ pub async fn start(
 
     PENDING.lock().await.insert(nonce, Pending {
         integration_id: integration_id.clone(), user_id: identity.user_id.to_string(),
-        config_id, created: Instant::now(),
+        config_id, callback_url: cb.clone(), created: Instant::now(),
     });
 
     let result = wm.rpc(
@@ -103,7 +103,6 @@ pub async fn start(
 
 pub async fn callback(
     State(rt): State<SharedRuntime>,
-    headers: HeaderMap,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Html<String>, ApiError> {
     let state = params.get("state").ok_or_else(|| ApiError::BadRequest("missing state".into()))?;
@@ -119,7 +118,7 @@ pub async fn callback(
 
     let result = wm.rpc(
         &pending.integration_id, Uuid::new_v4().to_string(), "__auth_callback".into(),
-        json!({ "config": config, "query": params, "userId": pending.user_id, "callbackUrl": resolve_callback_url(&headers) }),
+        json!({ "config": config, "query": params, "userId": pending.user_id, "callbackUrl": pending.callback_url }),
         None,
     ).await.map_err(|e| ApiError::Internal(e.to_string()))?;
 
