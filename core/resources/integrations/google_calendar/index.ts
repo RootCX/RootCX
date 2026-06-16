@@ -27,6 +27,17 @@ serve({
   onJob: handleJob,
 });
 
+// Re-enter one of our own actions (with the user's resolved credentials) and
+// surface its Result: return `data`, or throw a coded Error so callers can
+// branch on `err.code` (e.g. SYNC_CURSOR_ERROR).
+async function runAction(ctx: RootCxCtx, action: string, input: Record<string, unknown> = {}): Promise<any> {
+  const r = await ctx.action(action, input);
+  if (r?.ok === false) {
+    throw Object.assign(new Error(r.error?.message ?? action), { code: r.error?.code, retryAfter: r.error?.retryAfter });
+  }
+  return r?.ok === true && "data" in r ? r.data : r;
+}
+
 async function accessTokenFor(config: Config, creds: UserCreds, userId: string): Promise<string> {
   const access = await oauth2ClientFor(config, creds, userId).getAccessToken();
   if (!access.token) throw new Error("no access token from refresh");
@@ -354,7 +365,7 @@ async function syncCursor(ctx: RootCxCtx, userId: string, sc: any) {
     else args.showDeleted = true;
 
     let data: any;
-    try { data = await ctx.selfAction("list_events", args); }
+    try { data = await runAction(ctx, "list_events", args); }
     catch (e: any) {
       if (e.code === "SYNC_CURSOR_ERROR") {
         await ctx.sql(`UPDATE google_calendar.sync_cursors SET sync_token = null WHERE id = $1`, [sc.id]);

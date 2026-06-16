@@ -4,6 +4,11 @@
   "version": "0.3.0",
   "type": "integration",
   "description": "Email integration via generic IMAP/SMTP. Owns email data with per-user sync. Consumer apps read via the collections API.",
+  "crons": [{
+    "name": "sync",
+    "schedule": "*/5 * * * *",
+    "payload": { "type": "sync_all" }
+  }],
   "configSchema": {
     "type": "object",
     "properties": {}
@@ -65,14 +70,14 @@
     {
       "id": "sync_connect",
       "name": "Start Sync",
-      "description": "Initialize sync for the current user. Creates a sync_cursor, registers a 5-min cron.",
+      "description": "Initialize sync for the current user. Creates a sync_cursor and triggers the first sync.",
       "inputSchema": { "type": "object" },
       "outputSchema": { "type": "object", "properties": { "cursor_id": { "type": "string" }, "handle": { "type": "string" } } }
     },
     {
       "id": "sync_disconnect",
       "name": "Stop Sync",
-      "description": "Disable sync. Removes cron but keeps synced data.",
+      "description": "Disable sync for the current user. Keeps synced data.",
       "inputSchema": { "type": "object" },
       "outputSchema": { "type": "object" }
     },

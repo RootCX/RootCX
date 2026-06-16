@@ -42,6 +42,17 @@ serve({
   onJob: handleJob,
 });
 
+// Re-enter one of our own actions (with the user's resolved credentials) and
+// surface its Result: return `data`, or throw a coded Error so callers can
+// branch on `err.code` (e.g. SYNC_CURSOR_ERROR).
+async function runAction(ctx: RootCxCtx, action: string, input: Record<string, unknown> = {}): Promise<any> {
+  const r = await ctx.action(action, input);
+  if (r?.ok === false) {
+    throw Object.assign(new Error(r.error?.message ?? action), { code: r.error?.code, retryAfter: r.error?.retryAfter });
+  }
+  return r?.ok === true && "data" in r ? r.data : r;
+}
+
 async function withImap<T>(creds: Creds, fn: (client: ImapFlow) => Promise<T>): Promise<T> {
   const client = new ImapFlow({
     host: creds.imapHost, port: creds.imapPort, secure: true,
@@ -80,7 +91,7 @@ async function sendEmail(creds: Creds, input: any, userId: string, ctx: RootCxCt
   } catch (e: any) { log.warn(`append to Sent: ${e.message}`); }
 
   try {
-    const parsed = await ctx.selfAction("get_email", { uid: 0, folder: "SENT", messageId });
+    const parsed = await runAction(ctx, "get_email", { uid: 0, folder: "SENT", messageId });
     if (parsed) await persistParsedMessage(ctx, userId, parsed);
   } catch { /* will be picked up on next sync */ }
 
@@ -113,13 +124,11 @@ async function getFolders(creds: Creds, _input: any, _userId: string, _ctx: Root
 async function syncConnect(creds: Creds, _input: any, userId: string, ctx: RootCxCtx) {
   const handle = creds.username.toLowerCase();
   const existing = await ctx.sql(
-    `SELECT id, cron_id FROM imap_smtp.sync_cursors WHERE user_id = $1`, [userId]
+    `SELECT id FROM imap_smtp.sync_cursors WHERE user_id = $1`, [userId]
   );
   let cursorId: string;
-  let cronId: string | null = null;
   if (existing.rows.length) {
-    cursorId = existing.rows[0][0];
-    cronId = existing.rows[0][1];
+    cursorId = existing.rows[0][0] as string;
     await ctx.sql(
       `UPDATE imap_smtp.sync_cursors SET handle = $1, enabled = true, status = 'idle', throttle_count = 0, throttle_after = null WHERE id = $2`,
       [handle, cursorId]
@@ -129,22 +138,14 @@ async function syncConnect(creds: Creds, _input: any, userId: string, ctx: RootC
       `INSERT INTO imap_smtp.sync_cursors (user_id, handle, status, enabled, throttle_count) VALUES ($1, $2, 'idle', true, 0) RETURNING id`,
       [userId, handle]
     );
-    cursorId = ins.rows[0][0];
+    cursorId = ins.rows[0][0] as string;
   }
-  if (!cronId) {
-    cronId = await createSyncCron(userId, ctx);
-    if (cronId) await ctx.sql(`UPDATE imap_smtp.sync_cursors SET cron_id = $1 WHERE id = $2`, [cronId, cursorId]);
-  }
-  await dispatchSyncJob(userId, ctx);
+  await syncUserNow(ctx, userId);
   return { ok: true, data: { cursor_id: cursorId, handle } };
 }
 
 async function syncDisconnect(_creds: Creds, _input: any, userId: string, ctx: RootCxCtx) {
-  const cursor = await ctx.sql(`SELECT cron_id FROM imap_smtp.sync_cursors WHERE user_id = $1`, [userId]);
-  if (cursor.rows.length && cursor.rows[0][0]) {
-    await deleteSyncCron(cursor.rows[0][0], ctx);
-  }
-  await ctx.sql(`UPDATE imap_smtp.sync_cursors SET enabled = false, cron_id = null WHERE user_id = $1`, [userId]);
+  await ctx.sql(`UPDATE imap_smtp.sync_cursors SET enabled = false WHERE user_id = $1`, [userId]);
   return { ok: true, data: {} };
 }
 
@@ -156,7 +157,7 @@ async function syncNow(_creds: Creds, _input: any, userId: string, ctx: RootCxCt
   const [, status, throttle_after] = cursor.rows[0] as any[];
   if (status === "syncing") return { ok: true, data: { triggered: false } };
   if (throttle_after && new Date(throttle_after).getTime() > Date.now()) return { ok: true, data: { triggered: false } };
-  await dispatchSyncJob(userId, ctx);
+  await syncUserNow(ctx, userId);
   return { ok: true, data: { triggered: true } };
 }
 
@@ -166,15 +167,24 @@ const actions: Record<string, (creds: Creds, input: any, userId: string, ctx: Ro
 };
 
 async function handleJob(payload: any, _caller: any, ctx: RootCxCtx) {
-  if (payload?.type !== "sync") return { skipped: true };
-  const userId = payload.user_id;
+  if (payload?.type === "sync_all") {
+    await ctx.selfAction("syncConnectedUsers", { actionName: "sync_now" });
+    return { ok: true };
+  }
+  if (payload?.type === "sync") {
+    await syncUserNow(ctx, payload.user_id);
+    return { ok: true };
+  }
+  return { skipped: true };
+}
+
+async function syncUserNow(ctx: RootCxCtx, userId: string) {
   const cursors = await ctx.sql(
     `SELECT id, cursor, throttle_count FROM imap_smtp.sync_cursors WHERE user_id = $1 AND enabled = true`, [userId]
   );
-  if (!cursors.rows.length) return { skipped: true };
+  if (!cursors.rows.length) return;
   const [id, cursor, throttle_count] = cursors.rows[0] as any[];
   const sc = { id, cursor, throttle_count };
-
   try {
     await ctx.sql(`UPDATE imap_smtp.sync_cursors SET status = 'syncing' WHERE id = $1`, [sc.id]);
     await runSync(ctx, userId, sc);
@@ -185,11 +195,10 @@ async function handleJob(payload: any, _caller: any, ctx: RootCxCtx) {
     log.error(`sync ${userId}: ${e.message}`);
     await handleSyncError(ctx, sc, e);
   }
-  return { ok: true };
 }
 
 async function runSync(ctx: RootCxCtx, userId: string, sc: any) {
-  const foldersResp = await ctx.selfAction("get_folders", {});
+  const foldersResp = await runAction(ctx, "get_folders", {});
   const folders: Array<{ path: string; specialUse: string | null }> = (foldersResp?.folders ?? [])
     .filter((f: any) => !SKIP_SPECIAL_USE.has(f.specialUse));
 
@@ -198,12 +207,12 @@ async function runSync(ctx: RootCxCtx, userId: string, sc: any) {
 
   for (const folder of folders) {
     const prev = cursor[folder.path];
-    const listResp = await ctx.selfAction("list_emails", { folder: folder.path, sinceUid: prev?.highestUid });
+    const listResp = await runAction(ctx, "list_emails", { folder: folder.path, sinceUid: prev?.highestUid });
     const { messageUids, uidValidity, highestUid } = listResp;
 
     if (prev && uidValidity !== prev.uidValidity) {
       log.warn(`uidValidity changed for folder ${folder.path}, full resync`);
-      const fullResp = await ctx.selfAction("list_emails", { folder: folder.path });
+      const fullResp = await runAction(ctx, "list_emails", { folder: folder.path });
       await importUids(ctx, userId, folder.path, fullResp.messageUids ?? []);
       newCursor[folder.path] = { uidValidity: fullResp.uidValidity, highestUid: fullResp.highestUid };
       continue;
@@ -239,7 +248,7 @@ async function importUids(ctx: RootCxCtx, userId: string, folder: string, uids: 
 
 async function persistSingleMessage(ctx: RootCxCtx, userId: string, uid: number, folder: string) {
   let msg: any;
-  try { msg = await ctx.selfAction("get_email", { uid, folder }); }
+  try { msg = await runAction(ctx, "get_email", { uid, folder }); }
   catch { return; }
   await persistParsedMessage(ctx, userId, msg);
 }
@@ -329,27 +338,6 @@ async function findSentFolder(client: ImapFlow): Promise<string | null> {
   return byName?.path ?? null;
 }
 
-async function dispatchSyncJob(userId: string, ctx: RootCxCtx) {
-  await ctx.sql(`UPDATE imap_smtp.sync_cursors SET status = 'syncing' WHERE user_id = $1`, [userId]);
-  try {
-    await ctx.selfAction("triggerAction", { actionName: "sync", input: { type: "sync", user_id: userId } });
-  } catch (e: any) { log.warn(`job dispatch: ${e.message}`); }
-}
-
-async function createSyncCron(userId: string, ctx: RootCxCtx): Promise<string | null> {
-  try {
-    const res = await ctx.selfAction("createCron", {
-      name: `sync_imap_${userId}`, schedule: "*/5 * * * *",
-      payload: { type: "sync", user_id: userId }, overlapPolicy: "skip",
-    });
-    return res?.id ?? null;
-  } catch (e: any) { log.warn(`cron create: ${e.message}`); return null; }
-}
-
-async function deleteSyncCron(cronId: string, ctx: RootCxCtx) {
-  try { await ctx.selfAction("deleteCron", { cronId }); }
-  catch (e: any) { log.warn(`cron delete: ${e.message}`); }
-}
 
 async function handleSyncError(ctx: RootCxCtx, sc: any, err: any) {
   const count = (sc.throttle_count ?? 0) + 1;
