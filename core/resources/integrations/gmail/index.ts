@@ -61,6 +61,17 @@ async function gmailApi(config: Config, creds: UserCreds, path: string, init: Re
 const callGmail = (config: Config, creds: UserCreds, path: string, init: RequestInit | undefined, userId: string) =>
   withRetry(() => gmailApi(config, creds, path, init, userId));
 
+// Re-enter one of our own actions (with the user's resolved credentials) and
+// surface its Result: return `data`, or throw a coded Error so callers can
+// branch on `err.code` (e.g. SYNC_CURSOR_ERROR).
+async function runAction(ctx: RootCxCtx, action: string, input: Record<string, unknown> = {}): Promise<any> {
+  const r = await ctx.action(action, input);
+  if (r?.ok === false) {
+    throw Object.assign(new Error(r.error?.message ?? action), { code: r.error?.code, retryAfter: r.error?.retryAfter });
+  }
+  return r?.ok === true && "data" in r ? r.data : r;
+}
+
 async function authStart(params: any) {
   const { config, callbackUrl, state } = params;
   return { type: "redirect", url: buildAuthUrl(config, callbackUrl, state) };
@@ -285,12 +296,12 @@ async function handleJob(payload: any, _caller: any, ctx: RootCxCtx) {
 }
 
 async function fullSync(ctx: RootCxCtx, userId: string, sc: any) {
-  const profile = await ctx.selfAction("get_profile", {});
+  const profile = await runAction(ctx, "get_profile");
   const snapshotCursor = profile.historyId;
 
   let pageToken: string | undefined;
   do {
-    const r = await ctx.selfAction("list_messages", { query: EXCLUDE_QUERY, maxResults: 500, pageToken });
+    const r = await runAction(ctx, "list_messages", { query: EXCLUDE_QUERY, maxResults: 500, pageToken });
     const ids: string[] = (r.messages ?? []).map((m: any) => m.id);
     await importBatch(ctx, userId, ids);
     pageToken = r.nextPageToken ?? undefined;
@@ -308,7 +319,7 @@ async function incrementalSync(ctx: RootCxCtx, userId: string, sc: any) {
   do {
     let r: any;
     try {
-      r = await ctx.selfAction("history_list", { startHistoryId: sc.cursor, maxResults: 500, pageToken });
+      r = await runAction(ctx, "history_list", { startHistoryId: sc.cursor, maxResults: 500, pageToken });
     } catch (e: any) {
       if (e.code === "SYNC_CURSOR_ERROR") {
         await ctx.sql(`UPDATE gmail.sync_cursors SET cursor = null WHERE id = $1`, [sc.id]);
@@ -350,7 +361,7 @@ async function importBatch(ctx: RootCxCtx, userId: string, externalIds: string[]
 
 async function persistSingleMessage(ctx: RootCxCtx, userId: string, externalId: string) {
   let msg: any;
-  try { msg = await ctx.selfAction("get_email", { messageId: externalId }); }
+  try { msg = await runAction(ctx, "get_email", { messageId: externalId }); }
   catch { return; }
 
   const headerMsgId = msg.headerMessageId || `fallback-${userId}-${externalId}`;

@@ -228,6 +228,10 @@ function _makeCtx() {
     uploadFile: _uploadFile,
     sql: (sql, params = []) => _sqlQuery(sql, params),
     selfAction: (action, params = {}) => _selfAction(action, params),
+    // Invoke one of THIS app's own actions, with the caller's own credentials
+    // resolved by the core. The same-app sibling of callIntegration below.
+    // Returns the action's raw result envelope.
+    action: (name, input = {}) => _selfAction("triggerAction", { actionName: name, input }),
     // Mediated integration call: the core resolves credentials via the
     // (app × user) binding and executes — the worker never sees a token.
     // `asUser` requires that user's own binding of this integration to this app.

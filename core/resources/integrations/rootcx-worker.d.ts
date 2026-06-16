@@ -22,6 +22,11 @@ interface RootCxCtx {
   sql(text: string, params?: unknown[]): Promise<RootCxSqlResult>;
   // Privileged self-action over IPC (integrations) — no token replay.
   selfAction(action: string, params?: Record<string, unknown>): Promise<any>;
+  // Invoke one of this app's own actions; credentials resolve for the caller.
+  // Same-app sibling of callIntegration. Returns the action's raw result.
+  action(name: string, input?: Record<string, unknown>): Promise<any>;
+  // Call another integration's action, gated by the (app x user) binding.
+  callIntegration(integrationId: string, action: string, input?: Record<string, unknown>, asUser?: string): Promise<any>;
   uploadFile(content: string | Uint8Array, filename: string, contentType: string): Promise<string>;
   collection(entity: string): {
     insert(data: Record<string, unknown>): Promise<any>;
