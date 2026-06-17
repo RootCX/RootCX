@@ -2,6 +2,7 @@ import * as React from "react";
 import * as SelectPrimitive from "@radix-ui/react-select";
 import { IconCheck, IconChevronDown, IconChevronUp } from "@tabler/icons-react";
 import { cn } from "../lib/utils";
+import { usePortalContainer } from "./portal-container";
 
 const Select = SelectPrimitive.Root;
 const SelectGroup = SelectPrimitive.Group;
@@ -57,9 +58,15 @@ SelectScrollDownButton.displayName = "SelectScrollDownButton";
 
 const SelectContent = React.forwardRef<
   React.ComponentRef<typeof SelectPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>
->(({ className, children, position = "popper", ...props }, ref) => (
-  <SelectPrimitive.Portal>
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content> & {
+    container?: HTMLElement | null;
+  }
+>(({ className, children, position = "popper", container, ...props }, ref) => {
+  const parentContainer = usePortalContainer();
+  const portalContainer = container ?? parentContainer ?? undefined;
+
+  return (
+  <SelectPrimitive.Portal container={portalContainer}>
     <SelectPrimitive.Content
       ref={ref}
       className={cn(
@@ -82,7 +89,8 @@ const SelectContent = React.forwardRef<
       <SelectScrollDownButton />
     </SelectPrimitive.Content>
   </SelectPrimitive.Portal>
-));
+  );
+});
 SelectContent.displayName = "SelectContent";
 
 const SelectItem = React.forwardRef<

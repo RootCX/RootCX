@@ -2,6 +2,7 @@ import * as React from "react";
 import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
 import { IconCheck, IconChevronRight, IconPointFilled } from "@tabler/icons-react";
 import { cn } from "../lib/utils";
+import { usePortalContainer } from "./portal-container";
 
 const DropdownMenu = DropdownMenuPrimitive.Root;
 const DropdownMenuTrigger = DropdownMenuPrimitive.Trigger;
@@ -47,8 +48,10 @@ DropdownMenuSubContent.displayName = "DropdownMenuSubContent";
 const DropdownMenuContent = React.forwardRef<
   React.ComponentRef<typeof DropdownMenuPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Content>
->(({ className, sideOffset = 4, ...props }, ref) => (
-  <DropdownMenuPrimitive.Portal>
+>(({ className, sideOffset = 4, ...props }, ref) => {
+  const portalContainer = usePortalContainer();
+  return (
+  <DropdownMenuPrimitive.Portal container={portalContainer ?? undefined}>
     <DropdownMenuPrimitive.Content
       ref={ref}
       sideOffset={sideOffset}
@@ -59,7 +62,8 @@ const DropdownMenuContent = React.forwardRef<
       {...props}
     />
   </DropdownMenuPrimitive.Portal>
-));
+  );
+});
 DropdownMenuContent.displayName = "DropdownMenuContent";
 
 const DropdownMenuItem = React.forwardRef<
