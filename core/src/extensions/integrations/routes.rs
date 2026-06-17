@@ -154,7 +154,7 @@ pub async fn execute_action(
             &integration_id,
             Uuid::new_v4().to_string(),
             "__integration".into(),
-            json!({ "action": action_id, "input": input, "config": config, "userCredentials": user_credentials, "userId": effective_uid }),
+            json!({ "action": action_id, "input": input, "config": config, "userCredentials": user_credentials, "userId": effective_uid, "connectionId": conn_id }),
             caller,
         )
         .await

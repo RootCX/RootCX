@@ -143,6 +143,7 @@
       "entityName": "sync_cursors",
       "fields": [
         { "name": "user_id",          "type": "text", "required": true },
+        { "name": "connection_id",    "type": "text" },
         { "name": "handle",           "type": "text" },
         { "name": "cursor",           "type": "text" },
         { "name": "status",           "type": "text", "enum_values": ["idle", "syncing", "needs_reauth", "failed_temporary", "failed_permanent"] },

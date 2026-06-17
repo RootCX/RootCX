@@ -30,13 +30,13 @@ serve({
     },
     async __auth_callback() { return { credentials: {} }; },
     async __integration(params, _caller, ctx) {
-      const { action, input, userCredentials, userId } = params;
+      const { action, input, userCredentials, userId, connectionId } = params;
       if (!userCredentials?.imapHost || !userCredentials?.username) {
         return { ok: false, error: { code: "INSUFFICIENT_PERMISSIONS", message: "not connected" } };
       }
       const handler = actions[action];
       if (!handler) return { ok: false, error: { code: "MISCONFIGURED", message: `unknown action: ${action}` } };
-      return handler(userCredentials as Creds, input, userId, ctx);
+      return handler(userCredentials as Creds, input, userId, ctx, connectionId ?? null);
     },
   },
   onJob: handleJob,
@@ -121,47 +121,52 @@ async function getFolders(creds: Creds, _input: any, _userId: string, _ctx: Root
   return { ok: true, data: { folders } };
 }
 
-async function syncConnect(creds: Creds, _input: any, userId: string, ctx: RootCxCtx) {
+async function syncConnect(creds: Creds, _input: any, userId: string, ctx: RootCxCtx, connectionId?: string | null) {
   const handle = creds.username.toLowerCase();
   const existing = await ctx.sql(
-    `SELECT id FROM imap_smtp.sync_cursors WHERE user_id = $1`, [userId]
+    `SELECT id FROM imap_smtp.sync_cursors WHERE user_id = $1 AND (connection_id = $2 OR (connection_id IS NULL AND $2 IS NOT NULL)) ORDER BY (connection_id = $2) DESC LIMIT 1`,
+    [userId, connectionId ?? null]
   );
   let cursorId: string;
   if (existing.rows.length) {
     cursorId = existing.rows[0][0] as string;
     await ctx.sql(
-      `UPDATE imap_smtp.sync_cursors SET handle = $1, enabled = true, status = 'idle', throttle_count = 0, throttle_after = null WHERE id = $2`,
-      [handle, cursorId]
+      `UPDATE imap_smtp.sync_cursors SET handle = $1, connection_id = $2, enabled = true, status = 'idle', throttle_count = 0, throttle_after = null WHERE id = $3`,
+      [handle, connectionId ?? null, cursorId]
     );
   } else {
     const ins = await ctx.sql(
-      `INSERT INTO imap_smtp.sync_cursors (user_id, handle, status, enabled, throttle_count) VALUES ($1, $2, 'idle', true, 0) RETURNING id`,
-      [userId, handle]
+      `INSERT INTO imap_smtp.sync_cursors (user_id, connection_id, handle, status, enabled, throttle_count) VALUES ($1, $2, $3, 'idle', true, 0) RETURNING id`,
+      [userId, connectionId ?? null, handle]
     );
     cursorId = ins.rows[0][0] as string;
   }
-  await syncUserNow(ctx, userId);
+  await syncUserNow(ctx, userId, connectionId);
   return { ok: true, data: { cursor_id: cursorId, handle } };
 }
 
-async function syncDisconnect(_creds: Creds, _input: any, userId: string, ctx: RootCxCtx) {
-  await ctx.sql(`UPDATE imap_smtp.sync_cursors SET enabled = false WHERE user_id = $1`, [userId]);
+async function syncDisconnect(_creds: Creds, _input: any, userId: string, ctx: RootCxCtx, connectionId?: string | null) {
+  if (connectionId) {
+    await ctx.sql(`UPDATE imap_smtp.sync_cursors SET enabled = false WHERE user_id = $1 AND connection_id = $2`, [userId, connectionId]);
+  } else {
+    await ctx.sql(`UPDATE imap_smtp.sync_cursors SET enabled = false WHERE user_id = $1`, [userId]);
+  }
   return { ok: true, data: {} };
 }
 
-async function syncNow(_creds: Creds, _input: any, userId: string, ctx: RootCxCtx) {
-  const cursor = await ctx.sql(
-    `SELECT id, status, throttle_after FROM imap_smtp.sync_cursors WHERE user_id = $1 AND enabled = true`, [userId]
-  );
-  if (!cursor.rows.length) return { ok: false, error: { code: "MISCONFIGURED", message: "no active sync" } };
+async function syncNow(_creds: Creds, _input: any, userId: string, ctx: RootCxCtx, connectionId?: string | null) {
+  const cursor = connectionId
+    ? await ctx.sql(`SELECT id, status, throttle_after FROM imap_smtp.sync_cursors WHERE user_id = $1 AND connection_id = $2 AND enabled = true`, [userId, connectionId])
+    : await ctx.sql(`SELECT id, status, throttle_after FROM imap_smtp.sync_cursors WHERE user_id = $1 AND enabled = true`, [userId]);
+  if (!cursor.rows.length) return { ok: true, data: { triggered: false, reason: "no cursor for this connection" } };
   const [, status, throttle_after] = cursor.rows[0] as any[];
   if (status === "syncing") return { ok: true, data: { triggered: false } };
   if (throttle_after && new Date(throttle_after).getTime() > Date.now()) return { ok: true, data: { triggered: false } };
-  await syncUserNow(ctx, userId);
+  await syncUserNow(ctx, userId, connectionId);
   return { ok: true, data: { triggered: true } };
 }
 
-const actions: Record<string, (creds: Creds, input: any, userId: string, ctx: RootCxCtx) => Promise<any>> = {
+const actions: Record<string, (creds: Creds, input: any, userId: string, ctx: RootCxCtx, connId?: string | null) => Promise<any>> = {
   send_email: sendEmail, get_email: getEmail, get_folders: getFolders,
   sync_connect: syncConnect, sync_disconnect: syncDisconnect, sync_now: syncNow,
 };
@@ -172,16 +177,18 @@ async function handleJob(payload: any, _caller: any, ctx: RootCxCtx) {
     return { ok: true };
   }
   if (payload?.type === "sync") {
-    await syncUserNow(ctx, payload.user_id);
+    await syncUserNow(ctx, payload.user_id, payload.connection_id ?? null);
     return { ok: true };
   }
   return { skipped: true };
 }
 
-async function syncUserNow(ctx: RootCxCtx, userId: string) {
-  const cursors = await ctx.sql(
-    `SELECT id, cursor, throttle_count FROM imap_smtp.sync_cursors WHERE user_id = $1 AND enabled = true`, [userId]
-  );
+async function syncUserNow(ctx: RootCxCtx, userId: string, connectionId?: string | null) {
+  const where = connectionId
+    ? `WHERE user_id = $1 AND connection_id = $2 AND enabled = true`
+    : `WHERE user_id = $1 AND enabled = true`;
+  const params = connectionId ? [userId, connectionId] : [userId];
+  const cursors = await ctx.sql(`SELECT id, cursor, throttle_count FROM imap_smtp.sync_cursors ${where}`, params);
   if (!cursors.rows.length) return;
   const [id, cursor, throttle_count] = cursors.rows[0] as any[];
   const sc = { id, cursor, throttle_count };

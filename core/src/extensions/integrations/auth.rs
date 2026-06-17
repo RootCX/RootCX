@@ -148,7 +148,7 @@ pub async fn callback(
         info!(integration_id = %pending.integration_id, user_id = %pending.user_id,
             connection_id = %conn_id, label = label.as_deref().unwrap_or(""), "credentials stored");
 
-        if let Some((code, msg)) = try_auto_sync_connect(&rt, &pool, &secrets, &wm, &pending).await {
+        if let Some((code, msg)) = try_auto_sync_connect(&pool, &secrets, &wm, &pending, &conn_id).await {
             return Ok(Html(callback_html(&pending.integration_id, Some((&code, &msg)))));
         }
     }
@@ -157,23 +157,22 @@ pub async fn callback(
 }
 
 async fn try_auto_sync_connect(
-    _rt: &SharedRuntime,
     pool: &sqlx::PgPool,
     secrets: &crate::secrets::SecretManager,
     wm: &crate::worker_manager::WorkerManager,
     pending: &Pending,
+    conn_id: &str,
 ) -> Option<(String, String)> {
     let user_id: uuid::Uuid = pending.user_id.parse().ok()?;
-    // Fail-closed: a disabled/unknown principal resolves to None and no auto-sync fires.
-    let caller = Some(crate::principal::resolve_caller(pool, user_id).await?);
+    let caller = Some(crate::principal::resolve_caller_pinned(pool, user_id, conn_id.to_string()).await?);
 
-    let (config, user_credentials, effective_uid, _conn_id) = super::connections::resolve_credentials(
-        secrets, pool, &pending.integration_id, &pending.user_id, None,
+    let (config, user_credentials, effective_uid, resolved_conn) = super::connections::resolve_by_connection_id(
+        secrets, pool, &pending.integration_id, conn_id, &pending.user_id,
     ).await;
 
     match wm.rpc(
         &pending.integration_id, Uuid::new_v4().to_string(), "__integration".into(),
-        json!({ "action": "sync_connect", "input": {}, "config": config, "userCredentials": user_credentials, "userId": effective_uid }),
+        json!({ "action": "sync_connect", "input": {}, "config": config, "userCredentials": user_credentials, "userId": effective_uid, "connectionId": resolved_conn }),
         caller,
     ).await {
         Ok(res) if res.get("ok").and_then(|v| v.as_bool()) == Some(false) => {

@@ -18,11 +18,11 @@ serve({
     __auth_start: authStart,
     __auth_callback: authCallback,
     async __integration(params, _caller, ctx) {
-      const { action, input, config, userCredentials, userId } = params;
+      const { action, input, config, userCredentials, userId, connectionId } = params;
       if (!userCredentials?.refreshToken) return fail({ code: "INSUFFICIENT_PERMISSIONS", message: "user not connected" });
       const handler = actions[action];
       if (!handler) return fail({ code: "MISCONFIGURED", message: `unknown action: ${action}` });
-      return handler(config, userCredentials, input, userId, ctx);
+      return handler(config, userCredentials, input, userId, ctx, connectionId ?? null);
     },
     async __webhook(params) {
       const data = params?.body?.message?.data;
@@ -137,54 +137,63 @@ async function getAttachment(config: Config, creds: UserCreds, input: any, userI
   return callGmail(config, creds, `/messages/${input.messageId}/attachments/${input.attachmentId}`, undefined, userId);
 }
 
-async function syncConnect(config: Config, creds: UserCreds, _input: any, userId: string, ctx: RootCxCtx): Promise<Result<any>> {
+async function syncConnect(config: Config, creds: UserCreds, _input: any, userId: string, ctx: RootCxCtx, connectionId?: string | null): Promise<Result<any>> {
   const aliases = await fetchAndCacheAliases(config, creds, userId);
   if (!aliases.ok) return aliases;
   const { primary: handle, aliases: aliasList } = aliases.data;
 
   const existing = await ctx.sql(
-    `SELECT id, cron_id FROM gmail.sync_cursors WHERE user_id = $1`, [userId]
+    `SELECT id FROM gmail.sync_cursors WHERE user_id = $1 AND (connection_id = $2 OR (connection_id IS NULL AND $2 IS NOT NULL)) ORDER BY (connection_id = $2) DESC LIMIT 1`,
+    [userId, connectionId ?? null]
   );
   let cursorId: string;
   if (existing.rows.length) {
     cursorId = existing.rows[0][0];
     await ctx.sql(
-      `UPDATE gmail.sync_cursors SET handle = $1, handle_aliases = $2, enabled = true, status = 'idle', throttle_count = 0, throttle_after = null WHERE id = $3`,
-      [handle, JSON.stringify(aliasList), cursorId]
+      `UPDATE gmail.sync_cursors SET handle = $1, handle_aliases = $2, connection_id = $3, enabled = true, status = 'idle', throttle_count = 0, throttle_after = null WHERE id = $4`,
+      [handle, JSON.stringify(aliasList), connectionId ?? null, cursorId]
     );
   } else {
     const ins = await ctx.sql(
-      `INSERT INTO gmail.sync_cursors (user_id, handle, handle_aliases, status, sync_stage, enabled, throttle_count) VALUES ($1, $2, $3, 'idle', 'list_fetch', true, 0) RETURNING id`,
-      [userId, handle, JSON.stringify(aliasList)]
+      `INSERT INTO gmail.sync_cursors (user_id, connection_id, handle, handle_aliases, status, sync_stage, enabled, throttle_count) VALUES ($1, $2, $3, $4, 'idle', 'list_fetch', true, 0) RETURNING id`,
+      [userId, connectionId ?? null, handle, JSON.stringify(aliasList)]
     );
     cursorId = ins.rows[0][0];
   }
 
-  await syncUserNow(userId, ctx);
+  await syncUserNow(userId, ctx, connectionId);
   return ok({ cursor_id: cursorId, handle });
 }
 
-async function syncDisconnect(_config: Config, _creds: UserCreds, _input: any, userId: string, ctx: RootCxCtx): Promise<Result<any>> {
-  await ctx.sql(`UPDATE gmail.sync_cursors SET enabled = false WHERE user_id = $1`, [userId]);
+async function syncDisconnect(_config: Config, _creds: UserCreds, _input: any, userId: string, ctx: RootCxCtx, connectionId?: string | null): Promise<Result<any>> {
+  if (connectionId) {
+    await ctx.sql(`UPDATE gmail.sync_cursors SET enabled = false WHERE user_id = $1 AND connection_id = $2`, [userId, connectionId]);
+  } else {
+    await ctx.sql(`UPDATE gmail.sync_cursors SET enabled = false WHERE user_id = $1`, [userId]);
+  }
   return ok({});
 }
 
-async function syncNow(_config: Config, _creds: UserCreds, _input: any, userId: string, ctx: RootCxCtx): Promise<Result<any>> {
-  const cursor = await ctx.sql(
-    `SELECT id, status, throttle_after FROM gmail.sync_cursors WHERE user_id = $1 AND enabled = true`, [userId]
-  );
-  if (!cursor.rows.length) return fail({ code: "MISCONFIGURED", message: "no active sync" });
+async function syncNow(_config: Config, _creds: UserCreds, _input: any, userId: string, ctx: RootCxCtx, connectionId?: string | null): Promise<Result<any>> {
+  const cursor = connectionId
+    ? await ctx.sql(`SELECT id, status, throttle_after FROM gmail.sync_cursors WHERE user_id = $1 AND connection_id = $2 AND enabled = true`, [userId, connectionId])
+    : await ctx.sql(`SELECT id, status, throttle_after FROM gmail.sync_cursors WHERE user_id = $1 AND enabled = true`, [userId]);
+  if (!cursor.rows.length) return ok({ triggered: false, reason: "no cursor for this connection" });
   const [, status, throttle_after] = cursor.rows[0];
   if (status === "syncing") return ok({ triggered: false });
   if (throttle_after && new Date(throttle_after).getTime() > Date.now()) return ok({ triggered: false });
-  await syncUserNow(userId, ctx);
+  await syncUserNow(userId, ctx, connectionId);
   return ok({ triggered: true });
 }
 
-async function syncUserNow(userId: string, ctx: RootCxCtx) {
-  await ctx.sql(`UPDATE gmail.sync_cursors SET status = 'syncing' WHERE user_id = $1`, [userId]);
+async function syncUserNow(userId: string, ctx: RootCxCtx, connectionId?: string | null) {
+  const where = connectionId
+    ? `WHERE user_id = $1 AND connection_id = $2 AND enabled = true`
+    : `WHERE user_id = $1 AND enabled = true`;
+  const params = connectionId ? [userId, connectionId] : [userId];
+  await ctx.sql(`UPDATE gmail.sync_cursors SET status = 'syncing' ${where}`, params);
   const cursors = await ctx.sql(
-    `SELECT id, cursor, sync_stage, throttle_count FROM gmail.sync_cursors WHERE user_id = $1 AND enabled = true`, [userId]
+    `SELECT id, cursor, sync_stage, throttle_count FROM gmail.sync_cursors ${where}`, params
   );
   if (!cursors.rows.length) return;
   const [id, cursor, , throttle_count] = cursors.rows[0];
@@ -276,7 +285,7 @@ async function historyList(config: Config, creds: UserCreds, input: any, userId:
   });
 }
 
-const actions: Record<string, (c: Config, u: UserCreds, i: any, uid: string, ctx: RootCxCtx) => Promise<Result<any>>> = {
+const actions: Record<string, (c: Config, u: UserCreds, i: any, uid: string, ctx: RootCxCtx, connId?: string | null) => Promise<Result<any>>> = {
   send_email: sendEmail, create_draft: createDraft, get_attachment: getAttachment,
   sync_connect: syncConnect, sync_disconnect: syncDisconnect, sync_now: syncNow,
   get_profile: getProfile, list_send_as: listSendAs, watch: watchAction, stop_watch: stopWatch,
@@ -289,7 +298,7 @@ async function handleJob(payload: any, _caller: any, ctx: RootCxCtx) {
     return { ok: true };
   }
   if (payload?.type === "sync") {
-    await syncUserNow(payload.user_id, ctx);
+    await syncUserNow(payload.user_id, ctx, payload.connection_id ?? null);
     return { ok: true };
   }
   return { skipped: true };

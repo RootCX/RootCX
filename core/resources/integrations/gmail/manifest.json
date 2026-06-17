@@ -163,6 +163,7 @@
       "entityName": "sync_cursors",
       "fields": [
         { "name": "user_id",          "type": "text", "required": true },
+        { "name": "connection_id",    "type": "text" },
         { "name": "handle",           "type": "text" },
         { "name": "handle_aliases",   "type": "text" },
         { "name": "cursor",           "type": "text" },

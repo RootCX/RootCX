@@ -539,6 +539,7 @@ impl IntegrationCaller for IntegrationCallImpl {
             serde_json::json!({
                 "action": action_id, "input": input, "config": config,
                 "userCredentials": user_credentials, "userId": effective_uid,
+                "connectionId": conn_id,
             }),
             caller,
         ).await.map_err(|e| e.to_string())?;
