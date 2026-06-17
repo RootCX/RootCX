@@ -34,7 +34,7 @@ const DialogContent = React.forwardRef<
   const [containerNode, setContainerNode] = React.useState<HTMLElement | null>(null);
   const fwdRef = React.useRef(ref);
   fwdRef.current = ref;
-  const composedRef = React.useCallback((node: HTMLElement | null) => {
+  const composedRef = React.useCallback((node: HTMLDivElement | null) => {
     setContainerNode(node);
     const r = fwdRef.current;
     if (typeof r === "function") r(node);
