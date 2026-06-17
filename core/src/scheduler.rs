@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::extensions::agents::persistence;
-use crate::ipc::{AgentInvokePayload, LlmModelRef, RpcCaller};
+use crate::ipc::{AgentInvokePayload, LlmModelRef};
 use crate::{jobs, worker_manager::WorkerManager};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -15,15 +15,6 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub struct SchedulerHandle {
     pub wake: Arc<Notify>,
     pub cancel: CancellationToken,
-}
-
-async fn resolve_caller(pool: &PgPool, user_id: uuid::Uuid) -> Option<RpcCaller> {
-    // Disabled principals (deny-by-default) resolve to no caller: the job then
-    // runs with no identity and RLS denies every row.
-    let (email,): (String,) = sqlx::query_as(
-        "SELECT email FROM rootcx_system.users WHERE id = $1 AND disabled_at IS NULL")
-        .bind(user_id).fetch_optional(pool).await.ok()??;
-    Some(RpcCaller { user_id: user_id.to_string(), email, effective_perms: None })
 }
 
 async fn dispatch_agent_job(
@@ -163,7 +154,7 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>) -> SchedulerHandle 
                         let _ = jobs::fail(&pool, msg_id).await;
                         continue;
                     };
-                    let caller = resolve_caller(&pool, uid).await;
+                    let caller = crate::principal::resolve_caller(&pool, uid).await;
                     if let Err(e) = wm.dispatch_job(&job_msg.app_id, msg_id.to_string(), job_msg.payload, caller).await {
                         warn!(msg_id, "dispatch failed: {e}");
                         let _ = jobs::fail(&pool, msg_id).await;

@@ -24,12 +24,18 @@ pub async fn execute_self_action(
     app_id: &str,
     action: &str,
     mut params: serde_json::Value,
-    requester: Option<uuid::Uuid>,
+    identity: &crate::governance::enforcement::ContextState,
 ) -> Result<serde_json::Value, String> {
     use crate::tools::str_arg;
-    // The requester is resolved from the IPC context_token. It is the only
-    // identity an action may act as — a worker can never name an arbitrary user.
-    let requester = requester.ok_or("self_action requires an authenticated context")?;
+    // The requester is this worker's fixed identity — the only user an action
+    // may act as (it can never name an arbitrary one). The unit run on its
+    // behalf must carry a real RLS identity to the sub-worker, else it lands on
+    // the anonymous worker and RLS hides every row.
+    let requester = identity.user_id.ok_or("self_action requires an authenticated context")?;
+    // Authority is monotone: a delegated worker propagates its frozen perms
+    // down; a direct one acts with the user's own authority. Never re-widened.
+    let inherit = identity.is_delegated.then(|| identity.effective_perms.as_slice());
+
     match action {
         "syncConnectedUsers" => {
             // Acting for ALL connected users is privileged. The old HTTP path
@@ -41,19 +47,24 @@ pub async fn execute_self_action(
             let users = connections::connected_users(pool, app_id).await.map_err(|e| format!("{e:?}"))?;
             let mut synced = 0u64;
             for uid in users {
-                if let Ok(user_uuid) = uid.parse::<uuid::Uuid>()
-                    && caller.call(pool, user_uuid, None, app_id, action_name, serde_json::json!({})).await.is_ok()
-                {
+                // Each user resyncs THEIR OWN data with their own authority; the
+                // admin gate above governs who may trigger the fan-out, not the
+                // per-user authority (hence no `inherit`). Disabled users skip.
+                let Ok(user_uuid) = uid.parse::<uuid::Uuid>() else { continue };
+                let Some(rpc) = crate::principal::resolve_caller(pool, user_uuid).await else { continue };
+                if caller.call(pool, user_uuid, None, app_id, action_name, serde_json::json!({}), Some(rpc)).await.is_ok() {
                     synced += 1;
                 }
             }
             Ok(serde_json::json!({ "ok": true, "synced": synced }))
         }
         "triggerAction" => {
-            // Scoped to the requester: runs the action for themselves only.
+            // Scoped to the requester: runs the action for themselves only,
+            // inheriting the caller's authority envelope.
             let action_name = str_arg(&params, "actionName")?;
             let input = params.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
-            caller.call(pool, requester, None, app_id, action_name, input).await
+            let rpc = crate::principal::resolve_caller_inheriting(pool, requester, inherit).await;
+            caller.call(pool, requester, None, app_id, action_name, input, rpc).await
         }
         "call_integration" => {
             // A business-app worker calling ANOTHER integration's action.
@@ -72,7 +83,15 @@ pub async fn execute_self_action(
             if !connections::binding_allows(pool, app_id, integration_id, requester, effective).await? {
                 return Err(format!("no binding allows {app_id} to use {integration_id} as user {effective}"));
             }
-            caller.call(pool, effective, Some(app_id), integration_id, action_name, input).await
+            // Acting as oneself inherits the caller's envelope; acting as another
+            // user (asUser, gated above by their binding) runs as that user's own
+            // authority.
+            let rpc = if effective == requester {
+                crate::principal::resolve_caller_inheriting(pool, requester, inherit).await
+            } else {
+                crate::principal::resolve_caller(pool, effective).await
+            };
+            caller.call(pool, effective, Some(app_id), integration_id, action_name, input, rpc).await
         }
         other => Err(format!("unknown self_action: {other}")),
     }

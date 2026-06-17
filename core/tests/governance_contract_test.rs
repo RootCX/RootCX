@@ -715,6 +715,15 @@ async fn get_webhook_token(pool: &sqlx::PgPool, wh_id: Uuid) -> String {
 
 struct RecordingCaller {
     last_user: std::sync::Mutex<Option<Uuid>>,
+    // The RLS identity handed to the sub-worker. `None` here means the worker
+    // would run anonymous (RLS hides every row) — the lost-identity bug.
+    last_caller: std::sync::Mutex<Option<rootcx_core::RpcCaller>>,
+}
+
+impl RecordingCaller {
+    fn new() -> Self {
+        Self { last_user: std::sync::Mutex::new(None), last_caller: std::sync::Mutex::new(None) }
+    }
 }
 
 #[async_trait::async_trait]
@@ -722,41 +731,63 @@ impl rootcx_core::tools::IntegrationCaller for RecordingCaller {
     async fn call(
         &self, _pool: &sqlx::PgPool, user_id: Uuid, _app_id: Option<&str>,
         _integration_id: &str, _action_id: &str, _input: Value,
+        caller: Option<rootcx_core::RpcCaller>,
     ) -> Result<Value, String> {
         *self.last_user.lock().unwrap() = Some(user_id);
+        *self.last_caller.lock().unwrap() = caller;
         Ok(json!({"ok": true}))
     }
+}
+
+// A direct (non-delegated) worker identity acting as `uid`.
+fn direct(uid: Uuid) -> rootcx_core::governance::enforcement::ContextState {
+    rootcx_core::governance::enforcement::ContextState { user_id: Some(uid), is_delegated: false, effective_perms: vec![] }
+}
+
+async fn call_ci(pool: &sqlx::PgPool, caller: &RecordingCaller, params: Value, requester: Uuid) -> Result<Value, String> {
+    rootcx_core::extensions::integrations::execute_self_action(
+        pool, caller, "prospection", "call_integration", params, &direct(requester),
+    ).await
 }
 
 #[tokio::test]
 async fn self_action_is_scoped_to_requester() {
     let rt = harness::TestRuntime::boot().await;
     let pool = rt.pool();
-    let caller = RecordingCaller { last_user: std::sync::Mutex::new(None) };
+    let caller = RecordingCaller::new();
 
-    let jean = Uuid::new_v4();
-    sqlx::query("INSERT INTO rootcx_system.users (id, email) VALUES ($1, 'jean-sa@t.local')")
-        .bind(jean).execute(pool).await.unwrap();
+    let jean = create_user(pool, "jean-sa@t.local").await;
     let victim = Uuid::new_v4();
 
     // triggerAction acts as the REQUESTER, ignoring any userId in params.
     let r = rootcx_core::extensions::integrations::execute_self_action(
         pool, &caller, "gmail", "triggerAction",
-        json!({"actionName": "x", "userId": victim.to_string()}), Some(jean),
+        json!({"actionName": "x", "userId": victim.to_string()}), &direct(jean),
     ).await;
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(*caller.last_user.lock().unwrap(), Some(jean),
         "must act as the requester, never the arbitrary params.userId");
 
-    // No requester (absent/unknown context token) → hard deny.
+    // Regression guard for the lost-identity bug: the sub-worker must receive a
+    // REAL RLS identity (never None → anonymous → RLS hides every row), and it
+    // must be the requester's, direct (non-delegated → own full authority).
+    {
+        let rec = caller.last_caller.lock().unwrap();
+        let c = rec.as_ref().expect("triggerAction must pass a real RLS caller, not None (anonymous)");
+        assert_eq!(c.user_id, jean.to_string(), "sub-worker runs under the requester's identity");
+        assert!(c.effective_perms.is_none(), "a direct caller carries own authority, not a frozen perm set");
+    }
+
+    // No requester (absent/unknown context) → hard deny.
     let r = rootcx_core::extensions::integrations::execute_self_action(
-        pool, &caller, "gmail", "triggerAction", json!({"actionName": "x"}), None,
+        pool, &caller, "gmail", "triggerAction", json!({"actionName": "x"}),
+        &rootcx_core::governance::enforcement::ContextState::default(),
     ).await;
     assert!(r.is_err(), "no context → deny");
 
     // syncConnectedUsers is admin-only (matches the old x-run-as admin gate).
     let r = rootcx_core::extensions::integrations::execute_self_action(
-        pool, &caller, "gmail", "syncConnectedUsers", json!({"actionName": "x"}), Some(jean),
+        pool, &caller, "gmail", "syncConnectedUsers", json!({"actionName": "x"}), &direct(jean),
     ).await;
     assert!(r.is_err() && r.as_ref().unwrap_err().contains("admin"),
         "non-admin syncConnectedUsers must be refused: {r:?}");
@@ -769,28 +800,23 @@ async fn self_action_is_scoped_to_requester() {
 async fn call_integration_requires_binding_consent() {
     let rt = harness::TestRuntime::boot().await;
     let pool = rt.pool();
-    let caller = RecordingCaller { last_user: std::sync::Mutex::new(None) };
+    let caller = RecordingCaller::new();
 
     // The gate reads only app_integrations — no user rows needed.
     let sandro = Uuid::new_v4();
     let colleague = Uuid::new_v4();
 
-    let call = |params: Value, requester: Uuid| {
-        rootcx_core::extensions::integrations::execute_self_action(
-            pool, &caller, "prospection", "call_integration", params, Some(requester),
-        )
-    };
     let base = json!({"integrationId": "gmail", "action": "send_email", "input": {}});
 
     // 1. No binding at all → the app may not touch the integration.
-    let r = call(base.clone(), sandro).await;
+    let r = call_ci(pool, &caller, base.clone(), sandro).await;
     assert!(r.is_err() && r.as_ref().unwrap_err().contains("no binding"),
         "unbound app must be refused: {r:?}");
 
     // 2. App-wide binding → acting as self is allowed.
     sqlx::query("INSERT INTO rootcx_system.app_integrations (app_id, integration_id, user_id) VALUES ('prospection', 'gmail', '')")
         .execute(pool).await.unwrap();
-    let r = call(base.clone(), sandro).await;
+    let r = call_ci(pool, &caller, base.clone(), sandro).await;
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(*caller.last_user.lock().unwrap(), Some(sandro), "acts as the requester by default");
 
@@ -798,7 +824,7 @@ async fn call_integration_requires_binding_consent() {
     //    app-wide binding exists. Another user's mailbox needs their consent.
     let mut p = base.clone();
     p["asUser"] = json!(colleague.to_string());
-    let r = call(p.clone(), sandro).await;
+    let r = call_ci(pool, &caller, p.clone(), sandro).await;
     assert!(r.is_err() && r.as_ref().unwrap_err().contains("no binding"),
         "asUser without user-scoped binding must be refused: {r:?}");
 
@@ -806,7 +832,7 @@ async fn call_integration_requires_binding_consent() {
     //    granted, the app may now act through their connection.
     sqlx::query("INSERT INTO rootcx_system.app_integrations (app_id, integration_id, user_id, connection_id) VALUES ('prospection', 'gmail', $1, 'conn-colleague')")
         .bind(colleague.to_string()).execute(pool).await.unwrap();
-    let r = call(p, sandro).await;
+    let r = call_ci(pool, &caller, p, sandro).await;
     assert!(r.is_ok(), "{r:?}");
     assert_eq!(*caller.last_user.lock().unwrap(), Some(colleague), "acts as the consenting user");
 

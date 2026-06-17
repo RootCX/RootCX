@@ -34,9 +34,13 @@ pub trait AgentDispatcher: Send + Sync {
 pub trait IntegrationCaller: Send + Sync {
     /// `app_id`: the calling app, threaded into credential resolution so
     /// (app × user) and app-wide bindings can select the connection.
+    /// `caller`: the RLS identity the sub-worker runs under. `None` lands on the
+    /// anonymous worker (RLS denies every row) — callers pass `Some` to act as a
+    /// real user, fail-closed when that user is disabled.
     async fn call(
         &self, pool: &PgPool, user_id: Uuid, app_id: Option<&str>,
         integration_id: &str, action_id: &str, input: JsonValue,
+        caller: Option<crate::ipc::RpcCaller>,
     ) -> Result<JsonValue, String>;
 }
 

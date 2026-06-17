@@ -709,13 +709,13 @@ async fn supervisor_loop(
                             let aid = config.app_id.clone();
                             let tx = outbound_tx.clone();
                             let int_caller = config.integration_caller.clone();
-                            // The requesting user is this worker's fixed identity,
-                            // so the action is scoped to them (never an arbitrary
-                            // user the worker could name).
-                            let requester = config.identity.user_id;
+                            // This worker's fixed identity scopes the action: it
+                            // is the only user it may act as, and (delegated or
+                            // not) the authority a sub-worker inherits.
+                            let identity = config.identity.clone();
                             tokio::spawn(async move {
                                 let result = match int_caller {
-                                    Some(c) => crate::extensions::integrations::execute_self_action(&pool, c.as_ref(), &aid, &action, params, requester).await,
+                                    Some(c) => crate::extensions::integrations::execute_self_action(&pool, c.as_ref(), &aid, &action, params, &identity).await,
                                     None => Err("self_action unavailable".into()),
                                 };
                                 let msg = match result {

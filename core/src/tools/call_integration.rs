@@ -44,6 +44,12 @@ impl Tool for CallIntegrationTool {
             return Err(format!("no binding allows {} to use {integration_id}", ctx.app_id));
         }
 
-        caller.call(&ctx.pool, effective_user, Some(&ctx.app_id), integration_id, action, input).await
+        // The integration runs under the human's RLS identity, but carrying the
+        // agent's already-frozen (narrowed) authority — delegated, never
+        // re-widened to the human's full set.
+        let rpc = crate::principal::resolve_caller_inheriting(
+            &ctx.pool, effective_user, Some(&ctx.permissions),
+        ).await;
+        caller.call(&ctx.pool, effective_user, Some(&ctx.app_id), integration_id, action, input, rpc).await
     }
 }

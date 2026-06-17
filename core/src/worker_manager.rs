@@ -506,12 +506,17 @@ impl IntegrationCaller for IntegrationCallImpl {
     async fn call(
         &self, pool: &PgPool, user_id: uuid::Uuid, app_id: Option<&str>,
         integration_id: &str, action_id: &str, input: JsonValue,
+        caller: Option<RpcCaller>,
     ) -> Result<JsonValue, String> {
         // config + creds resolve together: the chosen connection pins its OAuth client.
         let (config, user_credentials, effective_uid, conn_id) = crate::extensions::integrations::connections::resolve_credentials(
             &self.secrets, pool, integration_id, &user_id.to_string(), app_id,
         ).await;
 
+        // `caller` is the RLS identity the sub-worker runs under; `effective_uid`
+        // only selects whose mailbox/connection serves the request (mirrors the
+        // HTTP action route). Passing the caller through is what keeps the worker
+        // off the anonymous principal.
         let result = self.wm.rpc(
             integration_id,
             uuid::Uuid::new_v4().to_string(),
@@ -520,7 +525,7 @@ impl IntegrationCaller for IntegrationCallImpl {
                 "action": action_id, "input": input, "config": config,
                 "userCredentials": user_credentials, "userId": effective_uid,
             }),
-            None,
+            caller,
         ).await.map_err(|e| e.to_string())?;
 
         crate::extensions::integrations::connections::flag_if_auth_failed(pool, integration_id, conn_id.as_deref(), &result).await;

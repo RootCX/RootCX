@@ -164,14 +164,12 @@ async fn try_auto_sync_connect(
     pending: &Pending,
 ) -> Option<(String, String)> {
     let user_id: uuid::Uuid = pending.user_id.parse().ok()?;
-    let email: String = sqlx::query_scalar("SELECT email FROM rootcx_system.users WHERE id = $1")
-        .bind(user_id).fetch_optional(pool).await.ok()??;
-    if email.is_empty() { return None; }
+    // Fail-closed: a disabled/unknown principal resolves to None and no auto-sync fires.
+    let caller = Some(crate::principal::resolve_caller(pool, user_id).await?);
 
     let (config, user_credentials, effective_uid, _conn_id) = super::connections::resolve_credentials(
         secrets, pool, &pending.integration_id, &pending.user_id, None,
     ).await;
-    let caller = Some(crate::ipc::RpcCaller { user_id: pending.user_id.clone(), email: email.clone(), effective_perms: None });
 
     match wm.rpc(
         &pending.integration_id, Uuid::new_v4().to_string(), "__integration".into(),
