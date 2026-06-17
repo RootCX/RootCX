@@ -28,6 +28,11 @@ pub struct RpcCaller {
     /// call, `is_delegated='0'`. The worker is never trusted with a token.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effective_perms: Option<Vec<String>>,
+    /// Pin all credential resolution to this connection for the call's lifetime.
+    /// Set by the `syncConnectedUsers` fan-out; inherited by sub-calls so
+    /// re-entries (ctx.action) resolve the same mailbox, not the oldest one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -146,6 +146,7 @@ pub async fn execute_action(
         user_id: target_user.clone(),
         email: caller_email,
         effective_perms: None,
+        connection_id: conn_id.clone(),
     });
 
     let result = wm
@@ -256,6 +257,7 @@ pub async fn webhook_ingress(
             user_id: uid.to_string(),
             email: String::new(),
             effective_perms: None,
+            connection_id: None,
         });
         let result = wm
             .rpc(
@@ -295,6 +297,7 @@ pub async fn webhook_ingress(
         user_id: uid.to_string(),
         email: String::new(),
         effective_perms: None,
+        connection_id: None,
     });
 
     let config = resolve_config(&pool, &secrets, &integration_id).await?;

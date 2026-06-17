@@ -44,14 +44,14 @@ pub async fn execute_self_action(
             crate::governance::authority::require_admin(pool, requester)
                 .await.map_err(|_| "syncConnectedUsers requires admin".to_string())?;
             let action_name = str_arg(&params, "actionName")?;
-            let users = connections::connected_users(pool, app_id).await.map_err(|e| format!("{e:?}"))?;
+            let conns = connections::connected_connections(pool, app_id).await.map_err(|e| format!("{e:?}"))?;
             let mut synced = 0u64;
-            for uid in users {
-                // Each user resyncs THEIR OWN data with their own authority; the
-                // admin gate above governs who may trigger the fan-out, not the
-                // per-user authority (hence no `inherit`). Disabled users skip.
+            for (uid, conn_id) in conns {
+                // Each connection syncs with its own user's authority, pinned to
+                // that specific connection so re-entries (ctx.action) resolve the
+                // same mailbox. Disabled users skip.
                 let Ok(user_uuid) = uid.parse::<uuid::Uuid>() else { continue };
-                let Some(rpc) = crate::principal::resolve_caller(pool, user_uuid).await else { continue };
+                let Some(rpc) = crate::principal::resolve_caller_pinned(pool, user_uuid, conn_id).await else { continue };
                 if caller.call(pool, user_uuid, None, app_id, action_name, serde_json::json!({}), Some(rpc)).await.is_ok() {
                     synced += 1;
                 }
@@ -60,10 +60,11 @@ pub async fn execute_self_action(
         }
         "triggerAction" => {
             // Scoped to the requester: runs the action for themselves only,
-            // inheriting the caller's authority envelope.
+            // inheriting the caller's authority envelope AND connection pin.
             let action_name = str_arg(&params, "actionName")?;
             let input = params.get("input").cloned().unwrap_or_else(|| serde_json::json!({}));
-            let rpc = crate::principal::resolve_caller_inheriting(pool, requester, inherit).await;
+            let mut rpc = crate::principal::resolve_caller_inheriting(pool, requester, inherit).await;
+            if let Some(ref mut c) = rpc { c.connection_id = identity.connection_id.clone(); }
             caller.call(pool, requester, None, app_id, action_name, input, rpc).await
         }
         "call_integration" => {
@@ -83,14 +84,17 @@ pub async fn execute_self_action(
             if !connections::binding_allows(pool, app_id, integration_id, requester, effective).await? {
                 return Err(format!("no binding allows {app_id} to use {integration_id} as user {effective}"));
             }
-            // Acting as oneself inherits the caller's envelope; acting as another
-            // user (asUser, gated above by their binding) runs as that user's own
-            // authority.
-            let rpc = if effective == requester {
+            // Acting as oneself inherits the caller's envelope + connection pin;
+            // acting as another user runs as that user's own authority (no pin —
+            // the target integration resolves their connection normally).
+            let mut rpc = if effective == requester {
                 crate::principal::resolve_caller_inheriting(pool, requester, inherit).await
             } else {
                 crate::principal::resolve_caller(pool, effective).await
             };
+            if effective == requester {
+                if let Some(ref mut c) = rpc { c.connection_id = identity.connection_id.clone(); }
+            }
             caller.call(pool, effective, Some(app_id), integration_id, action_name, input, rpc).await
         }
         other => Err(format!("unknown self_action: {other}")),

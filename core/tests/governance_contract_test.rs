@@ -741,7 +741,7 @@ impl rootcx_core::tools::IntegrationCaller for RecordingCaller {
 
 // A direct (non-delegated) worker identity acting as `uid`.
 fn direct(uid: Uuid) -> rootcx_core::governance::enforcement::ContextState {
-    rootcx_core::governance::enforcement::ContextState { user_id: Some(uid), is_delegated: false, effective_perms: vec![] }
+    rootcx_core::governance::enforcement::ContextState { user_id: Some(uid), is_delegated: false, effective_perms: vec![], connection_id: None }
 }
 
 async fn call_ci(pool: &sqlx::PgPool, caller: &RecordingCaller, params: Value, requester: Uuid) -> Result<Value, String> {
@@ -791,6 +791,63 @@ async fn self_action_is_scoped_to_requester() {
     ).await;
     assert!(r.is_err() && r.as_ref().unwrap_err().contains("admin"),
         "non-admin syncConnectedUsers must be refused: {r:?}");
+    rt.shutdown().await;
+}
+
+// ── connection pinning: fan-out + re-entry inherit the pin ───────────────
+
+#[tokio::test]
+async fn sync_fanout_pins_connection_and_reentry_inherits() {
+    let rt = harness::TestRuntime::boot().await;
+    let pool = rt.pool();
+    let caller = RecordingCaller::new();
+
+    let jean = create_user(pool, "jean-sa-pin@t.local").await;
+
+    // Make jean an admin (syncConnectedUsers requires it).
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, 'admin') ON CONFLICT DO NOTHING")
+        .bind(jean).execute(pool).await.unwrap();
+
+    // Create two direct connections for jean on gmail (multi-mailbox).
+    let conn_old = Uuid::new_v4();
+    let conn_new = Uuid::new_v4();
+    sqlx::query("INSERT INTO rootcx_system.integration_connections (id, integration_id, user_id, kind, status, created_at) VALUES ($1, 'gmail', $2, 'direct', 'active', NOW() - INTERVAL '1 day'), ($3, 'gmail', $2, 'direct', 'active', NOW())")
+        .bind(conn_old).bind(jean.to_string()).bind(conn_new).execute(pool).await.unwrap();
+
+    // Fan-out: syncConnectedUsers should dispatch ONCE PER CONNECTION (not per user).
+    let r = rootcx_core::extensions::integrations::execute_self_action(
+        pool, &caller, "gmail", "syncConnectedUsers", json!({"actionName": "x"}), &direct(jean),
+    ).await;
+    assert!(r.is_ok(), "admin fan-out must succeed: {r:?}");
+    let synced: u64 = r.unwrap().get("synced").and_then(|v| v.as_u64()).unwrap_or(0);
+    assert_eq!(synced, 2, "must dispatch once per connection, not once per user");
+
+    // The LAST call's caller must carry a connection_id pin (either conn).
+    {
+        let rec = caller.last_caller.lock().unwrap();
+        let c = rec.as_ref().expect("fan-out must pass a real caller");
+        assert!(c.connection_id.is_some(), "fan-out must pin a connection_id on the caller");
+    }
+
+    // triggerAction inherits the pin from the worker's identity.
+    let pinned_identity = rootcx_core::governance::enforcement::ContextState {
+        user_id: Some(jean),
+        is_delegated: false,
+        effective_perms: vec![],
+        connection_id: Some(conn_new.to_string()),
+    };
+    let r = rootcx_core::extensions::integrations::execute_self_action(
+        pool, &caller, "gmail", "triggerAction",
+        json!({"actionName": "x"}), &pinned_identity,
+    ).await;
+    assert!(r.is_ok(), "{r:?}");
+    {
+        let rec = caller.last_caller.lock().unwrap();
+        let c = rec.as_ref().expect("triggerAction must pass a real caller");
+        assert_eq!(c.connection_id.as_deref(), Some(conn_new.to_string()).as_deref(),
+            "triggerAction must inherit the parent's connection pin");
+    }
+
     rt.shutdown().await;
 }
 
@@ -1553,11 +1610,12 @@ fn t4_3_rpc_caller_wire_carries_no_token() {
     let with_perms = serde_json::to_value(rootcx_core::RpcCaller {
         user_id: "u-1".into(), email: "u@x.com".into(),
         effective_perms: Some(vec!["app:crm:contacts.read".into()]),
+        connection_id: None,
     }).unwrap();
     expect_keys(&with_perms, &["effectivePerms", "email", "userId"]);
 
     let without_perms = serde_json::to_value(rootcx_core::RpcCaller {
-        user_id: "u-2".into(), email: "u2@x.com".into(), effective_perms: None,
+        user_id: "u-2".into(), email: "u2@x.com".into(), effective_perms: None, connection_id: None,
     }).unwrap();
     expect_keys(&without_perms, &["email", "userId"]);
 }
@@ -1728,6 +1786,7 @@ async fn regression_agent_tool_delegated_context_blocks_excess_perms() {
         user_id: Some(jean),
         is_delegated: true,
         effective_perms: agent_intersection,
+        connection_id: None,
     };
     let mut tx = rootcx_core::governance::enforcement::begin_app_tx(pool, "crm", &state, Some(jean), None, "test", rootcx_core::governance::enforcement::TIMEOUT_INTERACTIVE_MS)
         .await.unwrap();
@@ -1854,6 +1913,7 @@ async fn sql_proxy_timeout_kills_long_running_query() {
         user_id: Some(uid),
         is_delegated: false,
         effective_perms: vec!["app:crm:contacts.read".into()],
+        connection_id: None,
     };
 
     // Use a 1-second timeout (minimum practical). pg_sleep(5) must be cancelled.
@@ -1889,6 +1949,7 @@ async fn sql_proxy_oversized_result_rolls_back() {
             "app:crm:contacts.read".into(),
             "app:crm:contacts.create".into(),
         ],
+        connection_id: None,
     };
 
     // Insert 1001 rows via generate_series RETURNING. Must exceed MAX_ROWS=1000.
@@ -1925,6 +1986,7 @@ async fn sql_proxy_row_cap_boundary_1000_succeeds() {
             "app:crm:contacts.read".into(),
             "app:crm:contacts.create".into(),
         ],
+        connection_id: None,
     };
 
     // Exactly 1000 rows: must succeed.
@@ -1962,6 +2024,7 @@ fn writer_state(uid: Uuid) -> ContextState {
         user_id: Some(uid),
         is_delegated: false,
         effective_perms: vec!["app:crm:contacts.create".into(), "app:crm:contacts.read".into()],
+        connection_id: None,
     }
 }
 
@@ -2105,6 +2168,7 @@ async fn public_caller_deny_all_on_data() {
         user_id: "".parse().ok(), // None (empty string fails UUID parse)
         is_delegated: false,
         effective_perms: vec![],
+        connection_id: None,
     };
     assert!(public_state.user_id.is_none(), "precondition: empty string must parse to None");
 
@@ -2406,6 +2470,7 @@ async fn typed_bind_uuid_int_date_bool_array_jsonb() {
         user_id: Some(uid),
         is_delegated: false,
         effective_perms: vec!["app:typebind:records.create".into(), "app:typebind:records.read".into()],
+        connection_id: None,
     };
 
     // Insert a row with all typed columns via run_sql (exercises build_typed_args).

@@ -32,6 +32,10 @@ pub struct ContextState {
     pub user_id: Option<Uuid>,
     pub is_delegated: bool,
     pub effective_perms: Vec<String>,
+    /// Pinned integration connection for the worker's lifetime. When set, all
+    /// credential resolution uses this connection instead of the created_at
+    /// fallback. Inherited through sub-calls (ctx.action re-entries).
+    pub connection_id: Option<String>,
 }
 
 impl ContextState {
@@ -42,6 +46,7 @@ impl ContextState {
                 user_id: c.user_id.parse().ok(),
                 is_delegated: c.effective_perms.is_some(),
                 effective_perms: c.effective_perms.clone().unwrap_or_default(),
+                connection_id: c.connection_id.clone(),
             },
             None => Self::default(),
         }

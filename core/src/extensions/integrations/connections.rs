@@ -399,7 +399,7 @@ pub(crate) async fn resolve_credentials(
     (config, JsonValue::Null, user_id.to_string(), None)
 }
 
-async fn resolve_by_connection_id(
+pub(crate) async fn resolve_by_connection_id(
     secrets: &crate::secrets::SecretManager, pool: &sqlx::PgPool,
     integration_id: &str, connection_id: &str, fallback_user: &str,
 ) -> (JsonValue, JsonValue, String, Option<String>) {
@@ -637,6 +637,22 @@ pub async fn connected_users(
     .bind(integration_id)
     .fetch_all(pool).await?;
     Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+/// All active direct connections for an integration: (user_id, connection_id).
+/// Used by `syncConnectedUsers` to fan-out per-connection (not per-user), so
+/// each sync resolves credentials for exactly its own mailbox.
+pub async fn connected_connections(
+    pool: &sqlx::PgPool, integration_id: &str,
+) -> Result<Vec<(String, String)>, ApiError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT user_id, id FROM rootcx_system.integration_connections
+         WHERE integration_id = $1 AND kind = 'direct' AND status = 'active'
+         ORDER BY user_id, created_at"
+    )
+    .bind(integration_id)
+    .fetch_all(pool).await?;
+    Ok(rows)
 }
 
 #[cfg(test)]

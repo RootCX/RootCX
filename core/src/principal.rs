@@ -26,5 +26,13 @@ pub async fn resolve_caller_inheriting(
     let (email,): (String,) = sqlx::query_as(
         "SELECT email FROM rootcx_system.users WHERE id = $1 AND disabled_at IS NULL")
         .bind(user_id).fetch_optional(pool).await.ok()??;
-    Some(RpcCaller { user_id: user_id.to_string(), email, effective_perms: inherit.map(<[String]>::to_vec) })
+    Some(RpcCaller { user_id: user_id.to_string(), email, effective_perms: inherit.map(<[String]>::to_vec), connection_id: None })
+}
+
+/// Like [`resolve_caller`] but pins a specific integration connection so all
+/// sub-calls (re-entries via ctx.action) resolve the same mailbox.
+pub async fn resolve_caller_pinned(pool: &PgPool, user_id: Uuid, connection_id: String) -> Option<RpcCaller> {
+    let mut c = resolve_caller(pool, user_id).await?;
+    c.connection_id = Some(connection_id);
+    Some(c)
 }

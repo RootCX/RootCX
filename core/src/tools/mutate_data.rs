@@ -45,6 +45,7 @@ impl Tool for MutateDataTool {
             user_id: ctx.invoker_user_id,
             is_delegated: true,
             effective_perms: ctx.permissions.clone(),
+            connection_id: None,
         };
         let begin = || enforcement::begin_app_tx(&ctx.pool, app, &state, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool", enforcement::TIMEOUT_AGENT_TOOL_MS);
 

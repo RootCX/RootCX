@@ -19,7 +19,7 @@ use crate::governance::enforcement::{self, ContextState};
 /// not delegated — `check_access` resolves their permissions from the DB. The
 /// 9 former `check_app_perm` gates are gone; Postgres RLS is the sole arbiter.
 fn http_context(identity: &Identity) -> ContextState {
-    ContextState { user_id: Some(identity.user_id), is_delegated: false, effective_perms: vec![] }
+    ContextState { user_id: Some(identity.user_id), is_delegated: false, effective_perms: vec![], connection_id: None }
 }
 
 /// Open an RLS-governed transaction for a direct HTTP user request.

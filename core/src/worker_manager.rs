@@ -337,6 +337,7 @@ impl WorkerManager {
         ).await;
         let identity = crate::governance::enforcement::ContextState {
             user_id: payload.invoker_user_id, is_delegated: true, effective_perms,
+            connection_id: None,
         };
         // An agent invoke is always a delegated principal, never anonymous.
         let session_id = payload.session_id.clone();
@@ -483,6 +484,7 @@ impl ActionCaller for AppActionCallImpl {
             user_id: user_id.to_string(),
             email: String::new(),
             effective_perms,
+            connection_id: None,
         });
         self.wm.rpc(
             app_id,
@@ -508,10 +510,23 @@ impl IntegrationCaller for IntegrationCallImpl {
         integration_id: &str, action_id: &str, input: JsonValue,
         caller: Option<RpcCaller>,
     ) -> Result<JsonValue, String> {
-        // config + creds resolve together: the chosen connection pins its OAuth client.
-        let (config, user_credentials, effective_uid, conn_id) = crate::extensions::integrations::connections::resolve_credentials(
-            &self.secrets, pool, integration_id, &user_id.to_string(), app_id,
-        ).await;
+        // If the caller carries a pinned connection_id (set by the fan-out or
+        // inherited from a parent call), resolve against that connection directly
+        // instead of the ORDER BY created_at fallback that picks the oldest.
+        let pinned = caller.as_ref().and_then(|c| c.connection_id.as_deref());
+        let (config, user_credentials, effective_uid, conn_id) = if let Some(cid) = pinned {
+            let resolved = crate::extensions::integrations::connections::resolve_by_connection_id(
+                &self.secrets, pool, integration_id, cid, &user_id.to_string(),
+            ).await;
+            if resolved.3.is_none() {
+                tracing::warn!(integration_id, connection_id = cid, "pinned connection vanished or has no credentials");
+            }
+            resolved
+        } else {
+            crate::extensions::integrations::connections::resolve_credentials(
+                &self.secrets, pool, integration_id, &user_id.to_string(), app_id,
+            ).await
+        };
 
         // `caller` is the RLS identity the sub-worker runs under; `effective_uid`
         // only selects whose mailbox/connection serves the request (mirrors the
@@ -552,6 +567,7 @@ mod tests {
             user_id: uid,
             is_delegated: delegated,
             effective_perms: perms.iter().map(|s| s.to_string()).collect(),
+            connection_id: None,
         })
     }
 
@@ -616,14 +632,14 @@ mod tests {
         assert!(!p.run_onstart());
         // A real user is classified as User, never Anonymous/System.
         assert!(matches!(
-            Principal::from_request(ContextState { user_id: Some(Uuid::new_v4()), is_delegated: false, effective_perms: vec![] }),
+            Principal::from_request(ContextState { user_id: Some(Uuid::new_v4()), is_delegated: false, effective_perms: vec![], connection_id: None }),
             Principal::User(_)
         ));
         // A delegated no-user principal (cron/webhook agent) is a real authority,
         // NOT anonymous: it must get its own worker. Guards against simplifying
         // from_request to a `user_id.is_none()` check alone.
         assert!(matches!(
-            Principal::from_request(ContextState { user_id: None, is_delegated: true, effective_perms: vec![] }),
+            Principal::from_request(ContextState { user_id: None, is_delegated: true, effective_perms: vec![], connection_id: None }),
             Principal::User(_)
         ));
     }

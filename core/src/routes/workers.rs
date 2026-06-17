@@ -83,6 +83,7 @@ pub async fn rpc_proxy(
                 user_id: identity.user_id.to_string(),
                 email: identity.email.clone(),
                 effective_perms: None,
+                connection_id: None,
             })
         }
         CallerAuth::ShareToken(share) => {
@@ -98,6 +99,7 @@ pub async fn rpc_proxy(
                 user_id: share.created_by.to_string(),
                 email: String::new(),
                 effective_perms: Some(read_perms),
+                connection_id: None,
             })
         }
         CallerAuth::Anonymous => {
@@ -109,6 +111,7 @@ pub async fn rpc_proxy(
                 user_id: String::new(),
                 email: String::new(),
                 effective_perms: None,
+                connection_id: None,
             })
         }
     };
