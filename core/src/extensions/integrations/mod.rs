@@ -127,6 +127,10 @@ impl RuntimeExtension for IntegrationsExtension {
             sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
         }
         connections::bootstrap(pool).await?;
+        // Legacy indexes enforced 1-cursor-per-user; multi-mailbox needs N cursors.
+        for idx in ["gmail.idx_gmail_cursor_user", "imap_smtp.idx_imap_cursor_user"] {
+            let _ = sqlx::query(&format!("DROP INDEX IF EXISTS {idx}")).execute(pool).await;
+        }
         info!("integrations extension ready");
         Ok(())
     }
