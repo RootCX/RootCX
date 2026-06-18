@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use serde_json::Value as JsonValue;
+use serde_json::{Value as JsonValue, json};
 
 /// Resolve expression bindings in a JsonValue tree.
 /// Strings containing `{{ expr }}` are evaluated against node outputs.
@@ -86,15 +86,41 @@ fn parse_node_ref(rest: &str, outputs: &HashMap<String, JsonValue>) -> JsonValue
 
     let after = after.strip_prefix(']').unwrap_or(after);
 
-    let node_output = match outputs.get(node_id) {
+    let stored = match outputs.get(node_id) {
         Some(v) => v,
         None => return JsonValue::Null,
     };
 
-    let path = after.strip_prefix(".json.").or_else(|| after.strip_prefix(".json"))
-        .unwrap_or("");
+    // Unwrap the items-per-port format: [[{json: ...}, ...], ...]
+    // $node["X"].json → first item of port 0
+    // $node["X"].all → all items of port 0 as array
+    let first_item_json = stored.as_array()
+        .and_then(|ports| ports.first())
+        .and_then(|port| port.as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("json"))
+        .cloned()
+        // Legacy fallback: stored value is the raw output itself
+        .unwrap_or_else(|| stored.clone());
 
-    if path.is_empty() { node_output.clone() } else { navigate(node_output, path) }
+    if let Some(path) = after.strip_prefix(".all") {
+        let path = path.strip_prefix('.').unwrap_or("");
+        let all_items: JsonValue = stored.as_array()
+            .and_then(|ports| ports.first())
+            .and_then(|port| port.as_array())
+            .map(|items| {
+                let jsons: Vec<JsonValue> = items.iter()
+                    .filter_map(|item| item.get("json").cloned())
+                    .collect();
+                JsonValue::Array(jsons)
+            })
+            .unwrap_or_else(|| json!([]));
+        if path.is_empty() { all_items } else { navigate(&all_items, path) }
+    } else {
+        let path = after.strip_prefix(".json.").or_else(|| after.strip_prefix(".json"))
+            .unwrap_or("");
+        if path.is_empty() { first_item_json } else { navigate(&first_item_json, path) }
+    }
 }
 
 fn navigate(value: &JsonValue, path: &str) -> JsonValue {

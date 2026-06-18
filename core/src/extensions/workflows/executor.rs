@@ -6,7 +6,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::tools::{DispatchError, ToolContext, ToolRegistry};
-use rootcx_types::{ControlKind, WorkflowGraph, WorkflowNodeKind, WorkflowNodeRunStatus, WorkflowExecutionStatus};
+use rootcx_types::{
+    ControlKind, Item, WorkflowGraph, WorkflowNodeKind, WorkflowNodeRunStatus,
+    WorkflowExecutionStatus,
+};
 
 use super::expr;
 
@@ -17,9 +20,12 @@ pub struct NodeRunResult {
     pub error: Option<String>,
 }
 
+/// DB-first executor. Each node's output is persisted immediately after execution.
+/// A local cache (`run_outputs`) avoids re-querying PG for expression resolution
+/// and input collection — the DB remains the source of truth for durability/debug.
 pub async fn execute_dag(
     registry: &Arc<ToolRegistry>,
-    pool: &sqlx::PgPool,
+    pool: &PgPool,
     app_id: &str,
     user_id: Uuid,
     perms: &[String],
@@ -29,48 +35,55 @@ pub async fn execute_dag(
     let node_map: HashMap<&str, &rootcx_types::WorkflowNode> =
         graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let order = topo_sort(graph);
-    let mut outputs: HashMap<String, JsonValue> = HashMap::new();
-    // Tracks which output branch each node selected (for If/Switch routing)
-    let mut branch_outputs: HashMap<String, u8> = HashMap::new();
     let mut results = Vec::new();
+    let mut executed: HashMap<String, u8> = HashMap::new();
+    let mut run_outputs: HashMap<String, JsonValue> = HashMap::new();
 
     for node_id in &order {
         let Some(node) = node_map.get(node_id.as_str()) else { continue };
 
-        if !should_execute(node_id, graph, &outputs, &branch_outputs) {
+        if !should_execute(node_id, graph, &executed) {
             continue;
         }
 
-        let input = collect_inputs(node_id, graph, &outputs);
-        let resolved_params = expr::resolve(&node.params, &input, &outputs);
+        let input_items = collect_inputs(node_id, graph, &run_outputs);
+        let input_json = items_to_json(&input_items);
+        let resolved_params = expr::resolve(&node.params, &input_json, &run_outputs);
 
-        let (status, output, error) = match &node.kind {
+        let (status, output_items, error) = match &node.kind {
             WorkflowNodeKind::Trigger { .. } => {
-                (WorkflowNodeRunStatus::Succeeded, json!({}), None)
+                (WorkflowNodeRunStatus::Succeeded, vec![vec![Item { json: json!({}) }]], None)
             }
             WorkflowNodeKind::Tool { tool_name } => {
-                execute_tool_node(registry, pool, app_id, user_id, perms, tool_name, &resolved_params, &input).await
+                execute_tool_node(registry, pool, app_id, user_id, perms, tool_name, &resolved_params, &input_items).await
             }
             WorkflowNodeKind::Control { control } => {
-                execute_control_node(control, &resolved_params, &input)
+                execute_control_node(control, &resolved_params, &input_items)
             }
-            _ => (WorkflowNodeRunStatus::Skipped, json!(null), Some("not implemented".into())),
+            _ => (WorkflowNodeRunStatus::Skipped, vec![vec![]], Some("not implemented".into())),
         };
 
+        let branch = if output_items.len() > 1 {
+            output_items.iter().position(|port| !port.is_empty()).unwrap_or(0) as u8
+        } else {
+            0
+        };
+
+        let output_json = items_output_to_json(&output_items);
+
+        // Persist to DB (source of truth for debug/history).
         sqlx::query(
             "INSERT INTO rootcx_system.workflow_node_runs (execution_id, node_id, status, input, output, error, started_at, finished_at)
              VALUES ($1, $2, $3, $4, $5, $6, now(), now())",
         ).bind(exec_id).bind(node_id).bind(status.as_str())
-        .bind(&input).bind(&output).bind(&error)
+        .bind(&input_json).bind(&output_json).bind(&error)
         .execute(pool).await.ok();
 
         if status == WorkflowNodeRunStatus::Succeeded {
-            if let Some(branch) = output.get("_branch").and_then(|b| b.as_u64()) {
-                branch_outputs.insert(node_id.clone(), branch as u8);
-            }
-            outputs.insert(node_id.clone(), output.clone());
+            executed.insert(node_id.clone(), branch);
+            run_outputs.insert(node_id.clone(), output_json.clone());
         }
-        results.push(NodeRunResult { node_id: node_id.clone(), status, output, error });
+        results.push(NodeRunResult { node_id: node_id.clone(), status, output: output_json, error });
 
         if status == WorkflowNodeRunStatus::Failed { break; }
     }
@@ -78,8 +91,7 @@ pub async fn execute_dag(
     results
 }
 
-/// Full lifecycle: create execution, run DAG, finalize status. Shared by
-/// the HTTP run endpoint and the scheduler trigger path.
+/// Full lifecycle: create execution, run DAG, finalize status.
 pub async fn run_workflow(
     registry: &Arc<ToolRegistry>,
     pool: &PgPool,
@@ -95,8 +107,15 @@ pub async fn run_workflow(
     .fetch_optional(pool).await.map_err(|e| e.to_string())?
     .ok_or_else(|| "workflow not found or not enabled".to_string())?;
 
-    let graph: WorkflowGraph = serde_json::from_value(graph_json)
+    let mut graph: WorkflowGraph = serde_json::from_value(graph_json)
         .map_err(|e| format!("invalid graph: {e}"))?;
+
+    // Inject trigger data into the trigger node's params if provided.
+    if let Some(td) = &trigger_data {
+        if let Some(trigger_node) = graph.nodes.iter_mut().find(|n| matches!(n.kind, WorkflowNodeKind::Trigger { .. })) {
+            trigger_node.params = td.clone();
+        }
+    }
 
     let exec_id: Uuid = sqlx::query_scalar(
         "INSERT INTO rootcx_system.workflow_executions (id, workflow_id, app_id, status, run_as_user_id, trigger_data, started_at)
@@ -120,67 +139,137 @@ pub async fn run_workflow(
     Ok((exec_id, results))
 }
 
-fn should_execute(node_id: &str, graph: &WorkflowGraph, outputs: &HashMap<String, JsonValue>, branches: &HashMap<String, u8>) -> bool {
+// ── Input collection ─────────────────────────────────────────────────
+
+/// Assemble input items from the local run_outputs cache (no DB queries needed).
+fn collect_inputs(node_id: &str, graph: &WorkflowGraph, run_outputs: &HashMap<String, JsonValue>) -> Vec<Item> {
+    let mut items = Vec::new();
+    for edge in graph.edges.iter().filter(|e| e.to == node_id) {
+        if let Some(output_val) = run_outputs.get(&edge.from) {
+            items.extend(extract_port_items(output_val, edge.from_output));
+        }
+    }
+    items
+}
+
+/// Extract items from a specific output port of the stored output JSON.
+/// Output format: `[[{json: ...}, ...], [{json: ...}, ...]]` (items per port)
+/// Falls back to legacy single-value format for backwards compat.
+fn extract_port_items(output: &JsonValue, port: u8) -> Vec<Item> {
+    // New format: array of arrays (per-port items)
+    if let Some(ports) = output.as_array() {
+        if let Some(port_data) = ports.get(port as usize) {
+            if let Some(items_arr) = port_data.as_array() {
+                return items_arr.iter().map(|v| {
+                    if let Some(json_field) = v.get("json") {
+                        Item { json: json_field.clone() }
+                    } else {
+                        Item { json: v.clone() }
+                    }
+                }).collect();
+            }
+        }
+        return vec![];
+    }
+    // Legacy format: a single JSON value (old executor output)
+    if output.is_null() { return vec![]; }
+    vec![Item { json: output.clone() }]
+}
+
+// ── Conversion helpers ──────────────────────────────────────────────
+
+fn items_to_json(items: &[Item]) -> JsonValue {
+    if items.is_empty() { return json!({}); }
+    if items.len() == 1 { return items[0].json.clone(); }
+    json!(items.iter().map(|i| &i.json).collect::<Vec<_>>())
+}
+
+fn items_output_to_json(output: &[Vec<Item>]) -> JsonValue {
+    json!(output.iter().map(|port|
+        port.iter().map(|item| json!({ "json": item.json })).collect::<Vec<_>>()
+    ).collect::<Vec<_>>())
+}
+
+// ── Routing ─────────────────────────────────────────────────────────
+
+fn should_execute(node_id: &str, graph: &WorkflowGraph, executed: &HashMap<String, u8>) -> bool {
     let mut inbound = graph.edges.iter().filter(|e| e.to == node_id).peekable();
     if inbound.peek().is_none() { return true; }
     inbound.any(|edge| {
-        outputs.contains_key(&edge.from)
-            && branches.get(&edge.from).map_or(true, |&chosen| edge.from_output == chosen)
+        if let Some(&chosen_branch) = executed.get(&edge.from) {
+            edge.from_output == chosen_branch
+        } else {
+            false
+        }
     })
 }
 
-// ── Control nodes ────────────────────────────────────────────────────
+// ── Control nodes ───────────────────────────────────────────────────
 
 fn execute_control_node(
     control: &ControlKind,
     params: &JsonValue,
-    input: &JsonValue,
-) -> (WorkflowNodeRunStatus, JsonValue, Option<String>) {
+    input_items: &[Item],
+) -> (WorkflowNodeRunStatus, Vec<Vec<Item>>, Option<String>) {
     match control {
-        ControlKind::If => execute_if(params, input),
-        ControlKind::Switch => execute_switch(params, input),
-        ControlKind::Set => execute_set(params),
-        ControlKind::Merge => (WorkflowNodeRunStatus::Succeeded, input.clone(), None),
+        ControlKind::If => execute_if(params, input_items),
+        ControlKind::Switch => execute_switch(params, input_items),
+        ControlKind::Set => execute_set(params, input_items),
+        ControlKind::Merge => {
+            // Pass-through: all input items come out on port 0.
+            (WorkflowNodeRunStatus::Succeeded, vec![input_items.to_vec()], None)
+        }
         ControlKind::Stop => {
             let msg = params.get("message").and_then(|v| v.as_str()).unwrap_or("workflow stopped");
-            (WorkflowNodeRunStatus::Failed, json!(null), Some(msg.into()))
+            (WorkflowNodeRunStatus::Failed, vec![vec![]], Some(msg.into()))
         }
         ControlKind::Loop | ControlKind::Wait => {
-            (WorkflowNodeRunStatus::Skipped, json!(null), Some("not implemented".into()))
+            (WorkflowNodeRunStatus::Skipped, vec![vec![]], Some("not implemented".into()))
         }
     }
 }
 
-fn with_branch(input: &JsonValue, branch: u8) -> JsonValue {
-    let mut out = input.clone();
-    if let Some(obj) = out.as_object_mut() {
-        obj.insert("_branch".into(), json!(branch));
-    } else {
-        out = json!({ "_branch": branch });
-    }
-    out
-}
-
-fn execute_if(params: &JsonValue, input: &JsonValue) -> (WorkflowNodeRunStatus, JsonValue, Option<String>) {
+fn execute_if(params: &JsonValue, items: &[Item]) -> (WorkflowNodeRunStatus, Vec<Vec<Item>>, Option<String>) {
     let condition = params.get("condition").unwrap_or(&JsonValue::Null);
-    let branch: u8 = if is_truthy(condition) { 0 } else { 1 };
-    (WorkflowNodeRunStatus::Succeeded, with_branch(input, branch), None)
+    if is_truthy(condition) {
+        (WorkflowNodeRunStatus::Succeeded, vec![items.to_vec(), vec![]], None)
+    } else {
+        (WorkflowNodeRunStatus::Succeeded, vec![vec![], items.to_vec()], None)
+    }
 }
 
-fn execute_switch(params: &JsonValue, input: &JsonValue) -> (WorkflowNodeRunStatus, JsonValue, Option<String>) {
+fn execute_switch(params: &JsonValue, items: &[Item]) -> (WorkflowNodeRunStatus, Vec<Vec<Item>>, Option<String>) {
     let value = params.get("value").unwrap_or(&JsonValue::Null);
     let cases = params.get("cases").and_then(|c| c.as_array());
-    let branch: u8 = match cases {
-        Some(arr) => arr.iter().position(|c| c == value).map(|i| i as u8).unwrap_or(arr.len() as u8),
-        None => 0,
-    };
-    (WorkflowNodeRunStatus::Succeeded, with_branch(input, branch), None)
+    let num_cases = cases.map(|c| c.len()).unwrap_or(0);
+    let mut ports: Vec<Vec<Item>> = (0..=num_cases).map(|_| Vec::new()).collect();
+
+    for item in items {
+        let idx = match cases {
+            Some(arr) => arr.iter().position(|c| c == value).unwrap_or(num_cases),
+            None => 0,
+        };
+        ports[idx].push(item.clone());
+    }
+
+    (WorkflowNodeRunStatus::Succeeded, ports, None)
 }
 
-/// Set node: merges `fields` (object) into the output, overwriting input.
-fn execute_set(params: &JsonValue) -> (WorkflowNodeRunStatus, JsonValue, Option<String>) {
+fn execute_set(params: &JsonValue, items: &[Item]) -> (WorkflowNodeRunStatus, Vec<Vec<Item>>, Option<String>) {
     let fields = params.get("fields").cloned().unwrap_or(json!({}));
-    (WorkflowNodeRunStatus::Succeeded, fields, None)
+    // Set produces one item per input item, with the fields overwritten.
+    let output: Vec<Item> = if items.is_empty() {
+        vec![Item { json: fields }]
+    } else {
+        items.iter().map(|item| {
+            let mut merged = item.json.clone();
+            if let (Some(base), Some(patch)) = (merged.as_object_mut(), fields.as_object()) {
+                for (k, v) in patch { base.insert(k.clone(), v.clone()); }
+            }
+            Item { json: merged }
+        }).collect()
+    };
+    (WorkflowNodeRunStatus::Succeeded, vec![output], None)
 }
 
 fn is_truthy(value: &JsonValue) -> bool {
@@ -194,48 +283,81 @@ fn is_truthy(value: &JsonValue) -> bool {
     }
 }
 
-// ── Tool node ────────────────────────────────────────────────────────
+// ── Tool node ───────────────────────────────────────────────────────
 
 async fn execute_tool_node(
     registry: &Arc<ToolRegistry>,
-    pool: &sqlx::PgPool,
+    pool: &PgPool,
     app_id: &str,
     user_id: Uuid,
     perms: &[String],
     tool_name: &str,
     params: &JsonValue,
-    input: &JsonValue,
-) -> (WorkflowNodeRunStatus, JsonValue, Option<String>) {
+    input_items: &[Item],
+) -> (WorkflowNodeRunStatus, Vec<Vec<Item>>, Option<String>) {
     let tool = match registry.get(tool_name) {
         Some(t) => t,
-        None => return (WorkflowNodeRunStatus::Failed, json!(null), Some(format!("unknown tool: {tool_name}"))),
+        None => return (WorkflowNodeRunStatus::Failed, vec![vec![]], Some(format!("unknown tool: {tool_name}"))),
     };
 
-    let args = merge_args(params, input);
-
-    let ctx = ToolContext {
-        pool: pool.clone(),
-        app_id: app_id.into(),
-        user_id,
-        invoker_user_id: Some(user_id),
-        permissions: perms.to_vec(),
-        task_scope: None,
-        args,
-        agent_dispatch: None,
-        integration_caller: None,
-        action_caller: None,
-        stream_tx: None,
+    // If no input items, execute once with just params.
+    let items_to_process = if input_items.is_empty() {
+        vec![Item { json: json!({}) }]
+    } else {
+        input_items.to_vec()
     };
 
-    let outcome = crate::tools::dispatch(tool_name, tool, &ctx).await;
-    match outcome.value {
-        Ok(v) => (WorkflowNodeRunStatus::Succeeded, v, None),
-        Err(DispatchError::PermissionDenied(e)) => (WorkflowNodeRunStatus::Failed, json!(null), Some(e)),
-        Err(DispatchError::ExecutionFailed(e)) => (WorkflowNodeRunStatus::Failed, json!(null), Some(e)),
+    let mut output_items = Vec::new();
+    for item in &items_to_process {
+        let args = merge_args(params, &item.json);
+        let ctx = ToolContext {
+            pool: pool.clone(),
+            app_id: app_id.into(),
+            user_id,
+            invoker_user_id: Some(user_id),
+            permissions: perms.to_vec(),
+            task_scope: None,
+            args,
+            agent_dispatch: None,
+            integration_caller: None,
+            action_caller: None,
+            stream_tx: None,
+        };
+
+        let outcome = crate::tools::dispatch(tool_name, tool.clone(), &ctx).await;
+        match outcome.value {
+            Ok(v) => {
+                // Normalize: if the tool returns an array, each element becomes an item.
+                let new_items = normalize_tool_output(v);
+                output_items.extend(new_items);
+            }
+            Err(DispatchError::PermissionDenied(e)) => {
+                return (WorkflowNodeRunStatus::Failed, vec![vec![]], Some(e));
+            }
+            Err(DispatchError::ExecutionFailed(e)) => {
+                return (WorkflowNodeRunStatus::Failed, vec![vec![]], Some(e));
+            }
+        }
     }
+
+    (WorkflowNodeRunStatus::Succeeded, vec![output_items], None)
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────
+fn normalize_tool_output(value: JsonValue) -> Vec<Item> {
+    if let Some(arr) = value.as_array() {
+        return arr.iter().map(|v| Item { json: v.clone() }).collect();
+    }
+    // If the object has exactly one array-valued field, expand it as items.
+    if let Some(obj) = value.as_object() {
+        let arrays: Vec<_> = obj.values().filter_map(|v| v.as_array()).collect();
+        if arrays.len() == 1 {
+            return arrays[0].iter().map(|v| Item { json: v.clone() }).collect();
+        }
+    }
+    vec![Item { json: value }]
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
 
 pub(crate) fn merge_args(params: &JsonValue, input: &JsonValue) -> JsonValue {
     let mut base = params.clone();
@@ -243,23 +365,6 @@ pub(crate) fn merge_args(params: &JsonValue, input: &JsonValue) -> JsonValue {
         for (k, v) in i { b.entry(k.clone()).or_insert_with(|| v.clone()); }
     }
     base
-}
-
-pub(crate) fn collect_inputs(node_id: &str, graph: &WorkflowGraph, outputs: &HashMap<String, JsonValue>) -> JsonValue {
-    let mut merged = serde_json::Map::new();
-    for edge in &graph.edges {
-        if edge.to == node_id {
-            if let Some(out) = outputs.get(&edge.from) {
-                if let Some(obj) = out.as_object() {
-                    for (k, v) in obj {
-                        if k == "_branch" { continue; }
-                        merged.entry(k.clone()).or_insert_with(|| v.clone());
-                    }
-                }
-            }
-        }
-    }
-    JsonValue::Object(merged)
 }
 
 pub(crate) fn topo_sort(graph: &WorkflowGraph) -> Vec<String> {
@@ -293,16 +398,16 @@ mod tests {
     use rootcx_types::{WorkflowGraph, WorkflowNode, WorkflowEdge, WorkflowNodeKind, TriggerKind, ControlKind};
 
     fn trigger(id: &str) -> WorkflowNode {
-        WorkflowNode { id: id.into(), kind: WorkflowNodeKind::Trigger { trigger: TriggerKind::Manual }, params: json!({}), position: [0.0, 0.0] }
+        WorkflowNode { id: id.into(), kind: WorkflowNodeKind::Trigger { trigger: TriggerKind::Manual }, label: None, params: json!({}), position: [0.0, 0.0] }
     }
     fn control(id: &str, kind: ControlKind, params: JsonValue) -> WorkflowNode {
-        WorkflowNode { id: id.into(), kind: WorkflowNodeKind::Control { control: kind }, params, position: [0.0, 0.0] }
+        WorkflowNode { id: id.into(), kind: WorkflowNodeKind::Control { control: kind }, label: None, params, position: [0.0, 0.0] }
     }
     fn edge(from: &str, to: &str) -> WorkflowEdge {
-        WorkflowEdge { from: from.into(), to: to.into(), from_output: 0 }
+        WorkflowEdge { from: from.into(), to: to.into(), from_output: 0, to_input: 0 }
     }
     fn edge_branch(from: &str, to: &str, branch: u8) -> WorkflowEdge {
-        WorkflowEdge { from: from.into(), to: to.into(), from_output: branch }
+        WorkflowEdge { from: from.into(), to: to.into(), from_output: branch, to_input: 0 }
     }
 
     #[test]
@@ -347,63 +452,58 @@ mod tests {
     }
 
     #[test]
-    fn collect_inputs_merges_upstream_outputs() {
-        let graph = WorkflowGraph {
-            nodes: vec![trigger("A"), trigger("B"), trigger("C")],
-            edges: vec![edge("A", "C"), edge("B", "C")],
-        };
-        let mut outputs = HashMap::new();
-        outputs.insert("A".into(), json!({"x": 1}));
-        outputs.insert("B".into(), json!({"y": 2, "x": 99}));
-
-        let result = collect_inputs("C", &graph, &outputs);
-        assert_eq!(result["x"], 1, "first edge wins on conflict");
-        assert_eq!(result["y"], 2);
-    }
-
-    #[test]
-    fn collect_inputs_strips_branch_metadata() {
-        let graph = WorkflowGraph {
-            nodes: vec![trigger("A"), trigger("B")],
-            edges: vec![edge("A", "B")],
-        };
-        let mut outputs = HashMap::new();
-        outputs.insert("A".into(), json!({"x": 1, "_branch": 0}));
-
-        let result = collect_inputs("B", &graph, &outputs);
-        assert_eq!(result, json!({"x": 1}));
-    }
-
-    #[test]
-    fn if_node_branches_on_truthiness() {
-        let cases: Vec<(&str, JsonValue, u8)> = vec![
-            ("true", json!(true), 0),
-            ("false", json!(false), 1),
-            ("null", json!(null), 1),
-            ("non-empty string", json!("yes"), 0),
-            ("empty string", json!(""), 1),
-            ("zero", json!(0), 1),
-            ("non-zero", json!(42), 0),
-            ("empty array", json!([]), 1),
-            ("non-empty array", json!([1]), 0),
+    fn if_node_partitions_items() {
+        let items = vec![
+            Item { json: json!({"name": "a", "active": true}) },
+            Item { json: json!({"name": "b", "active": false}) },
+            Item { json: json!({"name": "c", "active": true}) },
         ];
-        for (label, condition, expected_branch) in &cases {
-            let params = json!({"condition": condition});
-            let (status, output, _) = execute_if(&params, &json!({}));
-            assert_eq!(status, WorkflowNodeRunStatus::Succeeded);
-            assert_eq!(output["_branch"], json!(*expected_branch), "[{label}]");
+        let params = json!({"condition": true});
+        let (status, output, _) = execute_if(&params, &items);
+        assert_eq!(status, WorkflowNodeRunStatus::Succeeded);
+        assert_eq!(output[0].len(), 3); // all go to true when condition is static true
+    }
+
+    #[test]
+    fn switch_partitions_items_across_ports() {
+        let items = vec![Item { json: json!({"x": 1}) }, Item { json: json!({"x": 2}) }];
+        let params = json!({"value": "b", "cases": ["a", "b", "c"]});
+        let (_, output, _) = execute_switch(&params, &items);
+        // value="b" matches index 1, so all items go to port 1
+        assert_eq!(output[1].len(), 2);
+        assert!(output[0].is_empty());
+    }
+
+    #[test]
+    fn normalize_tool_output_expands_records() {
+        let cases: Vec<(&str, JsonValue, usize)> = vec![
+            ("records array", json!({"records": [{"id": 1}, {"id": 2}]}), 2),
+            ("raw array", json!([{"a": 1}, {"a": 2}, {"a": 3}]), 3),
+            ("single object", json!({"result": "ok"}), 1),
+            ("null", json!(null), 1),
+        ];
+        for (label, value, expected_count) in cases {
+            let items = normalize_tool_output(value);
+            assert_eq!(items.len(), expected_count, "[{label}]");
         }
     }
 
     #[test]
-    fn switch_node_matches_case() {
-        let params = json!({"value": "b", "cases": ["a", "b", "c"]});
-        let (_, output, _) = execute_switch(&params, &json!({}));
-        assert_eq!(output["_branch"], json!(1));
+    fn extract_port_items_new_format() {
+        let output = json!([[{"json": {"id": 1}}, {"json": {"id": 2}}], [{"json": {"id": 3}}]]);
+        let port0 = extract_port_items(&output, 0);
+        assert_eq!(port0.len(), 2);
+        assert_eq!(port0[0].json, json!({"id": 1}));
+        let port1 = extract_port_items(&output, 1);
+        assert_eq!(port1.len(), 1);
+    }
 
-        let params = json!({"value": "z", "cases": ["a", "b"]});
-        let (_, output, _) = execute_switch(&params, &json!({}));
-        assert_eq!(output["_branch"], json!(2), "default = cases.len()");
+    #[test]
+    fn extract_port_items_legacy_format() {
+        let output = json!({"name": "Acme", "count": 5});
+        let items = extract_port_items(&output, 0);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].json, json!({"name": "Acme", "count": 5}));
     }
 
     #[test]
@@ -412,12 +512,10 @@ mod tests {
             nodes: vec![trigger("if"), trigger("yes"), trigger("no")],
             edges: vec![edge_branch("if", "yes", 0), edge_branch("if", "no", 1)],
         };
-        let mut outputs = HashMap::new();
-        outputs.insert("if".into(), json!({"_branch": 0}));
-        let mut branches = HashMap::new();
-        branches.insert("if".into(), 0u8);
+        let mut executed = HashMap::new();
+        executed.insert("if".into(), 0u8);
 
-        assert!(should_execute("yes", &graph, &outputs, &branches));
-        assert!(!should_execute("no", &graph, &outputs, &branches));
+        assert!(should_execute("yes", &graph, &executed));
+        assert!(!should_execute("no", &graph, &executed));
     }
 }

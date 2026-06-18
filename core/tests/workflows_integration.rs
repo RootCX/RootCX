@@ -126,7 +126,8 @@ async fn workflow_if_branch_truthy_path() {
     let yes_output: Value = sqlx::query_scalar(
         "SELECT output FROM rootcx_system.workflow_node_runs WHERE execution_id = $1::uuid AND node_id = 'yes'",
     ).bind(body["executionId"].as_str().unwrap()).fetch_one(rt.pool()).await.unwrap();
-    assert_eq!(yes_output["result"], "Hello Test!");
+    // Items format: [[{"json": {"result": "Hello Test!"}}]]
+    assert_eq!(yes_output[0][0]["json"]["result"], "Hello Test!");
 }
 
 // ── Palette ──────────────────────────────────────────────────────────

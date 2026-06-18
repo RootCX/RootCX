@@ -528,6 +528,14 @@ pub struct WorkflowEdge {
     pub to: String,
     #[serde(default)]
     pub from_output: u8,
+    #[serde(default)]
+    pub to_input: u8,
+}
+
+/// A single data item flowing between nodes. Mirrors n8n's INodeExecutionData.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Item {
+    pub json: JsonValue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
