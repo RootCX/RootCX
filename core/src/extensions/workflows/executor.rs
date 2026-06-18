@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use crate::routes::SharedRuntime;
 use crate::tools::{DispatchError, ToolContext};
-use rootcx_types::{WorkflowGraph, WorkflowNodeKind, WorkflowNodeRunStatus};
+use rootcx_types::{ControlKind, WorkflowGraph, WorkflowNodeKind, WorkflowNodeRunStatus};
+
+use super::expr;
 
 pub struct NodeRunResult {
     pub node_id: String,
@@ -26,19 +28,29 @@ pub async fn execute_dag(
         graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let order = topo_sort(graph);
     let mut outputs: HashMap<String, JsonValue> = HashMap::new();
+    // Tracks which output branch each node selected (for If/Switch routing)
+    let mut branch_outputs: HashMap<String, u8> = HashMap::new();
     let mut results = Vec::new();
 
     for node_id in &order {
         let Some(node) = node_map.get(node_id.as_str()) else { continue };
 
+        if !should_execute(node_id, graph, &outputs, &branch_outputs) {
+            continue;
+        }
+
         let input = collect_inputs(node_id, graph, &outputs);
+        let resolved_params = expr::resolve(&node.params, &input, &outputs);
 
         let (status, output, error) = match &node.kind {
             WorkflowNodeKind::Trigger { .. } => {
                 (WorkflowNodeRunStatus::Succeeded, json!({}), None)
             }
             WorkflowNodeKind::Tool { tool_name } => {
-                execute_tool_node(rt, pool, app_id, user_id, perms, tool_name, &node.params, &input).await
+                execute_tool_node(rt, pool, app_id, user_id, perms, tool_name, &resolved_params, &input).await
+            }
+            WorkflowNodeKind::Control { control } => {
+                execute_control_node(control, &resolved_params, &input)
             }
             _ => (WorkflowNodeRunStatus::Skipped, json!(null), Some("not implemented".into())),
         };
@@ -51,6 +63,9 @@ pub async fn execute_dag(
         .execute(pool).await.ok();
 
         if status == WorkflowNodeRunStatus::Succeeded {
+            if let Some(branch) = output.get("_branch").and_then(|b| b.as_u64()) {
+                branch_outputs.insert(node_id.clone(), branch as u8);
+            }
             outputs.insert(node_id.clone(), output);
         }
         results.push(NodeRunResult { node_id: node_id.clone(), status, error });
@@ -60,6 +75,82 @@ pub async fn execute_dag(
 
     results
 }
+
+fn should_execute(node_id: &str, graph: &WorkflowGraph, outputs: &HashMap<String, JsonValue>, branches: &HashMap<String, u8>) -> bool {
+    let mut inbound = graph.edges.iter().filter(|e| e.to == node_id).peekable();
+    if inbound.peek().is_none() { return true; }
+    inbound.any(|edge| {
+        outputs.contains_key(&edge.from)
+            && branches.get(&edge.from).map_or(true, |&chosen| edge.from_output == chosen)
+    })
+}
+
+// ── Control nodes ────────────────────────────────────────────────────
+
+fn execute_control_node(
+    control: &ControlKind,
+    params: &JsonValue,
+    input: &JsonValue,
+) -> (WorkflowNodeRunStatus, JsonValue, Option<String>) {
+    match control {
+        ControlKind::If => execute_if(params, input),
+        ControlKind::Switch => execute_switch(params, input),
+        ControlKind::Set => execute_set(params),
+        ControlKind::Merge => (WorkflowNodeRunStatus::Succeeded, input.clone(), None),
+        ControlKind::Stop => {
+            let msg = params.get("message").and_then(|v| v.as_str()).unwrap_or("workflow stopped");
+            (WorkflowNodeRunStatus::Failed, json!(null), Some(msg.into()))
+        }
+        ControlKind::Loop | ControlKind::Wait => {
+            (WorkflowNodeRunStatus::Skipped, json!(null), Some("not implemented".into()))
+        }
+    }
+}
+
+fn with_branch(input: &JsonValue, branch: u8) -> JsonValue {
+    let mut out = input.clone();
+    if let Some(obj) = out.as_object_mut() {
+        obj.insert("_branch".into(), json!(branch));
+    } else {
+        out = json!({ "_branch": branch });
+    }
+    out
+}
+
+fn execute_if(params: &JsonValue, input: &JsonValue) -> (WorkflowNodeRunStatus, JsonValue, Option<String>) {
+    let condition = params.get("condition").unwrap_or(&JsonValue::Null);
+    let branch: u8 = if is_truthy(condition) { 0 } else { 1 };
+    (WorkflowNodeRunStatus::Succeeded, with_branch(input, branch), None)
+}
+
+fn execute_switch(params: &JsonValue, input: &JsonValue) -> (WorkflowNodeRunStatus, JsonValue, Option<String>) {
+    let value = params.get("value").unwrap_or(&JsonValue::Null);
+    let cases = params.get("cases").and_then(|c| c.as_array());
+    let branch: u8 = match cases {
+        Some(arr) => arr.iter().position(|c| c == value).map(|i| i as u8).unwrap_or(arr.len() as u8),
+        None => 0,
+    };
+    (WorkflowNodeRunStatus::Succeeded, with_branch(input, branch), None)
+}
+
+/// Set node: merges `fields` (object) into the output, overwriting input.
+fn execute_set(params: &JsonValue) -> (WorkflowNodeRunStatus, JsonValue, Option<String>) {
+    let fields = params.get("fields").cloned().unwrap_or(json!({}));
+    (WorkflowNodeRunStatus::Succeeded, fields, None)
+}
+
+fn is_truthy(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Null => false,
+        JsonValue::Bool(b) => *b,
+        JsonValue::Number(n) => n.as_f64().map(|f| f != 0.0).unwrap_or(false),
+        JsonValue::String(s) => !s.is_empty() && s != "false" && s != "0",
+        JsonValue::Array(a) => !a.is_empty(),
+        JsonValue::Object(o) => !o.is_empty(),
+    }
+}
+
+// ── Tool node ────────────────────────────────────────────────────────
 
 async fn execute_tool_node(
     rt: &SharedRuntime,
@@ -100,6 +191,8 @@ async fn execute_tool_node(
     }
 }
 
+// ── Helpers ──────────────────────────────────────────────────────────
+
 pub(crate) fn merge_args(params: &JsonValue, input: &JsonValue) -> JsonValue {
     let mut base = params.clone();
     if let (Some(b), Some(i)) = (base.as_object_mut(), input.as_object()) {
@@ -114,7 +207,10 @@ pub(crate) fn collect_inputs(node_id: &str, graph: &WorkflowGraph, outputs: &Has
         if edge.to == node_id {
             if let Some(out) = outputs.get(&edge.from) {
                 if let Some(obj) = out.as_object() {
-                    for (k, v) in obj { merged.entry(k.clone()).or_insert_with(|| v.clone()); }
+                    for (k, v) in obj {
+                        if k == "_branch" { continue; }
+                        merged.entry(k.clone()).or_insert_with(|| v.clone());
+                    }
                 }
             }
         }
@@ -150,32 +246,38 @@ pub(crate) fn topo_sort(graph: &WorkflowGraph) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use rootcx_types::{WorkflowGraph, WorkflowNode, WorkflowEdge, WorkflowNodeKind, TriggerKind};
+    use rootcx_types::{WorkflowGraph, WorkflowNode, WorkflowEdge, WorkflowNodeKind, TriggerKind, ControlKind};
 
-    fn node(id: &str) -> WorkflowNode {
+    fn trigger(id: &str) -> WorkflowNode {
         WorkflowNode { id: id.into(), kind: WorkflowNodeKind::Trigger { trigger: TriggerKind::Manual }, params: json!({}), position: [0.0, 0.0] }
+    }
+    fn control(id: &str, kind: ControlKind, params: JsonValue) -> WorkflowNode {
+        WorkflowNode { id: id.into(), kind: WorkflowNodeKind::Control { control: kind }, params, position: [0.0, 0.0] }
     }
     fn edge(from: &str, to: &str) -> WorkflowEdge {
         WorkflowEdge { from: from.into(), to: to.into(), from_output: 0 }
+    }
+    fn edge_branch(from: &str, to: &str, branch: u8) -> WorkflowEdge {
+        WorkflowEdge { from: from.into(), to: to.into(), from_output: branch }
     }
 
     #[test]
     fn topo_sort_linear_and_branching() {
         let cases: Vec<(&str, WorkflowGraph, Vec<Vec<&str>>)> = vec![
             ("linear A->B->C", WorkflowGraph {
-                nodes: vec![node("A"), node("B"), node("C")],
+                nodes: vec![trigger("A"), trigger("B"), trigger("C")],
                 edges: vec![edge("A", "B"), edge("B", "C")],
             }, vec![vec!["A", "B", "C"]]),
             ("fan-out A->{B,C}->D", WorkflowGraph {
-                nodes: vec![node("A"), node("B"), node("C"), node("D")],
+                nodes: vec![trigger("A"), trigger("B"), trigger("C"), trigger("D")],
                 edges: vec![edge("A", "B"), edge("A", "C"), edge("B", "D"), edge("C", "D")],
             }, vec![vec!["A", "B", "C", "D"], vec!["A", "C", "B", "D"]]),
             ("isolated node", WorkflowGraph {
-                nodes: vec![node("X")],
+                nodes: vec![trigger("X")],
                 edges: vec![],
             }, vec![vec!["X"]]),
             ("cycle drops unreachable", WorkflowGraph {
-                nodes: vec![node("A"), node("B"), node("C")],
+                nodes: vec![trigger("A"), trigger("B"), trigger("C")],
                 edges: vec![edge("A", "B"), edge("B", "C"), edge("C", "B")],
             }, vec![vec!["A"]]),
         ];
@@ -203,7 +305,7 @@ mod tests {
     #[test]
     fn collect_inputs_merges_upstream_outputs() {
         let graph = WorkflowGraph {
-            nodes: vec![node("A"), node("B"), node("C")],
+            nodes: vec![trigger("A"), trigger("B"), trigger("C")],
             edges: vec![edge("A", "C"), edge("B", "C")],
         };
         let mut outputs = HashMap::new();
@@ -213,5 +315,65 @@ mod tests {
         let result = collect_inputs("C", &graph, &outputs);
         assert_eq!(result["x"], 1, "first edge wins on conflict");
         assert_eq!(result["y"], 2);
+    }
+
+    #[test]
+    fn collect_inputs_strips_branch_metadata() {
+        let graph = WorkflowGraph {
+            nodes: vec![trigger("A"), trigger("B")],
+            edges: vec![edge("A", "B")],
+        };
+        let mut outputs = HashMap::new();
+        outputs.insert("A".into(), json!({"x": 1, "_branch": 0}));
+
+        let result = collect_inputs("B", &graph, &outputs);
+        assert_eq!(result, json!({"x": 1}));
+    }
+
+    #[test]
+    fn if_node_branches_on_truthiness() {
+        let cases: Vec<(&str, JsonValue, u8)> = vec![
+            ("true", json!(true), 0),
+            ("false", json!(false), 1),
+            ("null", json!(null), 1),
+            ("non-empty string", json!("yes"), 0),
+            ("empty string", json!(""), 1),
+            ("zero", json!(0), 1),
+            ("non-zero", json!(42), 0),
+            ("empty array", json!([]), 1),
+            ("non-empty array", json!([1]), 0),
+        ];
+        for (label, condition, expected_branch) in &cases {
+            let params = json!({"condition": condition});
+            let (status, output, _) = execute_if(&params, &json!({}));
+            assert_eq!(status, WorkflowNodeRunStatus::Succeeded);
+            assert_eq!(output["_branch"], json!(*expected_branch), "[{label}]");
+        }
+    }
+
+    #[test]
+    fn switch_node_matches_case() {
+        let params = json!({"value": "b", "cases": ["a", "b", "c"]});
+        let (_, output, _) = execute_switch(&params, &json!({}));
+        assert_eq!(output["_branch"], json!(1));
+
+        let params = json!({"value": "z", "cases": ["a", "b"]});
+        let (_, output, _) = execute_switch(&params, &json!({}));
+        assert_eq!(output["_branch"], json!(2), "default = cases.len()");
+    }
+
+    #[test]
+    fn should_execute_respects_branch_routing() {
+        let graph = WorkflowGraph {
+            nodes: vec![trigger("if"), trigger("yes"), trigger("no")],
+            edges: vec![edge_branch("if", "yes", 0), edge_branch("if", "no", 1)],
+        };
+        let mut outputs = HashMap::new();
+        outputs.insert("if".into(), json!({"_branch": 0}));
+        let mut branches = HashMap::new();
+        branches.insert("if".into(), 0u8);
+
+        assert!(should_execute("yes", &graph, &outputs, &branches));
+        assert!(!should_execute("no", &graph, &outputs, &branches));
     }
 }
