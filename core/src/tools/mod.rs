@@ -96,10 +96,28 @@ pub async fn dispatch(tool_name: &str, tool: Arc<dyn Tool>, ctx: &ToolContext) -
     ToolOutcome { value, duration_ms: start.elapsed().as_millis() as u64 }
 }
 
+/// How the workflow executor feeds N input items to a tool node.
+/// `PerItem` maps the tool over each item (one dispatch per item); `Once`
+/// runs the tool a single time with the node params, ignoring item fan-out
+/// (right default for reads like `query_data` that would otherwise N+1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchMode { PerItem, Once }
+
+impl BatchMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "once" => Some(Self::Once),
+            "perItem" => Some(Self::PerItem),
+            _ => None,
+        }
+    }
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;
     fn enriches_with_schema(&self) -> bool { false }
+    fn batch_mode(&self) -> BatchMode { BatchMode::PerItem }
     async fn execute(&self, ctx: &ToolContext) -> Result<JsonValue, String>;
 }
 

@@ -130,6 +130,46 @@ async fn workflow_if_branch_truthy_path() {
     assert_eq!(yes_output[0][0]["json"]["result"], "Hello Test!");
 }
 
+// ── Tool batch mode ──────────────────────────────────────────────────
+
+// A read (query_data) downstream of a node that emits N items must run ONCE
+// over the whole batch, not once per item. Per-item would re-run the same query
+// N times: here the downstream read would yield 2×2 = 4 items instead of 2.
+#[tokio::test]
+async fn workflow_query_data_runs_once_not_per_item() {
+    let rt = TestRuntime::boot().await;
+    rt.install("wfbatch", "contacts").await;
+    rt.create("wfbatch", "contacts", &json!({"first_name": "A", "last_name": "X"})).await;
+    rt.create("wfbatch", "contacts", &json!({"first_name": "B", "last_name": "Y"})).await;
+
+    let graph = json!({
+        "nodes": [
+            {"id": "t", "kind": {"type": "trigger", "trigger": "manual"}, "params": {}, "position": [0,0]},
+            {"id": "src", "kind": {"type": "tool", "toolName": "query_data"}, "params": {"app": "wfbatch", "entity": "contacts"}, "position": [1,0]},
+            {"id": "dst", "kind": {"type": "tool", "toolName": "query_data"}, "params": {"app": "wfbatch", "entity": "contacts"}, "position": [2,0]}
+        ],
+        "edges": [{"from": "t", "to": "src", "fromOutput": 0}, {"from": "src", "to": "dst", "fromOutput": 0}]
+    });
+
+    let (_, body) = rt.post_json("/api/v1/workflows", &json!({"name": "batch-once", "graph": graph})).await;
+    let wf_id = body["id"].as_str().unwrap();
+    rt.put_json(&format!("/api/v1/workflows/{wf_id}"), &json!({"enabled": true})).await;
+
+    let (s, body) = rt.post_json(&format!("/api/v1/workflows/{wf_id}/run"), &json!({})).await;
+    assert_eq!(s, 200, "{body}");
+    assert_eq!(body["status"], "succeeded");
+
+    let exec_id = body["executionId"].as_str().unwrap();
+    let outputs: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT node_id, output FROM rootcx_system.workflow_node_runs WHERE execution_id = $1::uuid",
+    ).bind(exec_id).fetch_all(rt.pool()).await.unwrap();
+    let port0_len = |node: &str| outputs.iter().find(|(id, _)| id == node)
+        .and_then(|(_, o)| o[0].as_array()).map(|a| a.len()).unwrap_or(0);
+
+    assert_eq!(port0_len("src"), 2, "upstream emits 2 items (precondition)");
+    assert_eq!(port0_len("dst"), 2, "downstream read runs once, not per item (would be 4)");
+}
+
 // ── Palette ──────────────────────────────────────────────────────────
 
 // Palette = { tools, data }. `tools` keeps the generic descriptors (incl. the

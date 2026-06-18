@@ -43,6 +43,10 @@ impl Tool for QueryDataTool {
 
     fn enriches_with_schema(&self) -> bool { true }
 
+    // A read fetches the full set in one query; mapping it over N upstream items
+    // would re-run the same query N times for nothing.
+    fn batch_mode(&self) -> super::BatchMode { super::BatchMode::Once }
+
     async fn execute(&self, ctx: &ToolContext) -> Result<JsonValue, String> {
         let entity = str_arg(&ctx.args, "entity")?;
         let app = ctx.args.get("app").and_then(|v| v.as_str()).unwrap_or(&ctx.app_id);

@@ -5,7 +5,7 @@ use serde_json::{Value as JsonValue, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::tools::{DispatchError, ToolContext, ToolRegistry};
+use crate::tools::{BatchMode, DispatchError, ToolContext, ToolRegistry};
 use rootcx_types::{
     ControlKind, Item, WorkflowGraph, WorkflowNodeKind, WorkflowNodeRunStatus,
     WorkflowExecutionStatus,
@@ -46,7 +46,8 @@ pub async fn execute_dag(
             continue;
         }
 
-        let input_items = collect_inputs(node_id, graph, &run_outputs);
+        let input_by_port = collect_inputs_by_port(node_id, graph, &run_outputs);
+        let input_items: Vec<Item> = input_by_port.iter().flatten().cloned().collect();
         let input_json = items_to_json(&input_items);
         let resolved_params = expr::resolve(&node.params, &input_json, &run_outputs);
 
@@ -58,7 +59,7 @@ pub async fn execute_dag(
                 execute_tool_node(registry, pool, app_id, user_id, perms, tool_name, &resolved_params, &input_items).await
             }
             WorkflowNodeKind::Control { control } => {
-                execute_control_node(control, &node.params, &input_items, &run_outputs)
+                execute_control_node(control, &node.params, &input_items, &input_by_port, &run_outputs)
             }
             _ => (WorkflowNodeRunStatus::Skipped, vec![vec![]], Some("not implemented".into())),
         };
@@ -140,15 +141,19 @@ pub async fn run_workflow(
 
 // ── Input collection ─────────────────────────────────────────────────
 
-/// Assemble input items from the local run_outputs cache (no DB queries needed).
-fn collect_inputs(node_id: &str, graph: &WorkflowGraph, run_outputs: &HashMap<String, JsonValue>) -> Vec<Item> {
-    let mut items = Vec::new();
-    for edge in graph.edges.iter().filter(|e| e.to == node_id) {
+/// Assemble input items grouped by destination input port (`to_input`), from the
+/// local run_outputs cache. Generic nodes flatten this; Merge keeps the grouping
+/// to align/join branches. No DB queries needed.
+fn collect_inputs_by_port(node_id: &str, graph: &WorkflowGraph, run_outputs: &HashMap<String, JsonValue>) -> Vec<Vec<Item>> {
+    let inbound: Vec<_> = graph.edges.iter().filter(|e| e.to == node_id).collect();
+    let Some(max_port) = inbound.iter().map(|e| e.to_input).max() else { return vec![] };
+    let mut ports: Vec<Vec<Item>> = (0..=max_port).map(|_| Vec::new()).collect();
+    for edge in inbound {
         if let Some(output_val) = run_outputs.get(&edge.from) {
-            items.extend(extract_port_items(output_val, edge.from_output));
+            ports[edge.to_input as usize].extend(extract_port_items(output_val, edge.from_output));
         }
     }
-    items
+    ports
 }
 
 /// Extract items from a specific output port of the stored output JSON.
@@ -211,15 +216,14 @@ fn execute_control_node(
     control: &ControlKind,
     raw_params: &JsonValue,
     input_items: &[Item],
+    input_by_port: &[Vec<Item>],
     outputs: &HashMap<String, JsonValue>,
 ) -> (WorkflowNodeRunStatus, Vec<Vec<Item>>, Option<String>) {
     match control {
         ControlKind::If => execute_if(raw_params, input_items, outputs),
         ControlKind::Switch => execute_switch(raw_params, input_items, outputs),
         ControlKind::Set => execute_set(raw_params, input_items, outputs),
-        ControlKind::Merge => {
-            (WorkflowNodeRunStatus::Succeeded, vec![input_items.to_vec()], None)
-        }
+        ControlKind::Merge => execute_merge(raw_params, input_by_port, outputs),
         ControlKind::Stop => {
             let resolved = expr::resolve(raw_params, &json!({}), outputs);
             let msg = resolved.get("message").and_then(|v| v.as_str()).unwrap_or("workflow stopped");
@@ -274,13 +278,61 @@ fn execute_set(raw_params: &JsonValue, items: &[Item], outputs: &HashMap<String,
             let resolved = expr::resolve(raw_params, &item.json, outputs);
             let fields = resolved.get("fields").cloned().unwrap_or(json!({}));
             let mut merged = item.json.clone();
-            if let (Some(base), Some(patch)) = (merged.as_object_mut(), fields.as_object()) {
-                for (k, v) in patch { base.insert(k.clone(), v.clone()); }
-            }
+            overlay(&mut merged, &fields);
             Item { json: merged }
         }).collect()
     };
     (WorkflowNodeRunStatus::Succeeded, vec![output], None)
+}
+
+/// Merge branches per n8n's three modes:
+///   - `append` (default): concatenate every input port in order.
+///   - `combineByPosition`: zip ports index-wise, overlaying later ports onto earlier.
+///   - `combineByField`: inner-join port 0 and port 1 on `field1`/`field2` (`field2`
+///     defaults to `field1`), overlaying matched right items onto left.
+fn execute_merge(raw_params: &JsonValue, input_by_port: &[Vec<Item>], outputs: &HashMap<String, JsonValue>) -> (WorkflowNodeRunStatus, Vec<Vec<Item>>, Option<String>) {
+    let p = expr::resolve(raw_params, &json!({}), outputs);
+    let out = match p.get("mode").and_then(|v| v.as_str()).unwrap_or("append") {
+        "combineByPosition" => merge_by_position(input_by_port),
+        "combineByField" => merge_by_field(input_by_port, &p),
+        _ => input_by_port.iter().flatten().cloned().collect(),
+    };
+    (WorkflowNodeRunStatus::Succeeded, vec![out], None)
+}
+
+fn merge_by_position(ports: &[Vec<Item>]) -> Vec<Item> {
+    let len = ports.iter().map(|p| p.len()).max().unwrap_or(0);
+    (0..len).map(|i| {
+        let mut acc = json!({});
+        for port in ports {
+            if let Some(item) = port.get(i) { overlay(&mut acc, &item.json); }
+        }
+        Item { json: acc }
+    }).collect()
+}
+
+fn merge_by_field(ports: &[Vec<Item>], p: &JsonValue) -> Vec<Item> {
+    let f1 = p.get("field1").or_else(|| p.get("field")).and_then(|v| v.as_str()).unwrap_or("id");
+    let f2 = p.get("field2").and_then(|v| v.as_str()).unwrap_or(f1);
+    let left = ports.first().map(Vec::as_slice).unwrap_or(&[]);
+    let right = ports.get(1).map(Vec::as_slice).unwrap_or(&[]);
+    let mut out = Vec::new();
+    for l in left {
+        let Some(key) = l.json.get(f1) else { continue };
+        for r in right.iter().filter(|r| r.json.get(f2) == Some(key)) {
+            let mut merged = l.json.clone();
+            overlay(&mut merged, &r.json);
+            out.push(Item { json: merged });
+        }
+    }
+    out
+}
+
+/// Shallow-merge `patch`'s fields onto `base` (patch wins on clashes).
+fn overlay(base: &mut JsonValue, patch: &JsonValue) {
+    if let (Some(b), Some(p)) = (base.as_object_mut(), patch.as_object()) {
+        for (k, v) in p { b.insert(k.clone(), v.clone()); }
+    }
 }
 
 fn is_truthy(value: &JsonValue) -> bool {
@@ -311,16 +363,27 @@ async fn execute_tool_node(
         None => return (WorkflowNodeRunStatus::Failed, vec![vec![]], Some(format!("unknown tool: {tool_name}"))),
     };
 
-    // If no input items, execute once with just params.
-    let items_to_process = if input_items.is_empty() {
-        vec![Item { json: json!({}) }]
-    } else {
-        input_items.to_vec()
+    // Node param overrides the tool's declared default (e.g. force a read per-item).
+    let mode = params.get("batchMode").and_then(|v| v.as_str())
+        .and_then(BatchMode::parse)
+        .unwrap_or_else(|| tool.batch_mode());
+    let mut args_base = params.clone();
+    if let Some(o) = args_base.as_object_mut() { o.remove("batchMode"); }
+
+    // Once: a single dispatch with node params, ignoring item fan-out.
+    // PerItem: map over items (one dispatch each), the input filling param gaps.
+    let items_to_process = match mode {
+        BatchMode::Once => vec![Item { json: json!({}) }],
+        BatchMode::PerItem if input_items.is_empty() => vec![Item { json: json!({}) }],
+        BatchMode::PerItem => input_items.to_vec(),
     };
 
     let mut output_items = Vec::new();
     for item in &items_to_process {
-        let args = merge_args(params, &item.json);
+        let args = match mode {
+            BatchMode::Once => args_base.clone(),
+            BatchMode::PerItem => merge_args(&args_base, &item.json),
+        };
         let ctx = ToolContext {
             pool: pool.clone(),
             app_id: app_id.into(),
@@ -510,6 +573,85 @@ mod tests {
             let items = normalize_tool_output(value);
             assert_eq!(items.len(), expected_count, "[{label}]");
         }
+    }
+
+    fn item(v: JsonValue) -> Item { Item { json: v } }
+
+    #[test]
+    fn merge_append_concatenates_all_ports_in_order() {
+        // Absent mode defaults to append; both forms stack every port's items.
+        let ports = vec![
+            vec![item(json!({"id": 1})), item(json!({"id": 2}))],
+            vec![item(json!({"id": 3}))],
+        ];
+        for params in [json!({"mode": "append"}), json!({})] {
+            let (status, out, _) = execute_merge(&params, &ports, &HashMap::new());
+            assert_eq!(status, WorkflowNodeRunStatus::Succeeded, "[{params}]");
+            assert_eq!(out[0].len(), 3, "[{params}]");
+            assert_eq!(out[0][2].json, json!({"id": 3}), "[{params}] order preserved");
+        }
+    }
+
+    #[test]
+    fn merge_by_position_zips_and_overlays_to_longest() {
+        let ports = vec![
+            vec![item(json!({"id": 1, "name": "a"})), item(json!({"id": 2}))],
+            vec![item(json!({"email": "x@y.z"}))],
+        ];
+        let (_, out, _) = execute_merge(&json!({"mode": "combineByPosition"}), &ports, &HashMap::new());
+        // length = longest port; row 0 merges both, the unpaired row 1 passes through.
+        assert_eq!(out[0].len(), 2);
+        assert_eq!(out[0][0].json, json!({"id": 1, "name": "a", "email": "x@y.z"}));
+        assert_eq!(out[0][1].json, json!({"id": 2}));
+    }
+
+    #[test]
+    fn merge_by_field_inner_joins_port0_and_port1() {
+        let left = vec![item(json!({"uid": 1, "name": "a"})), item(json!({"uid": 2, "name": "b"}))];
+        let right = vec![item(json!({"id": 1, "role": "admin"})), item(json!({"id": 9})), item(json!({"uid": 2, "role": "ops"}))];
+        let ports = vec![left, right];
+        // (params, expected_len, expected_first_or_none)
+        let cases: Vec<(&str, JsonValue, usize, Option<JsonValue>)> = vec![
+            ("explicit field1/field2",
+                json!({"mode": "combineByField", "field1": "uid", "field2": "id"}),
+                1, Some(json!({"uid": 1, "name": "a", "id": 1, "role": "admin"}))),
+            ("field2 defaults to field1",
+                json!({"mode": "combineByField", "field1": "uid"}),
+                1, Some(json!({"uid": 2, "name": "b", "role": "ops"}))),
+            ("no overlapping key → empty",
+                json!({"mode": "combineByField", "field1": "name", "field2": "role"}),
+                0, None),
+        ];
+        for (label, params, len, first) in cases {
+            let (_, out, _) = execute_merge(&params, &ports, &HashMap::new());
+            assert_eq!(out[0].len(), len, "[{label}]");
+            if let Some(expected) = first { assert_eq!(out[0][0].json, expected, "[{label}]"); }
+        }
+    }
+
+    #[test]
+    fn batch_mode_parse_roundtrips() {
+        assert_eq!(BatchMode::parse("once"), Some(BatchMode::Once));
+        assert_eq!(BatchMode::parse("perItem"), Some(BatchMode::PerItem));
+        assert_eq!(BatchMode::parse("bogus"), None);
+    }
+
+    #[test]
+    fn collect_inputs_by_port_groups_by_to_input() {
+        let mut outputs = HashMap::new();
+        outputs.insert("a".to_string(), json!([[{"json": {"x": 1}}]]));
+        outputs.insert("b".to_string(), json!([[{"json": {"y": 2}}]]));
+        let graph = WorkflowGraph {
+            nodes: vec![trigger("a"), trigger("b"), trigger("m")],
+            edges: vec![
+                WorkflowEdge { from: "a".into(), to: "m".into(), from_output: 0, to_input: 0 },
+                WorkflowEdge { from: "b".into(), to: "m".into(), from_output: 0, to_input: 1 },
+            ],
+        };
+        let ports = collect_inputs_by_port("m", &graph, &outputs);
+        assert_eq!(ports.len(), 2);
+        assert_eq!(ports[0][0].json, json!({"x": 1}));
+        assert_eq!(ports[1][0].json, json!({"y": 2}));
     }
 
     #[test]
