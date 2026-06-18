@@ -36,13 +36,13 @@ pub async fn execute_dag(
         graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
     let order = topo_sort(graph);
     let mut results = Vec::new();
-    let mut executed: HashMap<String, u8> = HashMap::new();
+    let mut active_ports: HashMap<String, Vec<u8>> = HashMap::new();
     let mut run_outputs: HashMap<String, JsonValue> = HashMap::new();
 
     for node_id in &order {
         let Some(node) = node_map.get(node_id.as_str()) else { continue };
 
-        if !should_execute(node_id, graph, &executed) {
+        if !should_execute(node_id, graph, &active_ports) {
             continue;
         }
 
@@ -58,16 +58,15 @@ pub async fn execute_dag(
                 execute_tool_node(registry, pool, app_id, user_id, perms, tool_name, &resolved_params, &input_items).await
             }
             WorkflowNodeKind::Control { control } => {
-                execute_control_node(control, &resolved_params, &input_items)
+                execute_control_node(control, &node.params, &input_items, &run_outputs)
             }
             _ => (WorkflowNodeRunStatus::Skipped, vec![vec![]], Some("not implemented".into())),
         };
 
-        let branch = if output_items.len() > 1 {
-            output_items.iter().position(|port| !port.is_empty()).unwrap_or(0) as u8
-        } else {
-            0
-        };
+        let ports_with_items: Vec<u8> = output_items.iter().enumerate()
+            .filter(|(_, port)| !port.is_empty())
+            .map(|(i, _)| i as u8)
+            .collect();
 
         let output_json = items_output_to_json(&output_items);
 
@@ -80,7 +79,7 @@ pub async fn execute_dag(
         .execute(pool).await.ok();
 
         if status == WorkflowNodeRunStatus::Succeeded {
-            executed.insert(node_id.clone(), branch);
+            active_ports.insert(node_id.clone(), ports_with_items);
             run_outputs.insert(node_id.clone(), output_json.clone());
         }
         results.push(NodeRunResult { node_id: node_id.clone(), status, output: output_json, error });
@@ -192,15 +191,13 @@ fn items_output_to_json(output: &[Vec<Item>]) -> JsonValue {
 
 // ── Routing ─────────────────────────────────────────────────────────
 
-fn should_execute(node_id: &str, graph: &WorkflowGraph, executed: &HashMap<String, u8>) -> bool {
+fn should_execute(node_id: &str, graph: &WorkflowGraph, active_ports: &HashMap<String, Vec<u8>>) -> bool {
     let mut inbound = graph.edges.iter().filter(|e| e.to == node_id).peekable();
     if inbound.peek().is_none() { return true; }
     inbound.any(|edge| {
-        if let Some(&chosen_branch) = executed.get(&edge.from) {
-            edge.from_output == chosen_branch
-        } else {
-            false
-        }
+        active_ports.get(&edge.from)
+            .map(|ports| ports.contains(&edge.from_output))
+            .unwrap_or(false)
     })
 }
 
@@ -208,19 +205,20 @@ fn should_execute(node_id: &str, graph: &WorkflowGraph, executed: &HashMap<Strin
 
 fn execute_control_node(
     control: &ControlKind,
-    params: &JsonValue,
+    raw_params: &JsonValue,
     input_items: &[Item],
+    outputs: &HashMap<String, JsonValue>,
 ) -> (WorkflowNodeRunStatus, Vec<Vec<Item>>, Option<String>) {
     match control {
-        ControlKind::If => execute_if(params, input_items),
-        ControlKind::Switch => execute_switch(params, input_items),
-        ControlKind::Set => execute_set(params, input_items),
+        ControlKind::If => execute_if(raw_params, input_items, outputs),
+        ControlKind::Switch => execute_switch(raw_params, input_items, outputs),
+        ControlKind::Set => execute_set(raw_params, input_items, outputs),
         ControlKind::Merge => {
-            // Pass-through: all input items come out on port 0.
             (WorkflowNodeRunStatus::Succeeded, vec![input_items.to_vec()], None)
         }
         ControlKind::Stop => {
-            let msg = params.get("message").and_then(|v| v.as_str()).unwrap_or("workflow stopped");
+            let resolved = expr::resolve(raw_params, &json!({}), outputs);
+            let msg = resolved.get("message").and_then(|v| v.as_str()).unwrap_or("workflow stopped");
             (WorkflowNodeRunStatus::Failed, vec![vec![]], Some(msg.into()))
         }
         ControlKind::Loop | ControlKind::Wait => {
@@ -229,22 +227,29 @@ fn execute_control_node(
     }
 }
 
-fn execute_if(params: &JsonValue, items: &[Item]) -> (WorkflowNodeRunStatus, Vec<Vec<Item>>, Option<String>) {
-    let condition = params.get("condition").unwrap_or(&JsonValue::Null);
-    if is_truthy(condition) {
-        (WorkflowNodeRunStatus::Succeeded, vec![items.to_vec(), vec![]], None)
-    } else {
-        (WorkflowNodeRunStatus::Succeeded, vec![vec![], items.to_vec()], None)
+fn execute_if(raw_params: &JsonValue, items: &[Item], outputs: &HashMap<String, JsonValue>) -> (WorkflowNodeRunStatus, Vec<Vec<Item>>, Option<String>) {
+    let mut true_items = Vec::new();
+    let mut false_items = Vec::new();
+    for item in items {
+        let resolved = expr::resolve(raw_params, &item.json, outputs);
+        let condition = resolved.get("condition").unwrap_or(&JsonValue::Null);
+        if is_truthy(condition) {
+            true_items.push(item.clone());
+        } else {
+            false_items.push(item.clone());
+        }
     }
+    (WorkflowNodeRunStatus::Succeeded, vec![true_items, false_items], None)
 }
 
-fn execute_switch(params: &JsonValue, items: &[Item]) -> (WorkflowNodeRunStatus, Vec<Vec<Item>>, Option<String>) {
-    let value = params.get("value").unwrap_or(&JsonValue::Null);
-    let cases = params.get("cases").and_then(|c| c.as_array());
+fn execute_switch(raw_params: &JsonValue, items: &[Item], outputs: &HashMap<String, JsonValue>) -> (WorkflowNodeRunStatus, Vec<Vec<Item>>, Option<String>) {
+    let cases = raw_params.get("cases").and_then(|c| c.as_array());
     let num_cases = cases.map(|c| c.len()).unwrap_or(0);
     let mut ports: Vec<Vec<Item>> = (0..=num_cases).map(|_| Vec::new()).collect();
 
     for item in items {
+        let resolved = expr::resolve(raw_params, &item.json, outputs);
+        let value = resolved.get("value").unwrap_or(&JsonValue::Null);
         let idx = match cases {
             Some(arr) => arr.iter().position(|c| c == value).unwrap_or(num_cases),
             None => 0,
@@ -255,13 +260,15 @@ fn execute_switch(params: &JsonValue, items: &[Item]) -> (WorkflowNodeRunStatus,
     (WorkflowNodeRunStatus::Succeeded, ports, None)
 }
 
-fn execute_set(params: &JsonValue, items: &[Item]) -> (WorkflowNodeRunStatus, Vec<Vec<Item>>, Option<String>) {
-    let fields = params.get("fields").cloned().unwrap_or(json!({}));
-    // Set produces one item per input item, with the fields overwritten.
+fn execute_set(raw_params: &JsonValue, items: &[Item], outputs: &HashMap<String, JsonValue>) -> (WorkflowNodeRunStatus, Vec<Vec<Item>>, Option<String>) {
     let output: Vec<Item> = if items.is_empty() {
+        let resolved = expr::resolve(raw_params, &json!({}), outputs);
+        let fields = resolved.get("fields").cloned().unwrap_or(json!({}));
         vec![Item { json: fields }]
     } else {
         items.iter().map(|item| {
+            let resolved = expr::resolve(raw_params, &item.json, outputs);
+            let fields = resolved.get("fields").cloned().unwrap_or(json!({}));
             let mut merged = item.json.clone();
             if let (Some(base), Some(patch)) = (merged.as_object_mut(), fields.as_object()) {
                 for (k, v) in patch { base.insert(k.clone(), v.clone()); }
@@ -452,26 +459,39 @@ mod tests {
     }
 
     #[test]
-    fn if_node_partitions_items() {
+    fn if_node_partitions_items_per_item() {
         let items = vec![
             Item { json: json!({"name": "a", "active": true}) },
             Item { json: json!({"name": "b", "active": false}) },
             Item { json: json!({"name": "c", "active": true}) },
         ];
-        let params = json!({"condition": true});
-        let (status, output, _) = execute_if(&params, &items);
+        // Condition uses expression: $json.active → resolved per item
+        let params = json!({"condition": "{{ $json.active }}"});
+        let outputs = HashMap::new();
+        let (status, output, _) = execute_if(&params, &items, &outputs);
         assert_eq!(status, WorkflowNodeRunStatus::Succeeded);
-        assert_eq!(output[0].len(), 3); // all go to true when condition is static true
+        assert_eq!(output[0].len(), 2, "2 truthy items (active=true)");
+        assert_eq!(output[1].len(), 1, "1 falsy item (active=false)");
+    }
+
+    #[test]
+    fn if_node_static_condition() {
+        let items = vec![Item { json: json!({"x": 1}) }, Item { json: json!({"x": 2}) }];
+        let params = json!({"condition": true});
+        let outputs = HashMap::new();
+        let (_, output, _) = execute_if(&params, &items, &outputs);
+        assert_eq!(output[0].len(), 2, "static true routes all to port 0");
+        assert!(output[1].is_empty());
     }
 
     #[test]
     fn switch_partitions_items_across_ports() {
-        let items = vec![Item { json: json!({"x": 1}) }, Item { json: json!({"x": 2}) }];
-        let params = json!({"value": "b", "cases": ["a", "b", "c"]});
-        let (_, output, _) = execute_switch(&params, &items);
-        // value="b" matches index 1, so all items go to port 1
-        assert_eq!(output[1].len(), 2);
-        assert!(output[0].is_empty());
+        let items = vec![Item { json: json!({"status": "b"}) }, Item { json: json!({"status": "a"}) }];
+        let params = json!({"value": "{{ $json.status }}", "cases": ["a", "b", "c"]});
+        let outputs = HashMap::new();
+        let (_, output, _) = execute_switch(&params, &items, &outputs);
+        assert_eq!(output[0].len(), 1, "status=a → port 0");
+        assert_eq!(output[1].len(), 1, "status=b → port 1");
     }
 
     #[test]
@@ -512,10 +532,15 @@ mod tests {
             nodes: vec![trigger("if"), trigger("yes"), trigger("no")],
             edges: vec![edge_branch("if", "yes", 0), edge_branch("if", "no", 1)],
         };
-        let mut executed = HashMap::new();
-        executed.insert("if".into(), 0u8);
+        // Only port 0 has items → only "yes" should execute
+        let mut active = HashMap::new();
+        active.insert("if".into(), vec![0u8]);
+        assert!(should_execute("yes", &graph, &active));
+        assert!(!should_execute("no", &graph, &active));
 
-        assert!(should_execute("yes", &graph, &executed));
-        assert!(!should_execute("no", &graph, &executed));
+        // Both ports have items → both should execute
+        active.insert("if".into(), vec![0, 1]);
+        assert!(should_execute("yes", &graph, &active));
+        assert!(should_execute("no", &graph, &active));
     }
 }
