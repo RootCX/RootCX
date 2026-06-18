@@ -192,9 +192,13 @@ fn items_output_to_json(output: &[Vec<Item>]) -> JsonValue {
 // ── Routing ─────────────────────────────────────────────────────────
 
 fn should_execute(node_id: &str, graph: &WorkflowGraph, active_ports: &HashMap<String, Vec<u8>>) -> bool {
-    let mut inbound = graph.edges.iter().filter(|e| e.to == node_id).peekable();
-    if inbound.peek().is_none() { return true; }
-    inbound.any(|edge| {
+    let node = graph.nodes.iter().find(|n| n.id == node_id);
+    let is_trigger = node.map(|n| matches!(n.kind, WorkflowNodeKind::Trigger { .. })).unwrap_or(false);
+
+    let inbound: Vec<_> = graph.edges.iter().filter(|e| e.to == node_id).collect();
+    if inbound.is_empty() { return is_trigger; }
+
+    inbound.iter().any(|edge| {
         active_ports.get(&edge.from)
             .map(|ports| ports.contains(&edge.from_output))
             .unwrap_or(false)
