@@ -1,11 +1,12 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde_json::{Value as JsonValue, json};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::routes::SharedRuntime;
-use crate::tools::{DispatchError, ToolContext};
-use rootcx_types::{ControlKind, WorkflowGraph, WorkflowNodeKind, WorkflowNodeRunStatus};
+use crate::tools::{DispatchError, ToolContext, ToolRegistry};
+use rootcx_types::{ControlKind, WorkflowGraph, WorkflowNodeKind, WorkflowNodeRunStatus, WorkflowExecutionStatus};
 
 use super::expr;
 
@@ -16,7 +17,7 @@ pub struct NodeRunResult {
 }
 
 pub async fn execute_dag(
-    rt: &SharedRuntime,
+    registry: &Arc<ToolRegistry>,
     pool: &sqlx::PgPool,
     app_id: &str,
     user_id: Uuid,
@@ -47,7 +48,7 @@ pub async fn execute_dag(
                 (WorkflowNodeRunStatus::Succeeded, json!({}), None)
             }
             WorkflowNodeKind::Tool { tool_name } => {
-                execute_tool_node(rt, pool, app_id, user_id, perms, tool_name, &resolved_params, &input).await
+                execute_tool_node(registry, pool, app_id, user_id, perms, tool_name, &resolved_params, &input).await
             }
             WorkflowNodeKind::Control { control } => {
                 execute_control_node(control, &resolved_params, &input)
@@ -74,6 +75,48 @@ pub async fn execute_dag(
     }
 
     results
+}
+
+/// Full lifecycle: create execution, run DAG, finalize status. Shared by
+/// the HTTP run endpoint and the scheduler trigger path.
+pub async fn run_workflow(
+    registry: &Arc<ToolRegistry>,
+    pool: &PgPool,
+    app_id: &str,
+    workflow_id: Uuid,
+    user_id: Uuid,
+    perms: &[String],
+    trigger_data: Option<JsonValue>,
+) -> Result<(Uuid, Vec<NodeRunResult>), String> {
+    let graph_json: JsonValue = sqlx::query_scalar(
+        "SELECT graph FROM rootcx_system.workflows WHERE id = $1 AND app_id = $2 AND enabled = true",
+    ).bind(workflow_id).bind(app_id)
+    .fetch_optional(pool).await.map_err(|e| e.to_string())?
+    .ok_or_else(|| "workflow not found or not enabled".to_string())?;
+
+    let graph: WorkflowGraph = serde_json::from_value(graph_json)
+        .map_err(|e| format!("invalid graph: {e}"))?;
+
+    let exec_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO rootcx_system.workflow_executions (id, workflow_id, app_id, status, run_as_user_id, trigger_data, started_at)
+         VALUES (gen_random_uuid(), $1, $2, 'running', $3, $4, now()) RETURNING id",
+    ).bind(workflow_id).bind(app_id).bind(user_id).bind(&trigger_data)
+    .fetch_one(pool).await.map_err(|e| e.to_string())?;
+
+    let results = execute_dag(registry, pool, app_id, user_id, perms, &graph, exec_id).await;
+
+    let all_ok = results.iter().all(|r| r.status == WorkflowNodeRunStatus::Succeeded);
+    let final_status = if all_ok { WorkflowExecutionStatus::Succeeded } else { WorkflowExecutionStatus::Failed };
+    let error_msg = results.iter().find_map(|r| {
+        if r.status == WorkflowNodeRunStatus::Failed { r.error.clone() } else { None }
+    });
+
+    let _ = sqlx::query(
+        "UPDATE rootcx_system.workflow_executions SET status = $2, error = $3, finished_at = now() WHERE id = $1",
+    ).bind(exec_id).bind(final_status.as_str()).bind(&error_msg)
+    .execute(pool).await;
+
+    Ok((exec_id, results))
 }
 
 fn should_execute(node_id: &str, graph: &WorkflowGraph, outputs: &HashMap<String, JsonValue>, branches: &HashMap<String, u8>) -> bool {
@@ -153,7 +196,7 @@ fn is_truthy(value: &JsonValue) -> bool {
 // ── Tool node ────────────────────────────────────────────────────────
 
 async fn execute_tool_node(
-    rt: &SharedRuntime,
+    registry: &Arc<ToolRegistry>,
     pool: &sqlx::PgPool,
     app_id: &str,
     user_id: Uuid,
@@ -162,7 +205,7 @@ async fn execute_tool_node(
     params: &JsonValue,
     input: &JsonValue,
 ) -> (WorkflowNodeRunStatus, JsonValue, Option<String>) {
-    let tool = match rt.tool_registry().get(tool_name) {
+    let tool = match registry.get(tool_name) {
         Some(t) => t,
         None => return (WorkflowNodeRunStatus::Failed, json!(null), Some(format!("unknown tool: {tool_name}"))),
     };

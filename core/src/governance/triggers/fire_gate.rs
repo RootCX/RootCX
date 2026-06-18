@@ -85,3 +85,21 @@ pub async fn assert_can_fire(pool: &PgPool, owner: Option<Uuid>, app_id: &str) -
 
     Ok(delegator)
 }
+
+/// Lighter gate for workflows: owner present + enabled + holds invoke.
+/// Skips the delegation check because workflows have no agent principal
+/// to delegate to (the automation runs directly under the owner's identity).
+pub async fn assert_can_fire_workflow(pool: &PgPool, owner: Option<Uuid>, app_id: &str) -> Result<Uuid, FireDenied> {
+    let uid = owner.ok_or(FireDenied::NoOwner)?;
+    if !principal_enabled(pool, uid).await {
+        return Err(FireDenied::Disabled);
+    }
+    let required_perm = format!("app:{app_id}:invoke");
+    let holds = has_permission_db(pool, uid, &required_perm)
+        .await
+        .map_err(|e| FireDenied::CheckFailed(format!("{e:?}")))?;
+    if !holds {
+        return Err(FireDenied::NoInvoke(required_perm));
+    }
+    Ok(uid)
+}

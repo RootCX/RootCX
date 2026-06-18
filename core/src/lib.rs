@@ -144,7 +144,7 @@ impl Runtime {
         wm.init_self_ref();
 
         seed::seed_assistant(&pool, &self.data_dir, &self.bun_bin, &wm, &secret_manager).await?;
-        let scheduler = scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm));
+        let scheduler = scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm), Arc::clone(&self.tool_registry));
 
         wm.start_deployed_apps(&pool, &secret_manager).await;
 

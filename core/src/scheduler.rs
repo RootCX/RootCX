@@ -8,6 +8,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::extensions::agents::persistence;
 use crate::ipc::{AgentInvokePayload, LlmModelRef};
+use crate::tools::ToolRegistry;
 use crate::{jobs, worker_manager::WorkerManager};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -96,7 +97,67 @@ async fn dispatch_agent_job(
     }
 }
 
-pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>) -> SchedulerHandle {
+async fn dispatch_workflow_job(
+    pool: &PgPool,
+    tool_registry: &Arc<ToolRegistry>,
+    msg_id: i64,
+    app_id: &str,
+    workflow_id: &str,
+    user_id: Option<uuid::Uuid>,
+    trigger_data: serde_json::Value,
+    label: &'static str,
+) {
+    let uid = match crate::governance::triggers::fire_gate::assert_can_fire_workflow(
+        pool, user_id, app_id,
+    ).await {
+        Ok(uid) => uid,
+        Err(denied) => {
+            warn!(msg_id, app_id, "{label} workflow denied: {denied}");
+            let _ = jobs::fail(pool, msg_id).await;
+            return;
+        }
+    };
+
+    let wf_uuid = match workflow_id.parse::<uuid::Uuid>() {
+        Ok(id) => id,
+        Err(_) => {
+            warn!(msg_id, app_id, workflow_id, "{label} workflow: invalid workflow_id");
+            let _ = jobs::fail(pool, msg_id).await;
+            return;
+        }
+    };
+
+    let (_, perms) = match crate::governance::authority::resolve_permissions(pool, uid).await {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(msg_id, app_id, "{label} workflow perms: {e:?}");
+            let _ = jobs::fail(pool, msg_id).await;
+            return;
+        }
+    };
+
+    let pool = pool.clone();
+    let registry = Arc::clone(tool_registry);
+    let app_id = app_id.to_string();
+    let wf_id_str = workflow_id.to_string();
+
+    tokio::spawn(async move {
+        match crate::extensions::workflows::executor::run_workflow(
+            &registry, &pool, &app_id, wf_uuid, uid, &perms, Some(trigger_data),
+        ).await {
+            Ok((exec_id, _)) => {
+                let _ = jobs::complete(&pool, msg_id).await;
+                info!(msg_id, app_id = %app_id, workflow_id = %wf_id_str, %exec_id, "{label} workflow completed");
+            }
+            Err(e) => {
+                warn!(msg_id, app_id = %app_id, workflow_id = %wf_id_str, "{label} workflow failed: {e}");
+                let _ = jobs::fail(&pool, msg_id).await;
+            }
+        }
+    });
+}
+
+pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, tool_registry: Arc<ToolRegistry>) -> SchedulerHandle {
     let wake = Arc::new(Notify::new());
     let cancel = CancellationToken::new();
     let w = Arc::clone(&wake);
@@ -110,6 +171,8 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>) -> SchedulerHandle 
                 Ok(Some((msg_id, job_msg))) => {
                     let is_hook = job_msg.payload.get("_hook").and_then(|v| v.as_bool()) == Some(true);
                     let is_agent = job_msg.payload.get("action_type").and_then(|v| v.as_str()) == Some("agent");
+
+                    let is_workflow = job_msg.payload.get("action_type").and_then(|v| v.as_str()) == Some("workflow");
 
                     if is_hook && is_agent {
                         let target_app = job_msg.payload.get("action_config")
@@ -127,8 +190,30 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>) -> SchedulerHandle 
                         continue;
                     }
 
-                    // Cron-triggered agent invocation
+                    if is_hook && is_workflow {
+                        let wf_id = job_msg.payload.get("action_config")
+                            .and_then(|c| c.get("workflow_id"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let trigger_data = serde_json::json!({
+                            "entity": job_msg.payload.get("entity"),
+                            "operation": job_msg.payload.get("operation"),
+                            "record": job_msg.payload.get("record"),
+                            "old_record": job_msg.payload.get("old_record"),
+                        });
+                        dispatch_workflow_job(&pool, &tool_registry, msg_id, &job_msg.app_id, wf_id, job_msg.user_id, trigger_data, "hook").await;
+                        continue;
+                    }
+
+                    // Cron-triggered invocations
                     let is_cron = job_msg.payload.get("cron_id").is_some();
+                    let cron_workflow_id = job_msg.payload.get("workflow_id").and_then(|v| v.as_str());
+
+                    if let (true, Some(wf_id)) = (is_cron, cron_workflow_id) {
+                        dispatch_workflow_job(&pool, &tool_registry, msg_id, &job_msg.app_id, wf_id, job_msg.user_id, serde_json::json!({"trigger": "schedule"}), "cron").await;
+                        continue;
+                    }
+
                     let is_cron_agent = if is_cron {
                         sqlx::query_scalar::<_, bool>(
                             "SELECT EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id = $1)"

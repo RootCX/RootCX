@@ -72,6 +72,19 @@ impl RuntimeExtension for WorkflowExtension {
         ] {
             sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
         }
+
+        // Extend entity_hooks CHECK to include 'workflow' (idempotent)
+        sqlx::query(
+            "DO $$ BEGIN
+                ALTER TABLE rootcx_system.entity_hooks
+                    DROP CONSTRAINT IF EXISTS entity_hooks_action_type_check;
+                ALTER TABLE rootcx_system.entity_hooks
+                    ADD CONSTRAINT entity_hooks_action_type_check
+                    CHECK (action_type IN ('job', 'agent', 'workflow'));
+            EXCEPTION WHEN others THEN NULL;
+            END $$"
+        ).execute(pool).await.map_err(RuntimeError::Schema)?;
+
         info!("workflows tables ready");
         Ok(())
     }

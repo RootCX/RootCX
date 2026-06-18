@@ -42,7 +42,7 @@ impl RuntimeExtension for HooksExtension {
                 app_id       TEXT NOT NULL,
                 entity       TEXT NOT NULL,
                 operation    TEXT NOT NULL CHECK (operation IN ('INSERT', 'UPDATE', 'DELETE')),
-                action_type  TEXT NOT NULL CHECK (action_type IN ('job', 'agent')),
+                action_type  TEXT NOT NULL CHECK (action_type IN ('job', 'agent', 'workflow')),
                 action_config JSONB NOT NULL DEFAULT '{}',
                 active       BOOLEAN NOT NULL DEFAULT true,
                 created_by   UUID,
@@ -265,8 +265,8 @@ async fn create_hook(
     if !["INSERT", "UPDATE", "DELETE"].contains(&operation.as_str()) {
         return Err(ApiError::BadRequest("operation must be INSERT, UPDATE, or DELETE".into()));
     }
-    if !["job", "agent"].contains(&body.action_type.as_str()) {
-        return Err(ApiError::BadRequest("action_type must be 'job' or 'agent'".into()));
+    if !["job", "agent", "workflow"].contains(&body.action_type.as_str()) {
+        return Err(ApiError::BadRequest("action_type must be 'job', 'agent', or 'workflow'".into()));
     }
 
     let config = body.action_config.unwrap_or(serde_json::json!({}));

@@ -169,7 +169,7 @@ pub async fn list_nodes(
     Ok(Json(serde_json::to_value(descriptors).unwrap_or_default()))
 }
 
-// ── Run (synchronous, minimal v1) ───────────────────────────────────
+// ── Run ──────────────────────────────────────────────────────────────
 
 pub async fn run_workflow(
     identity: Identity,
@@ -178,36 +178,13 @@ pub async fn run_workflow(
 ) -> Result<Json<JsonValue>, ApiError> {
     let (pool, perms) = authed(&rt, identity.user_id, &app_id).await?;
 
-    let (graph_json,): (JsonValue,) = sqlx::query_as(
-        "SELECT graph FROM rootcx_system.workflows WHERE id = $1 AND app_id = $2 AND enabled = true",
-    ).bind(workflow_id).bind(&app_id).fetch_optional(&pool).await?
-    .ok_or_else(|| ApiError::NotFound("workflow not found or not enabled".into()))?;
-
-    let graph: WorkflowGraph = serde_json::from_value(graph_json)
-        .map_err(|e| ApiError::Internal(format!("invalid graph: {e}")))?;
-
-    let exec_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO rootcx_system.workflow_executions (workflow_id, app_id, status, run_as_user_id, started_at)
-         VALUES ($1, $2, 'running', $3, now()) RETURNING id",
-    ).bind(workflow_id).bind(&app_id).bind(identity.user_id)
-    .fetch_one(&pool).await?;
-
-    let results = executor::execute_dag(&rt, &pool, &app_id, identity.user_id, &perms, &graph, exec_id).await;
-
-    let all_ok = results.iter().all(|r| r.status == rootcx_types::WorkflowNodeRunStatus::Succeeded);
-    let final_status = if all_ok { rootcx_types::WorkflowExecutionStatus::Succeeded } else { rootcx_types::WorkflowExecutionStatus::Failed };
-    let error_msg = results.iter().find_map(|r| {
-        if r.status == rootcx_types::WorkflowNodeRunStatus::Failed { r.error.clone() } else { None }
-    });
-
-    sqlx::query(
-        "UPDATE rootcx_system.workflow_executions SET status = $2, error = $3, finished_at = now() WHERE id = $1",
-    ).bind(exec_id).bind(final_status.as_str()).bind(&error_msg)
-    .execute(&pool).await?;
+    let (exec_id, results) = executor::run_workflow(
+        rt.tool_registry(), &pool, &app_id, workflow_id, identity.user_id, &perms, None,
+    ).await.map_err(|e| ApiError::NotFound(e))?;
 
     Ok(Json(json!({
         "executionId": exec_id,
-        "status": final_status.as_str(),
+        "status": if results.iter().all(|r| r.status == rootcx_types::WorkflowNodeRunStatus::Succeeded) { "succeeded" } else { "failed" },
         "nodeRuns": results.iter().map(|r| json!({
             "nodeId": r.node_id, "status": r.status.as_str(), "error": r.error,
         })).collect::<Vec<_>>(),
