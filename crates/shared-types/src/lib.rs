@@ -481,6 +481,8 @@ pub struct WorkflowGraph {
 pub struct WorkflowNode {
     pub id: String,
     pub kind: WorkflowNodeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     #[serde(default)]
     pub params: JsonValue,
     #[serde(default)]

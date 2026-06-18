@@ -13,6 +13,7 @@ use super::expr;
 pub struct NodeRunResult {
     pub node_id: String,
     pub status: WorkflowNodeRunStatus,
+    pub output: JsonValue,
     pub error: Option<String>,
 }
 
@@ -67,9 +68,9 @@ pub async fn execute_dag(
             if let Some(branch) = output.get("_branch").and_then(|b| b.as_u64()) {
                 branch_outputs.insert(node_id.clone(), branch as u8);
             }
-            outputs.insert(node_id.clone(), output);
+            outputs.insert(node_id.clone(), output.clone());
         }
-        results.push(NodeRunResult { node_id: node_id.clone(), status, error });
+        results.push(NodeRunResult { node_id: node_id.clone(), status, output, error });
 
         if status == WorkflowNodeRunStatus::Failed { break; }
     }

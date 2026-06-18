@@ -247,7 +247,7 @@ pub async fn run_workflow(
         "executionId": exec_id,
         "status": if results.iter().all(|r| r.status == rootcx_types::WorkflowNodeRunStatus::Succeeded) { "succeeded" } else { "failed" },
         "nodeRuns": results.iter().map(|r| json!({
-            "nodeId": r.node_id, "status": r.status.as_str(), "error": r.error,
+            "nodeId": r.node_id, "status": r.status.as_str(), "output": r.output, "error": r.error,
         })).collect::<Vec<_>>(),
     })))
 }
