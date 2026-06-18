@@ -12,6 +12,7 @@ pub mod routes;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
@@ -69,6 +70,30 @@ pub struct ToolContext {
 pub fn check_permission(permissions: &[String], required: &str) -> Result<(), String> {
     if crate::governance::authority::has_permission(permissions, required) { Ok(()) }
     else { Err(format!("permission denied: {required}")) }
+}
+
+#[derive(Debug)]
+pub enum DispatchError {
+    PermissionDenied(String),
+    ExecutionFailed(String),
+}
+
+pub struct ToolOutcome {
+    pub value: Result<JsonValue, DispatchError>,
+    pub duration_ms: u64,
+}
+
+/// The single executor-agnostic path for running one tool under an authority.
+/// Gates `tool:{name}` (zero-alloc), then executes. No delivery side effects.
+pub async fn dispatch(tool_name: &str, tool: Arc<dyn Tool>, ctx: &ToolContext) -> ToolOutcome {
+    let start = Instant::now();
+    let perm_key = format!("tool:{tool_name}");
+    let value = if !crate::governance::authority::has_permission(&ctx.permissions, &perm_key) {
+        Err(DispatchError::PermissionDenied(perm_key))
+    } else {
+        tool.execute(ctx).await.map_err(DispatchError::ExecutionFailed)
+    };
+    ToolOutcome { value, duration_ms: start.elapsed().as_millis() as u64 }
 }
 
 #[async_trait]
@@ -182,6 +207,59 @@ fn format_data_contract(contract: &JsonValue) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Arc;
+    use uuid::Uuid;
+    use async_trait::async_trait;
+    use rootcx_types::ToolDescriptor;
+
+    struct StubTool(Result<serde_json::Value, String>);
+    #[async_trait]
+    impl Tool for StubTool {
+        fn descriptor(&self) -> ToolDescriptor {
+            ToolDescriptor { name: "ok".into(), description: String::new(), input_schema: json!({}) }
+        }
+        async fn execute(&self, _ctx: &ToolContext) -> Result<serde_json::Value, String> {
+            self.0.clone()
+        }
+    }
+
+    fn ctx_with(perms: Vec<String>) -> ToolContext {
+        // Lazy pool never connects: the gate/lookup cases short-circuit before
+        // any query, and the stub tool ignores ctx.pool.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/test").unwrap();
+        ToolContext {
+            pool, app_id: "app".into(), user_id: Uuid::nil(), invoker_user_id: None,
+            permissions: perms, task_scope: None, args: json!({}),
+            agent_dispatch: None, integration_caller: None, action_caller: None, stream_tx: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_gates_then_maps_outcome() {
+        let ok = || -> Arc<dyn Tool> { Arc::new(StubTool(Ok(json!({ "ran": true })))) };
+        let failing = || -> Arc<dyn Tool> { Arc::new(StubTool(Err("boom".into()))) };
+
+        // Denied: no perm
+        let out = dispatch("ok", ok(), &ctx_with(vec![])).await;
+        assert!(matches!(out.value, Err(DispatchError::PermissionDenied(_))), "should deny with no perm");
+
+        // Denied: unrelated perm
+        let out = dispatch("ok", ok(), &ctx_with(vec!["tool:other".into()])).await;
+        assert!(matches!(out.value, Err(DispatchError::PermissionDenied(_))), "should deny with unrelated perm");
+
+        // Allowed: exact perm
+        let out = dispatch("ok", ok(), &ctx_with(vec!["tool:ok".into()])).await;
+        assert_eq!(out.value.unwrap(), json!({ "ran": true }));
+
+        // Allowed: wildcard perm
+        let out = dispatch("ok", ok(), &ctx_with(vec!["tool:*".into()])).await;
+        assert_eq!(out.value.unwrap(), json!({ "ran": true }));
+
+        // Allowed: tool execution error propagates
+        let out = dispatch("ok", failing(), &ctx_with(vec!["tool:ok".into()])).await;
+        assert!(matches!(out.value, Err(DispatchError::ExecutionFailed(ref e)) if e == "boom"));
+    }
 
     // `enum_values` is read from raw JSON (not type-guarded), so a casing drift
     // back to `enumValues` would silently drop enum options from agent prompts.

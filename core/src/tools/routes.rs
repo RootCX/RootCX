@@ -6,7 +6,7 @@ use serde_json::Value as JsonValue;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::routes::SharedRuntime;
-use super::ToolContext;
+use super::{DispatchError, ToolContext};
 
 #[derive(Serialize)]
 pub struct ToolSummary {
@@ -44,9 +44,15 @@ pub async fn execute_tool(
     let pool = rt.pool().clone();
 
     let (_, permissions) = crate::governance::authority::resolve_permissions(&pool, identity.user_id).await?;
-    let result = tool.execute(&ToolContext {
+    let ctx = ToolContext {
         pool, app_id: body.app_id, user_id: identity.user_id, invoker_user_id: None,
-        permissions, task_scope: None, args: body.args, agent_dispatch: None, integration_caller: None, action_caller: None, stream_tx: None,
-    }).await.map_err(ApiError::Internal)?;
-    Ok(Json(result))
+        permissions, task_scope: None, args: body.args,
+        agent_dispatch: None, integration_caller: None, action_caller: None, stream_tx: None,
+    };
+    let outcome = super::dispatch(&tool_name, tool, &ctx).await;
+    match outcome.value {
+        Ok(v) => Ok(Json(v)),
+        Err(DispatchError::PermissionDenied(e)) => Err(ApiError::Forbidden(e)),
+        Err(DispatchError::ExecutionFailed(e)) => Err(ApiError::Internal(e)),
+    }
 }

@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Instant;
 
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
@@ -7,7 +6,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::ipc::OutboundMessage;
-use crate::tools::{ActionCaller, AgentDispatcher, IntegrationCaller, Tool, ToolContext, check_permission};
+use crate::tools::{ActionCaller, AgentDispatcher, DispatchError, IntegrationCaller, Tool, ToolContext};
 use crate::worker::AgentEvent;
 
 pub(crate) async fn execute(
@@ -28,25 +27,25 @@ pub(crate) async fn execute(
     invoke_id: String,
     call_id: String,
 ) {
-    if let Err(e) = check_permission(&permissions, &format!("tool:{tool_name}")) {
-        send_result(&out_tx, &stream_tx, &invoke_id, &call_id, &tool_name, None, Some(e), 0).await;
-        return;
-    }
+    let ctx = ToolContext {
+        pool, app_id, user_id, invoker_user_id, permissions, task_scope, args,
+        agent_dispatch, integration_caller, action_caller, stream_tx: stream_tx.clone(),
+    };
 
-    let start = Instant::now();
-    let (result, err) = match tool {
+    let (result, error, duration_ms) = match tool {
         Some(t) => {
-            let ctx = ToolContext { pool, app_id, user_id, invoker_user_id, permissions, task_scope, args, agent_dispatch, integration_caller, action_caller, stream_tx: stream_tx.clone() };
-            match t.execute(&ctx).await {
-                Ok(v) => (Some(v), None),
-                Err(e) => (None, Some(e)),
+            let outcome = crate::tools::dispatch(&tool_name, t, &ctx).await;
+            match outcome.value {
+                Ok(v) => (Some(v), None, outcome.duration_ms),
+                Err(DispatchError::PermissionDenied(e) | DispatchError::ExecutionFailed(e)) =>
+                    (None, Some(e), outcome.duration_ms),
             }
         }
-        None => (None, Some(format!("unknown tool: {tool_name}"))),
+        None => (None, Some(format!("unknown tool: {tool_name}")), 0),
     };
 
     send_result(&out_tx, &stream_tx, &invoke_id, &call_id, &tool_name,
-        result, err, start.elapsed().as_millis() as u64).await;
+        result, error, duration_ms).await;
 }
 
 async fn send_result(
