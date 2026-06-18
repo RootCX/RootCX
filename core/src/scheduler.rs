@@ -101,27 +101,38 @@ async fn dispatch_workflow_job(
     pool: &PgPool,
     tool_registry: &Arc<ToolRegistry>,
     msg_id: i64,
-    app_id: &str,
     workflow_id: &str,
     user_id: Option<uuid::Uuid>,
     trigger_data: serde_json::Value,
     label: &'static str,
 ) {
-    let uid = match crate::governance::triggers::fire_gate::assert_can_fire_workflow(
-        pool, user_id, app_id,
-    ).await {
-        Ok(uid) => uid,
-        Err(denied) => {
-            warn!(msg_id, app_id, "{label} workflow denied: {denied}");
+    let wf_uuid = match workflow_id.parse::<uuid::Uuid>() {
+        Ok(id) => id,
+        Err(_) => {
+            warn!(msg_id, workflow_id, "{label} workflow: invalid workflow_id");
             let _ = jobs::fail(pool, msg_id).await;
             return;
         }
     };
 
-    let wf_uuid = match workflow_id.parse::<uuid::Uuid>() {
-        Ok(id) => id,
-        Err(_) => {
-            warn!(msg_id, app_id, workflow_id, "{label} workflow: invalid workflow_id");
+    // Resolve the workflow's backing app_id
+    let app_id: String = match sqlx::query_scalar::<_, String>(
+        "SELECT app_id FROM rootcx_system.workflows WHERE id = $1",
+    ).bind(wf_uuid).fetch_optional(pool).await {
+        Ok(Some(id)) => id,
+        _ => {
+            warn!(msg_id, workflow_id, "{label} workflow not found");
+            let _ = jobs::fail(pool, msg_id).await;
+            return;
+        }
+    };
+
+    let uid = match crate::governance::triggers::fire_gate::assert_can_fire_workflow(
+        pool, user_id, &app_id,
+    ).await {
+        Ok(uid) => uid,
+        Err(denied) => {
+            warn!(msg_id, %app_id, "{label} workflow denied: {denied}");
             let _ = jobs::fail(pool, msg_id).await;
             return;
         }
@@ -130,7 +141,7 @@ async fn dispatch_workflow_job(
     let (_, perms) = match crate::governance::authority::resolve_permissions(pool, uid).await {
         Ok(p) => p,
         Err(e) => {
-            warn!(msg_id, app_id, "{label} workflow perms: {e:?}");
+            warn!(msg_id, %app_id, "{label} workflow perms: {e:?}");
             let _ = jobs::fail(pool, msg_id).await;
             return;
         }
@@ -138,7 +149,6 @@ async fn dispatch_workflow_job(
 
     let pool = pool.clone();
     let registry = Arc::clone(tool_registry);
-    let app_id = app_id.to_string();
     let wf_id_str = workflow_id.to_string();
 
     tokio::spawn(async move {
@@ -147,10 +157,10 @@ async fn dispatch_workflow_job(
         ).await {
             Ok((exec_id, _)) => {
                 let _ = jobs::complete(&pool, msg_id).await;
-                info!(msg_id, app_id = %app_id, workflow_id = %wf_id_str, %exec_id, "{label} workflow completed");
+                info!(msg_id, %app_id, workflow_id = %wf_id_str, %exec_id, "{label} workflow completed");
             }
             Err(e) => {
-                warn!(msg_id, app_id = %app_id, workflow_id = %wf_id_str, "{label} workflow failed: {e}");
+                warn!(msg_id, %app_id, workflow_id = %wf_id_str, "{label} workflow failed: {e}");
                 let _ = jobs::fail(&pool, msg_id).await;
             }
         }
@@ -201,7 +211,7 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, tool_registry: Arc<
                             "record": job_msg.payload.get("record"),
                             "old_record": job_msg.payload.get("old_record"),
                         });
-                        dispatch_workflow_job(&pool, &tool_registry, msg_id, &job_msg.app_id, wf_id, job_msg.user_id, trigger_data, "hook").await;
+                        dispatch_workflow_job(&pool, &tool_registry, msg_id, wf_id, job_msg.user_id, trigger_data, "hook").await;
                         continue;
                     }
 
@@ -210,7 +220,7 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, tool_registry: Arc<
                     let cron_workflow_id = job_msg.payload.get("workflow_id").and_then(|v| v.as_str());
 
                     if let (true, Some(wf_id)) = (is_cron, cron_workflow_id) {
-                        dispatch_workflow_job(&pool, &tool_registry, msg_id, &job_msg.app_id, wf_id, job_msg.user_id, serde_json::json!({"trigger": "schedule"}), "cron").await;
+                        dispatch_workflow_job(&pool, &tool_registry, msg_id, wf_id, job_msg.user_id, serde_json::json!({"trigger": "schedule"}), "cron").await;
                         continue;
                     }
 

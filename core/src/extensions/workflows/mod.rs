@@ -24,14 +24,13 @@ impl RuntimeExtension for WorkflowExtension {
             "CREATE TABLE IF NOT EXISTS rootcx_system.workflows (
                 id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 app_id      TEXT NOT NULL REFERENCES rootcx_system.apps(id) ON DELETE CASCADE,
-                name        TEXT NOT NULL,
+                name        TEXT NOT NULL UNIQUE,
                 graph       JSONB NOT NULL DEFAULT '{\"nodes\":[],\"edges\":[]}'::jsonb,
                 enabled     BOOLEAN NOT NULL DEFAULT false,
                 version     INT NOT NULL DEFAULT 1,
                 created_by  UUID,
                 created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-                updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-                UNIQUE(app_id, name)
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
             )",
             "CREATE TABLE IF NOT EXISTS rootcx_system.workflow_versions (
                 workflow_id UUID NOT NULL REFERENCES rootcx_system.workflows(id) ON DELETE CASCADE,
@@ -73,7 +72,6 @@ impl RuntimeExtension for WorkflowExtension {
             sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
         }
 
-        // Extend entity_hooks CHECK to include 'workflow' (idempotent)
         sqlx::query(
             "DO $$ BEGIN
                 ALTER TABLE rootcx_system.entity_hooks
@@ -92,11 +90,11 @@ impl RuntimeExtension for WorkflowExtension {
     fn routes(&self) -> Option<Router<SharedRuntime>> {
         Some(
             Router::new()
-                .route("/api/v1/apps/{app_id}/workflows", get(routes::list_workflows).post(routes::create_workflow))
-                .route("/api/v1/apps/{app_id}/workflows/{workflow_id}", get(routes::get_workflow).put(routes::update_workflow).delete(routes::delete_workflow))
-                .route("/api/v1/apps/{app_id}/workflows/{workflow_id}/run", post(routes::run_workflow))
-                .route("/api/v1/apps/{app_id}/workflows/{workflow_id}/executions", get(routes::list_executions))
-                .route("/api/v1/apps/{app_id}/nodes", get(routes::list_nodes))
+                .route("/api/v1/workflows", get(routes::list_workflows).post(routes::create_workflow))
+                .route("/api/v1/workflows/{workflow_id}", get(routes::get_workflow).put(routes::update_workflow).delete(routes::delete_workflow))
+                .route("/api/v1/workflows/{workflow_id}/run", post(routes::run_workflow))
+                .route("/api/v1/workflows/{workflow_id}/executions", get(routes::list_executions))
+                .route("/api/v1/workflows/nodes", get(routes::list_nodes))
         )
     }
 }

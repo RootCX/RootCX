@@ -488,7 +488,7 @@ pub struct WorkflowNode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum WorkflowNodeKind {
     Trigger { trigger: TriggerKind },
     Tool { tool_name: String },
@@ -634,6 +634,27 @@ mod tests {
             serde_json::from_value(serde_json::to_value(&f).unwrap()).expect("round-trip failed");
         assert_eq!(round.enum_values, f.enum_values, "enum_values lost on round-trip");
         assert_eq!(round.on_delete, f.on_delete, "on_delete lost on round-trip");
+    }
+
+    // The workflow editor speaks camelCase. WorkflowNodeKind is a `tag = "type"`
+    // enum, and `rename_all` alone renames only the variants — fields inside
+    // struct variants (tool_name, workflow_id) need `rename_all_fields`. Dropping
+    // it compiles cleanly but 422s on save. Guards both directions of the exact
+    // wire shapes the editor sends and reads back.
+    #[test]
+    fn node_kind_round_trips_camelcase_wire() {
+        let cases = [
+            ("tool", serde_json::json!({"type": "tool", "toolName": "query_data"})),
+            ("trigger", serde_json::json!({"type": "trigger", "trigger": "recordChange"})),
+            ("control", serde_json::json!({"type": "control", "control": "if"})),
+            ("subWorkflow", serde_json::json!({"type": "subWorkflow", "workflowId": "wf-1"})),
+        ];
+        for (label, wire) in &cases {
+            let kind: WorkflowNodeKind = serde_json::from_value(wire.clone())
+                .unwrap_or_else(|e| panic!("[{label}] wire shape rejected: {e}"));
+            assert_eq!(&serde_json::to_value(&kind).unwrap(), wire,
+                "[{label}] re-serialized shape drifted from the editor's wire");
+        }
     }
 
     #[test]
