@@ -467,6 +467,113 @@ pub struct ToolDescriptor {
     pub input_schema: serde_json::Value,
 }
 
+// ── Workflow types ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowGraph {
+    pub nodes: Vec<WorkflowNode>,
+    pub edges: Vec<WorkflowEdge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowNode {
+    pub id: String,
+    pub kind: WorkflowNodeKind,
+    #[serde(default)]
+    pub params: JsonValue,
+    #[serde(default)]
+    pub position: [f32; 2],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum WorkflowNodeKind {
+    Trigger { trigger: TriggerKind },
+    Tool { tool_name: String },
+    Control { control: ControlKind },
+    Code,
+    SubWorkflow { workflow_id: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TriggerKind {
+    Manual,
+    Schedule,
+    Webhook,
+    RecordChange,
+    Channel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ControlKind {
+    If,
+    Switch,
+    Merge,
+    Set,
+    Loop,
+    Wait,
+    Stop,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowEdge {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub from_output: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkflowExecutionStatus {
+    Queued,
+    Running,
+    Succeeded,
+    Failed,
+    Canceled,
+}
+
+impl WorkflowExecutionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Canceled => "canceled",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkflowNodeRunStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+}
+
+impl WorkflowNodeRunStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+// ── LLM types ────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {

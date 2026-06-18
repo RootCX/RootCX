@@ -13,6 +13,7 @@ pub mod service_accounts;
 pub mod sharing;
 pub mod platform_storage;
 pub mod storage;
+pub mod workflows;
 
 use std::sync::Arc;
 
@@ -70,5 +71,6 @@ pub fn builtin_extensions(auth_config: Arc<AuthConfig>) -> Vec<Box<dyn RuntimeEx
         Box::new(channels::ChannelExtension),
         Box::new(storage::StorageExtension),
         Box::new(platform_storage::PlatformStorageExtension),
+        Box::new(workflows::WorkflowExtension),
     ]
 }

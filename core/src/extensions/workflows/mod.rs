@@ -1,0 +1,88 @@
+pub(crate) mod executor;
+pub(crate) mod routes;
+
+use async_trait::async_trait;
+use axum::Router;
+use axum::routing::{get, post};
+use sqlx::PgPool;
+use tracing::info;
+
+use super::RuntimeExtension;
+use crate::RuntimeError;
+use crate::routes::SharedRuntime;
+
+pub struct WorkflowExtension;
+
+#[async_trait]
+impl RuntimeExtension for WorkflowExtension {
+    fn name(&self) -> &str { "workflows" }
+
+    async fn bootstrap(&self, pool: &PgPool) -> Result<(), RuntimeError> {
+        info!("bootstrapping workflows extension");
+        for ddl in [
+            "CREATE TABLE IF NOT EXISTS rootcx_system.workflows (
+                id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                app_id      TEXT NOT NULL REFERENCES rootcx_system.apps(id) ON DELETE CASCADE,
+                name        TEXT NOT NULL,
+                graph       JSONB NOT NULL DEFAULT '{\"nodes\":[],\"edges\":[]}'::jsonb,
+                enabled     BOOLEAN NOT NULL DEFAULT false,
+                version     INT NOT NULL DEFAULT 1,
+                created_by  UUID,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+                UNIQUE(app_id, name)
+            )",
+            "CREATE TABLE IF NOT EXISTS rootcx_system.workflow_versions (
+                workflow_id UUID NOT NULL REFERENCES rootcx_system.workflows(id) ON DELETE CASCADE,
+                version     INT NOT NULL,
+                graph       JSONB NOT NULL,
+                published_by UUID,
+                published_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (workflow_id, version)
+            )",
+            "CREATE TABLE IF NOT EXISTS rootcx_system.workflow_executions (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                workflow_id     UUID NOT NULL REFERENCES rootcx_system.workflows(id) ON DELETE CASCADE,
+                app_id          TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'queued',
+                trigger_data    JSONB,
+                run_as_user_id  UUID NOT NULL,
+                error           TEXT,
+                started_at      TIMESTAMPTZ,
+                finished_at     TIMESTAMPTZ,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            )",
+            "CREATE INDEX IF NOT EXISTS idx_workflow_executions_workflow
+                ON rootcx_system.workflow_executions (workflow_id, created_at DESC)",
+            "CREATE TABLE IF NOT EXISTS rootcx_system.workflow_node_runs (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                execution_id    UUID NOT NULL REFERENCES rootcx_system.workflow_executions(id) ON DELETE CASCADE,
+                node_id         TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                input           JSONB,
+                output          JSONB,
+                attempts        INT NOT NULL DEFAULT 0,
+                error           TEXT,
+                started_at      TIMESTAMPTZ,
+                finished_at     TIMESTAMPTZ
+            )",
+            "CREATE INDEX IF NOT EXISTS idx_workflow_node_runs_exec
+                ON rootcx_system.workflow_node_runs (execution_id)",
+        ] {
+            sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
+        }
+        info!("workflows tables ready");
+        Ok(())
+    }
+
+    fn routes(&self) -> Option<Router<SharedRuntime>> {
+        Some(
+            Router::new()
+                .route("/api/v1/apps/{app_id}/workflows", get(routes::list_workflows).post(routes::create_workflow))
+                .route("/api/v1/apps/{app_id}/workflows/{workflow_id}", get(routes::get_workflow).put(routes::update_workflow).delete(routes::delete_workflow))
+                .route("/api/v1/apps/{app_id}/workflows/{workflow_id}/run", post(routes::run_workflow))
+                .route("/api/v1/apps/{app_id}/workflows/{workflow_id}/executions", get(routes::list_executions))
+                .route("/api/v1/apps/{app_id}/nodes", get(routes::list_nodes))
+        )
+    }
+}
