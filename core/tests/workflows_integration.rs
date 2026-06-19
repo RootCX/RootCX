@@ -544,6 +544,53 @@ async fn workflow_hook_trigger_fires_on_insert() {
     assert_eq!(execs[0]["status"], "succeeded");
 }
 
+// Schedule crons are auto-managed: enable creates the pg_cron entry from the
+// trigger node's `schedule` param, disable removes it, and it actually fires.
+#[tokio::test]
+async fn workflow_schedule_cron_auto_lifecycle() {
+    let rt = TestRuntime::boot().await;
+
+    let graph = json!({
+        "nodes": [
+            {"id": "t", "kind": {"type": "trigger", "trigger": "schedule"},
+             "params": {"schedule": "1 seconds"}, "position": [0,0]},
+            {"id": "s", "kind": {"type": "control", "control": "set"},
+             "params": {"fields": {"tick": true}}, "position": [1,0]}
+        ],
+        "edges": [{"from": "t", "to": "s", "fromOutput": 0}]
+    });
+    let (_, body) = rt.post_json("/api/v1/workflows", &json!({"name": "sched-auto", "graph": graph})).await;
+    let wf_id = body["id"].as_str().unwrap();
+    let app_id = format!("wf-{wf_id}");
+
+    // Not enabled → no cron.
+    let crons: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rootcx_system.cron_schedules WHERE payload->>'workflow_id' = $1",
+    ).bind(wf_id).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(crons, 0, "no cron before enable");
+
+    // Enable → cron auto-created.
+    rt.put_json(&format!("/api/v1/workflows/{wf_id}"), &json!({"enabled": true})).await;
+    let crons: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rootcx_system.cron_schedules WHERE payload->>'workflow_id' = $1",
+    ).bind(wf_id).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(crons, 1, "cron created on enable");
+
+    // Wait for it to fire.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    let execs: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rootcx_system.workflow_executions WHERE workflow_id = $1::uuid",
+    ).bind(wf_id).fetch_one(rt.pool()).await.unwrap();
+    assert!(execs >= 1, "cron fired at least once: got {execs}");
+
+    // Disable → cron removed.
+    rt.put_json(&format!("/api/v1/workflows/{wf_id}"), &json!({"enabled": false})).await;
+    let crons: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rootcx_system.cron_schedules WHERE payload->>'workflow_id' = $1",
+    ).bind(wf_id).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(crons, 0, "cron removed on disable");
+}
+
 // Record-change hooks are auto-managed: enable creates the hook from the trigger
 // node's params, disable removes it, and the hook actually fires on record insert.
 #[tokio::test]

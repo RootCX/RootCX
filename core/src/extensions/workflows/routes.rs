@@ -182,10 +182,10 @@ pub async fn update_workflow(
 
     if r.rows_affected() == 0 { return Err(ApiError::NotFound("workflow not found".into())); }
 
-    // Auto-register/unregister record-change hooks when enabled state changes
-    // (not on every graph save — hooks only take effect when the workflow is enabled).
+    // Auto-register/unregister triggers when enabled state changes.
     if body.enabled.is_some() {
         sync_record_change_hooks(&pool, workflow_id, identity.user_id).await;
+        sync_schedule_cron(&pool, workflow_id, identity.user_id).await;
     }
 
     Ok(Json(json!({ "updated": true })))
@@ -259,6 +259,44 @@ async fn sync_record_change_hooks(pool: &sqlx::PgPool, workflow_id: Uuid, user_i
     .bind(json!({ "workflow_id": workflow_id }))
     .bind(user_id)
     .execute(pool).await.ok();
+}
+
+/// Auto-register/unregister a pg_cron schedule for schedule-triggered workflows.
+async fn sync_schedule_cron(pool: &sqlx::PgPool, workflow_id: Uuid, user_id: Uuid) {
+    let row: Option<(String, bool, JsonValue)> = sqlx::query_as(
+        "SELECT app_id, enabled, graph FROM rootcx_system.workflows WHERE id = $1",
+    ).bind(workflow_id).fetch_optional(pool).await.ok().flatten();
+
+    let Some((app_id, enabled, graph_json)) = row else { return };
+
+    // Remove any existing cron for this workflow (idempotent reconciliation).
+    let existing: Vec<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT id FROM rootcx_system.cron_schedules WHERE app_id = $1 AND payload->>'workflow_id' = $2",
+    ).bind(&app_id).bind(workflow_id.to_string()).fetch_all(pool).await.unwrap_or_default();
+    for cron_id in existing {
+        crate::crons::delete(pool, &app_id, cron_id).await.ok();
+    }
+
+    if !enabled { return; }
+
+    let graph: rootcx_types::WorkflowGraph = match serde_json::from_value(graph_json) {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let trigger = graph.nodes.iter().find(|n| matches!(
+        &n.kind, rootcx_types::WorkflowNodeKind::Trigger { trigger: rootcx_types::TriggerKind::Schedule }
+    ));
+    let Some(t) = trigger else { return };
+    let Some(schedule) = t.params.get("schedule").and_then(|v| v.as_str()) else { return };
+
+    crate::crons::create(pool, &app_id, crate::crons::CreateCron {
+        name: format!("wf-{workflow_id}-schedule"),
+        schedule: schedule.to_string(),
+        timezone: None,
+        payload: json!({ "workflow_id": workflow_id }),
+        overlap_policy: "skip".to_string(),
+        created_by: Some(user_id),
+    }).await.ok();
 }
 
 // ── Node palette ─────────────────────────────────────────────────────
