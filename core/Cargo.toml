@@ -51,6 +51,7 @@ chrono = { version = "0.4", features = ["serde"] }
 either = "1"
 
 reqwest = { version = "0.12", features = ["json"] }
+boa_engine = "0.19"
 libc = "0.2"
 
 [dev-dependencies]

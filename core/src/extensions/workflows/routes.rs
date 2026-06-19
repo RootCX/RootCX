@@ -11,10 +11,27 @@ use crate::governance::authority::resolve_permissions;
 use crate::routes::{self, SharedRuntime};
 use rootcx_types::WorkflowGraph;
 
-use super::executor;
+use super::events::WorkflowEvent;
 
 fn wf_app_id(workflow_id: Uuid) -> String {
     format!("wf-{workflow_id}")
+}
+
+/// Per-workflow authorization: the caller must own it (`created_by`) or be an
+/// admin — mirrors the `list_workflows` visibility predicate. Returns NotFound
+/// (not Forbidden) so a probe can't tell "exists, not yours" from "absent". Every
+/// workflow/execution-scoped read or mutation goes through this; executions inherit
+/// their workflow's authority (no per-user RLS on the system-schema tables).
+async fn authorize_workflow(pool: &sqlx::PgPool, user_id: Uuid, workflow_id: Uuid) -> Result<(), ApiError> {
+    let ok: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM rootcx_system.workflows w WHERE w.id = $1 AND (
+            w.created_by = $2 OR EXISTS (
+                SELECT 1 FROM rootcx_system.rbac_assignments ra
+                JOIN rootcx_system.rbac_roles rr ON rr.name = ra.role
+                WHERE ra.user_id = $2 AND ('admin' = ANY(rr.permissions) OR '*' = ANY(rr.permissions))
+            )))",
+    ).bind(workflow_id).bind(user_id).fetch_one(pool).await?;
+    if ok { Ok(()) } else { Err(ApiError::NotFound("workflow not found".into())) }
 }
 
 // ── CRUD ─────────────────────────────────────────────────────────────
@@ -110,11 +127,12 @@ pub async fn create_workflow(
 }
 
 pub async fn get_workflow(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(workflow_id): Path<Uuid>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
+    authorize_workflow(&pool, identity.user_id, workflow_id).await?;
 
     let row: Option<(Uuid, String, String, JsonValue, bool, i32, String, String)> = sqlx::query_as(
         "SELECT id, app_id, name, graph, enabled, version, created_at::text, updated_at::text
@@ -142,12 +160,13 @@ pub struct UpdateWorkflow {
 }
 
 pub async fn update_workflow(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(workflow_id): Path<Uuid>,
     Json(body): Json<UpdateWorkflow>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
+    authorize_workflow(&pool, identity.user_id, workflow_id).await?;
     let graph_json = body.graph.map(|g| serde_json::to_value(g).unwrap_or_default());
 
     let r = sqlx::query(
@@ -166,11 +185,12 @@ pub async fn update_workflow(
 }
 
 pub async fn delete_workflow(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(workflow_id): Path<Uuid>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
+    authorize_workflow(&pool, identity.user_id, workflow_id).await?;
 
     // Get the backing app_id to clean up
     let app_id: Option<String> = sqlx::query_scalar(
@@ -226,40 +246,115 @@ pub async fn list_nodes(
 
 // ── Run ──────────────────────────────────────────────────────────────
 
+/// Manual run: snapshot an execution (run-as caller) and enqueue it, returning the
+/// id immediately. Like every other run it now goes through pgmq under a lease;
+/// the editor streams progress via `stream_execution`.
 pub async fn run_workflow(
     identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(workflow_id): Path<Uuid>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
-    let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
+    authorize_workflow(&pool, identity.user_id, workflow_id).await?;
 
     let app_id: String = sqlx::query_scalar(
         "SELECT app_id FROM rootcx_system.workflows WHERE id = $1 AND enabled = true",
     ).bind(workflow_id).fetch_optional(&pool).await?
     .ok_or_else(|| ApiError::NotFound("workflow not found or not enabled".into()))?;
 
-    let (exec_id, results) = executor::run_workflow(
-        rt.tool_registry(), &pool, &app_id, workflow_id, identity.user_id, &perms, None,
-    ).await.map_err(|e| ApiError::Internal(e))?;
+    let exec_id = super::runner::create_execution(&pool, workflow_id, &app_id, identity.user_id, None, None)
+        .await.map_err(ApiError::Internal)?;
 
-    Ok(Json(json!({
-        "executionId": exec_id,
-        "status": if results.iter().all(|r| r.status == rootcx_types::WorkflowNodeRunStatus::Succeeded) { "succeeded" } else { "failed" },
-        "nodeRuns": results.iter().map(|r| json!({
-            "nodeId": r.node_id, "status": r.status.as_str(), "output": r.output, "error": r.error,
-        })).collect::<Vec<_>>(),
-    })))
+    let payload = json!({ "action_type": "workflow", "manual": true, "execution_id": exec_id });
+    let msg_id = crate::jobs::enqueue(&pool, &app_id, payload, Some(identity.user_id))
+        .await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    // Bind the lease so a redelivery resumes this very execution.
+    sqlx::query("UPDATE rootcx_system.workflow_executions SET lease_msg_id = $2 WHERE id = $1")
+        .bind(exec_id).bind(msg_id).execute(&pool).await?;
+    rt.wake_scheduler();
+
+    Ok(Json(json!({ "executionId": exec_id, "status": "queued" })))
+}
+
+/// SSE stream of an execution's progress. Replays persisted node_runs (durable
+/// source of truth, so a late or reconnecting client misses nothing), then
+/// forwards live per-node events until the terminal `done`.
+pub async fn stream_execution(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path((workflow_id, exec_id)): Path<(Uuid, Uuid)>,
+) -> Result<axum::response::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>, ApiError> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures::StreamExt;
+
+    let pool = routes::pool(&rt);
+    authorize_workflow(&pool, identity.user_id, workflow_id).await?;
+    // Subscribe before reading state so no event fires in the gap.
+    let rx = rt.workflow_events().subscribe(exec_id);
+
+    // Scope by workflow_id so an owned workflow can't be used to read another's run.
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM rootcx_system.workflow_executions WHERE id = $1 AND workflow_id = $2",
+    ).bind(exec_id).bind(workflow_id).fetch_optional(&pool).await?
+    .ok_or_else(|| ApiError::NotFound("execution not found".into()))?;
+
+    let rows: Vec<(String, String, Option<JsonValue>, Option<String>)> = sqlx::query_as(
+        "SELECT node_id, status, output, error FROM rootcx_system.workflow_node_runs
+         WHERE execution_id = $1 ORDER BY started_at",
+    ).bind(exec_id).fetch_all(&pool).await?;
+
+    let mut replay: Vec<Event> = rows.iter()
+        .map(|(nid, st, out, err)| node_sse(nid, st, out.clone(), err.clone()))
+        .collect();
+
+    let terminal = matches!(status.as_str(), "succeeded" | "failed" | "canceled");
+    let live = if terminal {
+        // Already finished before the client attached: close it out from the row,
+        // and drop the channel our `subscribe` may have re-created so the per-exec
+        // map can't accumulate orphans from reconnects on finished runs.
+        replay.push(done_sse(&status, None));
+        rt.workflow_events().close(exec_id);
+        futures::stream::empty().left_stream()
+    } else {
+        futures::stream::unfold(rx, |mut rx| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(WorkflowEvent::Node { node_id, status, output, error }) =>
+                        return Some((Ok(node_sse(&node_id, &status, Some(output), error)), rx)),
+                    Ok(WorkflowEvent::Done { status, error }) =>
+                        return Some((Ok(done_sse(&status, error)), rx)),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(_) => return None, // sender dropped after Done → end
+                }
+            }
+        }).right_stream()
+    };
+
+    let stream = futures::stream::iter(replay.into_iter().map(Ok)).chain(live);
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+fn node_sse(node_id: &str, status: &str, output: Option<JsonValue>, error: Option<String>) -> axum::response::sse::Event {
+    axum::response::sse::Event::default().event("node").data(
+        json!({ "nodeId": node_id, "status": status, "output": output, "error": error }).to_string()
+    )
+}
+
+fn done_sse(status: &str, error: Option<String>) -> axum::response::sse::Event {
+    axum::response::sse::Event::default().event("done").data(
+        json!({ "status": status, "error": error }).to_string()
+    )
 }
 
 // ── Executions list ──────────────────────────────────────────────────
 
 pub async fn list_executions(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(workflow_id): Path<Uuid>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
+    authorize_workflow(&pool, identity.user_id, workflow_id).await?;
 
     let rows: Vec<(Uuid, String, Option<String>, String, Option<String>)> = sqlx::query_as(
         "SELECT id, status, error, created_at::text, finished_at::text

@@ -48,6 +48,7 @@ pub async fn execute_tool(
         pool, app_id: body.app_id, user_id: identity.user_id, invoker_user_id: None,
         permissions, task_scope: None, args: body.args,
         agent_dispatch: None, integration_caller: None, action_caller: None, stream_tx: None,
+        idempotency_key: None,
     };
     let outcome = super::dispatch(&tool_name, tool, &ctx).await;
     match outcome.value {

@@ -1,6 +1,10 @@
+pub(crate) mod events;
 pub(crate) mod executor;
 pub(crate) mod expr;
+pub(crate) mod items;
 pub(crate) mod routes;
+pub(crate) mod runner;
+pub(crate) mod validate;
 
 use async_trait::async_trait;
 use axum::Router;
@@ -68,6 +72,20 @@ impl RuntimeExtension for WorkflowExtension {
             )",
             "CREATE INDEX IF NOT EXISTS idx_workflow_node_runs_exec
                 ON rootcx_system.workflow_node_runs (execution_id)",
+            // Durable runner: graph snapshot (stable across edits/redelivery),
+            // pgmq lease mapping for crash-resume, and the attempt counter.
+            "ALTER TABLE rootcx_system.workflow_executions
+                ADD COLUMN IF NOT EXISTS graph JSONB,
+                ADD COLUMN IF NOT EXISTS lease_msg_id BIGINT,
+                ADD COLUMN IF NOT EXISTS attempts INT NOT NULL DEFAULT 0",
+            // One row per (execution, node): upsert on retry/resume instead of
+            // appending duplicates.
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_node_runs_exec_node
+                ON rootcx_system.workflow_node_runs (execution_id, node_id)",
+            // Resume lookup: find the in-flight execution for a redelivered lease.
+            "CREATE INDEX IF NOT EXISTS idx_workflow_executions_lease
+                ON rootcx_system.workflow_executions (lease_msg_id)
+                WHERE lease_msg_id IS NOT NULL",
         ] {
             sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
         }
@@ -94,6 +112,7 @@ impl RuntimeExtension for WorkflowExtension {
                 .route("/api/v1/workflows/{workflow_id}", get(routes::get_workflow).put(routes::update_workflow).delete(routes::delete_workflow))
                 .route("/api/v1/workflows/{workflow_id}/run", post(routes::run_workflow))
                 .route("/api/v1/workflows/{workflow_id}/executions", get(routes::list_executions))
+                .route("/api/v1/workflows/{workflow_id}/executions/{execution_id}/stream", get(routes::stream_execution))
                 .route("/api/v1/workflows/nodes", get(routes::list_nodes))
         )
     }

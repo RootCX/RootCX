@@ -60,16 +60,29 @@ impl Tool for MutateDataTool {
                     return Err("'data' must contain at least one writable field".into());
                 }
 
-                let cols: Vec<String> = entries.iter().map(|(k, _)| quote_ident(k)).collect();
-                let phs: Vec<String> = (1..=entries.len()).map(|i| format!("${i}")).collect();
+                let mut cols: Vec<String> = entries.iter().map(|(k, _)| quote_ident(k)).collect();
+                let mut phs: Vec<String> = (1..=entries.len()).map(|i| format!("${i}")).collect();
+
+                // Idempotent create under a durable workflow: a deterministic id
+                // turns a retry / crash-resume into a no-op (ON CONFLICT returns the
+                // existing row) instead of a duplicate insert. Plain callers (agents,
+                // HTTP) pass no key and keep server-generated ids.
+                let idem_id = ctx.idempotency_key.as_ref()
+                    .map(|k| sqlx::types::Uuid::new_v5(&sqlx::types::Uuid::NAMESPACE_OID, k.as_bytes()));
+                let on_conflict = if idem_id.is_some() {
+                    cols.push("\"id\"".into());
+                    phs.push(format!("${}", entries.len() + 1));
+                    "ON CONFLICT (\"id\") DO UPDATE SET \"id\" = EXCLUDED.\"id\""
+                } else { "" };
 
                 let sql = format!(
-                    "INSERT INTO {tbl} ({}) VALUES ({}) RETURNING to_jsonb({tbl}.*) AS row",
+                    "INSERT INTO {tbl} ({}) VALUES ({}) {on_conflict} RETURNING to_jsonb({tbl}.*) AS row",
                     cols.join(", "), phs.join(", ")
                 );
                 let mut tx = begin().await.map_err(|e| e.to_string())?;
                 let mut q = sqlx::query_as::<_, (JsonValue,)>(&sql);
                 for (k, v) in &entries { q = bind_typed(q, v, types.get(*k)); }
+                if let Some(id) = idem_id { q = q.bind(id); }
                 let (row,) = q.fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
                 tx.commit().await.map_err(|e| e.to_string())?;
                 Ok(row)
@@ -102,6 +115,13 @@ impl Tool for MutateDataTool {
                 Ok(row)
             }
             "bulk_create" => {
+                // bulk_create is a single non-idempotent multi-row INSERT; under a
+                // durable workflow a crash-resume would duplicate the whole batch.
+                // Refuse it on that path (fail loud, don't corrupt) — map over items
+                // with a per-item `create` node instead, which is idempotency-keyed.
+                if ctx.idempotency_key.is_some() {
+                    return Err("bulk_create is not allowed inside a workflow (not resumable without duplicates); use a per-item create node".into());
+                }
                 let arr = ctx.args.get("data").and_then(|v| v.as_array())
                     .ok_or("'data' must be an array of objects for bulk_create")?;
                 if arr.is_empty() {
@@ -123,7 +143,12 @@ impl Tool for MutateDataTool {
                 let sql = format!("DELETE FROM {tbl} WHERE id = $1");
                 let mut tx = begin().await.map_err(|e| e.to_string())?;
                 let r = sqlx::query(&sql).bind(uuid).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-                if r.rows_affected() == 0 { return Err(format!("record '{id}' not found")); }
+                if r.rows_affected() == 0 {
+                    // Under a durable workflow a resumed delete of an already-deleted
+                    // row is success, not a spurious failure.
+                    if ctx.idempotency_key.is_some() { return Ok(json!("Already deleted")); }
+                    return Err(format!("record '{id}' not found"));
+                }
                 tx.commit().await.map_err(|e| e.to_string())?;
                 Ok(json!("Deleted successfully"))
             }

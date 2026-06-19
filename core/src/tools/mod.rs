@@ -65,6 +65,10 @@ pub struct ToolContext {
     pub integration_caller: Option<Arc<dyn IntegrationCaller>>,
     pub action_caller: Option<Arc<dyn ActionCaller>>,
     pub stream_tx: Option<tokio::sync::mpsc::Sender<crate::worker::AgentEvent>>,
+    /// Stable per-call dedupe key (set by the workflow runner = exec:node:item).
+    /// Tools that cause side effects use it to make a retry / crash-resume a no-op
+    /// instead of a duplicate. `None` outside durable workflow runs.
+    pub idempotency_key: Option<String>,
 }
 
 pub fn check_permission(permissions: &[String], required: &str) -> Result<(), String> {
@@ -250,6 +254,7 @@ mod tests {
             pool, app_id: "app".into(), user_id: Uuid::nil(), invoker_user_id: None,
             permissions: perms, task_scope: None, args: json!({}),
             agent_dispatch: None, integration_caller: None, action_caller: None, stream_tx: None,
+            idempotency_key: None,
         }
     }
 

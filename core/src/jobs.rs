@@ -5,6 +5,7 @@ use tracing::info;
 use crate::RuntimeError;
 
 const QUEUE: &str = "jobs";
+const DLQ: &str = "jobs_dlq";
 const VT_SECS: i32 = 120;
 
 fn err(e: impl std::fmt::Display) -> RuntimeError {
@@ -14,6 +15,8 @@ fn err(e: impl std::fmt::Display) -> RuntimeError {
 pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
     sqlx::query("CREATE EXTENSION IF NOT EXISTS pgmq").execute(pool).await.map_err(err)?;
     sqlx::query(&format!("SELECT pgmq.create('{QUEUE}')"))
+        .execute(pool).await.map_err(err)?;
+    sqlx::query(&format!("SELECT pgmq.create('{DLQ}')"))
         .execute(pool).await.map_err(err)?;
     info!("pgmq jobs queue ready");
     Ok(())
@@ -47,15 +50,17 @@ pub async fn enqueue(pool: &PgPool, app_id: &str, payload: JsonValue, user_id: O
     Ok(msg_id)
 }
 
-pub async fn read_next(pool: &PgPool) -> Result<Option<(i64, JobMessage)>, RuntimeError> {
-    let row: Option<(i64, JsonValue)> = sqlx::query_as(
-        &format!("SELECT msg_id, message FROM pgmq.read('{QUEUE}', {VT_SECS}, 1)")
+/// Returns `(msg_id, read_ct, message)`. `read_ct` counts deliveries: > 1 means
+/// the previous lease expired (worker crash or overrun) and this is a redelivery.
+pub async fn read_next(pool: &PgPool) -> Result<Option<(i64, i32, JobMessage)>, RuntimeError> {
+    let row: Option<(i64, i32, JsonValue)> = sqlx::query_as(
+        &format!("SELECT msg_id, read_ct, message FROM pgmq.read('{QUEUE}', {VT_SECS}, 1)")
     ).fetch_optional(pool).await.map_err(err)?;
 
     match row {
-        Some((msg_id, message)) => {
+        Some((msg_id, read_ct, message)) => {
             let job_msg: JobMessage = serde_json::from_value(message).map_err(err)?;
-            Ok(Some((msg_id, job_msg)))
+            Ok(Some((msg_id, read_ct, job_msg)))
         }
         None => Ok(None),
     }
@@ -69,6 +74,29 @@ pub async fn complete(pool: &PgPool, msg_id: i64) -> Result<(), RuntimeError> {
 
 pub async fn fail(pool: &PgPool, msg_id: i64) -> Result<(), RuntimeError> {
     sqlx::query(&format!("SELECT pgmq.delete('{QUEUE}', $1)"))
+        .bind(msg_id).execute(pool).await.map_err(err)?;
+    Ok(())
+}
+
+/// Extend the visibility timeout of an in-flight message (lease heartbeat): keeps
+/// a long-running job from being redelivered while a worker is still on it.
+pub async fn extend_lease(pool: &PgPool, msg_id: i64, vt_secs: i32) -> Result<(), RuntimeError> {
+    sqlx::query(&format!("SELECT pgmq.set_vt('{QUEUE}', $1, {vt_secs})"))
+        .bind(msg_id).execute(pool).await.map_err(err)?;
+    Ok(())
+}
+
+/// Move a poison message off the main queue: copy it to the dead-letter queue
+/// (with the failure reason) and archive the original. Terminal — never retried.
+pub async fn dead_letter(pool: &PgPool, msg_id: i64, message: &JsonValue, reason: &str) -> Result<(), RuntimeError> {
+    let mut entry = message.clone();
+    if let Some(obj) = entry.as_object_mut() {
+        obj.insert("_dlq_reason".into(), JsonValue::String(reason.to_string()));
+        obj.insert("_dlq_msg_id".into(), JsonValue::Number(msg_id.into()));
+    }
+    sqlx::query(&format!("SELECT pgmq.send('{DLQ}', $1)"))
+        .bind(&entry).execute(pool).await.map_err(err)?;
+    sqlx::query(&format!("SELECT pgmq.archive('{QUEUE}', $1)"))
         .bind(msg_id).execute(pool).await.map_err(err)?;
     Ok(())
 }

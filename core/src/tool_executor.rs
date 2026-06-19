@@ -30,6 +30,7 @@ pub(crate) async fn execute(
     let ctx = ToolContext {
         pool, app_id, user_id, invoker_user_id, permissions, task_scope, args,
         agent_dispatch, integration_caller, action_caller, stream_tx: stream_tx.clone(),
+        idempotency_key: None,
     };
 
     let (result, error, duration_ms) = match tool {

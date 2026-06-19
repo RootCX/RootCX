@@ -144,7 +144,8 @@ impl Runtime {
         wm.init_self_ref();
 
         seed::seed_assistant(&pool, &self.data_dir, &self.bun_bin, &wm, &secret_manager).await?;
-        let scheduler = scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm), Arc::clone(&self.tool_registry));
+        let workflow_events = extensions::workflows::events::WorkflowEvents::default();
+        let scheduler = scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm), Arc::clone(&self.tool_registry), workflow_events.clone());
 
         wm.start_deployed_apps(&pool, &secret_manager).await;
 
@@ -162,6 +163,7 @@ impl Runtime {
             mcp_manager: self.mcp_manager,
             pending_approvals: self.pending_approvals,
             scheduler,
+            workflow_events,
             upload_nonces,
             runtime_url,
             resources_dir: self.resources_dir,
@@ -182,6 +184,7 @@ pub struct ReadyRuntime {
     mcp_manager: Arc<McpManager>,
     pending_approvals: PendingApprovals,
     scheduler: SchedulerHandle,
+    workflow_events: extensions::workflows::events::WorkflowEvents,
     upload_nonces: Arc<std::sync::Mutex<extensions::storage::nonce::NonceStore>>,
     runtime_url: String,
     resources_dir: PathBuf,
@@ -216,6 +219,9 @@ impl ReadyRuntime {
 
     pub fn auth_config(&self) -> &Arc<auth::AuthConfig> { &self.auth_config }
     pub fn pool(&self) -> &PgPool { &self.pool }
+    pub fn workflow_events(&self) -> &extensions::workflows::events::WorkflowEvents { &self.workflow_events }
+    /// Nudge the scheduler to poll now instead of waiting for the next tick.
+    pub fn wake_scheduler(&self) { self.scheduler.wake.notify_one(); }
     pub fn extensions(&self) -> &[Box<dyn RuntimeExtension>] { &self.extensions }
     pub fn secret_manager(&self) -> &Arc<SecretManager> { &self.secret_manager }
     pub fn worker_manager(&self) -> &Arc<WorkerManager> { &self.worker_manager }

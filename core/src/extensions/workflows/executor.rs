@@ -6,137 +6,61 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::tools::{BatchMode, DispatchError, ToolContext, ToolRegistry};
-use rootcx_types::{
-    ControlKind, Item, WorkflowGraph, WorkflowNodeKind, WorkflowNodeRunStatus,
-    WorkflowExecutionStatus,
-};
+use rootcx_types::{ControlKind, Item, WorkflowGraph, WorkflowNodeKind, WorkflowNodeRunStatus};
 
 use super::expr;
 
-pub struct NodeRunResult {
-    pub node_id: String,
+/// Outcome of one node, ready for the runner to persist and route. Pure: no DB
+/// writes, no retry, no should-execute decision — the durable runner owns those.
+/// Output ports are derived from `output_json` by the runner (single source).
+pub(crate) struct NodeExecution {
     pub status: WorkflowNodeRunStatus,
-    pub output: JsonValue,
+    /// Items-per-port format: `[[{json:..}], ..]`.
+    pub output_json: JsonValue,
+    pub input_json: JsonValue,
     pub error: Option<String>,
+    /// A Stop node: record it, then halt the whole execution (no further nodes).
+    pub halt: bool,
 }
 
-/// DB-first executor. Each node's output is persisted immediately after execution.
-/// A local cache (`run_outputs`) avoids re-querying PG for expression resolution
-/// and input collection — the DB remains the source of truth for durability/debug.
-pub async fn execute_dag(
+/// Execute a single node against the current `run_outputs` cache. Input items are
+/// collected per port from upstream outputs; expression params are resolved here.
+pub(crate) async fn execute_node(
     registry: &Arc<ToolRegistry>,
     pool: &PgPool,
     app_id: &str,
     user_id: Uuid,
     perms: &[String],
+    node: &rootcx_types::WorkflowNode,
     graph: &WorkflowGraph,
+    run_outputs: &HashMap<String, JsonValue>,
     exec_id: Uuid,
-) -> Vec<NodeRunResult> {
-    let node_map: HashMap<&str, &rootcx_types::WorkflowNode> =
-        graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
-    let order = topo_sort(graph);
-    let mut results = Vec::new();
-    let mut active_ports: HashMap<String, Vec<u8>> = HashMap::new();
-    let mut run_outputs: HashMap<String, JsonValue> = HashMap::new();
+) -> NodeExecution {
+    let input_by_port = collect_inputs_by_port(&node.id, graph, run_outputs);
+    let input_items: Vec<Item> = input_by_port.iter().flatten().cloned().collect();
+    let input_json = items_to_json(&input_items);
 
-    for node_id in &order {
-        let Some(node) = node_map.get(node_id.as_str()) else { continue };
-
-        if !should_execute(node_id, graph, &active_ports) {
-            continue;
+    let (status, output_items, error) = match &node.kind {
+        WorkflowNodeKind::Trigger { .. } => {
+            (WorkflowNodeRunStatus::Succeeded, vec![vec![Item { json: json!({}) }]], None)
         }
-
-        let input_by_port = collect_inputs_by_port(node_id, graph, &run_outputs);
-        let input_items: Vec<Item> = input_by_port.iter().flatten().cloned().collect();
-        let input_json = items_to_json(&input_items);
-        let resolved_params = expr::resolve(&node.params, &input_json, &run_outputs);
-
-        let (status, output_items, error) = match &node.kind {
-            WorkflowNodeKind::Trigger { .. } => {
-                (WorkflowNodeRunStatus::Succeeded, vec![vec![Item { json: json!({}) }]], None)
-            }
-            WorkflowNodeKind::Tool { tool_name } => {
-                execute_tool_node(registry, pool, app_id, user_id, perms, tool_name, &resolved_params, &input_items).await
-            }
-            WorkflowNodeKind::Control { control } => {
-                execute_control_node(control, &node.params, &input_items, &input_by_port, &run_outputs)
-            }
-            _ => (WorkflowNodeRunStatus::Skipped, vec![vec![]], Some("not implemented".into())),
-        };
-
-        let ports_with_items: Vec<u8> = output_items.iter().enumerate()
-            .filter(|(_, port)| !port.is_empty())
-            .map(|(i, _)| i as u8)
-            .collect();
-
-        let output_json = items_output_to_json(&output_items);
-
-        // Persist to DB (source of truth for debug/history).
-        sqlx::query(
-            "INSERT INTO rootcx_system.workflow_node_runs (execution_id, node_id, status, input, output, error, started_at, finished_at)
-             VALUES ($1, $2, $3, $4, $5, $6, now(), now())",
-        ).bind(exec_id).bind(node_id).bind(status.as_str())
-        .bind(&input_json).bind(&output_json).bind(&error)
-        .execute(pool).await.ok();
-
-        if status == WorkflowNodeRunStatus::Succeeded {
-            active_ports.insert(node_id.clone(), ports_with_items);
-            run_outputs.insert(node_id.clone(), output_json.clone());
+        WorkflowNodeKind::Tool { tool_name } => {
+            let idem_base = format!("{exec_id}:{}", node.id);
+            execute_tool_node(registry, pool, app_id, user_id, perms, tool_name, &node.params, &input_items, &idem_base, run_outputs).await
         }
-        results.push(NodeRunResult { node_id: node_id.clone(), status, output: output_json, error });
+        WorkflowNodeKind::Control { control } => {
+            execute_control_node(control, &node.params, &input_items, &input_by_port, run_outputs)
+        }
+        _ => (WorkflowNodeRunStatus::Skipped, vec![vec![]], Some("not implemented".into())),
+    };
 
-        if status == WorkflowNodeRunStatus::Failed { break; }
+    NodeExecution {
+        status,
+        output_json: items_output_to_json(&output_items),
+        input_json,
+        error,
+        halt: matches!(&node.kind, WorkflowNodeKind::Control { control: ControlKind::Stop }),
     }
-
-    results
-}
-
-/// Full lifecycle: create execution, run DAG, finalize status.
-pub async fn run_workflow(
-    registry: &Arc<ToolRegistry>,
-    pool: &PgPool,
-    app_id: &str,
-    workflow_id: Uuid,
-    user_id: Uuid,
-    perms: &[String],
-    trigger_data: Option<JsonValue>,
-) -> Result<(Uuid, Vec<NodeRunResult>), String> {
-    let graph_json: JsonValue = sqlx::query_scalar(
-        "SELECT graph FROM rootcx_system.workflows WHERE id = $1 AND app_id = $2 AND enabled = true",
-    ).bind(workflow_id).bind(app_id)
-    .fetch_optional(pool).await.map_err(|e| e.to_string())?
-    .ok_or_else(|| "workflow not found or not enabled".to_string())?;
-
-    let mut graph: WorkflowGraph = serde_json::from_value(graph_json)
-        .map_err(|e| format!("invalid graph: {e}"))?;
-
-    // Inject trigger data into the trigger node's params if provided.
-    if let Some(td) = &trigger_data {
-        if let Some(trigger_node) = graph.nodes.iter_mut().find(|n| matches!(n.kind, WorkflowNodeKind::Trigger { .. })) {
-            trigger_node.params = td.clone();
-        }
-    }
-
-    let exec_id: Uuid = sqlx::query_scalar(
-        "INSERT INTO rootcx_system.workflow_executions (id, workflow_id, app_id, status, run_as_user_id, trigger_data, started_at)
-         VALUES (gen_random_uuid(), $1, $2, 'running', $3, $4, now()) RETURNING id",
-    ).bind(workflow_id).bind(app_id).bind(user_id).bind(&trigger_data)
-    .fetch_one(pool).await.map_err(|e| e.to_string())?;
-
-    let results = execute_dag(registry, pool, app_id, user_id, perms, &graph, exec_id).await;
-
-    let all_ok = results.iter().all(|r| r.status == WorkflowNodeRunStatus::Succeeded);
-    let final_status = if all_ok { WorkflowExecutionStatus::Succeeded } else { WorkflowExecutionStatus::Failed };
-    let error_msg = results.iter().find_map(|r| {
-        if r.status == WorkflowNodeRunStatus::Failed { r.error.clone() } else { None }
-    });
-
-    let _ = sqlx::query(
-        "UPDATE rootcx_system.workflow_executions SET status = $2, error = $3, finished_at = now() WHERE id = $1",
-    ).bind(exec_id).bind(final_status.as_str()).bind(&error_msg)
-    .execute(pool).await;
-
-    Ok((exec_id, results))
 }
 
 // ── Input collection ─────────────────────────────────────────────────
@@ -156,28 +80,8 @@ fn collect_inputs_by_port(node_id: &str, graph: &WorkflowGraph, run_outputs: &Ha
     ports
 }
 
-/// Extract items from a specific output port of the stored output JSON.
-/// Output format: `[[{json: ...}, ...], [{json: ...}, ...]]` (items per port)
-/// Falls back to legacy single-value format for backwards compat.
 fn extract_port_items(output: &JsonValue, port: u8) -> Vec<Item> {
-    // New format: array of arrays (per-port items)
-    if let Some(ports) = output.as_array() {
-        if let Some(port_data) = ports.get(port as usize) {
-            if let Some(items_arr) = port_data.as_array() {
-                return items_arr.iter().map(|v| {
-                    if let Some(json_field) = v.get("json") {
-                        Item { json: json_field.clone() }
-                    } else {
-                        Item { json: v.clone() }
-                    }
-                }).collect();
-            }
-        }
-        return vec![];
-    }
-    // Legacy format: a single JSON value (old executor output)
-    if output.is_null() { return vec![]; }
-    vec![Item { json: output.clone() }]
+    super::items::decode_port(output, port)
 }
 
 // ── Conversion helpers ──────────────────────────────────────────────
@@ -189,14 +93,12 @@ fn items_to_json(items: &[Item]) -> JsonValue {
 }
 
 fn items_output_to_json(output: &[Vec<Item>]) -> JsonValue {
-    json!(output.iter().map(|port|
-        port.iter().map(|item| json!({ "json": item.json })).collect::<Vec<_>>()
-    ).collect::<Vec<_>>())
+    super::items::encode(output)
 }
 
 // ── Routing ─────────────────────────────────────────────────────────
 
-fn should_execute(node_id: &str, graph: &WorkflowGraph, active_ports: &HashMap<String, Vec<u8>>) -> bool {
+pub(crate) fn should_execute(node_id: &str, graph: &WorkflowGraph, active_ports: &HashMap<String, Vec<u8>>) -> bool {
     let node = graph.nodes.iter().find(|n| n.id == node_id);
     let is_trigger = node.map(|n| matches!(n.kind, WorkflowNodeKind::Trigger { .. })).unwrap_or(false);
 
@@ -225,9 +127,11 @@ fn execute_control_node(
         ControlKind::Set => execute_set(raw_params, input_items, outputs),
         ControlKind::Merge => execute_merge(raw_params, input_by_port, outputs),
         ControlKind::Stop => {
+            // Graceful halt: the node succeeds and surfaces its reason as output;
+            // the runner stops the whole execution here (see `NodeExecution.halt`).
             let resolved = expr::resolve(raw_params, &json!({}), outputs);
             let msg = resolved.get("message").and_then(|v| v.as_str()).unwrap_or("workflow stopped");
-            (WorkflowNodeRunStatus::Failed, vec![vec![]], Some(msg.into()))
+            (WorkflowNodeRunStatus::Succeeded, vec![vec![Item { json: json!({ "stopped": true, "message": msg }) }]], None)
         }
         ControlKind::Loop | ControlKind::Wait => {
             (WorkflowNodeRunStatus::Skipped, vec![vec![]], Some("not implemented".into()))
@@ -355,8 +259,10 @@ async fn execute_tool_node(
     user_id: Uuid,
     perms: &[String],
     tool_name: &str,
-    params: &JsonValue,
+    raw_params: &JsonValue,
     input_items: &[Item],
+    idem_base: &str,
+    outputs: &HashMap<String, JsonValue>,
 ) -> (WorkflowNodeRunStatus, Vec<Vec<Item>>, Option<String>) {
     let tool = match registry.get(tool_name) {
         Some(t) => t,
@@ -364,11 +270,11 @@ async fn execute_tool_node(
     };
 
     // Node param overrides the tool's declared default (e.g. force a read per-item).
-    let mode = params.get("batchMode").and_then(|v| v.as_str())
+    let mode = raw_params.get("batchMode").and_then(|v| v.as_str())
         .and_then(BatchMode::parse)
         .unwrap_or_else(|| tool.batch_mode());
-    let mut args_base = params.clone();
-    if let Some(o) = args_base.as_object_mut() { o.remove("batchMode"); }
+    let mut params_base = raw_params.clone();
+    if let Some(o) = params_base.as_object_mut() { o.remove("batchMode"); }
 
     // Once: a single dispatch with node params, ignoring item fan-out.
     // PerItem: map over items (one dispatch each), the input filling param gaps.
@@ -379,11 +285,10 @@ async fn execute_tool_node(
     };
 
     let mut output_items = Vec::new();
-    for item in &items_to_process {
-        let args = match mode {
-            BatchMode::Once => args_base.clone(),
-            BatchMode::PerItem => merge_args(&args_base, &item.json),
-        };
+    for (i, item) in items_to_process.iter().enumerate() {
+        // Resolve per-item: $json = this item so {{ $json.field }} works in tool params.
+        let resolved = expr::resolve(&params_base, &item.json, outputs);
+        let args = merge_args(&resolved, &item.json);
         let ctx = ToolContext {
             pool: pool.clone(),
             app_id: app_id.into(),
@@ -396,6 +301,8 @@ async fn execute_tool_node(
             integration_caller: None,
             action_caller: None,
             stream_tx: None,
+            // Stable across attempts and resume: same (exec, node, item) → same key.
+            idempotency_key: Some(format!("{idem_base}:{i}")),
         };
 
         let outcome = crate::tools::dispatch(tool_name, tool.clone(), &ctx).await;
@@ -652,24 +559,6 @@ mod tests {
         assert_eq!(ports.len(), 2);
         assert_eq!(ports[0][0].json, json!({"x": 1}));
         assert_eq!(ports[1][0].json, json!({"y": 2}));
-    }
-
-    #[test]
-    fn extract_port_items_new_format() {
-        let output = json!([[{"json": {"id": 1}}, {"json": {"id": 2}}], [{"json": {"id": 3}}]]);
-        let port0 = extract_port_items(&output, 0);
-        assert_eq!(port0.len(), 2);
-        assert_eq!(port0[0].json, json!({"id": 1}));
-        let port1 = extract_port_items(&output, 1);
-        assert_eq!(port1.len(), 1);
-    }
-
-    #[test]
-    fn extract_port_items_legacy_format() {
-        let output = json!({"name": "Acme", "count": 5});
-        let items = extract_port_items(&output, 0);
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].json, json!({"name": "Acme", "count": 5}));
     }
 
     #[test]
