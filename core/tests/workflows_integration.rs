@@ -544,6 +544,54 @@ async fn workflow_hook_trigger_fires_on_insert() {
     assert_eq!(execs[0]["status"], "succeeded");
 }
 
+// Record-change hooks are auto-managed: enable creates the hook from the trigger
+// node's params, disable removes it, and the hook actually fires on record insert.
+#[tokio::test]
+async fn workflow_record_change_hook_auto_lifecycle() {
+    let rt = TestRuntime::boot().await;
+    rt.install("wfhookrc", "contacts").await;
+
+    let graph = json!({
+        "nodes": [
+            {"id": "t", "kind": {"type": "trigger", "trigger": "recordChange"},
+             "params": {"app": "wfhookrc", "entity": "contacts", "operation": "INSERT"}, "position": [0,0]},
+            {"id": "s", "kind": {"type": "control", "control": "set"},
+             "params": {"fields": {"saw": "{{ $json.record ? $json.record.first_name : 'none' }}"}}, "position": [1,0]}
+        ],
+        "edges": [{"from": "t", "to": "s", "fromOutput": 0}]
+    });
+    let (_, body) = rt.post_json("/api/v1/workflows", &json!({"name": "rc-auto", "graph": graph})).await;
+    let wf_id = body["id"].as_str().unwrap();
+
+    // Not yet enabled → no hook exists.
+    let hooks: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rootcx_system.entity_hooks WHERE action_config->>'workflow_id' = $1",
+    ).bind(wf_id).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(hooks, 0, "no hook before enable");
+
+    // Enable → hook auto-created.
+    rt.put_json(&format!("/api/v1/workflows/{wf_id}"), &json!({"enabled": true})).await;
+    let hooks: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rootcx_system.entity_hooks WHERE action_config->>'workflow_id' = $1",
+    ).bind(wf_id).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(hooks, 1, "hook created on enable");
+
+    // Insert a record → workflow fires.
+    rt.create("wfhookrc", "contacts", &json!({"first_name": "Auto", "last_name": "Hook"})).await;
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM rootcx_system.workflow_executions WHERE workflow_id = $1::uuid ORDER BY created_at DESC LIMIT 1",
+    ).bind(wf_id).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(status, "succeeded", "record change fired the workflow");
+
+    // Disable → hook removed.
+    rt.put_json(&format!("/api/v1/workflows/{wf_id}"), &json!({"enabled": false})).await;
+    let hooks: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rootcx_system.entity_hooks WHERE action_config->>'workflow_id' = $1",
+    ).bind(wf_id).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(hooks, 0, "hook removed on disable");
+}
+
 // ── Webhook trigger ─────────────────────────────────────────────────
 
 // The webhook endpoint is public (no auth): a POST triggers the workflow run-as-owner

@@ -181,6 +181,13 @@ pub async fn update_workflow(
     .execute(&pool).await?;
 
     if r.rows_affected() == 0 { return Err(ApiError::NotFound("workflow not found".into())); }
+
+    // Auto-register/unregister record-change hooks when enabled state changes
+    // (not on every graph save — hooks only take effect when the workflow is enabled).
+    if body.enabled.is_some() {
+        sync_record_change_hooks(&pool, workflow_id, identity.user_id).await;
+    }
+
     Ok(Json(json!({ "updated": true })))
 }
 
@@ -201,12 +208,57 @@ pub async fn delete_workflow(
         .bind(workflow_id).execute(&pool).await?;
     if r.rows_affected() == 0 { return Err(ApiError::NotFound("workflow not found".into())); }
 
+    // Remove hooks owned by this workflow before deleting the backing app.
+    sqlx::query(
+        "DELETE FROM rootcx_system.entity_hooks WHERE action_type = 'workflow' AND action_config->>'workflow_id' = $1",
+    ).bind(workflow_id.to_string()).execute(&pool).await.ok();
+
     // Clean up backing app
     if let Some(aid) = app_id {
         sqlx::query("DELETE FROM rootcx_system.apps WHERE id = $1").bind(&aid).execute(&pool).await.ok();
     }
 
     Ok(Json(json!({ "deleted": true })))
+}
+
+/// Auto-register/unregister entity hooks for record-change triggers. Called on
+/// enable/disable and graph save. Idempotent: drops stale hooks, creates missing.
+async fn sync_record_change_hooks(pool: &sqlx::PgPool, workflow_id: Uuid, user_id: Uuid) {
+    let row: Option<(bool, JsonValue)> = sqlx::query_as(
+        "SELECT enabled, graph FROM rootcx_system.workflows WHERE id = $1",
+    ).bind(workflow_id).fetch_optional(pool).await.ok().flatten();
+
+    let Some((enabled, graph_json)) = row else { return };
+
+    // Remove all hooks for this workflow first (idempotent reconciliation).
+    sqlx::query(
+        "DELETE FROM rootcx_system.entity_hooks WHERE action_type = 'workflow' AND action_config->>'workflow_id' = $1",
+    ).bind(workflow_id.to_string()).execute(pool).await.ok();
+
+    if !enabled { return; }
+
+    // Find the recordChange trigger node and its configured params.
+    let graph: rootcx_types::WorkflowGraph = match serde_json::from_value(graph_json) {
+        Ok(g) => g,
+        Err(_) => return,
+    };
+    let trigger = graph.nodes.iter().find(|n| matches!(
+        &n.kind, rootcx_types::WorkflowNodeKind::Trigger { trigger: rootcx_types::TriggerKind::RecordChange }
+    ));
+    let Some(t) = trigger else { return };
+
+    let app = t.params.get("app").and_then(|v| v.as_str());
+    let entity = t.params.get("entity").and_then(|v| v.as_str());
+    let operation = t.params.get("operation").and_then(|v| v.as_str());
+    let (Some(app), Some(entity), Some(operation)) = (app, entity, operation) else { return };
+
+    sqlx::query(
+        "INSERT INTO rootcx_system.entity_hooks (app_id, entity, operation, action_type, action_config, active, created_by)
+         VALUES ($1, $2, $3, 'workflow', $4, true, $5)",
+    ).bind(app).bind(entity).bind(operation)
+    .bind(json!({ "workflow_id": workflow_id }))
+    .bind(user_id)
+    .execute(pool).await.ok();
 }
 
 // ── Node palette ─────────────────────────────────────────────────────
