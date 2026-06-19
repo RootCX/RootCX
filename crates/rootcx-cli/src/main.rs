@@ -13,6 +13,7 @@ mod cmd_auth;
 mod cmd_completions;
 mod cmd_data;
 mod cmd_status;
+mod cmd_workflows;
 mod config;
 mod deploy;
 mod docker;
@@ -55,6 +56,7 @@ APP MANAGEMENT
   apps         Manage installed apps
   data         Read and write app data
   agents       Manage agents
+  workflows    Manage workflows
 
 AUTHENTICATION
   auth         Manage authentication (login, logout, whoami)
@@ -116,6 +118,9 @@ enum Cmd {
     /// Read and write app data
     #[command(subcommand, override_help = DATA_HELP, disable_help_subcommand = true)]
     Data(DataCmd),
+    /// Manage workflows
+    #[command(subcommand, override_help = WORKFLOWS_HELP, disable_help_subcommand = true)]
+    Workflows(WorkflowsCmd),
     /// Manage authentication
     #[command(subcommand, override_help = AUTH_HELP, disable_help_subcommand = true)]
     Auth(AuthCmd),
@@ -398,6 +403,83 @@ enum DataCmd {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum WorkflowsCmd {
+    /// List all workflows
+    #[command(alias = "ls")]
+    List {
+        /// Emit machine-readable JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show workflow details
+    Describe {
+        /// Workflow ID
+        id: String,
+    },
+    /// Trigger a manual run and stream progress
+    Run {
+        /// Workflow ID
+        id: String,
+    },
+    /// Enable a workflow
+    Enable {
+        /// Workflow ID
+        id: String,
+    },
+    /// Disable a workflow
+    Disable {
+        /// Workflow ID
+        id: String,
+    },
+    /// Delete a workflow
+    Rm {
+        /// Workflow ID
+        id: String,
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    /// Export workflow graph as JSON
+    Export {
+        /// Workflow ID
+        id: String,
+    },
+    /// Import a workflow from a JSON file
+    Import {
+        /// Path to JSON graph file
+        file: String,
+    },
+}
+
+const WORKFLOWS_HELP: &str = "\
+Manage workflows on the connected Core.
+
+USAGE
+  rootcx workflows <command> [flags]
+
+COMMANDS
+  list      List all workflows (alias: ls)
+  describe  Show workflow details
+  run       Trigger a manual run and stream progress
+  enable    Enable a workflow
+  disable   Disable a workflow
+  rm        Delete a workflow (requires confirmation)
+  export    Export workflow graph as JSON
+  import    Import a workflow from a JSON file
+
+EXAMPLES
+  $ rootcx workflows list
+  $ rootcx workflows list --json
+  $ rootcx workflows describe 550e8400-...
+  $ rootcx workflows run 550e8400-...
+  $ rootcx workflows enable 550e8400-...
+  $ rootcx workflows disable 550e8400-...
+  $ rootcx workflows rm 550e8400-...
+  $ rootcx workflows export 550e8400-... > my-flow.json
+  $ rootcx workflows import my-flow.json
+";
+
 const DATA_HELP: &str = "\
 Read and write app data.
 
@@ -449,6 +531,16 @@ async fn main() -> Result<()> {
             }
             AgentsCmd::List { json } => cmd_agents::list(json).await,
             AgentsCmd::Sessions { app_id, json } => cmd_agents::sessions(&app_id, json).await,
+        },
+        Cmd::Workflows(sub) => match sub {
+            WorkflowsCmd::List { json } => cmd_workflows::list(json).await,
+            WorkflowsCmd::Describe { id } => cmd_workflows::describe(&id).await,
+            WorkflowsCmd::Run { id } => cmd_workflows::run(&id).await,
+            WorkflowsCmd::Enable { id } => cmd_workflows::enable(&id).await,
+            WorkflowsCmd::Disable { id } => cmd_workflows::disable(&id).await,
+            WorkflowsCmd::Rm { id, yes } => cmd_workflows::rm(&id, yes).await,
+            WorkflowsCmd::Export { id } => cmd_workflows::export(&id).await,
+            WorkflowsCmd::Import { file } => cmd_workflows::import(&file).await,
         },
         Cmd::Data(sub) => match sub {
             DataCmd::List { app_id, entity, limit, offset, sort, order } => {
@@ -588,6 +680,17 @@ mod cli_parse_tests {
             (&["data", "delete", "a", "contacts", "id1"], |c| matches!(c, Cmd::Data(DataCmd::Delete { id, yes: false, .. }) if id == "id1")),
             (&["data", "rm", "a", "contacts", "id1", "-y"], |c| matches!(c, Cmd::Data(DataCmd::Delete { yes: true, .. }))),
             (&["data", "query", "a", "contacts", "{}"], |c| matches!(c, Cmd::Data(DataCmd::Query { app_id, entity, body }) if app_id == "a" && entity == "contacts" && body == "{}")),
+            (&["workflows", "list"], |c| matches!(c, Cmd::Workflows(WorkflowsCmd::List { json: false }))),
+            (&["workflows", "ls"], |c| matches!(c, Cmd::Workflows(WorkflowsCmd::List { .. }))),
+            (&["workflows", "list", "--json"], |c| matches!(c, Cmd::Workflows(WorkflowsCmd::List { json: true }))),
+            (&["workflows", "describe", "abc"], |c| matches!(c, Cmd::Workflows(WorkflowsCmd::Describe { id }) if id == "abc")),
+            (&["workflows", "run", "abc"], |c| matches!(c, Cmd::Workflows(WorkflowsCmd::Run { id }) if id == "abc")),
+            (&["workflows", "enable", "abc"], |c| matches!(c, Cmd::Workflows(WorkflowsCmd::Enable { id }) if id == "abc")),
+            (&["workflows", "disable", "abc"], |c| matches!(c, Cmd::Workflows(WorkflowsCmd::Disable { id }) if id == "abc")),
+            (&["workflows", "rm", "abc"], |c| matches!(c, Cmd::Workflows(WorkflowsCmd::Rm { id, yes: false }) if id == "abc")),
+            (&["workflows", "rm", "abc", "-y"], |c| matches!(c, Cmd::Workflows(WorkflowsCmd::Rm { yes: true, .. }))),
+            (&["workflows", "export", "abc"], |c| matches!(c, Cmd::Workflows(WorkflowsCmd::Export { id }) if id == "abc")),
+            (&["workflows", "import", "f.json"], |c| matches!(c, Cmd::Workflows(WorkflowsCmd::Import { file }) if file == "f.json")),
         ];
         for (args, check) in cases {
             let parsed = parse(args).unwrap_or_else(|e| panic!("parse {args:?} failed: {e}"));
@@ -613,6 +716,11 @@ mod cli_parse_tests {
         assert!(parse(&["data", "get", "a", "e"]).is_err(), "`data get` requires id");
         assert!(parse(&["data", "create", "a", "e"]).is_err(), "`data create` requires --body");
         assert!(parse(&["data", "delete", "a", "e"]).is_err(), "`data delete` requires id");
+        assert!(parse(&["workflows", "describe"]).is_err(), "`workflows describe` requires id");
+        assert!(parse(&["workflows", "run"]).is_err(), "`workflows run` requires id");
+        assert!(parse(&["workflows", "rm"]).is_err(), "`workflows rm` requires id");
+        assert!(parse(&["workflows", "export"]).is_err(), "`workflows export` requires id");
+        assert!(parse(&["workflows", "import"]).is_err(), "`workflows import` requires file");
     }
 
     #[test]
