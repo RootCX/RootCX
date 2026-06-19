@@ -42,7 +42,8 @@ pub(crate) async fn execute_node(
 
     let (status, output_items, error) = match &node.kind {
         WorkflowNodeKind::Trigger { .. } => {
-            (WorkflowNodeRunStatus::Succeeded, vec![vec![Item { json: json!({}) }]], None)
+            // Emit params as the seed item (= trigger_data injected by create_execution).
+            (WorkflowNodeRunStatus::Succeeded, vec![vec![Item { json: node.params.clone() }]], None)
         }
         WorkflowNodeKind::Tool { tool_name } => {
             let idem_base = format!("{exec_id}:{}", node.id);

@@ -113,6 +113,8 @@ impl RuntimeExtension for WorkflowExtension {
                 .route("/api/v1/workflows/{workflow_id}/run", post(routes::run_workflow))
                 .route("/api/v1/workflows/{workflow_id}/executions", get(routes::list_executions))
                 .route("/api/v1/workflows/{workflow_id}/executions/{execution_id}/stream", get(routes::stream_execution))
+                .route("/api/v1/workflows/{workflow_id}/live", get(routes::stream_workflow_live))
+                .route("/api/v1/workflows/{workflow_id}/webhook", post(routes::webhook_trigger))
                 .route("/api/v1/workflows/nodes", get(routes::list_nodes))
         )
     }

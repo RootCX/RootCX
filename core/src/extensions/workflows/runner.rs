@@ -135,8 +135,8 @@ pub async fn run(
     hb: Heartbeat,
     events: &WorkflowEvents,
 ) -> Result<WorkflowExecutionStatus, String> {
-    let (app_id, graph_json): (String, Option<JsonValue>) = sqlx::query_as(
-        "SELECT app_id, graph FROM rootcx_system.workflow_executions WHERE id = $1",
+    let (app_id, workflow_id, graph_json): (String, Uuid, Option<JsonValue>) = sqlx::query_as(
+        "SELECT app_id, workflow_id, graph FROM rootcx_system.workflow_executions WHERE id = $1",
     ).bind(exec_id).fetch_optional(pool).await.map_err(|e| e.to_string())?
     .ok_or_else(|| "execution not found".to_string())?;
 
@@ -198,7 +198,7 @@ pub async fn run(
             };
 
             persist_node_run(pool, exec_id, node_id, rec_status, &ex.input_json, &output_json, ex.error.as_deref(), attempt).await;
-            events.publish(exec_id, WorkflowEvent::Node {
+            events.publish(exec_id, workflow_id, WorkflowEvent::Node {
                 node_id: node_id.clone(), status: rec_status.as_str().into(),
                 output: output_json.clone(), error: ex.error.clone(),
             });
@@ -226,7 +226,7 @@ pub async fn run(
     ).bind(exec_id).bind(final_status.as_str()).bind(&first_error)
     .execute(pool).await.map_err(|e| e.to_string())?;
 
-    events.publish(exec_id, WorkflowEvent::Done { status: final_status.as_str().into(), error: first_error });
+    events.publish(exec_id, workflow_id, WorkflowEvent::Done { status: final_status.as_str().into(), error: first_error });
     events.close(exec_id);
 
     Ok(final_status)

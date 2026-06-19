@@ -11,7 +11,7 @@ use crate::governance::authority::resolve_permissions;
 use crate::routes::{self, SharedRuntime};
 use rootcx_types::WorkflowGraph;
 
-use super::events::WorkflowEvent;
+use super::events::{LiveEvent, WorkflowEvent};
 
 fn wf_app_id(workflow_id: Uuid) -> String {
     format!("wf-{workflow_id}")
@@ -346,6 +346,42 @@ fn done_sse(status: &str, error: Option<String>) -> axum::response::sse::Event {
     )
 }
 
+/// SSE stream of ALL runs for a workflow (the editor subscribes on page load).
+/// Emits per-node and terminal events for every execution as it happens — the
+/// nodes light up in real time regardless of who/what triggered the run.
+pub async fn stream_workflow_live(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path(workflow_id): Path<Uuid>,
+) -> Result<axum::response::Sse<impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>>, ApiError> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+
+    let pool = routes::pool(&rt);
+    authorize_workflow(&pool, identity.user_id, workflow_id).await?;
+
+    let rx = rt.workflow_events().subscribe_workflow(workflow_id);
+
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    let data = serde_json::to_string(&ev).unwrap_or_default();
+                    let event_type = match &ev.event {
+                        WorkflowEvent::Node { .. } => "node",
+                        WorkflowEvent::Done { .. } => "done",
+                    };
+                    let sse = Event::default().event(event_type).data(data);
+                    return Some((Ok(sse), rx));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => return None,
+            }
+        }
+    });
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
 // ── Executions list ──────────────────────────────────────────────────
 
 pub async fn list_executions(
@@ -364,4 +400,40 @@ pub async fn list_executions(
     Ok(Json(json!(rows.into_iter().map(|(id, status, error, ca, fa)| json!({
         "id": id, "status": status, "error": error, "createdAt": ca, "finishedAt": fa,
     })).collect::<Vec<_>>())))
+}
+
+// ── Webhook trigger ─────────────────────────────────────────────────
+
+/// Public endpoint (no auth). An HTTP POST triggers the workflow run-as-owner via
+/// fire_gate, with the request body as trigger_data. The workflow must be enabled
+/// and have a `webhook` trigger node.
+pub async fn webhook_trigger(
+    State(rt): State<SharedRuntime>,
+    Path(workflow_id): Path<Uuid>,
+    body: axum::body::Bytes,
+) -> Result<Json<JsonValue>, ApiError> {
+    let pool = routes::pool(&rt);
+
+    let (app_id, owner): (String, Option<uuid::Uuid>) = sqlx::query_as(
+        "SELECT app_id, created_by FROM rootcx_system.workflows WHERE id = $1 AND enabled = true",
+    ).bind(workflow_id).fetch_optional(&pool).await?
+    .ok_or_else(|| ApiError::NotFound("workflow not found or not enabled".into()))?;
+
+    let trigger_data: JsonValue = serde_json::from_slice(&body).unwrap_or_else(|_| {
+        json!({ "raw": String::from_utf8_lossy(&body).into_owned() })
+    });
+
+    // Webhook payload goes directly into trigger_data (not wrapped in a hook
+    // envelope), so $json in the workflow = the POST body as-is.
+    let payload = json!({
+        "action_type": "workflow",
+        "_hook": true,
+        "action_config": { "workflow_id": workflow_id },
+        "record": trigger_data,
+    });
+    crate::jobs::enqueue(&pool, &app_id, payload, owner)
+        .await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    rt.wake_scheduler();
+
+    Ok(Json(json!({ "status": "accepted" })))
 }

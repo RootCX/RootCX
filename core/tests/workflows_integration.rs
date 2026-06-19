@@ -544,6 +544,61 @@ async fn workflow_hook_trigger_fires_on_insert() {
     assert_eq!(execs[0]["status"], "succeeded");
 }
 
+// ── Webhook trigger ─────────────────────────────────────────────────
+
+// The webhook endpoint is public (no auth): a POST triggers the workflow run-as-owner
+// and the body arrives as $json in the trigger node (accessible by downstream nodes).
+#[tokio::test]
+async fn workflow_webhook_trigger_fires_and_passes_body() {
+    let rt = TestRuntime::boot().await;
+
+    let graph = json!({
+        "nodes": [
+            {"id": "t", "kind": {"type": "trigger", "trigger": "webhook"}, "params": {}, "position": [0,0]},
+            {"id": "echo", "kind": {"type": "control", "control": "set"},
+             "params": {"fields": {"got": "{{ $json.record ? $json.record.ping : 'none' }}"}}, "position": [1,0]}
+        ],
+        "edges": [{"from": "t", "to": "echo", "fromOutput": 0}]
+    });
+    let (_, body) = rt.post_json("/api/v1/workflows", &json!({"name": "webhook-test", "graph": graph})).await;
+    let wf_id = body["id"].as_str().unwrap();
+    rt.put_json(&format!("/api/v1/workflows/{wf_id}"), &json!({"enabled": true})).await;
+
+    // POST without auth (public endpoint)
+    let (s, resp) = rt.post_unauthed(
+        &format!("/api/v1/workflows/{wf_id}/webhook"),
+        &json!({"ping": "pong"}),
+    ).await;
+    assert_eq!(s, 200, "webhook must accept without auth: {resp}");
+    assert_eq!(resp["status"], "accepted");
+
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let exec_id: String = sqlx::query_scalar(
+        "SELECT id::text FROM rootcx_system.workflow_executions WHERE workflow_id = $1::uuid ORDER BY created_at DESC LIMIT 1",
+    ).bind(wf_id).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(wait_exec(&rt, &exec_id).await, "succeeded");
+
+    // The Set node received the webhook body via trigger_data.
+    let output: Value = sqlx::query_scalar(
+        "SELECT output FROM rootcx_system.workflow_node_runs WHERE execution_id = $1::uuid AND node_id = 'echo'",
+    ).bind(&exec_id).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(output[0][0]["json"]["got"], "pong", "webhook body propagated to downstream node");
+}
+
+// A disabled workflow's webhook returns 404 (not 500, not silently queued).
+#[tokio::test]
+async fn workflow_webhook_rejects_disabled() {
+    let rt = TestRuntime::boot().await;
+
+    let (_, body) = rt.post_json("/api/v1/workflows", &json!({"name": "wh-disabled", "graph": simple_graph()})).await;
+    let wf_id = body["id"].as_str().unwrap();
+    // NOT enabled
+
+    let (s, _) = rt.post_unauthed(&format!("/api/v1/workflows/{wf_id}/webhook"), &json!({})).await;
+    assert_eq!(s, 404, "disabled workflow webhook must return 404");
+}
+
 // ── Auth boundary ────────────────────────────────────────────────────
 
 #[tokio::test]
