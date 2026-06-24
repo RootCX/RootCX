@@ -79,8 +79,8 @@ async function authStart(params: any) {
 
 async function authCallback(params: any) {
   const { config, query } = params;
-  const refreshToken = await exchangeCodeForRefreshToken(config, query.code, query.redirect_uri ?? params.callbackUrl ?? "");
-  return { credentials: { refreshToken } };
+  const { refreshToken, email } = await exchangeCodeForRefreshToken(config, query.code, query.redirect_uri ?? params.callbackUrl ?? "");
+  return { credentials: { refreshToken }, label: email };
 }
 
 async function fetchAndCacheAliases(config: Config, creds: UserCreds, userId: string): Promise<Result<{ primary: string; aliases: string[] }>> {

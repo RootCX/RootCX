@@ -57,10 +57,10 @@ export function buildAuthUrl(config: Config, callbackUrl: string, state: string)
   return url.toString();
 }
 
-/** Exchange authorization code for refresh_token. */
+/** Exchange authorization code for refresh_token + account email (from id_token). */
 export async function exchangeCodeForRefreshToken(
   config: Config, code: string, redirectUri: string,
-): Promise<string> {
+): Promise<{ refreshToken: string; email: string | null }> {
   const res = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -71,7 +71,16 @@ export async function exchangeCodeForRefreshToken(
   });
   if (!res.ok) throw new Error(`token exchange failed: ${await res.text()}`);
   const data = await res.json();
-  return data.refresh_token;
+  const email = parseIdTokenEmail(data.id_token);
+  return { refreshToken: data.refresh_token, email };
+}
+
+export function parseIdTokenEmail(idToken: string | undefined): string | null {
+  if (!idToken) return null;
+  const parts = idToken.split(".");
+  if (parts.length < 2) return null;
+  const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString());
+  return payload.email?.toLowerCase() ?? null;
 }
 
 export function evictClient(userId: string): void {
