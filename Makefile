@@ -35,7 +35,7 @@ endif
 
 DIST := target/dist
 
-.PHONY: test-image release dev deps dev-mode prod-mode \
+.PHONY: test-image devbox-image release dev deps dev-mode prod-mode \
         deps-mac-arm deps-mac-x86 deps-linux deps-linux-arm deps-win \
         require-mac require-linux require-win \
         build-frontend \
@@ -61,6 +61,14 @@ endif
 
 test-image:
 	docker compose build postgres
+
+devbox-image:
+	ROOTCX_SKILLS_REV=$$(git ls-remote https://github.com/rootcx/skills HEAD | cut -f1); \
+	docker buildx build --platform linux/arm64 \
+		-f docker/Dockerfile.devbox \
+		-t rootcx-devbox:local \
+		--build-arg ROOTCX_SKILLS_REV=$$ROOTCX_SKILLS_REV \
+		--load .
 
 # ── Development ───────────────────────────────────────────────────────────────
 

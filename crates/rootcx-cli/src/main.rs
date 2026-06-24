@@ -578,6 +578,7 @@ async fn run_deploy() -> Result<()> {
 
     let client = client_from_config().await?;
     let core_url = client.base_url();
+    let public_url = std::env::var("ROOTCX_PUBLIC_URL").unwrap_or_else(|_| core_url.to_string());
 
     if cwd.join("package.json").exists() {
         let bun = bun::ensure().await?;
@@ -591,7 +592,7 @@ async fn run_deploy() -> Result<()> {
             println!("→ building frontend");
             let base_flag = format!("--base=/apps/{app_id}/");
             let args = &["run", "build", "--", &base_flag];
-            bun::exec(&bun, &cwd, args, &[("VITE_ROOTCX_URL", core_url)]).await?;
+            bun::exec(&bun, &cwd, args, &[("VITE_ROOTCX_URL", &public_url)]).await?;
         }
     }
 
