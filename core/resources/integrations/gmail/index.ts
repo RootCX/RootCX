@@ -36,30 +36,30 @@ serve({
   onJob: handleJob,
 });
 
-async function accessTokenFor(config: Config, creds: UserCreds, userId: string): Promise<string> {
-  const access = await oauth2ClientFor(config, creds, userId).getAccessToken();
+async function accessTokenFor(config: Config, creds: UserCreds, userId: string, connectionId?: string | null): Promise<string> {
+  const access = await oauth2ClientFor(config, creds, userId, connectionId).getAccessToken();
   if (!access.token) throw new Error("no access token from refresh");
   return access.token;
 }
 
-async function gmailApi(config: Config, creds: UserCreds, path: string, init: RequestInit | undefined, userId: string): Promise<Result<any>> {
+async function gmailApi(config: Config, creds: UserCreds, path: string, init: RequestInit | undefined, userId: string, connectionId?: string | null): Promise<Result<any>> {
   let token: string;
-  try { token = await accessTokenFor(config, creds, userId); }
-  catch (e: any) { evictClient(userId); return fail({ code: "INSUFFICIENT_PERMISSIONS", message: e?.message ?? "auth failed" }); }
+  try { token = await accessTokenFor(config, creds, userId, connectionId); }
+  catch (e: any) { evictClient(userId, connectionId); return fail({ code: "INSUFFICIENT_PERMISSIONS", message: e?.message ?? "auth failed" }); }
   let res: Response;
   try { res = await fetch(`${GMAIL_API}${path}`, { ...init, headers: { Authorization: `Bearer ${token}`, ...init?.headers } }); }
   catch (e: any) { return fail({ code: "TEMPORARY_ERROR", message: e?.message ?? "network error" }); }
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     const err = classifyHttp(res.status, body, path);
-    if (err.code === "INSUFFICIENT_PERMISSIONS") evictClient(userId);
+    if (err.code === "INSUFFICIENT_PERMISSIONS") evictClient(userId, connectionId);
     return fail(err);
   }
   return ok(await res.json());
 }
 
-const callGmail = (config: Config, creds: UserCreds, path: string, init: RequestInit | undefined, userId: string) =>
-  withRetry(() => gmailApi(config, creds, path, init, userId));
+const callGmail = (config: Config, creds: UserCreds, path: string, init: RequestInit | undefined, userId: string, connectionId?: string | null) =>
+  withRetry(() => gmailApi(config, creds, path, init, userId, connectionId));
 
 // Re-enter one of our own actions (with the user's resolved credentials) and
 // surface its Result: return `data`, or throw a coded Error so callers can
@@ -83,26 +83,27 @@ async function authCallback(params: any) {
   return { credentials: { refreshToken }, label: email };
 }
 
-async function fetchAndCacheAliases(config: Config, creds: UserCreds, userId: string): Promise<Result<{ primary: string; aliases: string[] }>> {
-  const cached = getCachedAliases(userId);
+async function fetchAndCacheAliases(config: Config, creds: UserCreds, userId: string, connectionId?: string | null): Promise<Result<{ primary: string; aliases: string[] }>> {
+  const cacheKey = connectionId ? `${userId}:${connectionId}` : userId;
+  const cached = getCachedAliases(cacheKey);
   if (cached) return ok({ primary: cached.primary, aliases: [...cached.aliases] });
   const [profileR, sendAsR] = await Promise.all([
-    callGmail(config, creds, "/profile", undefined, userId),
-    callGmail(config, creds, "/settings/sendAs", undefined, userId),
+    callGmail(config, creds, "/profile", undefined, userId, connectionId),
+    callGmail(config, creds, "/settings/sendAs", undefined, userId, connectionId),
   ]);
   if (!profileR.ok) return profileR;
   if (!sendAsR.ok) return sendAsR;
   const primary = (profileR.data.emailAddress ?? "").toLowerCase();
   const aliases = (sendAsR.data.sendAs ?? []).map((e: any) => (e.sendAsEmail ?? "").toLowerCase()).filter(Boolean);
-  cacheAliases(userId, primary, aliases);
+  cacheAliases(cacheKey, primary, aliases);
   return ok({ primary, aliases });
 }
 
 async function composeAndSend(
-  config: Config, creds: UserCreds, input: SendInput, userId: string, asDraft: boolean, ctx: RootCxCtx,
+  config: Config, creds: UserCreds, input: SendInput, userId: string, asDraft: boolean, ctx: RootCxCtx, connectionId?: string | null,
 ): Promise<Result<any>> {
   if (!input.to && !input.bcc) return fail({ code: "MISCONFIGURED", message: "at least one recipient required" });
-  const aliases = await fetchAndCacheAliases(config, creds, userId);
+  const aliases = await fetchAndCacheAliases(config, creds, userId, connectionId);
   if (!aliases.ok) return aliases;
 
   let composed;
@@ -118,7 +119,7 @@ async function composeAndSend(
   const r = await callGmail(config, creds, path, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  }, userId);
+  }, userId, connectionId);
   if (!r.ok) return r;
 
   const msgId = asDraft ? r.data.message?.id : r.data.id;
@@ -129,16 +130,16 @@ async function composeAndSend(
     : ok({ messageId: r.data.id, threadId: r.data.threadId, headerMessageId: composed.headerMessageId });
 }
 
-const sendEmail = (c: Config, u: UserCreds, i: any, uid: string, ctx: RootCxCtx) => composeAndSend(c, u, i, uid, false, ctx);
-const createDraft = (c: Config, u: UserCreds, i: any, uid: string, ctx: RootCxCtx) => composeAndSend(c, u, i, uid, true, ctx);
+const sendEmail = (c: Config, u: UserCreds, i: any, uid: string, ctx: RootCxCtx, connId?: string | null) => composeAndSend(c, u, i, uid, false, ctx, connId);
+const createDraft = (c: Config, u: UserCreds, i: any, uid: string, ctx: RootCxCtx, connId?: string | null) => composeAndSend(c, u, i, uid, true, ctx, connId);
 
-async function getAttachment(config: Config, creds: UserCreds, input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
+async function getAttachment(config: Config, creds: UserCreds, input: any, userId: string, _ctx: RootCxCtx, connectionId?: string | null): Promise<Result<any>> {
   if (!input.messageId || !input.attachmentId) return fail({ code: "MISCONFIGURED", message: "messageId and attachmentId required" });
-  return callGmail(config, creds, `/messages/${input.messageId}/attachments/${input.attachmentId}`, undefined, userId);
+  return callGmail(config, creds, `/messages/${input.messageId}/attachments/${input.attachmentId}`, undefined, userId, connectionId);
 }
 
 async function syncConnect(config: Config, creds: UserCreds, _input: any, userId: string, ctx: RootCxCtx, connectionId?: string | null): Promise<Result<any>> {
-  const aliases = await fetchAndCacheAliases(config, creds, userId);
+  const aliases = await fetchAndCacheAliases(config, creds, userId, connectionId);
   if (!aliases.ok) return aliases;
   const { primary: handle, aliases: aliasList } = aliases.data;
 
@@ -210,42 +211,42 @@ async function syncUserNow(userId: string, ctx: RootCxCtx, connectionId?: string
   }
 }
 
-async function getProfile(config: Config, creds: UserCreds, _input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
-  const r = await callGmail(config, creds, "/profile", undefined, userId);
+async function getProfile(config: Config, creds: UserCreds, _input: any, userId: string, _ctx: RootCxCtx, connectionId?: string | null): Promise<Result<any>> {
+  const r = await callGmail(config, creds, "/profile", undefined, userId, connectionId);
   if (!r.ok) return r;
   return ok({ emailAddress: r.data.emailAddress, historyId: r.data.historyId });
 }
 
-async function listSendAs(config: Config, creds: UserCreds, _input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
-  const r = await callGmail(config, creds, "/settings/sendAs", undefined, userId);
+async function listSendAs(config: Config, creds: UserCreds, _input: any, userId: string, _ctx: RootCxCtx, connectionId?: string | null): Promise<Result<any>> {
+  const r = await callGmail(config, creds, "/settings/sendAs", undefined, userId, connectionId);
   if (!r.ok) return r;
   return ok({ sendAs: (r.data.sendAs ?? []).map((e: any) => ({ sendAsEmail: e.sendAsEmail, displayName: e.displayName ?? "", isDefault: !!e.isDefault, isPrimary: !!e.isPrimary })) });
 }
 
-async function watchAction(config: Config, creds: UserCreds, input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
+async function watchAction(config: Config, creds: UserCreds, input: any, userId: string, _ctx: RootCxCtx, connectionId?: string | null): Promise<Result<any>> {
   const topicName = input?.topicName ?? config.pubsubTopicName;
   if (!topicName) return fail({ code: "MISCONFIGURED", message: "topicName required" });
   const r = await callGmail(config, creds, "/watch", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ topicName, ...(input?.labelIds ? { labelIds: input.labelIds } : {}) }),
-  }, userId);
+  }, userId, connectionId);
   if (!r.ok) return r;
   return ok({ historyId: r.data.historyId, expiration: r.data.expiration ? Number(r.data.expiration) : null });
 }
 
-async function stopWatch(config: Config, creds: UserCreds, _input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
-  const r = await callGmail(config, creds, "/stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }, userId);
+async function stopWatch(config: Config, creds: UserCreds, _input: any, userId: string, _ctx: RootCxCtx, connectionId?: string | null): Promise<Result<any>> {
+  const r = await callGmail(config, creds, "/stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }, userId, connectionId);
   if (!r.ok) return r;
   return ok({});
 }
 
-async function listMessages(config: Config, creds: UserCreds, input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
+async function listMessages(config: Config, creds: UserCreds, input: any, userId: string, _ctx: RootCxCtx, connectionId?: string | null): Promise<Result<any>> {
   const { query, maxResults = 100, pageToken, labelIds } = input ?? {};
   const params = new URLSearchParams({ maxResults: String(Math.min(Math.max(1, maxResults), 500)) });
   if (query) params.set("q", String(query).slice(0, 1024));
   if (pageToken) params.set("pageToken", pageToken);
   if (labelIds?.length) for (const l of labelIds) params.append("labelIds", l);
-  const r = await callGmail(config, creds, `/messages?${params}`, undefined, userId);
+  const r = await callGmail(config, creds, `/messages?${params}`, undefined, userId, connectionId);
   if (!r.ok) return r;
   return ok({
     messages: (r.data.messages ?? []).map((m: any) => ({ id: m.id, threadId: m.threadId })),
@@ -254,21 +255,21 @@ async function listMessages(config: Config, creds: UserCreds, input: any, userId
   });
 }
 
-async function getEmail(config: Config, creds: UserCreds, input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
+async function getEmail(config: Config, creds: UserCreds, input: any, userId: string, _ctx: RootCxCtx, connectionId?: string | null): Promise<Result<any>> {
   if (!input?.messageId) return fail({ code: "MISCONFIGURED", message: "messageId required" });
-  const r = await callGmail(config, creds, `/messages/${input.messageId}?format=full`, undefined, userId);
+  const r = await callGmail(config, creds, `/messages/${input.messageId}?format=full`, undefined, userId, connectionId);
   if (!r.ok) return r;
   return ok(parseMessage(r.data));
 }
 
-async function historyList(config: Config, creds: UserCreds, input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
+async function historyList(config: Config, creds: UserCreds, input: any, userId: string, _ctx: RootCxCtx, connectionId?: string | null): Promise<Result<any>> {
   const { startHistoryId, maxResults = 500, pageToken } = input ?? {};
   if (!startHistoryId) return fail({ code: "MISCONFIGURED", message: "startHistoryId required" });
   const params = new URLSearchParams({ startHistoryId: String(startHistoryId), maxResults: String(Math.min(maxResults, 500)) });
   if (pageToken) params.set("pageToken", pageToken);
   params.append("historyTypes", "messageAdded");
   params.append("historyTypes", "messageDeleted");
-  const r = await callGmail(config, creds, `/history?${params}`, undefined, userId);
+  const r = await callGmail(config, creds, `/history?${params}`, undefined, userId, connectionId);
   if (!r.ok) return r;
   const messagesAdded: string[] = [];
   const messagesDeleted: string[] = [];

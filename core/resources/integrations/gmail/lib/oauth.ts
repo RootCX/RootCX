@@ -1,5 +1,6 @@
 /// <reference path="../../rootcx-worker.d.ts" />
 import { google, type Auth } from "googleapis";
+import { LruMap } from "./lru";
 
 export const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 
@@ -31,16 +32,15 @@ export function scopesFor(c: Config): string {
   return scopes.join(" ");
 }
 
-import { LruMap } from "./lru";
-
 const CLIENT_CACHE = new LruMap<string, Auth.OAuth2Client>(64, 30 * 60_000);
 
-export function oauth2ClientFor(config: Config, creds: UserCreds, userId: string): Auth.OAuth2Client {
-  const cached = CLIENT_CACHE.get(userId);
+export function oauth2ClientFor(config: Config, creds: UserCreds, userId: string, connectionId?: string | null): Auth.OAuth2Client {
+  const cacheKey = connectionId ? `${userId}:${connectionId}` : userId;
+  const cached = CLIENT_CACHE.get(cacheKey);
   if (cached) return cached;
   const client = new google.auth.OAuth2(config.clientId, config.clientSecret);
   client.setCredentials({ refresh_token: creds.refreshToken });
-  CLIENT_CACHE.set(userId, client);
+  CLIENT_CACHE.set(cacheKey, client);
   return client;
 }
 
@@ -83,7 +83,8 @@ export function parseIdTokenEmail(idToken: string | undefined): string | null {
   return payload.email?.toLowerCase() ?? null;
 }
 
-export function evictClient(userId: string): void {
-  CLIENT_CACHE.delete(userId);
+export function evictClient(userId: string, connectionId?: string | null): void {
+  const cacheKey = connectionId ? `${userId}:${connectionId}` : userId;
+  CLIENT_CACHE.delete(cacheKey);
 }
 
