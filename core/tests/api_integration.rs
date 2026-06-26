@@ -3296,3 +3296,43 @@ async fn db_query_search_path_does_not_leak_across_pool() {
 
     rt.shutdown().await;
 }
+
+#[tokio::test]
+async fn query_pagination_no_duplicates() {
+    let rt = TestRuntime::boot().await;
+    rt.install("pagtest", "contacts").await;
+
+    let n = 15usize;
+    let mut ids = std::collections::HashSet::new();
+    for i in 0..n {
+        let v = rt.create("pagtest", "contacts", &json!({
+            "first_name": format!("User{i}"),
+            "last_name": "Test",
+        })).await;
+        ids.insert(v["id"].as_str().unwrap().to_string());
+    }
+    // Force identical created_at to trigger unstable ORDER BY
+    sqlx::query("UPDATE app_pagtest.contacts SET created_at = '2026-01-01 00:00:00+00'")
+        .execute(rt.pool()).await.unwrap();
+
+    // Paginate in pages of 5
+    let mut seen = std::collections::HashSet::new();
+    for offset in (0..n).step_by(5) {
+        let (s, body) = rt.post_json(
+            "/api/v1/apps/pagtest/collections/contacts/query",
+            &json!({"limit": 5, "offset": offset}),
+        ).await;
+        assert_eq!(s, 200, "query failed at offset {offset}: {body}");
+        for row in body["data"].as_array().unwrap() {
+            let id = row["id"].as_str().unwrap().to_string();
+            assert!(
+                seen.insert(id.clone()),
+                "duplicate id {id} at offset {offset} — pagination is unstable"
+            );
+        }
+    }
+    assert_eq!(seen.len(), n, "expected {n} unique records, got {}", seen.len());
+    assert_eq!(seen, ids, "paginated results don't match inserted records");
+
+    rt.shutdown().await;
+}

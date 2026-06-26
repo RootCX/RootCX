@@ -444,7 +444,7 @@ pub async fn query_records(
 
     let q = format!(
         "SELECT to_jsonb(t.*) AS row, COUNT(*) OVER() AS total \
-         FROM {tbl} t{wh} ORDER BY {sort} {order} LIMIT {limit} OFFSET {offset}"
+         FROM {tbl} t{wh} ORDER BY {sort} {order}, t.id ASC LIMIT {limit} OFFSET {offset}"
     );
     let mut query = sqlx::query_as::<_, (JsonValue, i64)>(&q);
     for s in &binds { query = query.bind(s.as_str()); }
@@ -726,7 +726,7 @@ pub async fn federated_query(
 
     let q = format!(
         "SELECT row, COUNT(*) OVER() AS total FROM ({}) sub \
-         ORDER BY row->>'{sort_field}' {order} LIMIT {limit} OFFSET {offset}",
+         ORDER BY row->>'{sort_field}' {order}, row->>'id' ASC LIMIT {limit} OFFSET {offset}",
         unions.join(" UNION ALL ")
     );
 
