@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRuntimeClient } from "../components/RuntimeProvider";
 import type { QueryOptions } from "../client";
 
@@ -14,10 +14,13 @@ export interface UseAppCollectionResult<T> {
   remove: (id: string) => Promise<void>;
 }
 
+const PAGE_SIZE = 1000;
+
 export function useAppCollection<T extends { id?: string } = Record<string, unknown>>(
   appId: string,
   entity: string,
   query?: QueryOptions,
+  options?: { fetchAll?: boolean },
 ): UseAppCollectionResult<T> {
   const client = useRuntimeClient();
   const [data, setData] = useState<T[]>([]);
@@ -25,26 +28,50 @@ export function useAppCollection<T extends { id?: string } = Record<string, unkn
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const queryKey = JSON.stringify(query);
+  const fetchAll = options?.fetchAll ?? false;
+  const abortRef = useRef<AbortController | null>(null);
 
   const fetchData = useCallback(async () => {
+    abortRef.current?.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+
     setLoading(true);
     setError(null);
     try {
       if (query) {
-        const result = await client.queryRecords<T>(appId, entity, query);
-        setData(result.data);
-        setTotal(result.total);
+        const first = await client.queryRecords<T>(appId, entity, query);
+        let all = first.data;
+        const serverTotal = first.total;
+        setTotal(serverTotal);
+
+        if (fetchAll && all.length < serverTotal) {
+          const limit = query.limit ?? PAGE_SIZE;
+          let offset = (query.offset ?? 0) + all.length;
+          while (all.length < serverTotal && !ctrl.signal.aborted) {
+            const page = await client.queryRecords<T>(appId, entity, { ...query, limit, offset });
+            if (page.data.length === 0) break;
+            all = [...all, ...page.data];
+            offset += page.data.length;
+          }
+        }
+
+        if (!ctrl.signal.aborted) setData(all);
       } else {
         const records = await client.listRecords<T>(appId, entity);
-        setData(records);
-        setTotal(records.length);
+        if (!ctrl.signal.aborted) {
+          setData(records);
+          setTotal(records.length);
+        }
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      if (!ctrl.signal.aborted) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
-      setLoading(false);
+      if (!ctrl.signal.aborted) setLoading(false);
     }
-  }, [client, appId, entity, queryKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [client, appId, entity, queryKey, fetchAll]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
