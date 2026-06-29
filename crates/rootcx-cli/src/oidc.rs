@@ -15,6 +15,15 @@ const SUCCESS_HTML: &str = r#"<!DOCTYPE html><html><head><meta charset="utf-8"><
 .c{text-align:center}h1{font-size:1.5rem;margin-bottom:.5rem}p{color:#888;font-size:.875rem}</style></head>
 <body><div class="c"><h1>Authenticated</h1><p>You can close this tab and return to your terminal.</p></div></body></html>"#;
 
+const BRIDGE_HTML: &str = r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>Authenticating</title>
+<style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0a0a0a;color:#fafafa}
+p{color:#888;font-size:.875rem}</style></head>
+<body><p>Completing authentication…</p>
+<script>
+var params = location.hash.substring(1) || location.search.substring(1);
+if (params && !location.search) location.replace(location.pathname + '?' + params);
+</script></body></html>"#;
+
 const ERROR_HTML: &str = r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>Error</title>
 <style>body{font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#0a0a0a;color:#fafafa}
 .c{text-align:center}h1{font-size:1.5rem;margin-bottom:.5rem;color:#ef4444}p{color:#888;font-size:.875rem}</style></head>
@@ -43,45 +52,49 @@ pub async fn login(core_url: &str, provider_id: &str) -> Result<Tokens> {
 }
 
 async fn wait_for_callback(listener: TcpListener) -> Result<Tokens> {
-    let (mut stream, _) = listener.accept().await?;
-    drop(listener);
-
-    let mut buf = vec![0u8; 8192];
-    let mut total = 0;
     loop {
-        let n = stream.read(&mut buf[total..]).await?;
-        if n == 0 {
-            break;
+        let (mut stream, _) = listener.accept().await?;
+
+        let mut buf = vec![0u8; 8192];
+        let mut total = 0;
+        loop {
+            let n = stream.read(&mut buf[total..]).await?;
+            if n == 0 {
+                break;
+            }
+            total += n;
+            if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+            if total >= buf.len() {
+                break;
+            }
         }
-        total += n;
-        if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
-            break;
-        }
-        if total >= buf.len() {
-            break;
+
+        let request = String::from_utf8_lossy(&buf[..total]);
+        let path = request
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .unwrap_or("/");
+
+        let query = path.split('?').nth(1).unwrap_or("");
+
+        let (status, html, result) = match parse_callback(query) {
+            Ok(tokens) => ("200 OK", SUCCESS_HTML, Some(Ok(tokens))),
+            Err(e) if has_error_param(query) => ("400 Bad Request", ERROR_HTML, Some(Err(e))),
+            Err(_) => ("200 OK", BRIDGE_HTML, None),
+        };
+        send_response(&mut stream, status, html).await;
+        let _ = stream.shutdown().await;
+        if let Some(r) = result {
+            return r;
         }
     }
+}
 
-    let request = String::from_utf8_lossy(&buf[..total]);
-    let path = request
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .ok_or_else(|| anyhow!("invalid HTTP request"))?;
-
-    let query = path.split('?').nth(1).unwrap_or("");
-    match parse_callback(query) {
-        Ok(tokens) => {
-            send_response(&mut stream, "200 OK", SUCCESS_HTML).await;
-            let _ = stream.shutdown().await;
-            Ok(tokens)
-        }
-        Err(e) => {
-            send_response(&mut stream, "400 Bad Request", ERROR_HTML).await;
-            let _ = stream.shutdown().await;
-            Err(e)
-        }
-    }
+fn has_error_param(query: &str) -> bool {
+    query.split('&').any(|pair| pair.starts_with("error="))
 }
 
 pub(crate) fn parse_callback(query: &str) -> Result<Tokens> {
