@@ -411,8 +411,17 @@ async fn unschedule_pg_cron(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     job_id: i64,
 ) -> Result<(), RuntimeError> {
-    sqlx::query("SELECT cron.unschedule($1)")
-        .bind(job_id).execute(&mut **tx).await.map_err(err)?;
+    // Idempotent: cron.unschedule() raises "could not find valid entry for job N"
+    // if the pg_cron job was already removed out-of-band (e.g. an app worker
+    // calling cron.unschedule directly). Because this runs inside the sync/delete
+    // transaction, that error rolls the whole tx back and wedges every future
+    // deploy for the app. Treat an already-gone job as success.
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM cron.job WHERE jobid = $1)")
+        .bind(job_id).fetch_one(&mut **tx).await.map_err(err)?;
+    if exists {
+        sqlx::query("SELECT cron.unschedule($1)")
+            .bind(job_id).execute(&mut **tx).await.map_err(err)?;
+    }
     Ok(())
 }
 
