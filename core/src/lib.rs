@@ -77,6 +77,7 @@ impl Runtime {
         tool_registry.register(tools::describe_app::DescribeAppTool);
         tool_registry.register(tools::list_integrations::ListIntegrationsTool);
         tool_registry.register(tools::call_integration::CallIntegrationTool);
+        tool_registry.register(tools::http_request::HttpRequestTool);
         tool_registry.register(tools::invoke_agent::InvokeAgentTool);
         tool_registry.register(tools::list_actions::ListActionsTool);
         tool_registry.register(tools::call_action::CallActionTool);

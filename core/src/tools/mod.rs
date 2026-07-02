@@ -2,6 +2,7 @@ pub mod call_action;
 pub mod call_integration;
 pub mod cli;
 pub mod describe_app;
+pub mod http_request;
 pub mod invoke_agent;
 pub mod list_actions;
 pub mod list_apps;
