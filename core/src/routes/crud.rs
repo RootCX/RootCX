@@ -12,14 +12,22 @@ use uuid::Uuid;
 use super::{SharedRuntime, parse_uuid, pool};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::manifest::{entity_exists, entity_identity, field_type_map, find_entities_by_identity, is_system_field, map_field_type, quote_ident};
 use crate::governance::enforcement::{self, ContextState};
+use crate::manifest::{
+    entity_exists, entity_identity, field_type_map, find_entities_by_identity, is_system_field,
+    map_field_type, quote_ident,
+};
 
 /// RLS context for a direct HTTP user call: the user is the responsible party,
 /// not delegated — `check_access` resolves their permissions from the DB. The
 /// 9 former `check_app_perm` gates are gone; Postgres RLS is the sole arbiter.
 fn http_context(identity: &Identity) -> ContextState {
-    ContextState { user_id: Some(identity.user_id), is_delegated: false, effective_perms: vec![], connection_id: None }
+    ContextState {
+        user_id: Some(identity.user_id),
+        is_delegated: false,
+        effective_perms: vec![],
+        connection_id: None,
+    }
 }
 
 /// Open an RLS-governed transaction for a direct HTTP user request.
@@ -29,22 +37,39 @@ async fn http_tx<'a>(
     identity: &Identity,
 ) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, ApiError> {
     let (actor, delegator) = identity.actor_pair();
-    Ok(enforcement::begin_app_tx(pool, app_id, &http_context(identity), actor, delegator, "api", enforcement::TIMEOUT_INTERACTIVE_MS).await?)
+    Ok(enforcement::begin_app_tx(
+        pool,
+        app_id,
+        &http_context(identity),
+        actor,
+        delegator,
+        "api",
+        enforcement::TIMEOUT_INTERACTIVE_MS,
+    )
+    .await?)
 }
 
 pub(crate) const MAX_BULK_SIZE: usize = 1000;
 const PG_PARAM_LIMIT: usize = 65535;
 
 pub(crate) fn validate_app_id(app_id: &str) -> Result<(), ApiError> {
-    if matches!(app_id, "rootcx_system" | "pg_catalog" | "information_schema") || app_id.starts_with("pg_") {
-        return Err(ApiError::Forbidden(format!("access to schema '{app_id}' is blocked")));
+    if matches!(
+        app_id,
+        "rootcx_system" | "pg_catalog" | "information_schema"
+    ) || app_id.starts_with("pg_")
+    {
+        return Err(ApiError::Forbidden(format!(
+            "access to schema '{app_id}' is blocked"
+        )));
     }
     Ok(())
 }
 
 async fn ensure_entity(pool: &PgPool, app_id: &str, entity: &str) -> Result<(), ApiError> {
     if !entity_exists(pool, app_id, entity).await? {
-        return Err(ApiError::NotFound(format!("entity '{entity}' not found in app '{app_id}'")));
+        return Err(ApiError::NotFound(format!(
+            "entity '{entity}' not found in app '{app_id}'"
+        )));
     }
     Ok(())
 }
@@ -54,7 +79,9 @@ pub(crate) fn table(app_id: &str, entity: &str) -> String {
 }
 
 fn require_object(body: &JsonValue) -> Result<&serde_json::Map<String, JsonValue>, ApiError> {
-    let obj = body.as_object().ok_or_else(|| ApiError::BadRequest("body must be a JSON object".into()))?;
+    let obj = body
+        .as_object()
+        .ok_or_else(|| ApiError::BadRequest("body must be a JSON object".into()))?;
     if obj.is_empty() {
         return Err(ApiError::BadRequest("body must not be empty".into()));
     }
@@ -86,6 +113,10 @@ fn pg_cast_suffix(manifest_type: Option<&str>) -> &'static str {
     }
 }
 
+fn is_jsonb_type(manifest_type: Option<&str>) -> bool {
+    matches!(manifest_type.map(map_field_type), Some("JSONB"))
+}
+
 fn json_value_to_string(val: &JsonValue) -> String {
     match val {
         JsonValue::String(s) => s.clone(),
@@ -96,7 +127,10 @@ fn json_value_to_string(val: &JsonValue) -> String {
     }
 }
 
-pub(crate) fn validate_sort_field(field: Option<&String>, types: &HashMap<String, String>) -> String {
+pub(crate) fn validate_sort_field(
+    field: Option<&String>,
+    types: &HashMap<String, String>,
+) -> String {
     match field {
         Some(f)
             if types.contains_key(f.as_str())
@@ -138,7 +172,11 @@ pub(crate) fn build_where_clause(
         }
     }
 
-    if parts.is_empty() { Ok("TRUE".into()) } else { Ok(parts.join(" AND ")) }
+    if parts.is_empty() {
+        Ok("TRUE".into())
+    } else {
+        Ok(parts.join(" AND "))
+    }
 }
 
 fn build_logical(
@@ -156,11 +194,19 @@ fn build_logical(
         .iter()
         .map(|s| build_where_clause(s, types, binds, idx))
         .collect::<Result<_, _>>()?;
-    if subs.is_empty() { Ok("TRUE".into()) } else { Ok(format!("({})", subs.join(sep))) }
+    if subs.is_empty() {
+        Ok("TRUE".into())
+    } else {
+        Ok(format!("({})", subs.join(sep)))
+    }
 }
 
 pub(crate) fn join_where(conditions: &[String]) -> String {
-    if conditions.is_empty() { String::new() } else { format!(" WHERE {}", conditions.join(" AND ")) }
+    if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    }
 }
 
 fn build_field_condition(
@@ -171,10 +217,14 @@ fn build_field_condition(
     idx: &mut usize,
 ) -> Result<String, ApiError> {
     let col = quote_ident(field);
-    let cast = pg_cast_suffix(types.get(field).map(String::as_str));
+    let manifest_type = types.get(field).map(String::as_str);
+    let cast = pg_cast_suffix(manifest_type);
+    let is_jsonb = is_jsonb_type(manifest_type);
 
     if !val.is_object() {
-        if val.is_null() { return Ok(format!("{col} IS NULL")); }
+        if val.is_null() {
+            return Ok(format!("{col} IS NULL"));
+        }
         *idx += 1;
         binds.push(json_value_to_string(val));
         return Ok(format!("{col} = ${}{cast}", *idx));
@@ -224,13 +274,22 @@ fn build_field_condition(
                 let kw = if op == "$like" { "LIKE" } else { "ILIKE" };
                 *idx += 1;
                 binds.push(json_value_to_string(operand));
-                conditions.push(format!("{col} {kw} ${}", *idx));
+                let lhs = if is_jsonb {
+                    format!("{col}::text")
+                } else {
+                    col.clone()
+                };
+                conditions.push(format!("{lhs} {kw} ${}", *idx));
             }
             "$in" | "$nin" => {
                 let arr = operand
                     .as_array()
                     .ok_or_else(|| ApiError::BadRequest(format!("{op} must be an array")))?;
-                let (empty_val, kw) = if op == "$in" { ("FALSE", "IN") } else { ("TRUE", "NOT IN") };
+                let (empty_val, kw) = if op == "$in" {
+                    ("FALSE", "IN")
+                } else {
+                    ("TRUE", "NOT IN")
+                };
                 if arr.is_empty() {
                     conditions.push(empty_val.into());
                 } else {
@@ -250,15 +309,21 @@ fn build_field_condition(
                     .as_array()
                     .ok_or_else(|| ApiError::BadRequest("$contains must be an array".into()))?;
                 if !arr.is_empty() {
-                    let phs: Vec<String> = arr
-                        .iter()
-                        .map(|v| {
-                            *idx += 1;
-                            binds.push(json_value_to_string(v));
-                            format!("${}", *idx)
-                        })
-                        .collect();
-                    conditions.push(format!("{col} @> ARRAY[{}]{cast}", phs.join(", ")));
+                    if is_jsonb {
+                        *idx += 1;
+                        binds.push(operand.to_string());
+                        conditions.push(format!("{col} @> ${}::jsonb", *idx));
+                    } else {
+                        let phs: Vec<String> = arr
+                            .iter()
+                            .map(|v| {
+                                *idx += 1;
+                                binds.push(json_value_to_string(v));
+                                format!("${}", *idx)
+                            })
+                            .collect();
+                        conditions.push(format!("{col} @> ARRAY[{}]{cast}", phs.join(", ")));
+                    }
                 }
             }
             "$isNull" => {
@@ -320,7 +385,9 @@ pub async fn list_records(
     let (mut idx, mut conditions, mut binds) = (0usize, Vec::new(), Vec::new());
 
     for (key, val) in &params {
-        if RESERVED_PARAMS.contains(&key.as_str()) { continue; }
+        if RESERVED_PARAMS.contains(&key.as_str()) {
+            continue;
+        }
         let cast = pg_cast_suffix(types.get(key.as_str()).map(String::as_str));
         idx += 1;
         binds.push(val.clone());
@@ -330,12 +397,27 @@ pub async fn list_records(
     let wh = join_where(&conditions);
     let sort = validate_sort_field(params.get("sort"), &types);
     let order = validate_order(params.get("order"));
-    let limit = params.get("limit").map(|l| format!(" LIMIT {}", l.parse::<i64>().unwrap_or(100).min(1000).max(1))).unwrap_or_default();
-    let offset = params.get("offset").map(|o| format!(" OFFSET {}", o.parse::<i64>().unwrap_or(0).max(0))).unwrap_or_default();
+    let limit = params
+        .get("limit")
+        .map(|l| {
+            format!(
+                " LIMIT {}",
+                l.parse::<i64>().unwrap_or(100).min(1000).max(1)
+            )
+        })
+        .unwrap_or_default();
+    let offset = params
+        .get("offset")
+        .map(|o| format!(" OFFSET {}", o.parse::<i64>().unwrap_or(0).max(0)))
+        .unwrap_or_default();
 
-    let q = format!("SELECT to_jsonb(t.*) AS row FROM {tbl} t{wh} ORDER BY {sort} {order}{limit}{offset}");
+    let q = format!(
+        "SELECT to_jsonb(t.*) AS row FROM {tbl} t{wh} ORDER BY {sort} {order}{limit}{offset}"
+    );
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
-    for s in &binds { query = query.bind(s.as_str()); }
+    for s in &binds {
+        query = query.bind(s.as_str());
+    }
 
     // Reads now run inside an RLS transaction: no permission visible → 0 rows.
     let mut tx = http_tx(&pool, &app_id, &identity).await?;
@@ -367,11 +449,15 @@ async fn enrich_linked(
     // rootcx_system access). The DATA reads below run on `tx` so RLS filters
     // each cross-app target by the caller's identity (no perm → 0 rows).
     let Some((identity_kind, identity_key)) = entity_identity(pool, source_app, entity)
-        .await.map_err(|e| ApiError::Internal(e.to_string()))?
-    else { return Ok(()) };
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+    else {
+        return Ok(());
+    };
 
     let targets: Vec<_> = find_entities_by_identity(pool, &identity_kind, Some(source_app))
-        .await.map_err(|e| ApiError::Internal(e.to_string()))?
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
         .into_iter()
         .filter(|(app, _, _)| match linked {
             LinkedOption::All(true) => true,
@@ -380,36 +466,66 @@ async fn enrich_linked(
         })
         .collect();
 
-    let key_values: Vec<String> = rows.iter()
-        .filter_map(|r| r.get(&identity_key).and_then(|v| v.as_str()).map(String::from))
+    let key_values: Vec<String> = rows
+        .iter()
+        .filter_map(|r| {
+            r.get(&identity_key)
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        })
         .collect();
 
-    if targets.is_empty() || key_values.is_empty() { return Ok(()) }
+    if targets.is_empty() || key_values.is_empty() {
+        return Ok(());
+    }
 
     for (target_app, target_entity, target_key) in &targets {
         let tbl = table(target_app, target_entity);
-        let phs: String = (1..=key_values.len()).map(|i| format!("${i}")).collect::<Vec<_>>().join(",");
-        let q = format!("SELECT to_jsonb(t.*) AS row FROM {tbl} t WHERE t.{} IN ({phs})", quote_ident(target_key));
+        let phs: String = (1..=key_values.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let q = format!(
+            "SELECT to_jsonb(t.*) AS row FROM {tbl} t WHERE t.{} IN ({phs})",
+            quote_ident(target_key)
+        );
         let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
-        for v in &key_values { query = query.bind(v.as_str()); }
-        let Ok(linked_rows) = query.fetch_all(&mut **tx).await else { continue };
+        for v in &key_values {
+            query = query.bind(v.as_str());
+        }
+        let Ok(linked_rows) = query.fetch_all(&mut **tx).await else {
+            continue;
+        };
 
-        let by_key: HashMap<&str, &JsonValue> = linked_rows.iter()
-            .filter_map(|(row,)| row.get(target_key).and_then(|v| v.as_str()).map(|k| (k, row)))
+        let by_key: HashMap<&str, &JsonValue> = linked_rows
+            .iter()
+            .filter_map(|(row,)| {
+                row.get(target_key)
+                    .and_then(|v| v.as_str())
+                    .map(|k| (k, row))
+            })
             .collect();
 
         for row in rows.iter_mut() {
-            let kv = row.get(&identity_key).and_then(|v| v.as_str()).unwrap_or_default();
+            let kv = row
+                .get(&identity_key)
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             if let Some(&linked_record) = by_key.get(kv) {
-                row.as_object_mut().unwrap()
+                row.as_object_mut()
+                    .unwrap()
                     .entry("_linked")
                     .or_insert_with(|| serde_json::json!({}))
-                    .as_object_mut().unwrap()
-                    .insert(target_app.clone(), serde_json::json!({
-                        "entity": target_entity,
-                        "recordId": linked_record.get("id"),
-                        "data": linked_record
-                    }));
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(
+                        target_app.clone(),
+                        serde_json::json!({
+                            "entity": target_entity,
+                            "recordId": linked_record.get("id"),
+                            "data": linked_record
+                        }),
+                    );
             }
         }
     }
@@ -433,7 +549,9 @@ pub async fn query_records(
 
     if let Some(ref w) = body.where_clause {
         let sql = build_where_clause(w, &types, &mut binds, &mut idx)?;
-        if sql != "TRUE" { conditions.push(sql); }
+        if sql != "TRUE" {
+            conditions.push(sql);
+        }
     }
 
     let wh = join_where(&conditions);
@@ -447,7 +565,9 @@ pub async fn query_records(
          FROM {tbl} t{wh} ORDER BY {sort} {order}, t.id ASC LIMIT {limit} OFFSET {offset}"
     );
     let mut query = sqlx::query_as::<_, (JsonValue, i64)>(&q);
-    for s in &binds { query = query.bind(s.as_str()); }
+    for s in &binds {
+        query = query.bind(s.as_str());
+    }
 
     let mut tx = http_tx(&pool, &app_id, &identity).await?;
     let rows: Vec<(JsonValue, i64)> = query.fetch_all(&mut *tx).await?;
@@ -478,7 +598,9 @@ pub async fn create_record(
 
     let entries = filter_writable_fields(obj);
     if entries.is_empty() {
-        return Err(ApiError::BadRequest("body must contain at least one writable field".into()));
+        return Err(ApiError::BadRequest(
+            "body must contain at least one writable field".into(),
+        ));
     }
 
     let cols: Vec<String> = entries.iter().map(|(k, _)| quote_ident(k)).collect();
@@ -504,7 +626,9 @@ fn union_keys(objects: &[&serde_json::Map<String, JsonValue>]) -> Vec<String> {
     let mut keys = Vec::new();
     for obj in objects {
         for k in obj.keys() {
-            if is_system_field(k.as_str()) { continue; }
+            if is_system_field(k.as_str()) {
+                continue;
+            }
             if seen.insert(k) {
                 keys.push(k.clone());
             }
@@ -528,7 +652,9 @@ pub(crate) async fn bulk_insert(
 ) -> Result<Vec<JsonValue>, ApiError> {
     let keys = union_keys(objects);
     if keys.is_empty() {
-        return Err(ApiError::BadRequest("each record must contain at least one writable field".into()));
+        return Err(ApiError::BadRequest(
+            "each record must contain at least one writable field".into(),
+        ));
     }
     let total_params = objects.len() * keys.len();
     if total_params > PG_PARAM_LIMIT {
@@ -556,11 +682,24 @@ pub(crate) async fn bulk_insert(
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&sql);
     for obj in objects {
         for key in &keys {
-            query = bind_typed(query, obj.get(key.as_str()).unwrap_or(&null_val), types.get(key.as_str()));
+            query = bind_typed(
+                query,
+                obj.get(key.as_str()).unwrap_or(&null_val),
+                types.get(key.as_str()),
+            );
         }
     }
 
-    let mut tx = enforcement::begin_app_tx(pool, app_id, state, actor_uid, delegator_uid, trigger_ref, timeout_ms).await?;
+    let mut tx = enforcement::begin_app_tx(
+        pool,
+        app_id,
+        state,
+        actor_uid,
+        delegator_uid,
+        trigger_ref,
+        timeout_ms,
+    )
+    .await?;
     let rows: Vec<(JsonValue,)> = query.fetch_all(&mut *tx).await?;
     tx.commit().await?;
     Ok(rows.into_iter().map(|(r,)| r).collect())
@@ -575,24 +714,39 @@ pub async fn bulk_create_records(
     validate_app_id(&app_id)?;
     let db = pool(&rt);
     ensure_entity(&db, &app_id, &entity).await?;
-    let records = body.as_array()
+    let records = body
+        .as_array()
         .ok_or_else(|| ApiError::BadRequest("body must be a JSON array".into()))?;
     if records.is_empty() {
         return Err(ApiError::BadRequest("array must not be empty".into()));
     }
     if records.len() > MAX_BULK_SIZE {
         return Err(ApiError::BadRequest(format!(
-            "batch size {} exceeds max {MAX_BULK_SIZE}", records.len()
+            "batch size {} exceeds max {MAX_BULK_SIZE}",
+            records.len()
         )));
     }
-    let objects: Vec<&serde_json::Map<String, JsonValue>> = records.iter()
+    let objects: Vec<&serde_json::Map<String, JsonValue>> = records
+        .iter()
         .map(|r| require_object(r))
         .collect::<Result<_, _>>()?;
 
     let tbl = table(&app_id, &entity);
     let types = field_type_map(&db, &app_id, &entity).await?;
     let (actor, delegator) = identity.actor_pair();
-    let created = bulk_insert(&db, &app_id, &tbl, &types, &objects, &http_context(&identity), actor, delegator, "api", enforcement::TIMEOUT_INTERACTIVE_MS).await?;
+    let created = bulk_insert(
+        &db,
+        &app_id,
+        &tbl,
+        &types,
+        &objects,
+        &http_context(&identity),
+        actor,
+        delegator,
+        "api",
+        enforcement::TIMEOUT_INTERACTIVE_MS,
+    )
+    .await?;
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -608,7 +762,10 @@ pub async fn get_record(
     let q = format!("SELECT to_jsonb(t.*) AS row FROM {tbl} t WHERE t.id = $1");
 
     let mut tx = http_tx(&pool, &app_id, &identity).await?;
-    let row = sqlx::query_as::<_, (JsonValue,)>(&q).bind(uuid).fetch_optional(&mut *tx).await?;
+    let row = sqlx::query_as::<_, (JsonValue,)>(&q)
+        .bind(uuid)
+        .fetch_optional(&mut *tx)
+        .await?;
     tx.commit().await?;
 
     row.map(|(r,)| Json(r))
@@ -629,7 +786,9 @@ pub async fn update_record(
     let types = field_type_map(&pool, &app_id, &entity).await?;
     let entries = filter_writable_fields(obj);
     let id_param = entries.len() + 1;
-    let mut sets: Vec<String> = entries.iter().enumerate()
+    let mut sets: Vec<String> = entries
+        .iter()
+        .enumerate()
         .map(|(i, (k, _))| format!("{} = ${}", quote_ident(k), i + 1))
         .collect();
     sets.push("\"updated_at\" = now()".to_string());
@@ -668,7 +827,9 @@ pub async fn delete_record(
         return Err(ApiError::NotFound(format!("record '{id}' not found")));
     }
     tx.commit().await?;
-    Ok(Json(serde_json::json!({ "message": format!("record '{id}' deleted") })))
+    Ok(Json(
+        serde_json::json!({ "message": format!("record '{id}' deleted") }),
+    ))
 }
 
 pub async fn federated_query(
@@ -679,7 +840,8 @@ pub async fn federated_query(
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = pool(&rt);
     let targets = find_entities_by_identity(&pool, &identity_kind, None)
-        .await.map_err(|e| ApiError::Internal(e.to_string()))?;
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let mut unions: Vec<String> = Vec::new();
     let mut all_binds: Vec<String> = Vec::new();
@@ -692,7 +854,9 @@ pub async fn federated_query(
 
         if let Some(ref w) = body.where_clause {
             let sql = build_where_clause(w, &types, &mut binds, &mut idx)?;
-            if sql != "TRUE" { conditions.push(sql); }
+            if sql != "TRUE" {
+                conditions.push(sql);
+            }
         }
 
         let wh = join_where(&conditions);
@@ -719,8 +883,13 @@ pub async fn federated_query(
     let limit = body.limit.min(1000).max(1);
     let offset = body.offset.max(0);
     let sort_field = body.order_by.as_deref().unwrap_or("created_at");
-    if !sort_field.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_') {
-        return Err(ApiError::BadRequest(format!("invalid sort field: '{sort_field}'")));
+    if !sort_field
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+    {
+        return Err(ApiError::BadRequest(format!(
+            "invalid sort field: '{sort_field}'"
+        )));
     }
     let order = validate_order(body.order.as_ref());
 
@@ -731,7 +900,9 @@ pub async fn federated_query(
     );
 
     let mut query = sqlx::query_as::<_, (JsonValue, i64)>(&q);
-    for s in &all_binds { query = query.bind(s.as_str()); }
+    for s in &all_binds {
+        query = query.bind(s.as_str());
+    }
 
     // Federated reads span schemas (fully qualified); RLS filters each UNION
     // branch by the caller's identity. search_path is irrelevant here.
@@ -744,22 +915,27 @@ pub async fn federated_query(
     Ok(Json(serde_json::json!({ "data": data, "total": total })))
 }
 
-pub(crate) type QA<'q> = sqlx::query::QueryAs<'q, sqlx::Postgres, (JsonValue,), sqlx::postgres::PgArguments>;
+pub(crate) type QA<'q> =
+    sqlx::query::QueryAs<'q, sqlx::Postgres, (JsonValue,), sqlx::postgres::PgArguments>;
 
 /// Bind using the manifest type (not the JSON payload) so the parameter OID
 /// is stable across sqlx's prepared-statement cache.
-pub(crate) fn bind_typed<'q>(q: QA<'q>, val: &'q JsonValue, manifest_type: Option<&String>) -> QA<'q> {
+pub(crate) fn bind_typed<'q>(
+    q: QA<'q>,
+    val: &'q JsonValue,
+    manifest_type: Option<&String>,
+) -> QA<'q> {
     let pg = manifest_type.map(|t| map_field_type(t));
 
     if val.is_null() {
         return match pg {
             Some("DOUBLE PRECISION") => q.bind(None::<f64>),
-            Some("BOOLEAN")         => q.bind(None::<bool>),
-            Some("UUID")            => q.bind(None::<Uuid>),
-            Some("DATE")            => q.bind(None::<NaiveDate>),
-            Some("TIMESTAMPTZ")     => q.bind(None::<DateTime<Utc>>),
-            Some("JSONB")           => q.bind(None::<JsonValue>),
-            Some("TEXT[]")          => q.bind(None::<Vec<String>>),
+            Some("BOOLEAN") => q.bind(None::<bool>),
+            Some("UUID") => q.bind(None::<Uuid>),
+            Some("DATE") => q.bind(None::<NaiveDate>),
+            Some("TIMESTAMPTZ") => q.bind(None::<DateTime<Utc>>),
+            Some("JSONB") => q.bind(None::<JsonValue>),
+            Some("TEXT[]") => q.bind(None::<Vec<String>>),
             Some("DOUBLE PRECISION[]") => q.bind(None::<Vec<f64>>),
             _ => q.bind(None::<String>),
         };
@@ -770,7 +946,9 @@ pub(crate) fn bind_typed<'q>(q: QA<'q>, val: &'q JsonValue, manifest_type: Optio
         Some("BOOLEAN") => q.bind(coerce_bool(val)),
         Some("UUID") => q.bind(coerce_str(val).and_then(|s| s.parse::<Uuid>().ok())),
         Some("DATE") => q.bind(coerce_str(val).and_then(|s| s.parse::<NaiveDate>().ok())),
-        Some("TIMESTAMPTZ") => q.bind(coerce_str(val).and_then(|s| s.parse::<DateTime<Utc>>().ok())),
+        Some("TIMESTAMPTZ") => {
+            q.bind(coerce_str(val).and_then(|s| s.parse::<DateTime<Utc>>().ok()))
+        }
         Some("JSONB") => q.bind(val),
         Some("TEXT[]") => q.bind(coerce_str_vec(val)),
         Some("DOUBLE PRECISION[]") => q.bind(coerce_f64_vec(val)),
@@ -785,7 +963,13 @@ fn coerce_f64(val: &JsonValue) -> f64 {
     match val {
         JsonValue::Number(n) => n.as_f64().unwrap_or(0.0),
         JsonValue::String(s) => s.parse().unwrap_or(0.0),
-        JsonValue::Bool(b) => if *b { 1.0 } else { 0.0 },
+        JsonValue::Bool(b) => {
+            if *b {
+                1.0
+            } else {
+                0.0
+            }
+        }
         _ => 0.0,
     }
 }
@@ -834,10 +1018,16 @@ mod tests {
 
     #[test]
     fn require_object_rejects_invalid() {
-        for (label, input) in
-            [("empty", json!({})), ("array", json!([1, 2])), ("string", json!("hello")), ("null", json!(null))]
-        {
-            assert!(require_object(&input).is_err(), "expected error for {label}");
+        for (label, input) in [
+            ("empty", json!({})),
+            ("array", json!([1, 2])),
+            ("string", json!("hello")),
+            ("null", json!(null)),
+        ] {
+            assert!(
+                require_object(&input).is_err(),
+                "expected error for {label}"
+            );
         }
     }
 
@@ -869,6 +1059,7 @@ mod tests {
             ("age", "number"),
             ("active", "boolean"),
             ("tags", "[text]"),
+            ("references", "json"),
             ("score", "number"),
             ("created", "timestamp"),
         ]
@@ -882,7 +1073,8 @@ mod tests {
         let types = types_fixture();
         let mut binds = Vec::new();
         let mut idx = 0;
-        let sql = build_where_clause(&json!({"status": "active"}), &types, &mut binds, &mut idx).unwrap();
+        let sql =
+            build_where_clause(&json!({"status": "active"}), &types, &mut binds, &mut idx).unwrap();
         assert_eq!(sql, "\"status\" = $1");
         assert_eq!(binds, vec!["active"]);
     }
@@ -892,7 +1084,8 @@ mod tests {
         let types = types_fixture();
         let mut binds = Vec::new();
         let mut idx = 0;
-        let sql = build_where_clause(&json!({"status": null}), &types, &mut binds, &mut idx).unwrap();
+        let sql =
+            build_where_clause(&json!({"status": null}), &types, &mut binds, &mut idx).unwrap();
         assert_eq!(sql, "\"status\" IS NULL");
         assert!(binds.is_empty());
     }
@@ -945,9 +1138,13 @@ mod tests {
         let types = types_fixture();
         let mut binds = Vec::new();
         let mut idx = 0;
-        let sql =
-            build_where_clause(&json!({"status": {"$in": []}}), &types, &mut binds, &mut idx)
-                .unwrap();
+        let sql = build_where_clause(
+            &json!({"status": {"$in": []}}),
+            &types,
+            &mut binds,
+            &mut idx,
+        )
+        .unwrap();
         assert_eq!(sql, "FALSE");
     }
 
@@ -972,9 +1169,13 @@ mod tests {
         let types = types_fixture();
         let mut binds = Vec::new();
         let mut idx = 0;
-        let sql =
-            build_where_clause(&json!({"status": {"$nin": []}}), &types, &mut binds, &mut idx)
-                .unwrap();
+        let sql = build_where_clause(
+            &json!({"status": {"$nin": []}}),
+            &types,
+            &mut binds,
+            &mut idx,
+        )
+        .unwrap();
         assert_eq!(sql, "TRUE");
     }
 
@@ -1104,6 +1305,44 @@ mod tests {
     }
 
     #[test]
+    fn where_contains_jsonb_array() {
+        let types = types_fixture();
+        let mut binds = Vec::new();
+        let mut idx = 0;
+        let needle = json!([{
+            "id": "stripe_invoice_id",
+            "type": "custom",
+            "label": "Stripe invoice ID",
+            "value": "in_123"
+        }]);
+        let sql = build_where_clause(
+            &json!({"references": {"$contains": needle}}),
+            &types,
+            &mut binds,
+            &mut idx,
+        )
+        .unwrap();
+        assert_eq!(sql, "\"references\" @> $1::jsonb");
+        assert_eq!(binds, vec![needle.to_string()]);
+    }
+
+    #[test]
+    fn where_ilike_jsonb_casts_to_text() {
+        let types = types_fixture();
+        let mut binds = Vec::new();
+        let mut idx = 0;
+        let sql = build_where_clause(
+            &json!({"references": {"$ilike": "%in_123%"}}),
+            &types,
+            &mut binds,
+            &mut idx,
+        )
+        .unwrap();
+        assert_eq!(sql, "\"references\"::text ILIKE $1");
+        assert_eq!(binds, vec!["%in_123%"]);
+    }
+
+    #[test]
     fn where_unknown_operator_rejected() {
         let types = types_fixture();
         let mut binds = Vec::new();
@@ -1141,9 +1380,18 @@ mod tests {
     #[test]
     fn where_id_field_gets_uuid_cast() {
         let cases = [
-            (json!({"id": {"$eq": "72c32d24-1ff5-491a-9091-3c579a8e6fd5"}}), "\"id\" = $1::uuid"),
-            (json!({"id": {"$in": ["aaa", "bbb"]}}), "\"id\" IN ($1::uuid, $2::uuid)"),
-            (json!({"id": "72c32d24-1ff5-491a-9091-3c579a8e6fd5"}), "\"id\" = $1::uuid"),
+            (
+                json!({"id": {"$eq": "72c32d24-1ff5-491a-9091-3c579a8e6fd5"}}),
+                "\"id\" = $1::uuid",
+            ),
+            (
+                json!({"id": {"$in": ["aaa", "bbb"]}}),
+                "\"id\" IN ($1::uuid, $2::uuid)",
+            ),
+            (
+                json!({"id": "72c32d24-1ff5-491a-9091-3c579a8e6fd5"}),
+                "\"id\" = $1::uuid",
+            ),
         ];
         for (input, expected) in &cases {
             let types = types_fixture();
@@ -1157,9 +1405,18 @@ mod tests {
     #[test]
     fn validate_sort_accepts_known_fields() {
         let types = types_fixture();
-        assert_eq!(validate_sort_field(Some(&"status".into()), &types), "\"status\"");
-        assert_eq!(validate_sort_field(Some(&"created_at".into()), &types), "\"created_at\"");
-        assert_eq!(validate_sort_field(Some(&"unknown_field".into()), &types), "\"created_at\"");
+        assert_eq!(
+            validate_sort_field(Some(&"status".into()), &types),
+            "\"status\""
+        );
+        assert_eq!(
+            validate_sort_field(Some(&"created_at".into()), &types),
+            "\"created_at\""
+        );
+        assert_eq!(
+            validate_sort_field(Some(&"unknown_field".into()), &types),
+            "\"created_at\""
+        );
         assert_eq!(validate_sort_field(None, &types), "\"created_at\"");
     }
 }
