@@ -47,6 +47,7 @@ export interface InvoiceParams {
   issueDate: string;
   dueDate: string;
   currency?: string;
+  taxCurrency?: string;
   buyerReference?: string;
   orderReference?: string;
   contractReference?: string;
@@ -57,6 +58,7 @@ export interface InvoiceParams {
   customer: InvoiceParty;
   lines: InvoiceLine[];
   taxTotal: number;
+  taxAmountInTaxCurrency?: number;
   taxableAmount: number;
   payableAmount: number;
   note?: string;
@@ -73,6 +75,7 @@ export interface CreditNoteParams {
   creditNoteNumber: string;
   issueDate: string;
   currency?: string;
+  taxCurrency?: string;
   /** Number of the invoice this credit note corrects/cancels (EN16931 BT-25). Required. */
   correctedInvoiceNumber: string;
   /** Issue date of the corrected invoice (EN16931 BT-26), YYYY-MM-DD. */
@@ -86,6 +89,7 @@ export interface CreditNoteParams {
   customer: InvoiceParty;
   lines: InvoiceLine[];
   taxTotal: number;
+  taxAmountInTaxCurrency?: number;
   taxableAmount: number;
   payableAmount: number;
   note?: string;
@@ -119,11 +123,11 @@ const resolveTaxCategory = (cat: string | undefined, pct: number) => cat || (pct
 
 interface TaxSubtotal { category: string; percent: number; taxableAmount: number; taxAmount: number; }
 
-// EN16931: BR-CO-14 (TaxTotal = sum of subtotals), BR-CO-15 (Inclusive = Exclusive + Tax).
-function computeTaxSummary(lines: InvoiceLine[], taxableAmount: number): {
+// EN16931: BR-CO-14, BR-CO-15. When the caller provides authoritative totals
+// (e.g. from a workflow using the subtraction method), those take precedence.
+function computeTaxSummary(lines: InvoiceLine[], taxableAmount: number, authoritativeTaxTotal?: number, authoritativePayable?: number): {
   taxSubtotals: TaxSubtotal[]; taxTotal: number; taxInclusiveAmount: number;
 } {
-  // Group lines by tax category + rate for the TaxSubtotal breakdown.
   const taxGroups = lines.reduce((m, l) => {
     const cat = resolveTaxCategory(l.taxCategory, l.taxPercent), pct = l.taxPercent ?? 21, key = `${cat}:${pct}`;
     const g = m.get(key) || { category: cat, percent: pct, taxableAmount: 0 };
@@ -135,13 +139,26 @@ function computeTaxSummary(lines: InvoiceLine[], taxableAmount: number): {
     ...g,
     taxAmount: Math.round(g.taxableAmount * g.percent) / 100,
   }));
-  const taxTotal = taxSubtotals.reduce((s, g) => s + g.taxAmount, 0);
-  const taxInclusiveAmount = Math.round((taxableAmount + taxTotal) * 100) / 100;
+
+  const computedTotal = taxSubtotals.reduce((s, g) => s + g.taxAmount, 0);
+  const useTaxTotal = authoritativeTaxTotal && authoritativeTaxTotal !== computedTotal;
+  const taxTotal = useTaxTotal ? authoritativeTaxTotal : computedTotal;
+  const computedInclusive = Math.round((taxableAmount + taxTotal) * 100) / 100;
+  const usePayable = authoritativePayable && authoritativePayable > taxableAmount && authoritativePayable !== computedInclusive;
+  const taxInclusiveAmount = usePayable ? authoritativePayable : computedInclusive;
+
+  if (useTaxTotal && Math.abs(authoritativeTaxTotal - computedTotal) > 0.001) {
+    const largest = taxSubtotals.reduce((max, g) => g.taxableAmount > max.taxableAmount ? g : max, taxSubtotals[0]);
+    largest.taxAmount = Math.round((largest.taxAmount + (authoritativeTaxTotal - computedTotal)) * 100) / 100;
+  }
+
   return { taxSubtotals, taxTotal, taxInclusiveAmount };
 }
 
 const noteEl = (note?: string) =>
   note ? `\n    <cbc:Note>${escapeXml(note)}</cbc:Note>` : "";
+const taxCurrencyCodeEl = (documentCurrency: string, taxCurrency?: string) =>
+  taxCurrency && taxCurrency !== documentCurrency ? `\n    <cbc:TaxCurrencyCode>${taxCurrency}</cbc:TaxCurrencyCode>` : "";
 const orderRefEl = (ref?: string) =>
   ref ? `\n    <cac:OrderReference><cbc:ID>${escapeXml(ref)}</cbc:ID></cac:OrderReference>` : "";
 const contractRefEl = (ref?: string) =>
@@ -242,6 +259,20 @@ function taxTotalEl(taxSubtotals: TaxSubtotal[], taxTotal: number, currency: str
     </cac:TaxTotal>`;
 }
 
+function taxCurrencyTotalEl(documentCurrency: string, taxCurrency: string | undefined, taxAmount: number | undefined): string {
+  if (!taxCurrency || taxCurrency === documentCurrency || taxAmount == null) return "";
+  return `
+    <cac:TaxTotal>
+        <cbc:TaxAmount currencyID="${taxCurrency}">${taxAmount.toFixed(2)}</cbc:TaxAmount>
+    </cac:TaxTotal>`;
+}
+
+function assertTaxCurrencyComplete(documentCurrency: string, taxCurrency: string | undefined, taxAmount: number | undefined): void {
+  if (taxCurrency && taxCurrency !== documentCurrency && taxAmount == null) {
+    throw new Error("taxAmountInTaxCurrency is required when taxCurrency differs from currency");
+  }
+}
+
 function legalMonetaryTotalEl(taxableAmount: number, taxInclusiveAmount: number, currency: string): string {
   return `<cac:LegalMonetaryTotal>
         <cbc:LineExtensionAmount currencyID="${currency}">${taxableAmount.toFixed(2)}</cbc:LineExtensionAmount>
@@ -275,12 +306,13 @@ function documentLinesEl(lines: InvoiceLine[], currency: string, lineTag: string
 
 export function generateInvoiceXml(params: InvoiceParams): string {
   const {
-    invoiceNumber, issueDate, dueDate, currency = "EUR",
+    invoiceNumber, issueDate, dueDate, currency = "EUR", taxCurrency,
     buyerReference = invoiceNumber, supplier, customer, lines, taxableAmount, note,
   } = params;
 
   const schemeId = supplier.peppolId.split(":")[0] || "0208";
-  const { taxSubtotals, taxTotal, taxInclusiveAmount } = computeTaxSummary(lines, taxableAmount);
+  const { taxSubtotals, taxTotal, taxInclusiveAmount } = computeTaxSummary(lines, taxableAmount, params.taxTotal, params.payableAmount);
+  assertTaxCurrencyComplete(currency, taxCurrency, params.taxAmountInTaxCurrency);
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
@@ -292,11 +324,11 @@ export function generateInvoiceXml(params: InvoiceParams): string {
     <cbc:IssueDate>${issueDate}</cbc:IssueDate>
     <cbc:DueDate>${dueDate}</cbc:DueDate>
     <cbc:InvoiceTypeCode>380</cbc:InvoiceTypeCode>${noteEl(note)}
-    <cbc:DocumentCurrencyCode>${currency}</cbc:DocumentCurrencyCode>
+    <cbc:DocumentCurrencyCode>${currency}</cbc:DocumentCurrencyCode>${taxCurrencyCodeEl(currency, taxCurrency)}
     <cbc:BuyerReference>${escapeXml(buyerReference)}</cbc:BuyerReference>${orderRefEl(params.orderReference)}${originatorRefEl(params.originatorReference)}${contractRefEl(params.contractReference)}${docRefEls(params.documentReferences)}${projectRefEl(params.projectReference)}
     ${supplierPartyEl(supplier)}
     ${customerPartyEl(customer, schemeId)}${paymentMeansEl(params.paymentInfo, invoiceNumber)}
-    ${taxTotalEl(taxSubtotals, taxTotal, currency)}
+    ${taxTotalEl(taxSubtotals, taxTotal, currency)}${taxCurrencyTotalEl(currency, taxCurrency, params.taxAmountInTaxCurrency)}
     ${legalMonetaryTotalEl(taxableAmount, taxInclusiveAmount, currency)}${documentLinesEl(lines, currency, "InvoiceLine", "InvoicedQuantity")}
 </Invoice>`;
 }
@@ -305,7 +337,7 @@ export function generateInvoiceXml(params: InvoiceParams): string {
 
 export function generateCreditNoteXml(params: CreditNoteParams): string {
   const {
-    creditNoteNumber, issueDate, currency = "EUR",
+    creditNoteNumber, issueDate, currency = "EUR", taxCurrency,
     correctedInvoiceNumber, correctedInvoiceDate,
     buyerReference = creditNoteNumber, supplier, customer, lines, taxableAmount, note,
     paymentTermsNote = "Credit note relating to the referenced invoice.",
@@ -314,7 +346,8 @@ export function generateCreditNoteXml(params: CreditNoteParams): string {
   if (!correctedInvoiceNumber) throw new Error("correctedInvoiceNumber is required for a credit note");
 
   const schemeId = supplier.peppolId.split(":")[0] || "0208";
-  const { taxSubtotals, taxTotal, taxInclusiveAmount } = computeTaxSummary(lines, taxableAmount);
+  const { taxSubtotals, taxTotal, taxInclusiveAmount } = computeTaxSummary(lines, taxableAmount, params.taxTotal, params.payableAmount);
+  assertTaxCurrencyComplete(currency, taxCurrency, params.taxAmountInTaxCurrency);
 
   const billingRefEl = `
     <cac:BillingReference>
@@ -332,14 +365,14 @@ export function generateCreditNoteXml(params: CreditNoteParams): string {
     <cbc:ID>${escapeXml(creditNoteNumber)}</cbc:ID>
     <cbc:IssueDate>${issueDate}</cbc:IssueDate>
     <cbc:CreditNoteTypeCode>381</cbc:CreditNoteTypeCode>${noteEl(note)}
-    <cbc:DocumentCurrencyCode>${currency}</cbc:DocumentCurrencyCode>
+    <cbc:DocumentCurrencyCode>${currency}</cbc:DocumentCurrencyCode>${taxCurrencyCodeEl(currency, taxCurrency)}
     <cbc:BuyerReference>${escapeXml(buyerReference)}</cbc:BuyerReference>${orderRefEl(params.orderReference)}${billingRefEl}${contractRefEl(params.contractReference)}${docRefEls(params.documentReferences)}${originatorRefEl(params.originatorReference)}
     ${supplierPartyEl(supplier)}
     ${customerPartyEl(customer, schemeId)}${paymentMeansEl(params.paymentInfo, creditNoteNumber)}
     <cac:PaymentTerms>
         <cbc:Note>${escapeXml(paymentTermsNote)}</cbc:Note>
     </cac:PaymentTerms>
-    ${taxTotalEl(taxSubtotals, taxTotal, currency)}
+    ${taxTotalEl(taxSubtotals, taxTotal, currency)}${taxCurrencyTotalEl(currency, taxCurrency, params.taxAmountInTaxCurrency)}
     ${legalMonetaryTotalEl(taxableAmount, taxInclusiveAmount, currency)}${documentLinesEl(lines, currency, "CreditNoteLine", "CreditedQuantity")}
 </CreditNote>`;
 }

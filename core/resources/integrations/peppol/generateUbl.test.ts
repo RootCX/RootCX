@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { generateInvoiceXml, generateCreditNoteXml } from "./generateUbl";
+import { parseUbl } from "./parseUbl";
 
 const baseSupplier = {
   peppolId: "0208:1034898146",
@@ -27,6 +28,18 @@ function extractAllTaxSubtotalAmounts(xml: string): number[] {
   let m;
   while ((m = re.exec(xml)) !== null) amounts.push(parseFloat(m[1]));
   return amounts;
+}
+
+function extractTaxTotals(xml: string): { currency: string; amount: string; hasSubtotals: boolean }[] {
+  const totals: { currency: string; amount: string; hasSubtotals: boolean }[] = [];
+  const re = /<cac:TaxTotal>([\s\S]*?)<\/cac:TaxTotal>/g;
+  let m;
+  while ((m = re.exec(xml)) !== null) {
+    const body = m[1];
+    const amount = body.match(/<cbc:TaxAmount currencyID="([^"]+)">([\d.]+)<\/cbc:TaxAmount>/);
+    if (amount) totals.push({ currency: amount[1], amount: amount[2], hasSubtotals: body.includes("<cac:TaxSubtotal>") });
+  }
+  return totals;
 }
 
 describe("generateInvoiceXml BR-CO-14 compliance", () => {
@@ -101,6 +114,74 @@ describe("generateInvoiceXml BR-CO-14 compliance", () => {
       expect(inclusive).toBe(Math.round((exclusive + totalVat) * 100) / 100);
     });
   }
+});
+
+describe("generateInvoiceXml accounting tax currency", () => {
+  it("emits invoice currency totals in USD and a separate VAT accounting total in EUR", () => {
+    const xml = generateInvoiceXml({
+      invoiceNumber: "INV-USD-BE-001",
+      issueDate: "2026-07-02",
+      dueDate: "2026-07-02",
+      currency: "USD",
+      taxCurrency: "EUR",
+      supplier: baseSupplier,
+      customer: baseCustomer,
+      lines: [{ id: "1", description: "RootCX Pro", quantity: 1, unitPrice: 150, taxPercent: 21, lineAmount: 150 }],
+      taxTotal: 31.5,
+      taxAmountInTaxCurrency: 29.3,
+      taxableAmount: 150,
+      payableAmount: 181.5,
+    });
+
+    expect(xml).toContain("<cbc:DocumentCurrencyCode>USD</cbc:DocumentCurrencyCode>");
+    expect(xml).toContain("<cbc:TaxCurrencyCode>EUR</cbc:TaxCurrencyCode>");
+
+    const totals = extractTaxTotals(xml);
+    expect(totals).toEqual([
+      { currency: "USD", amount: "31.50", hasSubtotals: true },
+      { currency: "EUR", amount: "29.30", hasSubtotals: false },
+    ]);
+    expect(xml).toContain('<cbc:PayableAmount currencyID="USD">181.50</cbc:PayableAmount>');
+  });
+
+  it("rejects a different tax currency when the converted VAT amount is missing", () => {
+    expect(() => generateInvoiceXml({
+      invoiceNumber: "INV-USD-BE-002",
+      issueDate: "2026-07-02",
+      dueDate: "2026-07-02",
+      currency: "USD",
+      taxCurrency: "EUR",
+      supplier: baseSupplier,
+      customer: baseCustomer,
+      lines: [{ id: "1", description: "RootCX Pro", quantity: 1, unitPrice: 150, taxPercent: 21, lineAmount: 150 }],
+      taxTotal: 31.5,
+      taxableAmount: 150,
+      payableAmount: 181.5,
+    })).toThrow(/taxAmountInTaxCurrency/);
+  });
+
+  it("generates accounting tax currency data that RootCX can parse back", () => {
+    const xml = generateInvoiceXml({
+      invoiceNumber: "INV-USD-BE-003",
+      issueDate: "2026-07-02",
+      dueDate: "2026-07-02",
+      currency: "USD",
+      taxCurrency: "EUR",
+      supplier: baseSupplier,
+      customer: baseCustomer,
+      lines: [{ id: "1", description: "RootCX Pro", quantity: 1, unitPrice: 150, taxPercent: 21, lineAmount: 150 }],
+      taxTotal: 31.5,
+      taxAmountInTaxCurrency: 29.3,
+      taxableAmount: 150,
+      payableAmount: 181.5,
+    });
+
+    const parsed = parseUbl(xml);
+    expect(parsed.currency).toBe("USD");
+    expect(parsed.taxCurrencyCode).toBe("EUR");
+    expect(parsed.taxTotal.taxAmount).toBe(31.5);
+    expect(parsed.taxCurrencyTotal).toBe(29.3);
+  });
 });
 
 describe("generateCreditNoteXml structure (Peppol BIS 3.0 CreditNote)", () => {
@@ -237,6 +318,17 @@ describe("generateCreditNoteXml structure (Peppol BIS 3.0 CreditNote)", () => {
     expect(xml).not.toContain('currencyID="EUR"');
   });
 
+  it("emits a separate EUR VAT accounting total for USD credit notes", () => {
+    const xml = build({ currency: "USD", taxCurrency: "EUR", taxAmountInTaxCurrency: 73.84 });
+
+    expect(xml).toContain("<cbc:DocumentCurrencyCode>USD</cbc:DocumentCurrencyCode>");
+    expect(xml).toContain("<cbc:TaxCurrencyCode>EUR</cbc:TaxCurrencyCode>");
+    expect(extractTaxTotals(xml)).toEqual([
+      { currency: "USD", amount: "79.40", hasSubtotals: true },
+      { currency: "EUR", amount: "73.84", hasSubtotals: false },
+    ]);
+  });
+
   it("uses custom paymentTermsNote when provided, default when not", () => {
     const custom = build({ paymentTermsNote: "Net 30 days" });
     expect(custom).toContain("<cbc:Note>Net 30 days</cbc:Note>");
@@ -259,5 +351,68 @@ describe("generateCreditNoteXml structure (Peppol BIS 3.0 CreditNote)", () => {
     expect(xml).toContain("A&lt;B &amp; C&gt;D &apos;single&apos; &quot;double&quot;");
     expect(xml).toContain("Firm &amp; Co &lt;SRL&gt;");
     expect(xml).toContain("Item &lt;&amp;&gt; &quot;test&quot;");
+  });
+});
+
+describe("authoritative totals (subtraction method)", () => {
+  it("invoice uses caller-provided taxTotal and payableAmount over line recalculation", () => {
+    // 55 USD TTC Belgian refund: net=45.45, tax by subtraction=9.55
+    // Multiplication would give 45.45*0.21=9.5445 rounded to 9.54 (WRONG)
+    const xml = generateInvoiceXml({
+      invoiceNumber: "INV-AUTH-001",
+      issueDate: "2026-05-04",
+      dueDate: "2026-05-04",
+      currency: "USD",
+      supplier: baseSupplier,
+      customer: baseCustomer,
+      lines: [{ id: "1", description: "RootCX Pro", quantity: 3, unitPrice: 20.66, taxPercent: 21, lineAmount: 61.98 },
+              { id: "2", description: "AI Credits", quantity: 1, unitPrice: 82.65, taxPercent: 21, lineAmount: 82.65 }],
+      taxTotal: 30.37,
+      taxableAmount: 144.63,
+      payableAmount: 175,
+    });
+
+    expect(xml).toContain('<cbc:TaxAmount currencyID="USD">30.37</cbc:TaxAmount>');
+    expect(xml).toContain('<cbc:TaxInclusiveAmount currencyID="USD">175.00</cbc:TaxInclusiveAmount>');
+    expect(xml).toContain('<cbc:PayableAmount currencyID="USD">175.00</cbc:PayableAmount>');
+    const subtotalAmounts = extractAllTaxSubtotalAmounts(xml);
+    expect(subtotalAmounts.reduce((s, a) => s + a, 0)).toBe(30.37);
+  });
+
+  it("credit note uses caller-provided taxTotal and payableAmount", () => {
+    const xml = generateCreditNoteXml({
+      creditNoteNumber: "CN-AUTH-001",
+      issueDate: "2026-05-14",
+      currency: "USD",
+      correctedInvoiceNumber: "INV-20260504-001",
+      supplier: baseSupplier,
+      customer: baseCustomer,
+      lines: [{ id: "1", description: "Stripe refund", quantity: 1, unitPrice: 45.45, taxPercent: 21, lineAmount: 45.45 }],
+      taxTotal: 9.55,
+      taxableAmount: 45.45,
+      payableAmount: 55,
+    });
+
+    expect(xml).toContain('<cbc:TaxAmount currencyID="USD">9.55</cbc:TaxAmount>');
+    expect(xml).toContain('<cbc:TaxInclusiveAmount currencyID="USD">55.00</cbc:TaxInclusiveAmount>');
+    expect(xml).toContain('<cbc:PayableAmount currencyID="USD">55.00</cbc:PayableAmount>');
+  });
+
+  it("falls back to computed totals when taxTotal/payableAmount are not provided", () => {
+    const xml = generateInvoiceXml({
+      invoiceNumber: "INV-NOAUTH-001",
+      issueDate: "2026-05-04",
+      dueDate: "2026-05-04",
+      supplier: baseSupplier,
+      customer: baseCustomer,
+      lines: [{ id: "1", description: "Service", quantity: 1, unitPrice: 100, taxPercent: 21, lineAmount: 100 }],
+      taxTotal: 0,
+      taxableAmount: 100,
+      payableAmount: 100,
+    });
+
+    // taxTotal=0 means "not authoritative" — generator should compute 100*21%=21
+    expect(xml).toContain('<cbc:TaxAmount currencyID="EUR">21.00</cbc:TaxAmount>');
+    expect(xml).toContain('<cbc:TaxInclusiveAmount currencyID="EUR">121.00</cbc:TaxInclusiveAmount>');
   });
 });
