@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
+use base64::Engine;
 use serde_json::Value as JsonValue;
 use tokio::process::Command;
 use tokio::sync::{Mutex as TokioMutex, broadcast, mpsc, oneshot};
@@ -16,14 +17,18 @@ use crate::RuntimeError;
 use crate::extensions::agents::approvals::{ApprovalRequest, ApprovalResponse, PendingApprovals};
 use crate::extensions::agents::supervision::{PolicyDecision, PolicyEvaluator};
 use crate::extensions::logs::{LOG_CHANNEL_CAPACITY, LogEntry, emit_log, spawn_output_reader};
-use crate::ipc::{AgentBootConfig, AgentInvokePayload, InboundMessage, IpcEvent, IpcReader, IpcWriter, OutboundMessage, PendingRpcs, RpcCaller};
+use crate::extensions::storage::backend::{PostgresBackend, StorageBackend};
+use crate::ipc::{
+    AgentBootConfig, AgentInvokePayload, InboundMessage, IpcEvent, IpcReader, IpcWriter,
+    OutboundMessage, PendingRpcs, RpcCaller,
+};
 use crate::tools::{AgentDispatcher, ToolRegistry};
 
 const MAX_CRASHES: u32 = 5;
 const CRASH_WINDOW: Duration = Duration::from_secs(60);
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
 const IPC_SEND_TIMEOUT: Duration = Duration::from_secs(5);
-use crate::governance::enforcement::{TxSession, TX_NONE, TX_MISMATCH};
+use crate::governance::enforcement::{TX_MISMATCH, TX_NONE, TxSession};
 
 fn dead() -> RuntimeError {
     RuntimeError::Worker("supervisor actor dead".into())
@@ -31,7 +36,10 @@ fn dead() -> RuntimeError {
 
 /// Resolve the active transaction for an inbound TX message: present AND its
 /// `tx_id` matches. Returns the matching session or a stable reason string.
-fn match_session<'a>(open: &'a Option<TxSession>, tx_id: &str) -> Result<&'a TxSession, &'static str> {
+fn match_session<'a>(
+    open: &'a Option<TxSession>,
+    tx_id: &str,
+) -> Result<&'a TxSession, &'static str> {
     match open {
         Some(s) if s.tx_id == tx_id => Ok(s),
         Some(_) => Err(TX_MISMATCH),
@@ -44,7 +52,9 @@ fn match_session<'a>(open: &'a Option<TxSession>, tx_id: &str) -> Result<&'a TxS
 fn rate_admit(times: &mut Vec<Instant>, max: usize) -> bool {
     let now = Instant::now();
     times.retain(|t| now.duration_since(*t) < Duration::from_secs(1));
-    if times.len() >= max { return false; }
+    if times.len() >= max {
+        return false;
+    }
     times.push(now);
     true
 }
@@ -53,9 +63,28 @@ fn rate_admit(times: &mut Vec<Instant>, max: usize) -> bool {
 /// latency never blocks other IPC. `commit=false` rolls back.
 fn finish_tx(session: TxSession, commit: bool, id: String, out: mpsc::Sender<OutboundMessage>) {
     tokio::spawn(async move {
-        let r = if commit { session.commit().await } else { session.rollback().await };
-        let _ = out.send(OutboundMessage::SqlEndResult { id, error: r.err() }).await;
+        let r = if commit {
+            session.commit().await
+        } else {
+            session.rollback().await
+        };
+        let _ = out
+            .send(OutboundMessage::SqlEndResult { id, error: r.err() })
+            .await;
     });
+}
+
+fn storage_download_error(id: String, error: impl Into<String>) -> OutboundMessage {
+    OutboundMessage::StorageDownloadResult {
+        id,
+        file_id: None,
+        app_id: None,
+        name: None,
+        content_type: None,
+        size: None,
+        content_base64: None,
+        error: Some(error.into()),
+    }
 }
 
 /// Fleet-wide event envelope for SSE fan-out.
@@ -71,14 +100,41 @@ pub struct FleetEvent {
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "_event", rename_all = "snake_case")]
 pub enum AgentEvent {
-    Chunk { delta: String },
-    Done { response: String, tokens: Option<u64> },
-    Error { error: String },
-    ToolCallStarted { call_id: String, tool_name: String, input: JsonValue },
-    ToolCallCompleted { call_id: String, tool_name: String, output: Option<JsonValue>, error: Option<String>, duration_ms: u64 },
-    ApprovalRequired { approval_id: String, tool_name: String, args: JsonValue, reason: String },
-    SessionCompacted { summary: String },
-    SubAgentChunk { app_id: String, delta: String },
+    Chunk {
+        delta: String,
+    },
+    Done {
+        response: String,
+        tokens: Option<u64>,
+    },
+    Error {
+        error: String,
+    },
+    ToolCallStarted {
+        call_id: String,
+        tool_name: String,
+        input: JsonValue,
+    },
+    ToolCallCompleted {
+        call_id: String,
+        tool_name: String,
+        output: Option<JsonValue>,
+        error: Option<String>,
+        duration_ms: u64,
+    },
+    ApprovalRequired {
+        approval_id: String,
+        tool_name: String,
+        args: JsonValue,
+        reason: String,
+    },
+    SessionCompacted {
+        summary: String,
+    },
+    SubAgentChunk {
+        app_id: String,
+        delta: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -177,12 +233,29 @@ impl SupervisorHandle {
         caller: Option<RpcCaller>,
     ) -> Result<JsonValue, RuntimeError> {
         let (reply, rx) = oneshot::channel();
-        self.send(SupervisorCommand::Rpc { id, method, params, caller, reply }).await?;
+        self.send(SupervisorCommand::Rpc {
+            id,
+            method,
+            params,
+            caller,
+            reply,
+        })
+        .await?;
         rx.await.map_err(|_| dead())?.map_err(RuntimeError::Worker)
     }
 
-    pub async fn dispatch_job(&self, id: String, payload: JsonValue, caller: Option<RpcCaller>) -> Result<(), RuntimeError> {
-        self.send(SupervisorCommand::Job { id, payload, caller }).await
+    pub async fn dispatch_job(
+        &self,
+        id: String,
+        payload: JsonValue,
+        caller: Option<RpcCaller>,
+    ) -> Result<(), RuntimeError> {
+        self.send(SupervisorCommand::Job {
+            id,
+            payload,
+            caller,
+        })
+        .await
     }
 
     pub async fn status(&self) -> Result<WorkerStatus, RuntimeError> {
@@ -196,7 +269,8 @@ impl SupervisorHandle {
         payload: AgentInvokePayload,
     ) -> Result<mpsc::Receiver<AgentEvent>, RuntimeError> {
         let (stream_tx, stream_rx) = mpsc::channel(64);
-        self.send(SupervisorCommand::AgentInvoke { payload, stream_tx }).await?;
+        self.send(SupervisorCommand::AgentInvoke { payload, stream_tx })
+            .await?;
         Ok(stream_rx)
     }
 
@@ -737,6 +811,61 @@ async fn supervisor_loop(
                             let tx = outbound_tx.clone();
                             let _ = tx.send(OutboundMessage::StorageUploadUrl { id, url }).await;
                         }
+                        InboundMessage::StorageDownload { id, app_id: storage_app_id, file_id } => {
+                            let pool = config.pool.clone();
+                            let tx = outbound_tx.clone();
+                            tokio::spawn(async move {
+                                let msg = match file_id.parse() {
+                                    Ok(uuid) => match PostgresBackend.get(&pool, uuid, &storage_app_id).await {
+                                        Ok(obj) => {
+                                            let content_base64 =
+                                                base64::engine::general_purpose::STANDARD.encode(&obj.content);
+                                            OutboundMessage::StorageDownloadResult {
+                                                id,
+                                                file_id: Some(file_id),
+                                                app_id: Some(storage_app_id),
+                                                name: Some(obj.name),
+                                                content_type: Some(obj.content_type),
+                                                size: Some(obj.size),
+                                                content_base64: Some(content_base64),
+                                                error: None,
+                                            }
+                                        }
+                                        Err(e) => storage_download_error(id, e.to_string()),
+                                    },
+                                    Err(e) => storage_download_error(id, format!("invalid file id: {e}")),
+                                };
+                                let _ = tx.send(msg).await;
+                            });
+                        }
+                        InboundMessage::JobEnqueue { id, payload } => {
+                            let pool = config.pool.clone();
+                            let app_id = config.app_id.clone();
+                            let user_id = config.identity.user_id;
+                            let tx = outbound_tx.clone();
+                            tokio::spawn(async move {
+                                let msg = match user_id {
+                                    Some(uid) => match crate::jobs::enqueue(&pool, &app_id, payload, Some(uid)).await {
+                                        Ok(msg_id) => OutboundMessage::JobEnqueueResult {
+                                            id,
+                                            msg_id: Some(msg_id),
+                                            error: None,
+                                        },
+                                        Err(e) => OutboundMessage::JobEnqueueResult {
+                                            id,
+                                            msg_id: None,
+                                            error: Some(e.to_string()),
+                                        },
+                                    },
+                                    None => OutboundMessage::JobEnqueueResult {
+                                        id,
+                                        msg_id: None,
+                                        error: Some("enqueueJob requires an authenticated user".into()),
+                                    },
+                                };
+                                let _ = tx.send(msg).await;
+                            });
+                        }
                     },
                     Some(IpcEvent::Output(line)) => {
                         emit_log(&log_tx, "stdout", &line);
@@ -874,7 +1003,15 @@ pub(crate) fn sandbox_env(
 
 async fn spawn_worker(
     config: &WorkerConfig,
-) -> Result<(AsyncGroupChild, IpcWriter, IpcReader, tokio::process::ChildStderr), RuntimeError> {
+) -> Result<
+    (
+        AsyncGroupChild,
+        IpcWriter,
+        IpcReader,
+        tokio::process::ChildStderr,
+    ),
+    RuntimeError,
+> {
     let bin = &config.js_runtime;
     info!(app_id = %config.app_id, bin = %bin.display(), entry = %config.entry_point.display(), "spawning worker");
 
@@ -884,13 +1021,18 @@ async fn spawn_worker(
     // ROOTCX_JWT_SECRET / etc — the sandbox's central claim, asserted executably
     // by the governance contract suite (Category 4).
     cmd.env_clear()
-        .arg("--preload").arg(&config.prelude_path)
+        .arg("--preload")
+        .arg(&config.prelude_path)
         .arg(&config.entry_point)
         .current_dir(&config.working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .envs(sandbox_env(&config.app_id, &config.runtime_url, &config.credentials));
+        .envs(sandbox_env(
+            &config.app_id,
+            &config.runtime_url,
+            &config.credentials,
+        ));
 
     // Phase 0d: drop to the dedicated worker UID on Unix so the worker cannot
     // read /proc/<core>/environ. Best-effort: only when the core runs as root
@@ -898,11 +1040,25 @@ async fn spawn_worker(
     #[cfg(unix)]
     apply_worker_uid(&mut cmd);
 
-    let mut child = cmd.group_spawn().map_err(|e| RuntimeError::Worker(format!("spawn failed: {e}")))?;
+    let mut child = cmd
+        .group_spawn()
+        .map_err(|e| RuntimeError::Worker(format!("spawn failed: {e}")))?;
 
-    let stdin = child.inner().stdin.take().ok_or_else(|| RuntimeError::Worker("no stdin".into()))?;
-    let stdout = child.inner().stdout.take().ok_or_else(|| RuntimeError::Worker("no stdout".into()))?;
-    let stderr = child.inner().stderr.take().ok_or_else(|| RuntimeError::Worker("no stderr".into()))?;
+    let stdin = child
+        .inner()
+        .stdin
+        .take()
+        .ok_or_else(|| RuntimeError::Worker("no stdin".into()))?;
+    let stdout = child
+        .inner()
+        .stdout
+        .take()
+        .ok_or_else(|| RuntimeError::Worker("no stdout".into()))?;
+    let stderr = child
+        .inner()
+        .stderr
+        .take()
+        .ok_or_else(|| RuntimeError::Worker("no stderr".into()))?;
 
     // Hand the worker its own stored manifest so it can read its declared schema
     // (e.g. enum vocabulary) at runtime — best-effort: a missing manifest just
@@ -913,14 +1069,16 @@ async fn spawn_worker(
         .flatten();
 
     let mut writer = IpcWriter::new(stdin);
-    writer.send(&OutboundMessage::Discover {
-        app_id: config.app_id.clone(),
-        runtime_url: config.runtime_url.clone(),
-        credentials: config.credentials.clone(),
-        agent_config: config.agent_boot_config.clone(),
-        run_onstart: config.run_onstart,
-        manifest,
-    }).await?;
+    writer
+        .send(&OutboundMessage::Discover {
+            app_id: config.app_id.clone(),
+            runtime_url: config.runtime_url.clone(),
+            credentials: config.credentials.clone(),
+            agent_config: config.agent_boot_config.clone(),
+            run_onstart: config.run_onstart,
+            manifest,
+        })
+        .await?;
 
     Ok((child, writer, IpcReader::new(stdout), stderr))
 }
@@ -965,18 +1123,35 @@ async fn collection_op(
 
     // Metadata always via the superuser pool (the RLS executor role cannot read
     // rootcx_system).
-    let types = field_type_map(pool, app_id, entity).await.map_err(|e| e.to_string())?;
+    let types = field_type_map(pool, app_id, entity)
+        .await
+        .map_err(|e| e.to_string())?;
 
     match state {
         // RLS-governed path: a real sqlx transaction. It rolls back on drop, and
         // a failed COMMIT surfaces as an error instead of silently dropping the
         // write or leaking an open transaction back to the pool.
         Some(st) => {
-            let mut tx = crate::governance::enforcement::begin_app_tx(pool, app_id, &st, st.user_id, None, "collection", crate::governance::enforcement::TIMEOUT_INTERACTIVE_MS)
-                .await.map_err(|e| e.to_string())?;
+            let mut tx = crate::governance::enforcement::begin_app_tx(
+                pool,
+                app_id,
+                &st,
+                st.user_id,
+                None,
+                "collection",
+                crate::governance::enforcement::TIMEOUT_INTERACTIVE_MS,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
             match collection_exec(&mut tx, &types, app_id, op, entity, data).await {
-                Ok(v) => { tx.commit().await.map_err(|e| e.to_string())?; Ok(v) }
-                Err(e) => { let _ = tx.rollback().await; Err(e) }
+                Ok(v) => {
+                    tx.commit().await.map_err(|e| e.to_string())?;
+                    Ok(v)
+                }
+                Err(e) => {
+                    let _ = tx.rollback().await;
+                    Err(e)
+                }
             }
         }
         // onStart self-schema access (no user context): owner pool, BYPASSRLS.
@@ -1004,11 +1179,19 @@ async fn collection_exec(
 
     // Read ops use `data` as a where-equality map ({col: value}). Empty {} = full scan.
     if op == "find" || op == "findOne" || op == "list" {
-        let obj = data.as_object().ok_or("data must be a JSON object (where clause)")?;
-        let conds: Vec<String> = obj.keys().enumerate()
+        let obj = data
+            .as_object()
+            .ok_or("data must be a JSON object (where clause)")?;
+        let conds: Vec<String> = obj
+            .keys()
+            .enumerate()
             .map(|(i, k)| format!("{} = ${}", quote_ident(k), i + 1))
             .collect();
-        let where_clause = if conds.is_empty() { String::new() } else { format!(" WHERE {}", conds.join(" AND ")) };
+        let where_clause = if conds.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", conds.join(" AND "))
+        };
 
         if op == "findOne" {
             let sql = format!("SELECT to_jsonb({tbl}.*) AS row FROM {tbl}{where_clause} LIMIT 1");
@@ -1016,7 +1199,11 @@ async fn collection_exec(
             for (k, v) in obj.iter() {
                 query = bind_typed(query, v, types.get(k.as_str()));
             }
-            return match query.fetch_optional(&mut *conn).await.map_err(|e| e.to_string())? {
+            return match query
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(|e| e.to_string())?
+            {
                 Some((row,)) => Ok(row),
                 None => Ok(JsonValue::Null),
             };
@@ -1027,7 +1214,10 @@ async fn collection_exec(
         for (k, v) in obj.iter() {
             query = bind_typed(query, v, types.get(k.as_str()));
         }
-        let rows: Vec<(JsonValue,)> = query.fetch_all(&mut *conn).await.map_err(|e| e.to_string())?;
+        let rows: Vec<(JsonValue,)> = query
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(|e| e.to_string())?;
         return Ok(JsonValue::Array(rows.into_iter().map(|(r,)| r).collect()));
     }
 
@@ -1037,33 +1227,58 @@ async fn collection_exec(
         "insert" => {
             let cols: Vec<_> = obj.keys().map(|k| quote_ident(k)).collect();
             let phs: Vec<_> = (1..=cols.len()).map(|i| format!("${i}")).collect();
-            format!("INSERT INTO {tbl} ({}) VALUES ({}) RETURNING to_jsonb({tbl}.*) AS row", cols.join(","), phs.join(","))
+            format!(
+                "INSERT INTO {tbl} ({}) VALUES ({}) RETURNING to_jsonb({tbl}.*) AS row",
+                cols.join(","),
+                phs.join(",")
+            )
         }
         "update" => {
-            let sets: Vec<_> = obj.keys().filter(|k| *k != "id").enumerate()
+            let sets: Vec<_> = obj
+                .keys()
+                .filter(|k| *k != "id")
+                .enumerate()
                 .map(|(i, k)| format!("{} = ${}", quote_ident(k), i + 1))
                 .collect();
-            if sets.is_empty() { return Err("no fields to update".into()); }
-            format!("UPDATE {tbl} SET {} WHERE id = ${} RETURNING to_jsonb({tbl}.*) AS row", sets.join(","), sets.len() + 1)
+            if sets.is_empty() {
+                return Err("no fields to update".into());
+            }
+            format!(
+                "UPDATE {tbl} SET {} WHERE id = ${} RETURNING to_jsonb({tbl}.*) AS row",
+                sets.join(","),
+                sets.len() + 1
+            )
         }
         _ => return Err(format!("unsupported op: {op}")),
     };
 
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&sql);
     for (k, v) in obj.iter() {
-        if op == "update" && k == "id" { continue; }
+        if op == "update" && k == "id" {
+            continue;
+        }
         query = bind_typed(query, v, types.get(k.as_str()));
     }
     if op == "update" {
-        let id = obj.get("id").and_then(|v| v.as_str()).ok_or("id required for update")?;
+        let id = obj
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("id required for update")?;
         query = query.bind(id);
     }
-    let (row,) = query.fetch_one(&mut *conn).await.map_err(|e| e.to_string())?;
+    let (row,) = query
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(row)
 }
 
 fn backoff_delay(restart_count: u32) -> Duration {
-    if restart_count <= 1 { Duration::ZERO } else { BACKOFF_BASE * 2u32.saturating_pow(restart_count - 2) }
+    if restart_count <= 1 {
+        Duration::ZERO
+    } else {
+        BACKOFF_BASE * 2u32.saturating_pow(restart_count - 2)
+    }
 }
 
 #[doc(hidden)]
@@ -1086,7 +1301,11 @@ mod tests {
     #[test]
     fn backoff_delays() {
         for (count, secs) in [(0, 0), (1, 0), (2, 2), (3, 4), (4, 8)] {
-            assert_eq!(backoff_delay(count), Duration::from_secs(secs), "backoff_delay({count})");
+            assert_eq!(
+                backoff_delay(count),
+                Duration::from_secs(secs),
+                "backoff_delay({count})"
+            );
         }
         let _ = backoff_delay(34); // saturates without panic
     }
@@ -1097,9 +1316,15 @@ mod tests {
         // boundary is the off-by-one that a refactor could flip.
         let mut times = Vec::new();
         for i in 0..3 {
-            assert!(rate_admit(&mut times, 3), "call {i} within budget must admit");
+            assert!(
+                rate_admit(&mut times, 3),
+                "call {i} within budget must admit"
+            );
         }
-        assert!(!rate_admit(&mut times, 3), "4th call in window must be rejected");
+        assert!(
+            !rate_admit(&mut times, 3),
+            "4th call in window must be rejected"
+        );
     }
 
     #[test]
@@ -1108,7 +1333,10 @@ mod tests {
         // full-but-stale buffer admits again. Catches a missing/!inverted retain.
         let stale = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
         let mut times = vec![stale; 5];
-        assert!(rate_admit(&mut times, 3), "stale entries must be trimmed, then admit");
+        assert!(
+            rate_admit(&mut times, 3),
+            "stale entries must be trimmed, then admit"
+        );
         assert_eq!(times.len(), 1, "only the fresh push remains");
     }
 

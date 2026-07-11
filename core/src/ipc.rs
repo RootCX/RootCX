@@ -129,6 +129,30 @@ pub enum OutboundMessage {
         id: String,
         url: String,
     },
+    StorageDownloadResult {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        app_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content_type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        size: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        content_base64: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    JobEnqueueResult {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        msg_id: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     SqlQueryResult {
         id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -320,6 +344,16 @@ pub enum InboundMessage {
         #[serde(default)]
         size: usize,
     },
+    StorageDownload {
+        id: String,
+        app_id: String,
+        file_id: String,
+    },
+    JobEnqueue {
+        id: String,
+        #[serde(default)]
+        payload: JsonValue,
+    },
 }
 
 fn default_content_type() -> String {
@@ -348,7 +382,10 @@ impl IpcWriter {
     pub async fn send(&mut self, msg: &OutboundMessage) -> Result<(), RuntimeError> {
         let mut line = serde_json::to_string(msg).map_err(ipc_err)?;
         line.push('\n');
-        self.stdin.write_all(line.as_bytes()).await.map_err(ipc_err)?;
+        self.stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(ipc_err)?;
         self.stdin.flush().await.map_err(ipc_err)
     }
 }
@@ -410,19 +447,80 @@ mod tests {
     #[test]
     fn outbound_messages_carry_type_tag() {
         let cases: Vec<(OutboundMessage, &str)> = vec![
-            (OutboundMessage::Discover { app_id: "a".into(), runtime_url: "r".into(), credentials: HashMap::new(), agent_config: None, run_onstart: true, manifest: None }, "discover"),
-            (OutboundMessage::Rpc { id: "r1".into(), method: "echo".into(), params: json!({}), caller: None }, "rpc"),
-            (OutboundMessage::Job { id: "j1".into(), payload: json!({}), caller: None }, "job"),
-            (OutboundMessage::CollectionOpResult { id: "c1".into(), result: Some(json!({})), error: None }, "collection_op_result"),
+            (
+                OutboundMessage::Discover {
+                    app_id: "a".into(),
+                    runtime_url: "r".into(),
+                    credentials: HashMap::new(),
+                    agent_config: None,
+                    run_onstart: true,
+                    manifest: None,
+                },
+                "discover",
+            ),
+            (
+                OutboundMessage::Rpc {
+                    id: "r1".into(),
+                    method: "echo".into(),
+                    params: json!({}),
+                    caller: None,
+                },
+                "rpc",
+            ),
+            (
+                OutboundMessage::Job {
+                    id: "j1".into(),
+                    payload: json!({}),
+                    caller: None,
+                },
+                "job",
+            ),
+            (
+                OutboundMessage::CollectionOpResult {
+                    id: "c1".into(),
+                    result: Some(json!({})),
+                    error: None,
+                },
+                "collection_op_result",
+            ),
+            (
+                OutboundMessage::StorageDownloadResult {
+                    id: "d1".into(),
+                    file_id: Some("11111111-1111-1111-1111-111111111111".into()),
+                    app_id: Some("peppol".into()),
+                    name: Some("invoice.xml".into()),
+                    content_type: Some("application/xml".into()),
+                    size: Some(5),
+                    content_base64: Some("aGVsbG8=".into()),
+                    error: None,
+                },
+                "storage_download_result",
+            ),
+            (
+                OutboundMessage::JobEnqueueResult {
+                    id: "q1".into(),
+                    msg_id: Some(42),
+                    error: None,
+                },
+                "job_enqueue_result",
+            ),
             (OutboundMessage::Shutdown, "shutdown"),
-            (OutboundMessage::AgentToolResult {
-                invoke_id: "i1".into(), call_id: "c1".into(),
-                result: Some(json!({"data": []})), error: None,
-            }, "agent_tool_result"),
+            (
+                OutboundMessage::AgentToolResult {
+                    invoke_id: "i1".into(),
+                    call_id: "c1".into(),
+                    result: Some(json!({"data": []})),
+                    error: None,
+                },
+                "agent_tool_result",
+            ),
         ];
         for (msg, expected_type) in cases {
             let v: JsonValue = serde_json::to_value(&msg).unwrap();
-            assert_eq!(v["type"], expected_type, "wrong type tag for {expected_type}");
+            assert_eq!(
+                v["type"], expected_type,
+                "wrong type tag for {expected_type}"
+            );
         }
     }
 
@@ -431,7 +529,9 @@ mod tests {
         // Legacy apps (pre-`serve()`) omit `protocol` entirely. They must
         // still parse cleanly and fall through to protocol v1.
         let msg: InboundMessage = serde_json::from_str(r#"{"type":"discover"}"#).unwrap();
-        let InboundMessage::Discover { protocol } = msg else { panic!("expected Discover") };
+        let InboundMessage::Discover { protocol } = msg else {
+            panic!("expected Discover")
+        };
         assert_eq!(protocol, 1);
     }
 
@@ -440,7 +540,9 @@ mod tests {
         // Workers MAY send `methods` (ignored today) alongside `protocol`.
         let raw = r#"{"type":"discover","protocol":2,"methods":["ping"]}"#;
         let msg: InboundMessage = serde_json::from_str(raw).unwrap();
-        let InboundMessage::Discover { protocol } = msg else { panic!("expected Discover") };
+        let InboundMessage::Discover { protocol } = msg else {
+            panic!("expected Discover")
+        };
         assert_eq!(protocol, 2);
     }
 
@@ -451,14 +553,19 @@ mod tests {
         // it can speak to that worker. This keeps forward-compat cheap.
         let raw = r#"{"type":"discover","protocol":99}"#;
         let msg: InboundMessage = serde_json::from_str(raw).unwrap();
-        let InboundMessage::Discover { protocol } = msg else { panic!("expected Discover") };
+        let InboundMessage::Discover { protocol } = msg else {
+            panic!("expected Discover")
+        };
         assert_eq!(protocol, 99);
     }
 
     #[test]
     fn inbound_rpc_response_success() {
-        let msg: InboundMessage = serde_json::from_str(r#"{"type":"rpc_response","id":"1","result":42}"#).unwrap();
-        let InboundMessage::RpcResponse { id, result, error } = msg else { panic!("expected RpcResponse") };
+        let msg: InboundMessage =
+            serde_json::from_str(r#"{"type":"rpc_response","id":"1","result":42}"#).unwrap();
+        let InboundMessage::RpcResponse { id, result, error } = msg else {
+            panic!("expected RpcResponse")
+        };
         assert_eq!(id, "1");
         assert_eq!(result, Some(json!(42)));
         assert_eq!(error, None);
@@ -467,38 +574,52 @@ mod tests {
     #[test]
     fn inbound_rpc_response_error() {
         let msg: InboundMessage =
-            serde_json::from_str(r#"{"type":"rpc_response","id":"1","error":"not found"}"#).unwrap();
-        let InboundMessage::RpcResponse { error, .. } = msg else { panic!("expected RpcResponse") };
+            serde_json::from_str(r#"{"type":"rpc_response","id":"1","error":"not found"}"#)
+                .unwrap();
+        let InboundMessage::RpcResponse { error, .. } = msg else {
+            panic!("expected RpcResponse")
+        };
         assert_eq!(error, Some("not found".into()));
     }
 
     #[test]
     fn inbound_job_result_success() {
-        let msg: InboundMessage = serde_json::from_str(r#"{"type":"job_result","id":"j1"}"#).unwrap();
-        let InboundMessage::JobResult { id, error } = msg else { panic!("expected JobResult") };
+        let msg: InboundMessage =
+            serde_json::from_str(r#"{"type":"job_result","id":"j1"}"#).unwrap();
+        let InboundMessage::JobResult { id, error } = msg else {
+            panic!("expected JobResult")
+        };
         assert_eq!(id, "j1");
         assert_eq!(error, None);
     }
 
     #[test]
     fn inbound_job_result_error() {
-        let msg: InboundMessage = serde_json::from_str(r#"{"type":"job_result","id":"j1","error":"timeout"}"#).unwrap();
-        let InboundMessage::JobResult { error, .. } = msg else { panic!("expected JobResult") };
+        let msg: InboundMessage =
+            serde_json::from_str(r#"{"type":"job_result","id":"j1","error":"timeout"}"#).unwrap();
+        let InboundMessage::JobResult { error, .. } = msg else {
+            panic!("expected JobResult")
+        };
         assert_eq!(error, Some("timeout".into()));
     }
 
     #[test]
     fn inbound_log_default_level() {
         let msg: InboundMessage = serde_json::from_str(r#"{"type":"log","message":"hi"}"#).unwrap();
-        let InboundMessage::Log { level, message } = msg else { panic!("expected Log") };
+        let InboundMessage::Log { level, message } = msg else {
+            panic!("expected Log")
+        };
         assert_eq!(level, "info");
         assert_eq!(message, "hi");
     }
 
     #[test]
     fn inbound_log_explicit_level() {
-        let msg: InboundMessage = serde_json::from_str(r#"{"type":"log","level":"error","message":"hi"}"#).unwrap();
-        let InboundMessage::Log { level, message } = msg else { panic!("expected Log") };
+        let msg: InboundMessage =
+            serde_json::from_str(r#"{"type":"log","level":"error","message":"hi"}"#).unwrap();
+        let InboundMessage::Log { level, message } = msg else {
+            panic!("expected Log")
+        };
         assert_eq!(level, "error");
         assert_eq!(message, "hi");
     }
@@ -514,7 +635,15 @@ mod tests {
         let msg: InboundMessage = serde_json::from_str(
             r#"{"type":"agent_tool_call","invoke_id":"i1","call_id":"c1","tool_name":"query_data","args":{"entity":"Users"}}"#
         ).unwrap();
-        let InboundMessage::AgentToolCall { invoke_id, call_id, tool_name, args } = msg else { panic!("expected AgentToolCall") };
+        let InboundMessage::AgentToolCall {
+            invoke_id,
+            call_id,
+            tool_name,
+            args,
+        } = msg
+        else {
+            panic!("expected AgentToolCall")
+        };
         assert_eq!(invoke_id, "i1");
         assert_eq!(call_id, "c1");
         assert_eq!(tool_name, "query_data");
@@ -526,7 +655,9 @@ mod tests {
         let msg: InboundMessage = serde_json::from_str(
             r#"{"type":"agent_session_compacted","invoke_id":"i1","summary":"conversation about users"}"#
         ).unwrap();
-        let InboundMessage::AgentSessionCompacted { invoke_id, summary } = msg else { panic!("expected AgentSessionCompacted") };
+        let InboundMessage::AgentSessionCompacted { invoke_id, summary } = msg else {
+            panic!("expected AgentSessionCompacted")
+        };
         assert_eq!(invoke_id, "i1");
         assert_eq!(summary, "conversation about users");
     }
@@ -536,11 +667,52 @@ mod tests {
         let msg: InboundMessage = serde_json::from_str(
             r#"{"type":"collection_op","id":"c1","op":"insert","entity":"docs","data":{"title":"test"}}"#
         ).unwrap();
-        let InboundMessage::CollectionOp { id, op, entity, data, .. } = msg else { panic!("expected CollectionOp") };
+        let InboundMessage::CollectionOp {
+            id,
+            op,
+            entity,
+            data,
+            ..
+        } = msg
+        else {
+            panic!("expected CollectionOp")
+        };
         assert_eq!(id, "c1");
         assert_eq!(op, "insert");
         assert_eq!(entity, "docs");
         assert_eq!(data, json!({"title": "test"}));
+    }
+
+    #[test]
+    fn inbound_storage_download() {
+        let msg: InboundMessage = serde_json::from_str(
+            r#"{"type":"storage_download","id":"d1","app_id":"peppol","file_id":"11111111-1111-1111-1111-111111111111"}"#,
+        )
+        .unwrap();
+        let InboundMessage::StorageDownload {
+            id,
+            app_id,
+            file_id,
+        } = msg
+        else {
+            panic!("expected StorageDownload")
+        };
+        assert_eq!(id, "d1");
+        assert_eq!(app_id, "peppol");
+        assert_eq!(file_id, "11111111-1111-1111-1111-111111111111");
+    }
+
+    #[test]
+    fn inbound_job_enqueue() {
+        let msg: InboundMessage = serde_json::from_str(
+            r#"{"type":"job_enqueue","id":"q1","payload":{"type":"export"}}"#,
+        )
+        .unwrap();
+        let InboundMessage::JobEnqueue { id, payload } = msg else {
+            panic!("expected JobEnqueue")
+        };
+        assert_eq!(id, "q1");
+        assert_eq!(payload, json!({"type": "export"}));
     }
 
     #[test]
