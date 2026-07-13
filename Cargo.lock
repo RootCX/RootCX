@@ -6082,7 +6082,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-browser"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "chromiumoxide",
  "futures",
@@ -6096,7 +6096,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-cli"
-version = "0.17.0"
+version = "0.17.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -6128,7 +6128,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-client"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "reqwest 0.12.28",
  "rootcx-types",
@@ -6143,7 +6143,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-core"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -6186,7 +6186,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-forge"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -6212,7 +6212,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-platform"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "flate2",
  "libc",
@@ -6224,7 +6224,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-scaffold"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -6233,7 +6233,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-studio"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "fix-path-env",
  "flate2",
@@ -6267,7 +6267,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-types"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "serde",
  "serde_json",

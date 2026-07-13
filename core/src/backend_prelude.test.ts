@@ -303,7 +303,7 @@ describe("v2: serve()", () => {
       name: "invoice.xml",
       content_type: "application/xml",
       size: 5,
-      content_base64: "aGVsbG8=",
+      url: "data:application/octet-stream;base64,aGVsbG8=",
     });
 
     const msg = await w.readLine();
@@ -349,6 +349,36 @@ describe("v2: serve()", () => {
       id: "r1",
       result: { msgId: 42 },
     });
+    await w.close();
+  });
+
+  test("jobs execute serially within one worker", async () => {
+    const w = spawnWorker(`
+      let active = 0;
+      serve({
+        onJob: async (payload: any) => {
+          active++;
+          log.info(\`start:\${payload.n}:active:\${active}\`);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          active--;
+          return { n: payload.n };
+        },
+      });
+    `);
+    w.send(DISCOVER);
+    await w.readLine();
+
+    w.send({ type: "job", id: "1", payload: { n: 1 } });
+    w.send({ type: "job", id: "2", payload: { n: 2 } });
+
+    const messages = [];
+    while (messages.filter((m) => m.type === "job_result").length < 2) {
+      messages.push(await w.readLine(1000));
+    }
+    const starts = messages
+      .filter((m) => m.type === "log" && m.message.startsWith("start:"))
+      .map((m) => m.message);
+    expect(starts).toEqual(["start:1:active:1", "start:2:active:1"]);
     await w.close();
   });
 

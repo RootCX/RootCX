@@ -134,6 +134,7 @@ let _ctx = null;
 let _boot = null;
 let _handlers = null;
 let _started = false;
+let _jobChain = Promise.resolve();
 
 let _uploadSeq = 0;
 const _pendingUploads = new Map();
@@ -154,7 +155,10 @@ function _uploadFile(content, filename, contentType) {
   if (!_ctx) return Promise.reject(new Error("uploadFile: worker not started yet"));
   const id = `upl_${++_uploadSeq}`;
   const data = typeof content === "string" ? new TextEncoder().encode(content) : content;
-  const size = data.byteLength ?? data.length;
+  const size = data.byteLength ?? data.length ?? data.size;
+  if (!Number.isFinite(size)) {
+    return Promise.reject(new Error("uploadFile: content size is required"));
+  }
   log.info(`[storage] upload start: ${filename} (${size} bytes)`);
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -326,17 +330,19 @@ function _dispatch(msg) {
         p.reject(new Error(msg.error));
         return;
       }
-      const binary = atob(msg.content_base64 || "");
-      const content = Uint8Array.from(binary, (c) => c.charCodeAt(0));
-      p.resolve({
-        fileId: msg.file_id,
-        appId: msg.app_id,
-        name: msg.name,
-        contentType: msg.content_type,
-        size: msg.size,
-        contentBase64: msg.content_base64,
-        content,
-      });
+      fetch(msg.url)
+        .then(async (res) => {
+          if (!res.ok) throw new Error(`download failed: ${res.status} ${await res.text()}`);
+          p.resolve({
+            fileId: msg.file_id,
+            appId: msg.app_id,
+            name: msg.name,
+            contentType: msg.content_type,
+            size: msg.size,
+            content: new Uint8Array(await res.arrayBuffer()),
+          });
+        })
+        .catch((e) => p.reject(e));
       return;
     }
 
@@ -428,10 +434,12 @@ function _dispatch(msg) {
         _transport.send({ type: "job_result", id: msg.id, result: { ok: true } });
         return;
       }
-      _resolve(fn, [msg.payload, msg.caller ?? null, _makeCtx()],
-        (r) => _transport.send({ type: "job_result", id: msg.id, result: r ?? { ok: true } }),
-        (e) => _transport.send({ type: "job_result", id: msg.id, error: _err(e) }),
-      );
+      _jobChain = _jobChain.then(() => new Promise((done) => {
+        _resolve(fn, [msg.payload, msg.caller ?? null, _makeCtx()],
+          (r) => { _transport.send({ type: "job_result", id: msg.id, result: r ?? { ok: true } }); done(); },
+          (e) => { _transport.send({ type: "job_result", id: msg.id, error: _err(e) }); done(); },
+        );
+      }));
       return;
     }
 

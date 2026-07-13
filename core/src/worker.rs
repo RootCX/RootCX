@@ -5,10 +5,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
-use base64::Engine;
 use serde_json::Value as JsonValue;
 use tokio::process::Command;
 use tokio::sync::{Mutex as TokioMutex, broadcast, mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use sqlx::PgPool;
@@ -17,7 +17,6 @@ use crate::RuntimeError;
 use crate::extensions::agents::approvals::{ApprovalRequest, ApprovalResponse, PendingApprovals};
 use crate::extensions::agents::supervision::{PolicyDecision, PolicyEvaluator};
 use crate::extensions::logs::{LOG_CHANNEL_CAPACITY, LogEntry, emit_log, spawn_output_reader};
-use crate::extensions::storage::backend::{PostgresBackend, StorageBackend};
 use crate::ipc::{
     AgentBootConfig, AgentInvokePayload, InboundMessage, IpcEvent, IpcReader, IpcWriter,
     OutboundMessage, PendingRpcs, RpcCaller,
@@ -82,8 +81,14 @@ fn storage_download_error(id: String, error: impl Into<String>) -> OutboundMessa
         name: None,
         content_type: None,
         size: None,
-        content_base64: None,
+        url: None,
         error: Some(error.into()),
+    }
+}
+
+fn cancel_job_leases(job_leases: &mut HashMap<i64, CancellationToken>) {
+    for (_, token) in job_leases.drain() {
+        token.cancel();
     }
 }
 
@@ -303,6 +308,8 @@ async fn supervisor_loop(
     let mut invoker_user_ids: HashMap<String, uuid::Uuid> = HashMap::new();
     let mut effective_permissions: HashMap<String, Vec<String>> = HashMap::new();
     let mut task_scopes: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    let mut job_leases: HashMap<i64, CancellationToken> = HashMap::new();
+    let mut job_payloads: HashMap<i64, JsonValue> = HashMap::new();
     // Per-worker SQL-proxy rate limiter (best-effort DoS guard).
     let mut sql_query_times: Vec<Instant> = Vec::new();
     // Multi-statement transaction (max 1 open per worker). `tx_done_rx` receives
@@ -393,6 +400,8 @@ async fn supervisor_loop(
                         }
                         policy_evaluators.clear();
                         effective_permissions.clear(); task_scopes.clear();
+                        cancel_job_leases(&mut job_leases);
+                        job_payloads.clear();
                         // Drop any open TX handle → its task rolls back and frees
                         // the connection + slot at once (the deadline is the backstop).
                         open_tx = None;
@@ -437,10 +446,35 @@ async fn supervisor_loop(
                             continue;
                         }
                         onstart_done = true;
-                        if let Some(ref mut w) = ipc_writer
-                            && let Err(e) = w.send(&OutboundMessage::Job { id: id.clone(), payload, caller }).await {
+                        if let Some(ref mut w) = ipc_writer {
+                            let job_payload = payload.clone();
+                            if let Err(e) = w.send(&OutboundMessage::Job { id: id.clone(), payload, caller }).await {
                                 error!(app_id = %app_id, job_id = %id, "send failed: {e}");
+                            } else if let Ok(msg_id) = id.parse::<i64>() {
+                                let token = CancellationToken::new();
+                                let heartbeat = token.clone();
+                                let pool = config.pool.clone();
+                                tokio::spawn(async move {
+                                    loop {
+                                        tokio::select! {
+                                            _ = heartbeat.cancelled() => break,
+                                            _ = tokio::time::sleep(crate::jobs::HEARTBEAT_INTERVAL) => {
+                                                if let Err(e) = crate::jobs::extend_lease(
+                                                    &pool,
+                                                    msg_id,
+                                                    crate::jobs::VISIBILITY_TIMEOUT_SECS,
+                                                ).await {
+                                                    warn!(msg_id, "job lease heartbeat failed: {e}");
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                                job_leases.insert(msg_id, token);
+                                job_payloads.insert(msg_id, job_payload);
                             }
+                        }
                     }
 
                     SupervisorCommand::AgentInvoke { payload, stream_tx } => {
@@ -519,9 +553,27 @@ async fn supervisor_loop(
                         }
                         InboundMessage::JobResult { id, error } => {
                             if let Ok(msg_id) = id.parse::<i64>() {
+                                if let Some(token) = job_leases.remove(&msg_id) {
+                                    token.cancel();
+                                }
+                                let payload = job_payloads.remove(&msg_id);
                                 if let Some(e) = error {
                                     warn!(app_id = %app_id, msg_id, "job failed: {e}");
-                                    let _ = crate::jobs::fail(&config.pool, msg_id).await;
+                                    if let Some(payload) = payload {
+                                        let envelope = serde_json::json!({
+                                            "app_id": config.app_id,
+                                            "payload": payload,
+                                            "user_id": config.identity.user_id,
+                                        });
+                                        let _ = crate::jobs::dead_letter(
+                                            &config.pool,
+                                            msg_id,
+                                            &envelope,
+                                            &e,
+                                        ).await;
+                                    } else {
+                                        let _ = crate::jobs::fail(&config.pool, msg_id).await;
+                                    }
                                 } else {
                                     info!(app_id = %app_id, msg_id, "job completed");
                                     let _ = crate::jobs::complete(&config.pool, msg_id).await;
@@ -813,27 +865,62 @@ async fn supervisor_loop(
                         }
                         InboundMessage::StorageDownload { id, app_id: storage_app_id, file_id } => {
                             let pool = config.pool.clone();
+                            let requester_app_id = config.app_id.clone();
+                            let requester = config.identity.user_id;
+                            let runtime_url = config.runtime_url.clone();
+                            let nonces = Arc::clone(&config.upload_nonces);
                             let tx = outbound_tx.clone();
                             tokio::spawn(async move {
-                                let msg = match file_id.parse() {
-                                    Ok(uuid) => match PostgresBackend.get(&pool, uuid, &storage_app_id).await {
-                                        Ok(obj) => {
-                                            let content_base64 =
-                                                base64::engine::general_purpose::STANDARD.encode(&obj.content);
+                                let allowed = if storage_app_id == requester_app_id {
+                                    Ok(true)
+                                } else if let Some(uid) = requester {
+                                    crate::extensions::integrations::connections::binding_allows(
+                                        &pool,
+                                        &requester_app_id,
+                                        &storage_app_id,
+                                        uid,
+                                        uid,
+                                    ).await
+                                } else {
+                                    Ok(false)
+                                };
+
+                                let msg = match (allowed, file_id.parse()) {
+                                    (Ok(false), _) => storage_download_error(id, format!(
+                                        "no binding allows {requester_app_id} to read {storage_app_id} storage"
+                                    )),
+                                    (Err(e), _) => storage_download_error(id, e),
+                                    (Ok(true), Ok(uuid)) => match sqlx::query_as::<_, (String, String, i64)>(
+                                        "SELECT name, content_type, size FROM rootcx_system.files WHERE id = $1 AND app_id = $2",
+                                    )
+                                    .bind(uuid)
+                                    .bind(&storage_app_id)
+                                    .fetch_optional(&pool)
+                                    .await
+                                    {
+                                        Ok(Some((name, content_type, size))) => {
+                                            let nonce = nonces
+                                                .lock()
+                                                .unwrap_or_else(|e| e.into_inner())
+                                                .create_download(uuid, &storage_app_id);
                                             OutboundMessage::StorageDownloadResult {
                                                 id,
                                                 file_id: Some(file_id),
                                                 app_id: Some(storage_app_id),
-                                                name: Some(obj.name),
-                                                content_type: Some(obj.content_type),
-                                                size: Some(obj.size),
-                                                content_base64: Some(content_base64),
+                                                name: Some(name),
+                                                content_type: Some(content_type),
+                                                size: Some(size),
+                                                url: Some(crate::extensions::storage::download_url(
+                                                    &runtime_url,
+                                                    &nonce,
+                                                )),
                                                 error: None,
                                             }
                                         }
+                                        Ok(None) => storage_download_error(id, "file not found"),
                                         Err(e) => storage_download_error(id, e.to_string()),
                                     },
-                                    Err(e) => storage_download_error(id, format!("invalid file id: {e}")),
+                                    (Ok(true), Err(e)) => storage_download_error(id, format!("invalid file id: {e}")),
                                 };
                                 let _ = tx.send(msg).await;
                             });
@@ -893,6 +980,8 @@ async fn supervisor_loop(
                         // The process is gone. The respawned worker re-runs
                         // onStart from scratch (if it is the lifecycle worker).
                         effective_permissions.clear(); task_scopes.clear();
+                        cancel_job_leases(&mut job_leases);
+                        job_payloads.clear();
                         onstart_done = false;
                         // Drop the stale TX handle so the respawned process can
                         // open a fresh one (its task rolls back + frees the slot).

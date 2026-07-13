@@ -142,7 +142,7 @@ pub enum OutboundMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         size: Option<i64>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        content_base64: Option<String>,
+        url: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -491,7 +491,7 @@ mod tests {
                     name: Some("invoice.xml".into()),
                     content_type: Some("application/xml".into()),
                     size: Some(5),
-                    content_base64: Some("aGVsbG8=".into()),
+                    url: Some("http://runtime/api/v1/storage/download/nonce".into()),
                     error: None,
                 },
                 "storage_download_result",
@@ -704,10 +704,9 @@ mod tests {
 
     #[test]
     fn inbound_job_enqueue() {
-        let msg: InboundMessage = serde_json::from_str(
-            r#"{"type":"job_enqueue","id":"q1","payload":{"type":"export"}}"#,
-        )
-        .unwrap();
+        let msg: InboundMessage =
+            serde_json::from_str(r#"{"type":"job_enqueue","id":"q1","payload":{"type":"export"}}"#)
+                .unwrap();
         let InboundMessage::JobEnqueue { id, payload } = msg else {
             panic!("expected JobEnqueue")
         };
