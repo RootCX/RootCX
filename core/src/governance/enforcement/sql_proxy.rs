@@ -170,7 +170,13 @@ fn bind_typed_value(
     use sqlx::Arguments;
 
     if value.is_null() {
-        args.add(Option::<String>::None).map_err(|e| e.to_string())?;
+        if type_name == "NUMERIC" {
+            args.add(Option::<sqlx::types::BigDecimal>::None)
+                .map_err(|e| e.to_string())?;
+        } else {
+            args.add(Option::<String>::None)
+                .map_err(|e| e.to_string())?;
+        }
         return Ok(());
     }
 
@@ -198,6 +204,13 @@ fn bind_typed_value(
         "FLOAT8" => {
             let v = value.as_f64().ok_or("expected number")?;
             args.add(v).map_err(|e| e.to_string())?;
+        }
+        "NUMERIC" => {
+            let literal = value.as_str().ok_or("expected string for exact decimal")?;
+            let decimal = literal
+                .parse::<sqlx::types::BigDecimal>()
+                .map_err(|_| format!("invalid decimal: '{literal}'"))?;
+            args.add(decimal).map_err(|e| e.to_string())?;
         }
         "UUID" => {
             let s = value.as_str().ok_or("expected string for uuid")?;
@@ -506,6 +519,21 @@ mod tests {
             "SELECT * FROM resets",                     // "RESET" prefix in table name
         ] {
             assert!(validate_sql(ok).is_ok(), "should allow: {ok}");
+        }
+    }
+
+    #[test]
+    fn numeric_parameters_reject_inexact_or_malformed_json_values() {
+        for (value, expected) in [
+            (serde_json::json!(12.34), "expected string"),
+            (serde_json::json!(true), "expected string"),
+            (serde_json::json!("not-a-decimal"), "invalid decimal"),
+            (serde_json::json!(""), "invalid decimal"),
+        ] {
+            let mut args = sqlx::postgres::PgArguments::default();
+            let error = bind_typed_value(&mut args, &value, "NUMERIC")
+                .expect_err("NUMERIC parameters must preserve an exact decimal string");
+            assert!(error.contains(expected), "value={value}: {error}");
         }
     }
 }

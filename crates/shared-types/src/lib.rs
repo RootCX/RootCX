@@ -296,6 +296,10 @@ pub struct FieldContract {
     pub name: String,
     #[serde(rename = "type")]
     pub field_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precision: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<u16>,
     #[serde(default)]
     pub required: bool,
     #[serde(default)]

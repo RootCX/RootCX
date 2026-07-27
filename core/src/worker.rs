@@ -1255,14 +1255,15 @@ async fn collection_op(
 
 async fn collection_exec(
     conn: &mut sqlx::PgConnection,
-    types: &std::collections::HashMap<String, String>,
+    types: &crate::data_types::FieldTypes,
     app_id: &str,
     op: &str,
     entity: &str,
     data: JsonValue,
 ) -> Result<JsonValue, String> {
+    use crate::data_types::{bind_typed, row_json};
     use crate::manifest::quote_ident;
-    use crate::routes::crud::{bind_typed, table};
+    use crate::routes::crud::table;
 
     let tbl = table(app_id, entity);
 
@@ -1283,10 +1284,11 @@ async fn collection_exec(
         };
 
         if op == "findOne" {
-            let sql = format!("SELECT to_jsonb({tbl}.*) AS row FROM {tbl}{where_clause} LIMIT 1");
+            let row = row_json(&tbl, types);
+            let sql = format!("SELECT {row} AS row FROM {tbl}{where_clause} LIMIT 1");
             let mut query = sqlx::query_as::<_, (JsonValue,)>(&sql);
             for (k, v) in obj.iter() {
-                query = bind_typed(query, v, types.get(k.as_str()));
+                query = bind_typed(query, v, types.get(k.as_str()))?;
             }
             return match query
                 .fetch_optional(&mut *conn)
@@ -1298,10 +1300,11 @@ async fn collection_exec(
             };
         }
 
-        let sql = format!("SELECT to_jsonb({tbl}.*) AS row FROM {tbl}{where_clause}");
+        let row = row_json(&tbl, types);
+        let sql = format!("SELECT {row} AS row FROM {tbl}{where_clause}");
         let mut query = sqlx::query_as::<_, (JsonValue,)>(&sql);
         for (k, v) in obj.iter() {
-            query = bind_typed(query, v, types.get(k.as_str()));
+            query = bind_typed(query, v, types.get(k.as_str()))?;
         }
         let rows: Vec<(JsonValue,)> = query
             .fetch_all(&mut *conn)
@@ -1312,12 +1315,13 @@ async fn collection_exec(
 
     // Write ops below.
     let obj = data.as_object().ok_or("data must be a JSON object")?;
+    let row = row_json(&tbl, types);
     let sql = match op {
         "insert" => {
             let cols: Vec<_> = obj.keys().map(|k| quote_ident(k)).collect();
             let phs: Vec<_> = (1..=cols.len()).map(|i| format!("${i}")).collect();
             format!(
-                "INSERT INTO {tbl} ({}) VALUES ({}) RETURNING to_jsonb({tbl}.*) AS row",
+                "INSERT INTO {tbl} ({}) VALUES ({}) RETURNING {row} AS row",
                 cols.join(","),
                 phs.join(",")
             )
@@ -1333,7 +1337,7 @@ async fn collection_exec(
                 return Err("no fields to update".into());
             }
             format!(
-                "UPDATE {tbl} SET {} WHERE id = ${} RETURNING to_jsonb({tbl}.*) AS row",
+                "UPDATE {tbl} SET {} WHERE id = ${} RETURNING {row} AS row",
                 sets.join(","),
                 sets.len() + 1
             )
@@ -1346,7 +1350,7 @@ async fn collection_exec(
         if op == "update" && k == "id" {
             continue;
         }
-        query = bind_typed(query, v, types.get(k.as_str()));
+        query = bind_typed(query, v, types.get(k.as_str()))?;
     }
     if op == "update" {
         let id = obj

@@ -1422,6 +1422,123 @@ async fn typed_bindings_update() {
     rt.shutdown().await;
 }
 
+fn decimal_manifest(app_id: &str) -> Value {
+    json!({
+        "appId": app_id, "name": app_id, "version": "1.0.0",
+        "dataContract": [{ "entityName": "prices", "fields": [
+            { "name": "sku", "type": "text", "required": true },
+            {
+                "name": "sale_price", "type": "decimal", "required": true,
+                "precision": 30, "scale": 8
+            },
+            { "name": "source_price", "type": "decimal" },
+            {
+                "name": "tax_rate", "type": "decimal",
+                "precision": 30, "scale": 20,
+                "default_value": "0.12345678901234567890"
+            },
+        ]}]
+    })
+}
+
+#[tokio::test]
+async fn decimal_crud_preserves_values_outside_javascript_safe_range() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&decimal_manifest("decimal_crud")).await;
+
+    let sale_price = "9007199254740993.12345678";
+    let source_price = "0.123456789012345678901234567890";
+    let created = rt.create("decimal_crud", "prices", &json!({
+        "sku": "EXACT-1",
+        "sale_price": sale_price,
+        "source_price": source_price,
+    })).await;
+    assert_eq!(created["sale_price"], sale_price);
+    assert_eq!(created["source_price"], source_price);
+    assert_eq!(created["tax_rate"], "0.12345678901234567890");
+
+    let (status, result) = rt.post_json(
+        "/api/v1/apps/decimal_crud/collections/prices/query",
+        &json!({ "where": { "sale_price": { "$eq": sale_price } } }),
+    ).await;
+    assert_eq!(status, 200, "decimal query failed: {result}");
+    assert_eq!(result["data"][0]["sale_price"], sale_price);
+    assert_eq!(result["data"][0]["source_price"], source_price);
+
+    let id = created["id"].as_str().unwrap();
+    let updated_price = "42.00000001";
+    let (status, updated) = rt.patch_json(
+        &format!("/api/v1/apps/decimal_crud/collections/prices/{id}"),
+        &json!({ "sale_price": updated_price }),
+    ).await;
+    assert_eq!(status, 200, "decimal update failed: {updated}");
+    assert_eq!(updated["sale_price"], updated_price);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn decimal_manifest_materializes_a_stable_numeric_schema() {
+    let rt = TestRuntime::boot().await;
+    let manifest = decimal_manifest("decimal_schema");
+    rt.install_manifest(&manifest).await;
+
+    let column_types: Vec<(String,)> = sqlx::query_as(
+        "SELECT format_type(a.atttypid, a.atttypmod)
+         FROM pg_attribute a
+         JOIN pg_class c ON c.oid = a.attrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'decimal_schema'
+           AND c.relname = 'prices'
+           AND a.attname IN ('sale_price', 'source_price')
+         ORDER BY a.attname",
+    ).fetch_all(rt.pool()).await.unwrap();
+    assert_eq!(column_types, vec![("numeric(30,8)".to_string(),), ("numeric".to_string(),)]);
+
+    let (status, verification) = rt.post_json("/api/v1/apps/schema/verify", &manifest).await;
+    assert_eq!(status, 200, "schema verification failed: {verification}");
+    let verification: SchemaVerification = serde_json::from_value(verification).unwrap();
+    assert!(verification.compliant, "decimal schema should be stable: {:?}", verification.changes);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn decimal_create_rejects_an_inexact_json_number() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&decimal_manifest("decimal_input")).await;
+
+    let (status, body) = rt.post_json(
+        "/api/v1/apps/decimal_input/collections/prices",
+        &json!({ "sku": "INVALID", "sale_price": 12.34 }),
+    ).await;
+    assert_eq!(status, 400, "JSON numbers must not cross the exact-decimal boundary: {body}");
+    assert_eq!(body["error"], "decimal value must be a JSON string");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn decimal_database_query_serializes_numeric_as_an_exact_json_string() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&decimal_manifest("decimal_query")).await;
+    let exact = "9007199254740993.12345678901234567890";
+    rt.create("decimal_query", "prices", &json!({
+        "sku": "EXACT-QUERY",
+        "sale_price": "1.00000000",
+        "source_price": exact,
+    })).await;
+
+    let (status, body) = rt.post_json(
+        "/api/v1/db/query",
+        &json!({ "sql": "SELECT source_price FROM prices", "schema": "decimal_query" }),
+    ).await;
+    assert_eq!(status, 200, "database query failed: {body}");
+    assert_eq!(body["rows"][0][0], exact);
+
+    rt.shutdown().await;
+}
+
 #[tokio::test]
 async fn typed_bindings_text_not_cast_as_date() {
     let rt = TestRuntime::boot().await;

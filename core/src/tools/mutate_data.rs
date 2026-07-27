@@ -3,8 +3,9 @@ use serde_json::{json, Value as JsonValue};
 use rootcx_types::ToolDescriptor;
 
 use super::{Tool, ToolContext, str_arg};
+use crate::data_types::{bind_typed, row_json};
 use crate::manifest::{field_type_map, quote_ident};
-use crate::routes::crud::{bind_typed, bulk_insert, filter_writable_fields, table, MAX_BULK_SIZE};
+use crate::routes::crud::{bulk_insert, filter_writable_fields, table, MAX_BULK_SIZE};
 use crate::governance::enforcement::{self, ContextState};
 
 pub struct MutateDataTool;
@@ -75,13 +76,14 @@ impl Tool for MutateDataTool {
                     "ON CONFLICT (\"id\") DO UPDATE SET \"id\" = EXCLUDED.\"id\""
                 } else { "" };
 
+                let row = row_json(&tbl, &types);
                 let sql = format!(
-                    "INSERT INTO {tbl} ({}) VALUES ({}) {on_conflict} RETURNING to_jsonb({tbl}.*) AS row",
+                    "INSERT INTO {tbl} ({}) VALUES ({}) {on_conflict} RETURNING {row} AS row",
                     cols.join(", "), phs.join(", ")
                 );
                 let mut tx = begin().await.map_err(|e| e.to_string())?;
                 let mut q = sqlx::query_as::<_, (JsonValue,)>(&sql);
-                for (k, v) in &entries { q = bind_typed(q, v, types.get(*k)); }
+                for (k, v) in &entries { q = bind_typed(q, v, types.get(*k))?; }
                 if let Some(id) = idem_id { q = q.bind(id); }
                 let (row,) = q.fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
                 tx.commit().await.map_err(|e| e.to_string())?;
@@ -101,13 +103,14 @@ impl Tool for MutateDataTool {
                     .collect();
                 sets.push("\"updated_at\" = now()".to_string());
 
+                let row = row_json(&tbl, &types);
                 let sql = format!(
-                    "UPDATE {tbl} SET {} WHERE id = ${id_param} RETURNING to_jsonb({tbl}.*) AS row",
+                    "UPDATE {tbl} SET {} WHERE id = ${id_param} RETURNING {row} AS row",
                     sets.join(", ")
                 );
                 let mut tx = begin().await.map_err(|e| e.to_string())?;
                 let mut q = sqlx::query_as::<_, (JsonValue,)>(&sql);
-                for (k, v) in &entries { q = bind_typed(q, v, types.get(*k)); }
+                for (k, v) in &entries { q = bind_typed(q, v, types.get(*k))?; }
                 q = q.bind(uuid);
                 let (row,) = q.fetch_optional(&mut *tx).await.map_err(|e| e.to_string())?
                     .ok_or_else(|| format!("record '{id}' not found"))?;
