@@ -115,8 +115,8 @@ impl RuntimeExtension for OidcExtension {
     }
 }
 
-/// Seed an OIDC provider from environment variables (cloud provisioning).
-/// Called once at boot, after extensions bootstrap and SecretManager init.
+/// Reconcile the environment-managed OIDC provider at boot.
+/// Called after extensions bootstrap and SecretManager initialization.
 pub async fn seed_from_env(pool: &PgPool, secrets: &SecretManager) -> Result<(), RuntimeError> {
     let issuer = match std::env::var("ROOTCX_OIDC_ISSUER") {
         Ok(v) if !v.is_empty() => v,
@@ -127,23 +127,20 @@ pub async fn seed_from_env(pool: &PgPool, secrets: &SecretManager) -> Result<(),
     let client_secret = std::env::var("ROOTCX_OIDC_CLIENT_SECRET")
         .map_err(|_| RuntimeError::Config("ROOTCX_OIDC_ISSUER set but ROOTCX_OIDC_CLIENT_SECRET missing".into()))?;
 
-    // Check if provider already exists
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM rootcx_system.oidc_providers WHERE id = 'rootcx')",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(RuntimeError::Schema)?;
-
-    if exists {
-        return Ok(());
-    }
-
-    // Insert provider
+    // Environment configuration is declarative: reconcile the managed provider
+    // on every boot so Helm upgrades can rotate endpoints and client IDs.
     sqlx::query(
         "INSERT INTO rootcx_system.oidc_providers
             (id, display_name, issuer_url, client_id, client_secret, auto_register, default_role)
-         VALUES ('rootcx', 'RootCX', $1, $2, NULL, true, 'base')",
+         VALUES ('rootcx', 'RootCX', $1, $2, NULL, true, 'base')
+         ON CONFLICT (id) DO UPDATE SET
+            display_name = EXCLUDED.display_name,
+            issuer_url = EXCLUDED.issuer_url,
+            client_id = EXCLUDED.client_id,
+            client_secret = NULL,
+            auto_register = EXCLUDED.auto_register,
+            default_role = EXCLUDED.default_role,
+            enabled = true",
     )
     .bind(&issuer)
     .bind(&client_id)
@@ -154,6 +151,6 @@ pub async fn seed_from_env(pool: &PgPool, secrets: &SecretManager) -> Result<(),
     // Encrypt client_secret in vault
     secrets.set(pool, "oidc:rootcx", "client_secret", &client_secret).await?;
 
-    info!(issuer = %issuer, client_id = %client_id, "OIDC provider 'rootcx' seeded from env vars");
+    info!(issuer = %issuer, client_id = %client_id, "OIDC provider 'rootcx' reconciled from env vars");
     Ok(())
 }

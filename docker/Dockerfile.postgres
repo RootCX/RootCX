@@ -1,18 +1,25 @@
-FROM ghcr.io/cloudnative-pg/postgresql:16-standard-bookworm
+FROM ghcr.io/cloudnative-pg/postgresql:16-standard-bookworm@sha256:dc92cb5f3cf5719f33ad465ae17b752f03c152b47c03a8e90be6aefc5641b91f
 
 USER root
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-       build-essential postgresql-server-dev-16 git ca-certificates \
-    && git clone --branch v1.5.0 https://github.com/tembo-io/pgmq.git /tmp/pgmq \
+       build-essential postgresql-server-dev-16 git ca-certificates libnss-wrapper=1.1.12-1 \
+    && git init /tmp/pgmq \
+    && git -C /tmp/pgmq remote add origin https://github.com/tembo-io/pgmq.git \
+    && git -C /tmp/pgmq fetch --depth 1 origin 8e6df4bc46d0f9fd74e2cf24102352a233d043e4 \
+    && git -C /tmp/pgmq checkout --detach FETCH_HEAD \
     && cd /tmp/pgmq/pgmq-extension \
     && make && make install \
     && cd / && rm -rf /tmp/pgmq \
-    && apt-get install -y --no-install-recommends postgresql-16-cron \
+    && apt-get install -y --no-install-recommends postgresql-16-cron=1.6.7-3.pgdg12+1 \
     && apt-get purge -y build-essential postgresql-server-dev-16 git \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pg-entrypoint.sh /pg-entrypoint.sh
+COPY docker/pg-entrypoint.sh /pg-entrypoint.sh
 RUN chmod +x /pg-entrypoint.sh
-USER postgres
+USER 26:102
+
+# PostgreSQL maps SIGINT to a clean fast shutdown. SIGTERM waits for clients
+# to disconnect and can therefore exceed the pod termination grace period.
+STOPSIGNAL SIGINT

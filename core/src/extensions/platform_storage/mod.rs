@@ -653,17 +653,40 @@ mod tests {
 
     #[cfg(test)]
     mod integration {
+        use jsonwebtoken::{DecodingKey, EncodingKey};
         use sqlx::PgPool;
+        use std::sync::Arc;
+        use std::time::Duration;
         use uuid::Uuid;
 
         async fn pool() -> PgPool {
             let url = std::env::var("TEST_DATABASE_URL")
                 .unwrap_or_else(|_| "postgres://rootcx:rootcx@localhost:5480/rootcx".into());
             let pool = PgPool::connect(&url).await.expect("connect to test DB");
-            let _ = sqlx::query("CREATE SCHEMA IF NOT EXISTS rootcx_system").execute(&pool).await;
-            let ext = super::super::PlatformStorageExtension;
+            crate::schema::bootstrap(&pool)
+                .await
+                .expect("bootstrap core schema dependency");
             use crate::extensions::RuntimeExtension;
-            ext.bootstrap(&pool).await.expect("bootstrap");
+            let secret = b"platform-storage-test-secret-32b";
+            crate::extensions::auth::AuthExtension {
+                config: Arc::new(crate::auth::AuthConfig {
+                    encoding_key: EncodingKey::from_secret(secret),
+                    decoding_key: DecodingKey::from_secret(secret),
+                    access_ttl: Duration::from_secs(900),
+                    refresh_ttl: Duration::from_secs(3600),
+                }),
+            }
+            .bootstrap(&pool)
+            .await
+            .expect("bootstrap auth dependency");
+            crate::extensions::rbac::RbacExtension
+                .bootstrap(&pool)
+                .await
+                .expect("bootstrap RBAC dependency");
+            super::super::PlatformStorageExtension
+                .bootstrap(&pool)
+                .await
+                .expect("bootstrap platform storage");
             pool
         }
 

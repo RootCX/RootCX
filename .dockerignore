@@ -1,8 +1,8 @@
 target/
 node_modules/
 .git/
-core/resources/
-!core/resources/integrations/
+core/resources/bun
+core/resources/bun.exe
 studio/ui/
 runtime/ui/
 *.dmg
