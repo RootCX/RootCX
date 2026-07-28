@@ -197,6 +197,7 @@ pub(crate) fn pg_val(row: &PgRow, idx: usize, ti: &PgTypeInfo) -> JsonValue {
         "INT8" => try_json::<i64>(row, idx, |v| JsonValue::Number(v.into())),
         "FLOAT4" => row.try_get::<f32, _>(idx).ok().and_then(|v| serde_json::Number::from_f64(v as f64)).map(JsonValue::Number).unwrap_or(JsonValue::Null),
         "FLOAT8" => row.try_get::<f64, _>(idx).ok().and_then(|v| serde_json::Number::from_f64(v)).map(JsonValue::Number).unwrap_or(JsonValue::Null),
+        "NUMERIC" => try_json::<sqlx::types::BigDecimal>(row, idx, |v| JsonValue::String(v.to_string())),
         "JSONB" | "JSON" => row.try_get::<JsonValue, _>(idx).unwrap_or(JsonValue::Null),
         "UUID" => try_json::<sqlx::types::Uuid>(row, idx, |v| JsonValue::String(v.to_string())),
         "TIMESTAMPTZ" => try_json::<chrono::DateTime<chrono::Utc>>(row, idx, |v| JsonValue::String(v.to_rfc3339())),

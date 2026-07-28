@@ -362,6 +362,15 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, tool_registry: Arc<
                     // Regular job dispatch. Deny-by-default: a job with no owner
                     // (created_by NULL) has no responsible human, so RLS would
                     // see no identity. Refuse rather than fall back to admin.
+                    if jobs::delivery_exhausted(read_ct) {
+                        warn!(msg_id, read_ct, app_id = %job_msg.app_id,
+                            "app job exceeded max deliveries; moving to dead-letter queue");
+                        let raw = serde_json::to_value(&job_msg).unwrap_or_default();
+                        let reason = format!("exceeded {} deliveries", jobs::MAX_DELIVERIES);
+                        let _ = jobs::dead_letter(&pool, msg_id, &raw, &reason).await;
+                        continue;
+                    }
+
                     let Some(uid) = job_msg.user_id else {
                         warn!(msg_id, app_id = %job_msg.app_id,
                             "job denied: no owner (created_by is NULL)");

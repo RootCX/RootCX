@@ -3,6 +3,7 @@ use serde_json::{json, Value as JsonValue};
 use rootcx_types::ToolDescriptor;
 
 use super::{Tool, ToolContext, str_arg};
+use crate::data_types::row_json;
 use crate::manifest::field_type_map;
 use crate::routes::crud::{
     build_where_clause, join_where, table, validate_order, validate_sort_field,
@@ -90,8 +91,9 @@ impl Tool for QueryDataTool {
             let limit = ctx.args.get("limit").and_then(|v| v.as_i64()).unwrap_or(100).min(1000).max(1);
             let offset = ctx.args.get("offset").and_then(|v| v.as_i64()).unwrap_or(0).max(0);
 
+            let row = row_json("t", &types);
             let sql = format!(
-                "SELECT to_jsonb(t.*) AS row, COUNT(*) OVER() AS total \
+                "SELECT {row} AS row, COUNT(*) OVER() AS total \
                  FROM {tbl} t{wh} ORDER BY {sort} {order} LIMIT {limit} OFFSET {offset}"
             );
             let mut q = sqlx::query_as::<_, (JsonValue, i64)>(&sql);
@@ -102,8 +104,9 @@ impl Tool for QueryDataTool {
             let data: Vec<JsonValue> = rows.into_iter().map(|(r, _)| r).collect();
             json!({ "data": data, "total": total })
         } else {
+            let row = row_json("t", &types);
             let sql = format!(
-                "SELECT to_jsonb(t.*) AS row FROM {tbl} t ORDER BY \"created_at\" DESC"
+                "SELECT {row} AS row FROM {tbl} t ORDER BY \"created_at\" DESC"
             );
             let rows: Vec<(JsonValue,)> = sqlx::query_as(&sql)
                 .fetch_all(&mut *tx).await.map_err(|e| e.to_string())?;

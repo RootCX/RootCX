@@ -5,6 +5,7 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::RuntimeError;
+use crate::data_types::{FieldType, FieldTypes, field_types, sql_default, system_field_types};
 use crate::extensions::RuntimeExtension;
 use rootcx_types::{AppManifest, EntityContract};
 
@@ -116,7 +117,7 @@ pub async fn uninstall_app(pool: &PgPool, app_id: &str) -> Result<(), RuntimeErr
     Ok(())
 }
 
-fn generate_create_table(app_id: &str, entity: &EntityContract, pk_types: &HashMap<String, &'static str>) -> String {
+fn generate_create_table(app_id: &str, entity: &EntityContract, pk_types: &HashMap<String, String>) -> String {
     let table_name = format!("{}.{}", quote_ident(app_id), quote_ident(&entity.entity_name));
 
     let mut columns: Vec<String> = Vec::new();
@@ -184,13 +185,15 @@ fn generate_foreign_keys(app_id: &str, entity: &EntityContract, all_entities: &[
     stmts
 }
 
-pub(crate) fn build_pk_type_map(entities: &[EntityContract]) -> HashMap<String, &'static str> {
+pub(crate) fn build_pk_type_map(entities: &[EntityContract]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for entity in entities {
         let pk_field = entity.fields.iter().find(|f| f.is_primary_key.unwrap_or(false) || f.name == "id");
         let pg_type = match pk_field {
-            Some(f) => map_field_type(&f.field_type),
-            None => "UUID",
+            Some(f) => FieldType::from_field(f)
+                .expect("build_pk_type_map requires a validated manifest")
+                .postgres_type(),
+            None => "UUID".to_string(),
         };
         map.insert(entity.entity_name.clone(), pg_type);
     }
@@ -201,7 +204,7 @@ pub(crate) fn build_pk_type_map(entities: &[EntityContract]) -> HashMap<String, 
             if let Some(refs) = &field.references {
                 if let RefTarget::Core(name) = parse_entity_ref(&refs.entity) {
                     if let Some((_, _, _, pk_type)) = resolve_core_entity(&name) {
-                        map.insert(refs.entity.clone(), pk_type);
+                        map.insert(refs.entity.clone(), pk_type.to_string());
                     }
                 }
             }
@@ -210,14 +213,20 @@ pub(crate) fn build_pk_type_map(entities: &[EntityContract]) -> HashMap<String, 
     map
 }
 
-fn field_to_column(field: &rootcx_types::FieldContract, pk_types: &HashMap<String, &'static str>) -> String {
+fn field_to_column(field: &rootcx_types::FieldContract, pk_types: &HashMap<String, String>) -> String {
     let col_name = quote_ident(&field.name);
     let is_pk = field.is_primary_key.unwrap_or(false) || field.name == "id";
+    let field_type = FieldType::from_field(field)
+        .expect("field_to_column requires a validated manifest");
 
     let pg_type = if field.field_type == "entity_link" {
-        if let Some(refs) = &field.references { pk_types.get(&refs.entity).copied().unwrap_or("UUID") } else { "UUID" }
+        if let Some(refs) = &field.references {
+            pk_types.get(&refs.entity).cloned().unwrap_or_else(|| "UUID".into())
+        } else {
+            "UUID".into()
+        }
     } else {
-        map_field_type(&field.field_type)
+        field_type.postgres_type()
     };
 
     let mut parts = vec![format!("{col_name} {pg_type}")];
@@ -235,7 +244,7 @@ fn field_to_column(field: &rootcx_types::FieldContract, pk_types: &HashMap<Strin
 
     if let Some(ref default_val) = field.default_value
         && !is_pk
-            && let Some(default_sql) = json_to_sql_default(default_val, pg_type) {
+            && let Some(default_sql) = sql_default(default_val, &field_type) {
                 parts.push(format!("DEFAULT {default_sql}"));
             }
 
@@ -248,38 +257,6 @@ fn field_to_column(field: &rootcx_types::FieldContract, pk_types: &HashMap<Strin
         }
 
     col_def
-}
-
-pub fn map_field_type(field_type: &str) -> &'static str {
-    match field_type {
-        "text" => "TEXT",
-        "number" => "DOUBLE PRECISION",
-        "boolean" => "BOOLEAN",
-        "date" => "DATE",
-        "timestamp" => "TIMESTAMPTZ",
-        "json" => "JSONB",
-        "file" => "TEXT",
-        "uuid" | "entity_link" => "UUID",
-        "[text]" => "TEXT[]",
-        "[number]" => "DOUBLE PRECISION[]",
-        _ => "TEXT",
-    }
-}
-
-pub(crate) fn json_to_sql_default(val: &serde_json::Value, pg_type: &str) -> Option<String> {
-    match val {
-        serde_json::Value::Null => None,
-        serde_json::Value::Bool(b) => Some(b.to_string()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::String(s) => Some(format!("'{}'", s.replace('\'', "''"))),
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            if pg_type == "JSONB" {
-                Some(format!("'{}'::jsonb", val.to_string().replace('\'', "''")))
-            } else {
-                None
-            }
-        }
-    }
 }
 
 async fn load_entity(
@@ -314,15 +291,12 @@ pub async fn field_type_map(
     pool: &PgPool,
     app_id: &str,
     entity: &str,
-) -> Result<HashMap<String, String>, crate::RuntimeError> {
-    let mut m: HashMap<String, String> = load_entity(pool, app_id, entity)
-        .await?
-        .map(|ec| ec.fields.iter().map(|f| (f.name.clone(), f.field_type.clone())).collect())
-        .unwrap_or_default();
-    m.insert("id".into(), "uuid".into());
-    m.insert("created_at".into(), "timestamp".into());
-    m.insert("updated_at".into(), "timestamp".into());
-    Ok(m)
+) -> Result<FieldTypes, crate::RuntimeError> {
+    let Some(entity) = load_entity(pool, app_id, entity).await? else {
+        return Ok(system_field_types());
+    };
+    field_types(&entity)
+        .map_err(|message| crate::RuntimeError::Schema(sqlx::Error::Protocol(message)))
 }
 
 pub async fn entity_identity(
@@ -488,6 +462,9 @@ pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
         validate_ident(&entity.entity_name, "entity name")?;
         for field in &entity.fields {
             validate_ident(&field.name, "field name")?;
+            FieldType::from_field(field).map_err(|message| {
+                RuntimeError::Schema(sqlx::Error::Protocol(message))
+            })?;
         }
         for field in &entity.fields {
             if field.field_type != "entity_link" { continue; }
@@ -591,6 +568,8 @@ mod tests {
         FieldContract {
             name: name.to_string(),
             field_type: field_type.to_string(),
+            precision: None,
+            scale: None,
             required: false,
             default_value: None,
             enum_values: None,
@@ -636,15 +615,15 @@ mod tests {
     }
 
     #[test]
-    fn json_to_sql_defaults() {
-        assert_eq!(json_to_sql_default(&json!(null), "TEXT"), None);
-        assert_eq!(json_to_sql_default(&json!(true), "BOOLEAN"), Some("true".into()));
-        assert_eq!(json_to_sql_default(&json!(42), "DOUBLE PRECISION"), Some("42".into()));
-        assert_eq!(json_to_sql_default(&json!("hello"), "TEXT"), Some("'hello'".into()));
-        assert_eq!(json_to_sql_default(&json!("it's"), "TEXT"), Some("'it''s'".into()));
-        assert_eq!(json_to_sql_default(&json!({"a": 1}), "TEXT"), None);
+    fn sql_defaults_follow_field_type() {
+        assert_eq!(sql_default(&json!(null), &FieldType::Text), None);
+        assert_eq!(sql_default(&json!(true), &FieldType::Boolean), Some("true".into()));
+        assert_eq!(sql_default(&json!(42), &FieldType::Number), Some("42".into()));
+        assert_eq!(sql_default(&json!("hello"), &FieldType::Text), Some("'hello'".into()));
+        assert_eq!(sql_default(&json!("it's"), &FieldType::Text), Some("'it''s'".into()));
+        assert_eq!(sql_default(&json!({"a": 1}), &FieldType::Text), None);
 
-        let jsonb = json_to_sql_default(&json!({"a": 1}), "JSONB").unwrap();
+        let jsonb = sql_default(&json!({"a": 1}), &FieldType::Json).unwrap();
         assert!(jsonb.ends_with("::jsonb"), "expected ::jsonb suffix, got: {jsonb}");
     }
 
@@ -652,7 +631,7 @@ mod tests {
     fn build_pk_type_map_implicit_uuid() {
         let entities = vec![entity("contacts", vec![field("name", "text")])];
         let map = build_pk_type_map(&entities);
-        assert_eq!(map.get("contacts"), Some(&"UUID"));
+        assert_eq!(map.get("contacts").map(String::as_str), Some("UUID"));
     }
 
     #[test]
@@ -661,7 +640,7 @@ mod tests {
         id_field.is_primary_key = Some(true);
         let entities = vec![entity("contacts", vec![id_field])];
         let map = build_pk_type_map(&entities);
-        assert_eq!(map.get("contacts"), Some(&"TEXT"));
+        assert_eq!(map.get("contacts").map(String::as_str), Some("TEXT"));
     }
 
     #[test]
@@ -713,7 +692,7 @@ mod tests {
     #[test]
     fn field_to_column_entity_link() {
         let mut pk_types = HashMap::new();
-        pk_types.insert("accounts".to_string(), "UUID");
+        pk_types.insert("accounts".to_string(), "UUID".to_string());
         let mut f = field("account_id", "entity_link");
         f.references = Some(FieldReference { entity: "accounts".to_string(), field: "id".to_string() });
         let col = field_to_column(&f, &pk_types);
@@ -881,6 +860,16 @@ mod tests {
     fn validate_identity_accepts_absent() {
         let m = manifest_with(vec![entity("contacts", vec![field("name", "text")])]);
         assert!(validate_manifest(&m).is_ok());
+    }
+
+    #[test]
+    fn validate_manifest_enforces_the_field_type_contract() {
+        let mut price = field("price", "decimal");
+        price.precision = Some(19);
+        let error = validate_manifest(&manifest_with(vec![entity("products", vec![price])]))
+            .expect_err("manifest validation must reject an incomplete decimal contract")
+            .to_string();
+        assert!(error.contains("precision and scale together"), "{error}");
     }
 
     #[test]

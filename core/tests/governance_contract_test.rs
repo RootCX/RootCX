@@ -2444,7 +2444,7 @@ async fn t1_9_custom_permissions_app_still_mints_entity_keys() {
 // ══════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn typed_bind_uuid_int_date_bool_array_jsonb() {
+async fn typed_bind_uuid_number_decimal_date_bool_array_jsonb() {
     let rt = harness::TestRuntime::boot().await;
     admin(&rt).await;
 
@@ -2458,6 +2458,7 @@ async fn typed_bind_uuid_int_date_bool_array_jsonb() {
             "fields": [
                 { "name": "label", "type": "text", "required": true },
                 { "name": "count", "type": "number" },
+                { "name": "exact_amount", "type": "decimal", "precision": 30, "scale": 8 },
                 { "name": "is_active", "type": "boolean" },
                 { "name": "due_date", "type": "date" },
                 { "name": "tags", "type": "[text]" },
@@ -2478,27 +2479,35 @@ async fn typed_bind_uuid_int_date_bool_array_jsonb() {
     };
 
     // Insert a row with all typed columns via run_sql (exercises build_typed_args).
-    let insert = "INSERT INTO typebind.records (label, count, is_active, due_date, tags, meta) \
-                  VALUES ($1, $2, $3, $4, $5, $6) RETURNING id";
+    let insert = "INSERT INTO typebind.records (label, count, exact_amount, is_active, due_date, tags, meta) \
+                  VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id";
     let params: Vec<serde_json::Value> = vec![
-        json!("test"),           // $1 TEXT
-        json!(42),               // $2 FLOAT8 (number maps to DOUBLE PRECISION)
-        json!(true),             // $3 BOOL
-        json!("2026-06-08"),     // $4 DATE
-        json!(["a", "b", "c"]), // $5 TEXT[]
-        json!({"key": "val"}),  // $6 JSONB
+        json!("test"),                         // $1 TEXT
+        json!(42),                             // $2 FLOAT8
+        json!("9007199254740993.12345678"),    // $3 NUMERIC
+        json!(true),                           // $4 BOOL
+        json!("2026-06-08"),                   // $5 DATE
+        json!(["a", "b", "c"]),              // $6 TEXT[]
+        json!({"key": "val"}),                // $7 JSONB
     ];
     let result = rootcx_core::governance::enforcement::sql_proxy::run_sql(rt.pool(), "typebind", &state, insert, &params).await;
     assert!(result.is_ok(), "typed INSERT must succeed: {:?}", result.err());
     let id = result.unwrap().rows[0][0].as_str().unwrap().to_string();
 
     // Read back by UUID (the critical case: $1 bound as UUID, not TEXT).
-    let select = "SELECT label, count, is_active, due_date, tags, meta FROM typebind.records WHERE id = $1";
+    let select = "SELECT label, count, exact_amount, is_active, due_date, tags, meta FROM typebind.records WHERE id = $1";
     let result = rootcx_core::governance::enforcement::sql_proxy::run_sql(rt.pool(), "typebind", &state, select, &[json!(id)]).await;
     assert!(result.is_ok(), "typed SELECT by UUID must succeed: {:?}", result.err());
     let row = &result.unwrap().rows[0];
     assert_eq!(row[0], json!("test"));
-    assert_eq!(row[2], json!(true));
+    assert_eq!(row[2], json!("9007199254740993.12345678"));
+    assert_eq!(row[3], json!(true));
+
+    let null_numeric = "SELECT id FROM typebind.records WHERE exact_amount IS NOT DISTINCT FROM $1";
+    let result = rootcx_core::governance::enforcement::sql_proxy::run_sql(
+        rt.pool(), "typebind", &state, null_numeric, &[json!(null)],
+    ).await;
+    assert!(result.is_ok(), "NULL NUMERIC param must succeed: {:?}", result.err());
 
     // Query by ref_id (NULL UUID) — ensures NULL uuid binding works.
     let null_q = "SELECT id FROM typebind.records WHERE ref_id = $1";

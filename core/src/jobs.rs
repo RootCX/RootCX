@@ -6,7 +6,13 @@ use crate::RuntimeError;
 
 const QUEUE: &str = "jobs";
 const DLQ: &str = "jobs_dlq";
-const VT_SECS: i32 = 120;
+pub const VISIBILITY_TIMEOUT_SECS: i32 = 120;
+pub const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+pub const MAX_DELIVERIES: i32 = 5;
+
+pub fn delivery_exhausted(read_count: i32) -> bool {
+    read_count > MAX_DELIVERIES
+}
 
 fn err(e: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::Job(e.to_string())
@@ -54,7 +60,7 @@ pub async fn enqueue(pool: &PgPool, app_id: &str, payload: JsonValue, user_id: O
 /// the previous lease expired (worker crash or overrun) and this is a redelivery.
 pub async fn read_next(pool: &PgPool) -> Result<Option<(i64, i32, JobMessage)>, RuntimeError> {
     let row: Option<(i64, i32, JsonValue)> = sqlx::query_as(
-        &format!("SELECT msg_id, read_ct, message FROM pgmq.read('{QUEUE}', {VT_SECS}, 1)")
+        &format!("SELECT msg_id, read_ct, message FROM pgmq.read('{QUEUE}', {VISIBILITY_TIMEOUT_SECS}, 1)")
     ).fetch_optional(pool).await.map_err(err)?;
 
     match row {
@@ -120,4 +126,15 @@ pub async fn list_for_app(pool: &PgPool, app_id: &str, limit: i64) -> Result<Vec
 
 pub async fn list_archived(pool: &PgPool, app_id: &str, limit: i64) -> Result<Vec<Job>, RuntimeError> {
     list_from(pool, &format!("a_{QUEUE}"), "archived_at", app_id, limit).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{delivery_exhausted, MAX_DELIVERIES};
+
+    #[test]
+    fn delivery_limit_allows_last_attempt_then_exhausts() {
+        assert!(!delivery_exhausted(MAX_DELIVERIES));
+        assert!(delivery_exhausted(MAX_DELIVERIES + 1));
+    }
 }

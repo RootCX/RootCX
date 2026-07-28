@@ -2,6 +2,7 @@ mod api_error;
 pub mod app_migrations;
 pub mod auth;
 mod crons;
+mod data_types;
 mod error;
 pub mod extensions;
 pub mod governance;

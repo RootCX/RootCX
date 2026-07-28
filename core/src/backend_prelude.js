@@ -43,6 +43,8 @@
 //       ctx.sql(text, params) → { columns, rows, rowCount },
 //       ctx.selfAction(action, params),
 //       ctx.uploadFile(content, filename, contentType),
+//       ctx.downloadFile(appId, fileId),
+//       ctx.enqueueJob(payload),
 //       ctx.collection(entity).insert(data) / .update / .find / .findOne,
 //
 //     A v2 worker MUST announce its version in the `discover` reply:
@@ -118,6 +120,8 @@ globalThis.emit = (name, data) => _transport.send({ type: "event", name, data: d
 // `ctx.uploadFile`. DO NOT remove without a migration plan.
 globalThis.uploadFile = (content, filename, contentType) =>
   _uploadFile(content, filename, contentType);
+globalThis.downloadFile = (appId, fileId) => _downloadFile(appId, fileId);
+globalThis.enqueueJob = (payload) => _enqueueJob(payload);
 
 console.log = (...a) => log.info(a.map(String).join(" "));
 console.warn = (...a) => log.warn(a.map(String).join(" "));
@@ -130,9 +134,14 @@ let _ctx = null;
 let _boot = null;
 let _handlers = null;
 let _started = false;
+let _jobChain = Promise.resolve();
 
 let _uploadSeq = 0;
 const _pendingUploads = new Map();
+let _downloadSeq = 0;
+const _pendingDownloads = new Map();
+let _jobSeq = 0;
+const _pendingJobs = new Map();
 let _opSeq = 0;
 const _pendingOps = new Map();
 let _sqlSeq = 0;
@@ -146,7 +155,10 @@ function _uploadFile(content, filename, contentType) {
   if (!_ctx) return Promise.reject(new Error("uploadFile: worker not started yet"));
   const id = `upl_${++_uploadSeq}`;
   const data = typeof content === "string" ? new TextEncoder().encode(content) : content;
-  const size = data.byteLength ?? data.length;
+  const size = data.byteLength ?? data.length ?? data.size;
+  if (!Number.isFinite(size)) {
+    return Promise.reject(new Error("uploadFile: content size is required"));
+  }
   log.info(`[storage] upload start: ${filename} (${size} bytes)`);
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -162,6 +174,44 @@ function _uploadFile(content, filename, contentType) {
       content_type: contentType || "application/octet-stream",
       size,
     });
+  });
+}
+
+function _downloadFile(appId, fileId) {
+  if (!_ctx) return Promise.reject(new Error("downloadFile: worker not started yet"));
+  if (!fileId && appId) {
+    fileId = appId;
+    appId = _boot.app_id;
+  }
+  if (!appId || !fileId) {
+    return Promise.reject(new Error("downloadFile: appId and fileId are required"));
+  }
+
+  const id = `dwn_${++_downloadSeq}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (_pendingDownloads.has(id)) {
+        _pendingDownloads.delete(id);
+        reject(new Error("downloadFile: timeout waiting for file"));
+      }
+    }, 30_000);
+    _pendingDownloads.set(id, { resolve, reject, timer });
+    _transport.send({ type: "storage_download", id, app_id: appId, file_id: fileId });
+  });
+}
+
+function _enqueueJob(payload) {
+  if (!_ctx) return Promise.reject(new Error("enqueueJob: worker not started yet"));
+  const id = `job_${++_jobSeq}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (_pendingJobs.has(id)) {
+        _pendingJobs.delete(id);
+        reject(new Error("enqueueJob: timeout waiting for enqueue"));
+      }
+    }, 30_000);
+    _pendingJobs.set(id, { resolve, reject, timer });
+    _transport.send({ type: "job_enqueue", id, payload: payload ?? {} });
   });
 }
 
@@ -226,6 +276,8 @@ function _makeCtx() {
     log: globalThis.log,
     emit: globalThis.emit,
     uploadFile: _uploadFile,
+    downloadFile: _downloadFile,
+    enqueueJob: _enqueueJob,
     sql: (sql, params = []) => _sqlQuery(sql, params),
     selfAction: (action, params = {}) => _selfAction(action, params),
     // Invoke one of THIS app's own actions, with the caller's own credentials
@@ -266,6 +318,44 @@ function _dispatch(msg) {
           p.resolve(file_id);
         })
         .catch((e) => { log.error(`storage upload error: ${e.message}`); p.reject(e); });
+      return;
+    }
+
+    case "storage_download_result": {
+      const p = _pendingDownloads.get(msg.id);
+      if (!p) return;
+      _pendingDownloads.delete(msg.id);
+      clearTimeout(p.timer);
+      if (msg.error) {
+        p.reject(new Error(msg.error));
+        return;
+      }
+      fetch(msg.url)
+        .then(async (res) => {
+          if (!res.ok) throw new Error(`download failed: ${res.status} ${await res.text()}`);
+          p.resolve({
+            fileId: msg.file_id,
+            appId: msg.app_id,
+            name: msg.name,
+            contentType: msg.content_type,
+            size: msg.size,
+            content: new Uint8Array(await res.arrayBuffer()),
+          });
+        })
+        .catch((e) => p.reject(e));
+      return;
+    }
+
+    case "job_enqueue_result": {
+      const p = _pendingJobs.get(msg.id);
+      if (!p) return;
+      _pendingJobs.delete(msg.id);
+      clearTimeout(p.timer);
+      if (msg.error) {
+        p.reject(new Error(msg.error));
+      } else {
+        p.resolve({ msgId: msg.msg_id });
+      }
       return;
     }
 
@@ -344,10 +434,12 @@ function _dispatch(msg) {
         _transport.send({ type: "job_result", id: msg.id, result: { ok: true } });
         return;
       }
-      _resolve(fn, [msg.payload, msg.caller ?? null, _makeCtx()],
-        (r) => _transport.send({ type: "job_result", id: msg.id, result: r ?? { ok: true } }),
-        (e) => _transport.send({ type: "job_result", id: msg.id, error: _err(e) }),
-      );
+      _jobChain = _jobChain.then(() => new Promise((done) => {
+        _resolve(fn, [msg.payload, msg.caller ?? null, _makeCtx()],
+          (r) => { _transport.send({ type: "job_result", id: msg.id, result: r ?? { ok: true } }); done(); },
+          (e) => { _transport.send({ type: "job_result", id: msg.id, error: _err(e) }); done(); },
+        );
+      }));
       return;
     }
 

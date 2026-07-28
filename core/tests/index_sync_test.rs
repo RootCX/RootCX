@@ -13,6 +13,7 @@ use rootcx_types::{EntityContract, FieldContract, IndexColumn, IndexContract};
 fn field(name: &str, required: bool) -> FieldContract {
     FieldContract {
         name: name.into(), field_type: "text".into(), required,
+        precision: None, scale: None,
         default_value: None, enum_values: None, references: None,
         is_primary_key: None, on_delete: None,
     }

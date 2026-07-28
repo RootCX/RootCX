@@ -266,6 +266,122 @@ describe("v2: serve()", () => {
     await w.close();
   });
 
+  test("ctx.downloadFile emits storage_download and resolves content", async () => {
+    const w = spawnWorker(`
+      serve({
+        rpc: {
+          async download(_p: any, _c: any, ctx: any) {
+            const file = await ctx.downloadFile("peppol", "11111111-1111-1111-1111-111111111111");
+            return {
+              appId: file.appId,
+              fileId: file.fileId,
+              name: file.name,
+              contentType: file.contentType,
+              text: new TextDecoder().decode(file.content),
+            };
+          },
+        },
+      });
+    `);
+    w.send(DISCOVER);
+    await w.readLine(); // discover
+
+    w.send({ type: "rpc", id: "r1", method: "download", params: {} });
+    const req = await w.readLine();
+    expect(req).toEqual({
+      type: "storage_download",
+      id: expect.any(String),
+      app_id: "peppol",
+      file_id: "11111111-1111-1111-1111-111111111111",
+    });
+
+    w.send({
+      type: "storage_download_result",
+      id: req.id,
+      app_id: "peppol",
+      file_id: "11111111-1111-1111-1111-111111111111",
+      name: "invoice.xml",
+      content_type: "application/xml",
+      size: 5,
+      url: "data:application/octet-stream;base64,aGVsbG8=",
+    });
+
+    const msg = await w.readLine();
+    expect(msg).toEqual({
+      type: "rpc_response",
+      id: "r1",
+      result: {
+        appId: "peppol",
+        fileId: "11111111-1111-1111-1111-111111111111",
+        name: "invoice.xml",
+        contentType: "application/xml",
+        text: "hello",
+      },
+    });
+    await w.close();
+  });
+
+  test("ctx.enqueueJob emits job_enqueue and resolves msg id", async () => {
+    const w = spawnWorker(`
+      serve({
+        rpc: {
+          async queue(_p: any, _c: any, ctx: any) {
+            return ctx.enqueueJob({ type: "export", export_id: "exp1" });
+          },
+        },
+      });
+    `);
+    w.send(DISCOVER);
+    await w.readLine(); // discover
+
+    w.send({ type: "rpc", id: "r1", method: "queue", params: {} });
+    const req = await w.readLine();
+    expect(req).toEqual({
+      type: "job_enqueue",
+      id: expect.any(String),
+      payload: { type: "export", export_id: "exp1" },
+    });
+
+    w.send({ type: "job_enqueue_result", id: req.id, msg_id: 42 });
+    const msg = await w.readLine();
+    expect(msg).toEqual({
+      type: "rpc_response",
+      id: "r1",
+      result: { msgId: 42 },
+    });
+    await w.close();
+  });
+
+  test("jobs execute serially within one worker", async () => {
+    const w = spawnWorker(`
+      let active = 0;
+      serve({
+        onJob: async (payload: any) => {
+          active++;
+          log.info(\`start:\${payload.n}:active:\${active}\`);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          active--;
+          return { n: payload.n };
+        },
+      });
+    `);
+    w.send(DISCOVER);
+    await w.readLine();
+
+    w.send({ type: "job", id: "1", payload: { n: 1 } });
+    w.send({ type: "job", id: "2", payload: { n: 2 } });
+
+    const messages = [];
+    while (messages.filter((m) => m.type === "job_result").length < 2) {
+      messages.push(await w.readLine(1000));
+    }
+    const starts = messages
+      .filter((m) => m.type === "log" && m.message.startsWith("start:"))
+      .map((m) => m.message);
+    expect(starts).toEqual(["start:1:active:1", "start:2:active:1"]);
+    await w.close();
+  });
+
   test("serve() called twice throws", async () => {
     const w = spawnWorker(`
       serve({ rpc: {} });
@@ -384,6 +500,43 @@ describe("v1: legacy (no serve())", () => {
         const msg = await w.readLine(1000);
         if (msg.type === "storage_upload") {
           expect(msg.name).toBe("file.txt");
+          found = true;
+          break;
+        }
+      } catch { break; }
+    }
+    expect(found).toBe(true);
+    await w.close();
+  });
+
+  test("globalThis.downloadFile works without serve()", async () => {
+    const w = spawnWorker(`
+      process.stdin.setEncoding("utf-8");
+      let buf = "";
+      process.stdin.on("data", (chunk: string) => {
+        buf += chunk;
+        let nl: number;
+        while ((nl = buf.indexOf("\\n")) !== -1) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line) continue;
+          const msg = JSON.parse(line);
+          if (msg.type === "discover") {
+            (globalThis as any).downloadFile("peppol", "11111111-1111-1111-1111-111111111111")
+              .catch(() => {});
+          }
+        }
+      });
+    `);
+    w.send(DISCOVER);
+
+    let found = false;
+    for (let i = 0; i < 5; i++) {
+      try {
+        const msg = await w.readLine(1000);
+        if (msg.type === "storage_download") {
+          expect(msg.app_id).toBe("peppol");
+          expect(msg.file_id).toBe("11111111-1111-1111-1111-111111111111");
           found = true;
           break;
         }

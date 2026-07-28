@@ -30,7 +30,7 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
 
 ### Field types
 
-`text` `number` `boolean` `date` `timestamp` `json` `file` `entity_link` `[text]` `[number]`
+`text` `number` `decimal` `boolean` `date` `timestamp` `json` `file` `entity_link` `[text]` `[number]`
 
 ### Rules
 
@@ -38,6 +38,7 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
 - `entity_link` requires `"references": { "entity": "<target>", "field": "id" }`. `<target>` is `"<entity>"` (same app) or `"core:users"` (FK → `rootcx_system.users`, `ON DELETE SET NULL`). Cross-app refs not yet supported.
 - `"required": true` = mandatory on create; omit key for optional
 - `"enum_values": [...]` restricts text fields to fixed values
+- `decimal` is for exact values such as money. `precision` and `scale` are optional, but must be declared together (for example `"precision": 19, "scale": 4`). Decimal values and defaults cross the API as JSON strings so JavaScript never rounds them.
 
 ---
 
@@ -47,7 +48,7 @@ On install/deploy, Core runs `CREATE SCHEMA IF NOT EXISTS` + `CREATE TABLE IF NO
 
 ### Manifest ↔ DB contract
 
-`dataContract` fields map to columns. Auto-columns (`id UUID`, `created_at`, `updated_at`) added by Core — omit from manifest `fields`. Type mapping: `text`→`TEXT`, `number`→`DOUBLE PRECISION`, `boolean`→`BOOLEAN`, `date`→`DATE`, `timestamp`→`TIMESTAMPTZ`, `json`→`JSONB`, `file`→`TEXT`, `entity_link`→`UUID`, `[text]`→`TEXT[]`, `[number]`→`DOUBLE PRECISION[]`.
+`dataContract` fields map to columns. Auto-columns (`id UUID`, `created_at`, `updated_at`) added by Core — omit from manifest `fields`. Type mapping: `text`→`TEXT`, `number`→`DOUBLE PRECISION`, `decimal`→`NUMERIC` or `NUMERIC(precision,scale)`, `boolean`→`BOOLEAN`, `date`→`DATE`, `timestamp`→`TIMESTAMPTZ`, `json`→`JSONB`, `file`→`TEXT`, `entity_link`→`UUID`, `[text]`→`TEXT[]`, `[number]`→`DOUBLE PRECISION[]`.
 
 ---
 

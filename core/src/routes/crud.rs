@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet};
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use chrono::{DateTime, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
@@ -12,10 +11,11 @@ use uuid::Uuid;
 use super::{SharedRuntime, parse_uuid, pool};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
+use crate::data_types::{FieldType, FieldTypes, bind_typed, json_value_to_string, row_json};
 use crate::governance::enforcement::{self, ContextState};
 use crate::manifest::{
     entity_exists, entity_identity, field_type_map, find_entities_by_identity, is_system_field,
-    map_field_type, quote_ident,
+    quote_ident,
 };
 
 /// RLS context for a direct HTTP user call: the user is the responsible party,
@@ -99,38 +99,27 @@ pub(crate) fn filter_writable_fields(
         .collect()
 }
 
-fn pg_cast_suffix(manifest_type: Option<&str>) -> &'static str {
-    match manifest_type.map(map_field_type) {
-        Some("DOUBLE PRECISION") => "::float8",
-        Some("BOOLEAN") => "::boolean",
-        Some("DATE") => "::date",
-        Some("TIMESTAMPTZ") => "::timestamptz",
-        Some("UUID") => "::uuid",
-        Some("JSONB") => "::jsonb",
-        Some("TEXT[]") => "::text[]",
-        Some("DOUBLE PRECISION[]") => "::float8[]",
-        _ => "",
+fn pg_cast_suffix(field_type: Option<&FieldType>) -> &'static str {
+    field_type.map(FieldType::parameter_cast).unwrap_or("")
+}
+
+fn is_jsonb_type(field_type: Option<&FieldType>) -> bool {
+    field_type.is_some_and(FieldType::is_json)
+}
+
+fn filter_bind_value(
+    value: &JsonValue,
+    field_type: Option<&FieldType>,
+) -> Result<String, ApiError> {
+    if field_type.is_some_and(FieldType::is_decimal) && !value.is_string() {
+        return Err(ApiError::BadRequest(
+            "decimal filter values must be JSON strings".into(),
+        ));
     }
+    Ok(json_value_to_string(value))
 }
 
-fn is_jsonb_type(manifest_type: Option<&str>) -> bool {
-    matches!(manifest_type.map(map_field_type), Some("JSONB"))
-}
-
-fn json_value_to_string(val: &JsonValue) -> String {
-    match val {
-        JsonValue::String(s) => s.clone(),
-        JsonValue::Number(n) => n.to_string(),
-        JsonValue::Bool(b) => b.to_string(),
-        JsonValue::Null => String::new(),
-        _ => val.to_string(),
-    }
-}
-
-pub(crate) fn validate_sort_field(
-    field: Option<&String>,
-    types: &HashMap<String, String>,
-) -> String {
+pub(crate) fn validate_sort_field(field: Option<&String>, types: &FieldTypes) -> String {
     match field {
         Some(f)
             if types.contains_key(f.as_str())
@@ -151,7 +140,7 @@ pub(crate) fn validate_order(s: Option<&String>) -> &'static str {
 
 pub(crate) fn build_where_clause(
     clause: &JsonValue,
-    types: &HashMap<String, String>,
+    types: &FieldTypes,
     binds: &mut Vec<String>,
     idx: &mut usize,
 ) -> Result<String, ApiError> {
@@ -182,7 +171,7 @@ pub(crate) fn build_where_clause(
 fn build_logical(
     op: &str,
     val: &JsonValue,
-    types: &HashMap<String, String>,
+    types: &FieldTypes,
     binds: &mut Vec<String>,
     idx: &mut usize,
 ) -> Result<String, ApiError> {
@@ -212,12 +201,12 @@ pub(crate) fn join_where(conditions: &[String]) -> String {
 fn build_field_condition(
     field: &str,
     val: &JsonValue,
-    types: &HashMap<String, String>,
+    types: &FieldTypes,
     binds: &mut Vec<String>,
     idx: &mut usize,
 ) -> Result<String, ApiError> {
     let col = quote_ident(field);
-    let manifest_type = types.get(field).map(String::as_str);
+    let manifest_type = types.get(field);
     let cast = pg_cast_suffix(manifest_type);
     let is_jsonb = is_jsonb_type(manifest_type);
 
@@ -226,7 +215,7 @@ fn build_field_condition(
             return Ok(format!("{col} IS NULL"));
         }
         *idx += 1;
-        binds.push(json_value_to_string(val));
+        binds.push(filter_bind_value(val, manifest_type)?);
         return Ok(format!("{col} = ${}{cast}", *idx));
     }
 
@@ -246,7 +235,7 @@ fn build_field_condition(
                     conditions.push(format!("{col} IS NULL"));
                 } else {
                     *idx += 1;
-                    binds.push(json_value_to_string(operand));
+                    binds.push(filter_bind_value(operand, manifest_type)?);
                     conditions.push(format!("{col} = ${}{cast}", *idx));
                 }
             }
@@ -255,7 +244,7 @@ fn build_field_condition(
                     conditions.push(format!("{col} IS NOT NULL"));
                 } else {
                     *idx += 1;
-                    binds.push(json_value_to_string(operand));
+                    binds.push(filter_bind_value(operand, manifest_type)?);
                     conditions.push(format!("{col} != ${}{cast}", *idx));
                 }
             }
@@ -267,7 +256,7 @@ fn build_field_condition(
                     _ => "<=",
                 };
                 *idx += 1;
-                binds.push(json_value_to_string(operand));
+                binds.push(filter_bind_value(operand, manifest_type)?);
                 conditions.push(format!("{col} {sql_op} ${}{cast}", *idx));
             }
             "$like" | "$ilike" => {
@@ -297,10 +286,11 @@ fn build_field_condition(
                         .iter()
                         .map(|v| {
                             *idx += 1;
-                            binds.push(json_value_to_string(v));
-                            format!("${}{cast}", *idx)
+                            let bind = filter_bind_value(v, manifest_type)?;
+                            binds.push(bind);
+                            Ok(format!("${}{cast}", *idx))
                         })
-                        .collect();
+                        .collect::<Result<_, ApiError>>()?;
                     conditions.push(format!("{col} {kw} ({})", phs.join(", ")));
                 }
             }
@@ -388,7 +378,7 @@ pub async fn list_records(
         if RESERVED_PARAMS.contains(&key.as_str()) {
             continue;
         }
-        let cast = pg_cast_suffix(types.get(key.as_str()).map(String::as_str));
+        let cast = pg_cast_suffix(types.get(key.as_str()));
         idx += 1;
         binds.push(val.clone());
         conditions.push(format!("{} = ${}{}", quote_ident(key), idx, cast));
@@ -411,9 +401,8 @@ pub async fn list_records(
         .map(|o| format!(" OFFSET {}", o.parse::<i64>().unwrap_or(0).max(0)))
         .unwrap_or_default();
 
-    let q = format!(
-        "SELECT to_jsonb(t.*) AS row FROM {tbl} t{wh} ORDER BY {sort} {order}{limit}{offset}"
-    );
+    let row = row_json("t", &types);
+    let q = format!("SELECT {row} AS row FROM {tbl} t{wh} ORDER BY {sort} {order}{limit}{offset}");
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
     for s in &binds {
         query = query.bind(s.as_str());
@@ -481,12 +470,14 @@ async fn enrich_linked(
 
     for (target_app, target_entity, target_key) in &targets {
         let tbl = table(target_app, target_entity);
+        let target_types = field_type_map(pool, target_app, target_entity).await?;
+        let row = row_json("t", &target_types);
         let phs: String = (1..=key_values.len())
             .map(|i| format!("${i}"))
             .collect::<Vec<_>>()
             .join(",");
         let q = format!(
-            "SELECT to_jsonb(t.*) AS row FROM {tbl} t WHERE t.{} IN ({phs})",
+            "SELECT {row} AS row FROM {tbl} t WHERE t.{} IN ({phs})",
             quote_ident(target_key)
         );
         let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
@@ -560,8 +551,9 @@ pub async fn query_records(
     let limit = body.limit.min(1000).max(1);
     let offset = body.offset.max(0);
 
+    let row = row_json("t", &types);
     let q = format!(
-        "SELECT to_jsonb(t.*) AS row, COUNT(*) OVER() AS total \
+        "SELECT {row} AS row, COUNT(*) OVER() AS total \
          FROM {tbl} t{wh} ORDER BY {sort} {order}, t.id ASC LIMIT {limit} OFFSET {offset}"
     );
     let mut query = sqlx::query_as::<_, (JsonValue, i64)>(&q);
@@ -606,15 +598,16 @@ pub async fn create_record(
     let cols: Vec<String> = entries.iter().map(|(k, _)| quote_ident(k)).collect();
     let phs: Vec<String> = (1..=entries.len()).map(|i| format!("${i}")).collect();
 
+    let row = row_json(&tbl, &types);
     let q = format!(
-        "INSERT INTO {tbl} ({}) VALUES ({}) RETURNING to_jsonb({tbl}.*) AS row",
+        "INSERT INTO {tbl} ({}) VALUES ({}) RETURNING {row} AS row",
         cols.join(", "),
         phs.join(", ")
     );
     let mut tx = http_tx(&pool, &app_id, &identity).await?;
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
     for (k, v) in &entries {
-        query = bind_typed(query, v, types.get(*k));
+        query = bind_typed(query, v, types.get(*k)).map_err(ApiError::BadRequest)?;
     }
     let (row,) = query.fetch_one(&mut *tx).await?;
     tx.commit().await?;
@@ -642,7 +635,7 @@ pub(crate) async fn bulk_insert(
     pool: &PgPool,
     app_id: &str,
     tbl: &str,
-    types: &HashMap<String, String>,
+    types: &FieldTypes,
     objects: &[&serde_json::Map<String, JsonValue>],
     state: &ContextState,
     actor_uid: Option<Uuid>,
@@ -672,8 +665,9 @@ pub(crate) async fn bulk_insert(
         value_tuples.push(format!("({})", phs.join(",")));
     }
 
+    let row = row_json(tbl, types);
     let sql = format!(
-        "INSERT INTO {tbl} ({}) VALUES {} RETURNING to_jsonb({tbl}.*) AS row",
+        "INSERT INTO {tbl} ({}) VALUES {} RETURNING {row} AS row",
         cols.join(","),
         value_tuples.join(",")
     );
@@ -686,7 +680,8 @@ pub(crate) async fn bulk_insert(
                 query,
                 obj.get(key.as_str()).unwrap_or(&null_val),
                 types.get(key.as_str()),
-            );
+            )
+            .map_err(ApiError::BadRequest)?;
         }
     }
 
@@ -759,7 +754,8 @@ pub async fn get_record(
     let (uuid, pool) = (parse_uuid(&id)?, pool(&rt));
     ensure_entity(&pool, &app_id, &entity).await?;
     let tbl = table(&app_id, &entity);
-    let q = format!("SELECT to_jsonb(t.*) AS row FROM {tbl} t WHERE t.id = $1");
+    let row = row_json("t", &field_type_map(&pool, &app_id, &entity).await?);
+    let q = format!("SELECT {row} AS row FROM {tbl} t WHERE t.id = $1");
 
     let mut tx = http_tx(&pool, &app_id, &identity).await?;
     let row = sqlx::query_as::<_, (JsonValue,)>(&q)
@@ -792,14 +788,15 @@ pub async fn update_record(
         .map(|(i, (k, _))| format!("{} = ${}", quote_ident(k), i + 1))
         .collect();
     sets.push("\"updated_at\" = now()".to_string());
+    let row = row_json(&tbl, &types);
     let q = format!(
-        "UPDATE {tbl} SET {} WHERE id = ${id_param} RETURNING to_jsonb({tbl}.*) AS row",
+        "UPDATE {tbl} SET {} WHERE id = ${id_param} RETURNING {row} AS row",
         sets.join(", ")
     );
     let mut tx = http_tx(&pool, &app_id, &identity).await?;
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
     for (k, v) in &entries {
-        query = bind_typed(query, v, types.get(*k));
+        query = bind_typed(query, v, types.get(*k)).map_err(ApiError::BadRequest)?;
     }
     query = query.bind(uuid);
     let result = query
@@ -868,8 +865,9 @@ pub async fn federated_query(
         let ent_bind = idx;
         binds.push(entity_name.clone());
 
+        let row = row_json("t", &types);
         unions.push(format!(
-            "SELECT to_jsonb(t.*) || jsonb_build_object('_source', jsonb_build_object('app', ${app_bind}::text, 'entity', ${ent_bind}::text)) AS row FROM {tbl} t{wh}"
+            "SELECT {row} || jsonb_build_object('_source', jsonb_build_object('app', ${app_bind}::text, 'entity', ${ent_bind}::text)) AS row FROM {tbl} t{wh}"
         ));
 
         bind_offset = idx;
@@ -913,92 +911,6 @@ pub async fn federated_query(
     let total = rows.first().map(|(_, t)| *t).unwrap_or(0);
     let data: Vec<JsonValue> = rows.into_iter().map(|(r, _)| r).collect();
     Ok(Json(serde_json::json!({ "data": data, "total": total })))
-}
-
-pub(crate) type QA<'q> =
-    sqlx::query::QueryAs<'q, sqlx::Postgres, (JsonValue,), sqlx::postgres::PgArguments>;
-
-/// Bind using the manifest type (not the JSON payload) so the parameter OID
-/// is stable across sqlx's prepared-statement cache.
-pub(crate) fn bind_typed<'q>(
-    q: QA<'q>,
-    val: &'q JsonValue,
-    manifest_type: Option<&String>,
-) -> QA<'q> {
-    let pg = manifest_type.map(|t| map_field_type(t));
-
-    if val.is_null() {
-        return match pg {
-            Some("DOUBLE PRECISION") => q.bind(None::<f64>),
-            Some("BOOLEAN") => q.bind(None::<bool>),
-            Some("UUID") => q.bind(None::<Uuid>),
-            Some("DATE") => q.bind(None::<NaiveDate>),
-            Some("TIMESTAMPTZ") => q.bind(None::<DateTime<Utc>>),
-            Some("JSONB") => q.bind(None::<JsonValue>),
-            Some("TEXT[]") => q.bind(None::<Vec<String>>),
-            Some("DOUBLE PRECISION[]") => q.bind(None::<Vec<f64>>),
-            _ => q.bind(None::<String>),
-        };
-    }
-
-    match pg {
-        Some("DOUBLE PRECISION") => q.bind(coerce_f64(val)),
-        Some("BOOLEAN") => q.bind(coerce_bool(val)),
-        Some("UUID") => q.bind(coerce_str(val).and_then(|s| s.parse::<Uuid>().ok())),
-        Some("DATE") => q.bind(coerce_str(val).and_then(|s| s.parse::<NaiveDate>().ok())),
-        Some("TIMESTAMPTZ") => {
-            q.bind(coerce_str(val).and_then(|s| s.parse::<DateTime<Utc>>().ok()))
-        }
-        Some("JSONB") => q.bind(val),
-        Some("TEXT[]") => q.bind(coerce_str_vec(val)),
-        Some("DOUBLE PRECISION[]") => q.bind(coerce_f64_vec(val)),
-        _ => match val {
-            JsonValue::String(s) => q.bind(s.as_str()),
-            _ => q.bind(json_value_to_string(val)),
-        },
-    }
-}
-
-fn coerce_f64(val: &JsonValue) -> f64 {
-    match val {
-        JsonValue::Number(n) => n.as_f64().unwrap_or(0.0),
-        JsonValue::String(s) => s.parse().unwrap_or(0.0),
-        JsonValue::Bool(b) => {
-            if *b {
-                1.0
-            } else {
-                0.0
-            }
-        }
-        _ => 0.0,
-    }
-}
-
-fn coerce_bool(val: &JsonValue) -> bool {
-    match val {
-        JsonValue::Bool(b) => *b,
-        JsonValue::Number(n) => n.as_i64().is_some_and(|i| i != 0),
-        JsonValue::String(s) => matches!(s.as_str(), "true" | "1"),
-        _ => false,
-    }
-}
-
-fn coerce_str(val: &JsonValue) -> Option<&str> {
-    val.as_str()
-}
-
-fn coerce_str_vec<'a>(val: &'a JsonValue) -> Vec<&'a str> {
-    match val {
-        JsonValue::Array(arr) => arr.iter().filter_map(|v| v.as_str()).collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn coerce_f64_vec(val: &JsonValue) -> Vec<f64> {
-    match val {
-        JsonValue::Array(arr) => arr.iter().filter_map(|v| v.as_f64()).collect(),
-        _ => Vec::new(),
-    }
 }
 
 #[cfg(test)]
@@ -1050,21 +962,27 @@ mod tests {
         assert_eq!(keys, vec!["name".to_string(), "email".to_string()]);
     }
 
-    fn types_fixture() -> HashMap<String, String> {
+    fn types_fixture() -> FieldTypes {
+        let decimal_field = serde_json::from_value(json!({
+            "name": "price",
+            "type": "decimal"
+        }))
+        .unwrap();
         [
-            ("id", "uuid"),
-            ("created_at", "timestamp"),
-            ("updated_at", "timestamp"),
-            ("status", "text"),
-            ("age", "number"),
-            ("active", "boolean"),
-            ("tags", "[text]"),
-            ("references", "json"),
-            ("score", "number"),
-            ("created", "timestamp"),
+            ("id", FieldType::Uuid),
+            ("created_at", FieldType::Timestamp),
+            ("updated_at", FieldType::Timestamp),
+            ("status", FieldType::Text),
+            ("age", FieldType::Number),
+            ("active", FieldType::Boolean),
+            ("tags", FieldType::TextArray),
+            ("references", FieldType::Json),
+            ("score", FieldType::Number),
+            ("created", FieldType::Timestamp),
+            ("price", FieldType::from_field(&decimal_field).unwrap()),
         ]
         .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .map(|(key, value)| (key.to_string(), value))
         .collect()
     }
 
@@ -1099,6 +1017,36 @@ mod tests {
             build_where_clause(&json!({"age": {"$gt": 18}}), &types, &mut binds, &mut idx).unwrap();
         assert_eq!(sql, "\"age\" > $1::float8");
         assert_eq!(binds, vec!["18"]);
+    }
+
+    #[test]
+    fn where_decimal_requires_an_exact_string_operand() {
+        let types = types_fixture();
+
+        let mut binds = Vec::new();
+        let mut idx = 0;
+        let sql = build_where_clause(
+            &json!({"price": {"$gte": "9007199254740993.0001"}}),
+            &types,
+            &mut binds,
+            &mut idx,
+        )
+        .unwrap();
+        assert!(sql.contains("::numeric"), "{sql}");
+        assert_eq!(binds, vec!["9007199254740993.0001"]);
+
+        let error = build_where_clause(
+            &json!({"price": {"$gte": 12.34}}),
+            &types,
+            &mut Vec::new(),
+            &mut 0,
+        )
+        .expect_err("decimal JSON numbers must be rejected");
+        assert!(matches!(
+            error,
+            ApiError::BadRequest(message)
+                if message == "decimal filter values must be JSON strings"
+        ));
     }
 
     #[test]
@@ -1367,13 +1315,13 @@ mod tests {
 
     #[test]
     fn pg_cast_suffix_covers_types() {
-        assert_eq!(pg_cast_suffix(Some("number")), "::float8");
-        assert_eq!(pg_cast_suffix(Some("boolean")), "::boolean");
-        assert_eq!(pg_cast_suffix(Some("date")), "::date");
-        assert_eq!(pg_cast_suffix(Some("timestamp")), "::timestamptz");
-        assert_eq!(pg_cast_suffix(Some("uuid")), "::uuid");
-        assert_eq!(pg_cast_suffix(Some("entity_link")), "::uuid");
-        assert_eq!(pg_cast_suffix(Some("text")), "");
+        assert_eq!(pg_cast_suffix(Some(&FieldType::Number)), "::float8");
+        assert_eq!(pg_cast_suffix(Some(&FieldType::Boolean)), "::boolean");
+        assert_eq!(pg_cast_suffix(Some(&FieldType::Date)), "::date");
+        assert_eq!(pg_cast_suffix(Some(&FieldType::Timestamp)), "::timestamptz");
+        assert_eq!(pg_cast_suffix(Some(&FieldType::Uuid)), "::uuid");
+        assert_eq!(pg_cast_suffix(Some(&FieldType::EntityLink)), "::uuid");
+        assert_eq!(pg_cast_suffix(Some(&FieldType::Text)), "");
         assert_eq!(pg_cast_suffix(None), "");
     }
 

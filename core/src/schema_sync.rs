@@ -4,7 +4,8 @@ use sqlx::{Connection, PgPool};
 use tracing::info;
 
 use crate::RuntimeError;
-use crate::manifest::{identity_index_name, is_system_field, json_to_sql_default, list_identity_indexes, map_field_type, quote_ident, resolve_on_delete};
+use crate::data_types::{FieldType, sql_default};
+use crate::manifest::{identity_index_name, is_system_field, list_identity_indexes, quote_ident, resolve_on_delete};
 use rootcx_types::{EntityContract, FieldContract, SchemaChange, SchemaVerification};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -43,29 +44,23 @@ pub struct TableDiff {
     pub changes: Vec<ColumnDiff>,
 }
 
-fn normalize_pg_type(manifest_pg_type: &str) -> &str {
+fn normalize_pg_type(manifest_pg_type: &str) -> String {
     match manifest_pg_type {
-        "TEXT" => "text",
-        "DOUBLE PRECISION" => "double precision",
-        "BOOLEAN" => "boolean",
-        "DATE" => "date",
-        "TIMESTAMPTZ" => "timestamp with time zone",
-        "JSONB" => "jsonb",
-        "UUID" => "uuid",
-        "TEXT[]" => "text[]",
-        "DOUBLE PRECISION[]" => "double precision[]",
-        other => other,
+        "TIMESTAMPTZ" => "timestamp with time zone".into(),
+        other => other.to_ascii_lowercase(),
     }
 }
 
-fn resolve_pg_type(field: &FieldContract, pk_types: &HashMap<String, &'static str>) -> &'static str {
+fn resolve_pg_type(field: &FieldContract, pk_types: &HashMap<String, String>) -> String {
     if field.field_type == "entity_link" {
         if let Some(refs) = &field.references {
-            return pk_types.get(&refs.entity).copied().unwrap_or("UUID");
+            return pk_types.get(&refs.entity).cloned().unwrap_or_else(|| "UUID".into());
         }
-        return "UUID";
+        return "UUID".into();
     }
-    map_field_type(&field.field_type)
+    FieldType::from_field(field)
+        .expect("resolve_pg_type requires a validated manifest")
+        .postgres_type()
 }
 
 fn defaults_match(pg_expr: &str, desired: &str) -> bool {
@@ -87,7 +82,7 @@ pub fn compute_diff(
     table_name: &str,
     db_columns: &[DbColumn],
     manifest_fields: &[FieldContract],
-    pk_types: &HashMap<String, &'static str>,
+    pk_types: &HashMap<String, String>,
 ) -> TableDiff {
     let mut changes = Vec::new();
 
@@ -100,18 +95,18 @@ pub fn compute_diff(
         }
 
         let desired_pg_type = resolve_pg_type(field, pk_types);
-        let desired_normalized = normalize_pg_type(desired_pg_type);
+        let desired_normalized = normalize_pg_type(&desired_pg_type);
 
         match db_map.get(field.name.as_str()) {
             None => {
-                changes.push(ColumnDiff::Add { field: field.clone(), pg_type: desired_pg_type.to_string() });
+                changes.push(ColumnDiff::Add { field: field.clone(), pg_type: desired_pg_type.clone() });
             }
             Some(db_col) => {
                 if db_col.pg_type != desired_normalized {
                     changes.push(ColumnDiff::AlterType {
                         column_name: field.name.clone(),
                         from_type: db_col.pg_type.clone(),
-                        to_type: desired_pg_type.to_string(),
+                        to_type: desired_pg_type.clone(),
                     });
                 }
 
@@ -123,8 +118,11 @@ pub fn compute_diff(
                     changes.push(ColumnDiff::DropNotNull { column_name: field.name.clone() });
                 }
 
-                let desired_default =
-                    field.default_value.as_ref().and_then(|v| json_to_sql_default(v, desired_pg_type));
+                let desired_default = field.default_value.as_ref().and_then(|value| {
+                    let field_type = FieldType::from_field(field)
+                        .expect("compute_diff requires a validated manifest");
+                    sql_default(value, &field_type)
+                });
                 match (&db_col.default_expr, &desired_default) {
                     (None, Some(sql)) => {
                         changes
@@ -190,6 +188,9 @@ pub fn compute_diff(
 
 fn generate_using_clause(col_name: &str, to: &str) -> String {
     let col = quote_ident(col_name);
+    if to.starts_with("NUMERIC") {
+        return format!(" USING NULLIF({col}::text, '')::{to}");
+    }
     match to {
         "DOUBLE PRECISION" => format!(" USING NULLIF({col}, '')::DOUBLE PRECISION"),
         "BOOLEAN" => format!(
@@ -219,7 +220,8 @@ fn emit_ddl_phases(fq: &str, change: &ColumnDiff, p: &mut [Vec<String>; 7]) {
                 p[3].push(format!("ALTER TABLE {fq} ALTER COLUMN {col} SET NOT NULL"));
             }
             if let Some(ref val) = field.default_value
-                && let Some(sql) = json_to_sql_default(val, pg_type) {
+                && let Ok(field_type) = FieldType::from_field(field)
+                && let Some(sql) = sql_default(val, &field_type) {
                     p[4].push(format!("ALTER TABLE {fq} ALTER COLUMN {col} SET DEFAULT {sql}"));
                 }
         }
@@ -269,7 +271,7 @@ pub async fn sync_schema(
     pool: &PgPool,
     app_id: &str,
     entities: &[EntityContract],
-    pk_types: &HashMap<String, &'static str>,
+    pk_types: &HashMap<String, String>,
 ) -> Result<(), RuntimeError> {
     let mut has_type_changes = false;
 
@@ -659,9 +661,10 @@ fn enum_check_expr(field: &FieldContract) -> Option<String> {
     let vals = field.enum_values.as_ref().filter(|v| !v.is_empty())?;
     let col = quote_ident(&field.name);
     let list = vals.iter().map(|v| format!("'{}'", v.replace('\'', "''"))).collect::<Vec<_>>().join(", ");
-    Some(match map_field_type(&field.field_type).strip_suffix("[]") {
-        Some(elem) => format!("{col} <@ ARRAY[{list}]::{elem}[]"),
-        None => format!("{col} IN ({list})"),
+    let field_type = FieldType::from_field(field).ok()?;
+    Some(match field_type {
+        FieldType::TextArray => format!("{col} <@ ARRAY[{list}]::TEXT[]"),
+        _ => format!("{col} IN ({list})"),
     })
 }
 
@@ -893,7 +896,7 @@ pub async fn verify_all(
     pool: &PgPool,
     app_id: &str,
     entities: &[EntityContract],
-    pk_types: &HashMap<String, &'static str>,
+    pk_types: &HashMap<String, String>,
 ) -> Result<SchemaVerification, RuntimeError> {
     let mut changes = Vec::new();
     for entity in entities {
@@ -991,6 +994,8 @@ mod tests {
         FieldContract {
             name: name.to_string(),
             field_type: field_type.to_string(),
+            precision: None,
+            scale: None,
             required: false,
             default_value: None,
             enum_values: None,
@@ -1000,7 +1005,7 @@ mod tests {
         }
     }
 
-    fn empty_pk_types() -> HashMap<String, &'static str> {
+    fn empty_pk_types() -> HashMap<String, String> {
         HashMap::new()
     }
 
@@ -1026,6 +1031,7 @@ mod tests {
             ("UUID", "uuid"),
             ("TEXT[]", "text[]"),
             ("DOUBLE PRECISION[]", "double precision[]"),
+            ("NUMERIC(24,8)", "numeric(24,8)"),
         ] {
             assert_eq!(normalize_pg_type(input), expected, "normalize({input})");
         }
@@ -1253,7 +1259,7 @@ mod tests {
     #[test]
     fn diff_entity_link_resolution() {
         let mut pk = HashMap::new();
-        pk.insert("accounts".to_string(), "TEXT" as &str);
+        pk.insert("accounts".to_string(), "TEXT".to_string());
         let db = vec![]; // no columns = new column
         let mut f = mfield("account_id", "entity_link");
         f.references = Some(FieldReference { entity: "accounts".to_string(), field: "id".to_string() });
@@ -1328,6 +1334,27 @@ mod tests {
         assert!(stmt.contains("ALTER COLUMN"), "stmt: {stmt}");
         assert!(stmt.contains("TYPE DOUBLE PRECISION"), "stmt: {stmt}");
         assert!(stmt.contains("USING"), "stmt: {stmt}");
+    }
+
+    #[test]
+    fn ddl_alter_type_to_decimal_tolerates_empty_text_values() {
+        let diff = TableDiff {
+            schema_name: "app".into(),
+            table_name: "tbl".into(),
+            changes: vec![ColumnDiff::AlterType {
+                column_name: "price".into(),
+                from_type: "text".into(),
+                to_type: "NUMERIC(19,4)".into(),
+            }],
+        };
+
+        let statements = generate_ddl(&diff);
+        assert_eq!(statements.len(), 1, "{statements:?}");
+        assert!(
+            statements[0].contains("USING NULLIF(\"price\"::text, '')::NUMERIC(19,4)"),
+            "{}",
+            statements[0]
+        );
     }
 
     #[test]
@@ -1456,6 +1483,8 @@ mod tests {
         FieldContract {
             name: name.to_string(),
             field_type: "entity_link".to_string(),
+            precision: None,
+            scale: None,
             required,
             default_value: None,
             enum_values: None,
@@ -1481,7 +1510,7 @@ mod tests {
             let db = vec![db_col_with_fk("list_id", "uuid", *required, "fk_app_items_list_id_lists", db_rule)];
             let manifest = vec![entity_link_field("list_id", "lists", *required, *on_delete)];
             let mut pk = HashMap::new();
-            pk.insert("lists".to_string(), "UUID" as &str);
+            pk.insert("lists".to_string(), "UUID".to_string());
             let diff = compute_diff("app", "items", &db, &manifest, &pk);
             let fk_change = diff.changes.iter().find(|c| matches!(c, ColumnDiff::ReplaceFkConstraint { .. }));
             assert!(fk_change.is_some(),
@@ -1511,7 +1540,7 @@ mod tests {
             let db = vec![db_col_with_fk("list_id", "uuid", *required, "fk_app_items_list_id_lists", db_rule)];
             let manifest = vec![entity_link_field("list_id", "lists", *required, *on_delete)];
             let mut pk = HashMap::new();
-            pk.insert("lists".to_string(), "UUID" as &str);
+            pk.insert("lists".to_string(), "UUID".to_string());
             let diff = compute_diff("app", "items", &db, &manifest, &pk);
             let fk_changes: Vec<_> = diff.changes.iter()
                 .filter(|c| matches!(c, ColumnDiff::ReplaceFkConstraint { .. }))
@@ -1527,7 +1556,7 @@ mod tests {
         let db = vec![db_col("list_id", "uuid", true)];
         let manifest = vec![entity_link_field("list_id", "lists", true, Some(OnDeletePolicy::Cascade))];
         let mut pk = HashMap::new();
-        pk.insert("lists".to_string(), "UUID" as &str);
+        pk.insert("lists".to_string(), "UUID".to_string());
         let diff = compute_diff("app", "items", &db, &manifest, &pk);
         assert!(
             !diff.changes.iter().any(|c| matches!(c, ColumnDiff::ReplaceFkConstraint { .. })),
