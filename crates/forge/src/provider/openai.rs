@@ -7,20 +7,27 @@ use super::{
 };
 use crate::error::ForgeError;
 
-const API_URL: &str = "https://api.openai.com/v1/chat/completions";
+const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const MAX_TOKENS: u32 = 16384;
 
 pub struct OpenAi {
     model: String,
     api_key: String,
+    chat_completions_url: String,
     client: reqwest::Client,
 }
 
 impl OpenAi {
-    pub fn new(model: String, api_key: String) -> Self {
+    pub fn new(model: String, api_key: String, base_url: Option<&str>) -> Self {
+        let base_url = base_url
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .unwrap_or(DEFAULT_BASE_URL)
+            .trim_end_matches('/');
         Self {
             model,
             api_key,
+            chat_completions_url: format!("{base_url}/chat/completions"),
             client: reqwest::Client::new(),
         }
     }
@@ -141,7 +148,7 @@ impl LlmProvider for OpenAi {
 
         let resp = self
             .client
-            .post(API_URL)
+            .post(&self.chat_completions_url)
             .bearer_auth(&self.api_key)
             .json(&body)
             .send()
@@ -264,4 +271,54 @@ fn parse_chunk(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn stream_uses_the_configured_openai_compatible_endpoint() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 2048];
+            loop {
+                let read = socket.read(&mut chunk).await.unwrap();
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 14\r\n\r\ndata: [DONE]\n\n",
+                )
+                .await
+                .unwrap();
+            String::from_utf8(request).unwrap()
+        });
+
+        let provider = OpenAi::new(
+            "gateway-model".into(),
+            "gateway-token".into(),
+            Some(&format!("http://{address}/v1/")),
+        );
+        let mut events = provider.stream("system", &[], &[]).await.unwrap();
+
+        assert!(matches!(
+            events.next().await,
+            Some(Ok(StreamEvent::Done(StopReason::EndTurn)))
+        ));
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /v1/chat/completions HTTP/1.1\r\n"));
+        assert!(request.to_ascii_lowercase().contains("authorization: bearer gateway-token\r\n"));
+    }
 }

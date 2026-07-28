@@ -15,7 +15,11 @@ fn llm_config(provider: &str) -> LlmConfig {
     match provider {
         "openai" => LlmConfig {
             import: r#"import { ChatOpenAI } from "@langchain/openai";"#,
-            init: r#"new ChatOpenAI({ apiKey: credentials.OPENAI_API_KEY, model: "gpt-4.1" })"#,
+            init: concat!(
+                r#"new ChatOpenAI({ apiKey: credentials.OPENAI_API_KEY, model: "gpt-4.1", "#,
+                r#"...(credentials.OPENAI_BASE_URL ? { streamUsage: false, "#,
+                r#"configuration: { baseURL: credentials.OPENAI_BASE_URL } } : {}) })"#,
+            ),
             dep_name: "@langchain/openai",
             dep_version: "^1.4.0",
         },
@@ -40,6 +44,20 @@ fn llm_config(provider: &str) -> LlmConfig {
             dep_name: "@langchain/anthropic",
             dep_version: "^1.3.0",
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::llm_config;
+
+    #[test]
+    fn openai_agents_honor_the_configured_compatible_endpoint() {
+        let config = llm_config("openai");
+
+        assert!(config.init.contains("credentials.OPENAI_BASE_URL"));
+        assert!(config.init.contains("configuration: { baseURL:"));
+        assert!(config.init.contains("streamUsage: false"));
     }
 }
 

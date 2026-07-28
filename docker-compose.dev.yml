@@ -1,7 +1,6 @@
 services:
   postgres:
     image: ghcr.io/rootcx/postgresql:16-pgmq-cron
-    user: root
     entrypoint: ["/pg-entrypoint.sh"]
     environment:
       POSTGRES_USER: rootcx

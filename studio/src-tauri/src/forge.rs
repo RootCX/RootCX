@@ -84,12 +84,24 @@ async fn build_config(client: &RuntimeClient) -> Result<ForgeConfig, String> {
         rootcx_types::ProviderType::Bedrock => "AWS_BEARER_TOKEN_BEDROCK",
     };
     let api_key = env.get(secret_key).cloned();
+    let openai_base_url = match provider {
+        rootcx_types::ProviderType::OpenAI => env.get("OPENAI_BASE_URL").cloned(),
+        _ => None,
+    };
 
     info!("forge: provider={provider:?} model={model} key={}", if api_key.is_some() { "ok" } else { "missing" });
 
     let region = ai.get("region").and_then(|r| r.as_str()).map(String::from);
     let skills_dirs = crate::state::skills_dirs();
-    Ok(ForgeConfig { provider, model, api_key, region, system_prompt: None, skills_dirs })
+    Ok(ForgeConfig {
+        provider,
+        model,
+        api_key,
+        openai_base_url,
+        region,
+        system_prompt: None,
+        skills_dirs,
+    })
 }
 
 fn parse_provider_model(s: &str) -> (rootcx_types::ProviderType, String) {

@@ -33,6 +33,8 @@ pub struct ForgeConfig {
     pub provider: ProviderType,
     pub model: String,
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub openai_base_url: Option<String>,
     pub region: Option<String>,
     pub system_prompt: Option<String>,
     #[serde(default)]
@@ -45,6 +47,7 @@ impl std::fmt::Debug for ForgeConfig {
             .field("provider", &self.provider)
             .field("model", &self.model)
             .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("openai_base_url", &self.openai_base_url)
             .field("region", &self.region)
             .finish()
     }
@@ -56,6 +59,7 @@ impl Default for ForgeConfig {
             provider: ProviderType::Anthropic,
             model: "claude-sonnet-4-20250514".into(),
             api_key: None,
+            openai_base_url: None,
             region: None,
             system_prompt: None,
             skills_dirs: vec![],
@@ -146,7 +150,11 @@ impl ForgeEngine {
             cwd: cwd.clone(),
             system_prompt,
             provider: provider::build_provider(
-                &config.provider, &config.model, config.api_key.as_deref(), config.region.as_deref(),
+                &config.provider,
+                &config.model,
+                config.api_key.as_deref(),
+                config.openai_base_url.as_deref(),
+                config.region.as_deref(),
             ),
             compactor: Box::new(compactor::LlmSummarizer),
             config,

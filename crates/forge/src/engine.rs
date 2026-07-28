@@ -424,7 +424,11 @@ async fn build_history(
 
 async fn generate_title(pool: SqlitePool, session_id: String, user_text: String, config: ForgeConfig, emit: EmitFn) {
     let provider = provider::build_provider(
-        &config.provider, &config.model, config.api_key.as_deref(), config.region.as_deref(),
+        &config.provider,
+        &config.model,
+        config.api_key.as_deref(),
+        config.openai_base_url.as_deref(),
+        config.region.as_deref(),
     );
     let messages = [ChatMessage {
         role: Role::User,

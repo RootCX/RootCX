@@ -62,6 +62,7 @@ pub fn build_provider(
     kind: &ProviderType,
     model: &str,
     api_key: Option<&str>,
+    openai_base_url: Option<&str>,
     region: Option<&str>,
 ) -> Box<dyn LlmProvider> {
     match kind {
@@ -72,6 +73,7 @@ pub fn build_provider(
         ProviderType::OpenAI => Box::new(openai::OpenAi::new(
             model.to_string(),
             api_key.unwrap_or_default().to_string(),
+            openai_base_url,
         )),
         ProviderType::Bedrock => Box::new(bedrock::Bedrock::new(
             model.to_string(),

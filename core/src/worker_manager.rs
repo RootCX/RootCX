@@ -166,7 +166,11 @@ impl WorkerManager {
     ) -> Result<SupervisorHandle, RuntimeError> {
         let app_dir = self.apps_dir.join(app_id);
         let entry_point = resolve_entry_point(&app_dir)?;
-        let credentials = secrets.get_env_for_app(pool, app_id).await?;
+        let mut credentials = secrets.get_env_for_app(pool, app_id).await?;
+        apply_openai_base_url(
+            &mut credentials,
+            std::env::var("ROOTCX_OPENAI_BASE_URL").ok(),
+        );
         let (agent_boot_config, supervision) = match self.build_agent_boot(pool, app_id).await {
             Some((boot, sup)) => (Some(boot), sup),
             None => (None, None),
@@ -404,6 +408,57 @@ impl WorkerManager {
                 .or_insert(s);
         }
         out
+    }
+}
+
+fn apply_openai_base_url(
+    credentials: &mut std::collections::HashMap<String, String>,
+    configured_url: Option<String>,
+) {
+    let Some(url) = configured_url.map(|url| url.trim().to_string()) else {
+        return;
+    };
+    if !url.is_empty() {
+        credentials.entry("OPENAI_BASE_URL".into()).or_insert(url);
+    }
+}
+
+#[cfg(test)]
+mod openai_base_url_tests {
+    use super::apply_openai_base_url;
+    use std::collections::HashMap;
+
+    #[test]
+    fn chart_endpoint_reaches_sandboxed_agents() {
+        let mut credentials = HashMap::new();
+
+        apply_openai_base_url(
+            &mut credentials,
+            Some(" https://gateway.internal.example/v1/ ".into()),
+        );
+
+        assert_eq!(
+            credentials.get("OPENAI_BASE_URL").map(String::as_str),
+            Some("https://gateway.internal.example/v1/")
+        );
+    }
+
+    #[test]
+    fn app_specific_endpoint_takes_precedence() {
+        let mut credentials = HashMap::from([(
+            "OPENAI_BASE_URL".into(),
+            "https://app-gateway.internal/v1".into(),
+        )]);
+
+        apply_openai_base_url(
+            &mut credentials,
+            Some("https://platform-gateway.internal/v1".into()),
+        );
+
+        assert_eq!(
+            credentials.get("OPENAI_BASE_URL").map(String::as_str),
+            Some("https://app-gateway.internal/v1")
+        );
     }
 }
 
