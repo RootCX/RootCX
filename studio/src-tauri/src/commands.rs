@@ -333,7 +333,7 @@ const COMPOSE_YAML: &str = r#"services:
     volumes:
       - pgdata:/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U rootcx -d rootcx"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U rootcx -d rootcx"]
       interval: 2s
       timeout: 5s
       retries: 10

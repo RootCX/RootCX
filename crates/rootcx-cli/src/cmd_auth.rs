@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde_json::Value;
 
 use crate::{auth, config};
 
@@ -27,10 +28,12 @@ pub fn logout() -> Result<()> {
 }
 
 pub async fn whoami(json: bool) -> Result<()> {
+    let cfg = config::load().context("not signed in")?;
     let client = crate::client_from_config().await?;
     let user = client.me().await.context("whoami failed")?;
+    let workspace_url = cfg.url.trim_end_matches('/');
     if json {
-        println!("{}", serde_json::to_string_pretty(&user)?);
+        println!("{}", serde_json::to_string_pretty(&with_workspace_url(user, workspace_url))?);
         return Ok(());
     }
     let email = user["email"].as_str().unwrap_or("?");
@@ -39,7 +42,15 @@ pub async fn whoami(json: bool) -> Result<()> {
         Some(name) => println!("{email} ({name}) [{id}]"),
         None => println!("{email} [{id}]"),
     }
+    println!("Workspace: {workspace_url}");
     Ok(())
+}
+
+fn with_workspace_url(mut user: Value, workspace_url: &str) -> Value {
+    if let Some(object) = user.as_object_mut() {
+        object.insert("workspaceUrl".into(), Value::String(workspace_url.into()));
+    }
+    user
 }
 
 #[cfg(test)]
@@ -109,5 +120,13 @@ mod tests {
         assert_eq!(cfg.url, "http://core");
         assert!(cfg.token.is_none());
         assert!(cfg.refresh_token.is_none());
+    }
+
+    #[test]
+    fn whoami_json_identifies_the_authenticated_workspace() {
+        let user = serde_json::json!({ "id": "user-1", "email": "owner@example.com" });
+        let output = with_workspace_url(user, "https://acme.rootcx.com");
+        assert_eq!(output["workspaceUrl"], "https://acme.rootcx.com");
+        assert_eq!(output["email"], "owner@example.com");
     }
 }

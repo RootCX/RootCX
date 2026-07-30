@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::extract::FromRequestParts;
@@ -9,9 +10,15 @@ use super::jwt;
 use crate::api_error::ApiError;
 use crate::routes::SharedRuntime;
 
+#[derive(Clone, Debug)]
 pub struct Identity {
     pub user_id: Uuid,
     pub email: String,
+}
+
+pub struct AudienceIdentity {
+    pub identity: Identity,
+    pub scopes: HashSet<String>,
 }
 
 /// Deny-by-default enablement: `false` if the principal is disabled or missing.
@@ -39,38 +46,65 @@ impl Identity {
     }
 }
 
+fn auth_config(parts: &Parts, state: &SharedRuntime) -> Arc<AuthConfig> {
+    parts
+        .extensions
+        .get::<Arc<AuthConfig>>()
+        .cloned()
+        .unwrap_or_else(|| state.auth_config().clone())
+}
+
+fn bearer_token(parts: &Parts) -> Result<&str, ApiError> {
+    parts
+        .headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or_else(|| ApiError::Unauthorized("missing or invalid authorization header".into()))
+}
+
+/// Authenticate REST extractors and MCP middleware through the same policy.
+pub async fn authenticate_parts(parts: &Parts, state: &SharedRuntime) -> Result<Identity, ApiError> {
+    let claims = jwt::decode_unscoped(&auth_config(parts, state), bearer_token(parts)?)
+        .map_err(|_| ApiError::Unauthorized("invalid token".into()))?;
+    identity_from_claims(state, claims).await
+}
+
+pub async fn authenticate_parts_for_audience(
+    parts: &Parts,
+    state: &SharedRuntime,
+    audience: &str,
+) -> Result<AudienceIdentity, ApiError> {
+    let claims = jwt::decode_for_audience(&auth_config(parts, state), bearer_token(parts)?, audience)
+        .map_err(|_| ApiError::Unauthorized("invalid token audience".into()))?;
+    let scopes = claims
+        .scope
+        .as_deref()
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let identity = identity_from_claims(state, claims).await?;
+    Ok(AudienceIdentity { identity, scopes })
+}
+
+async fn identity_from_claims(state: &SharedRuntime, claims: jwt::Claims) -> Result<Identity, ApiError> {
+    // Access tokens carry an email; refresh/other tokens are not accepted here.
+    if claims.email.is_empty() {
+        return Err(ApiError::Unauthorized("invalid token type".into()));
+    }
+    let user_id: Uuid = claims.sub.parse()
+        .map_err(|_| ApiError::Unauthorized("invalid token subject".into()))?;
+    if !principal_enabled(state.pool(), user_id).await {
+        return Err(ApiError::Unauthorized("principal disabled".into()));
+    }
+    Ok(Identity { user_id, email: claims.email })
+}
+
 impl FromRequestParts<SharedRuntime> for Identity {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &SharedRuntime) -> Result<Self, Self::Rejection> {
-        let auth_config = parts
-            .extensions
-            .get::<Arc<AuthConfig>>()
-            .cloned()
-            .ok_or_else(|| ApiError::Internal("auth not configured".into()))?;
-
-        let token = parts.headers.get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|h| h.strip_prefix("Bearer "))
-            .ok_or_else(|| ApiError::Unauthorized("missing or invalid authorization header".into()))?;
-
-        let claims = jwt::decode(&auth_config, token)
-            .map_err(|_| ApiError::Unauthorized("invalid token".into()))?;
-
-        // Access tokens carry an email; refresh/other tokens are not accepted here.
-        if claims.email.is_empty() {
-            return Err(ApiError::Unauthorized("invalid token type".into()));
-        }
-
-        let user_id: Uuid = claims.sub.parse()
-            .map_err(|_| ApiError::Unauthorized("invalid token subject".into()))?;
-
-        // A valid token is not enough: a disabled (or deleted) principal has no
-        // authority, effective immediately rather than at token expiry.
-        if !principal_enabled(state.pool(), user_id).await {
-            return Err(ApiError::Unauthorized("principal disabled".into()));
-        }
-
-        Ok(Identity { user_id, email: claims.email })
+        authenticate_parts(parts, state).await
     }
 }

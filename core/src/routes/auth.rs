@@ -63,7 +63,8 @@ fn user_response(row: UserRow) -> AuthUserResponse {
 
 /// Decode a refresh token and extract (user_id, session_id).
 fn decode_refresh(config: &AuthConfig, token: &str) -> Result<(Uuid, Uuid), ApiError> {
-    let claims = jwt::decode(config, token).map_err(|_| ApiError::Unauthorized("invalid refresh token".into()))?;
+    let claims = jwt::decode_unscoped(config, token)
+        .map_err(|_| ApiError::Unauthorized("invalid refresh token".into()))?;
     let session_id = claims.session_id.ok_or_else(|| ApiError::Unauthorized("not a refresh token".into()))?;
     let user_id: Uuid = claims.sub.parse().map_err(|_| ApiError::Unauthorized("invalid token subject".into()))?;
     Ok((user_id, session_id))

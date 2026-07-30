@@ -8,6 +8,7 @@ pub mod logs;
 pub mod magic_link;
 pub mod mcp;
 pub mod oidc;
+pub mod onboarding;
 pub mod rbac;
 pub mod service_accounts;
 pub mod sharing;
@@ -68,6 +69,7 @@ pub fn builtin_extensions(auth_config: Arc<AuthConfig>) -> Vec<Box<dyn RuntimeEx
         Box::new(agents::AgentExtension),
         Box::new(integrations::IntegrationsExtension),
         Box::new(mcp::McpExtension),
+        Box::new(onboarding::OnboardingExtension),
         Box::new(channels::ChannelExtension),
         Box::new(storage::StorageExtension),
         Box::new(platform_storage::PlatformStorageExtension),

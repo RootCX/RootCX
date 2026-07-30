@@ -9,6 +9,9 @@ pub fn home_dir() -> Result<PathBuf, PlatformError> {
 }
 
 pub fn data_dir() -> Result<PathBuf, PlatformError> {
+    if let Some(path) = std::env::var_os("ROOTCX_DATA_DIR") {
+        return Ok(PathBuf::from(path));
+    }
     #[cfg(target_os = "macos")]
     { return home_dir().map(|h| h.join("Library/Application Support/RootCX")); }
     #[cfg(target_os = "linux")]

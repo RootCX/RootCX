@@ -393,4 +393,3 @@ async fn deploy_app(app_dir: &Path, app_id: &str, url: &str, token: &str) -> Res
     sp.stop("Deployed");
     Ok(())
 }
-

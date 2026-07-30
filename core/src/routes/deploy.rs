@@ -217,6 +217,7 @@ pub async fn deploy_frontend(
     extract_to(bytes, &frontend_dir).await?;
 
     info!(app_id = %app_id, dir = %frontend_dir.display(), "frontend deployed");
+    crate::extensions::onboarding::record_first_app(rt.pool(), identity.user_id, &app_id).await?;
     Ok(Json(json!({ "message": format!("frontend for '{app_id}' deployed"), "url": format!("/apps/{app_id}/") })))
 }
 

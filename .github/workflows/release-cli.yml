@@ -88,6 +88,11 @@ jobs:
           find . -mindepth 2 -type f -exec mv {} . \;
           find . -mindepth 1 -type d -empty -delete
 
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum rootcx-*.tar.gz > SHA256SUMS
+
       - uses: softprops/action-gh-release@v2
         with:
           draft: true

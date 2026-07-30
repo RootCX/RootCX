@@ -1,6 +1,6 @@
 mod harness;
 use harness::TestRuntime;
-use reqwest::Method;
+use reqwest::{Method, StatusCode};
 use rootcx_types::SchemaVerification;
 use serde_json::{Value, json};
 
@@ -116,6 +116,29 @@ async fn install_idempotent() {
     let apps: Vec<_> = body.as_array().unwrap().iter()
         .filter(|a| a["id"] != "assistant").collect();
     assert_eq!(apps.len(), 1);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn frontend_deploy_records_first_app_activation() {
+    let rt = TestRuntime::boot().await;
+    rt.install("first_app", "items").await;
+    let archive = make_tar_gz(&[("index.html", b"<!doctype html><title>First app</title>")]);
+
+    let (status, body) = rt
+        .upload(
+            "/api/v1/apps/first_app/frontend",
+            "frontend.tar.gz",
+            "application/gzip",
+            &archive,
+        )
+        .await;
+
+    assert_eq!(status, 200, "frontend deploy failed: {body}");
+    let (status, onboarding) = rt.get_json("/api/v1/onboarding/status").await;
+    assert_eq!(status, 200);
+    assert_eq!(onboarding["firstAppDeployed"], true);
+    assert_eq!(onboarding["firstAppId"], "first_app");
     rt.shutdown().await;
 }
 
@@ -963,6 +986,44 @@ async fn auth_register_login_me_logout() {
     // logout
     let r = rt.client.post(rt.url("/api/v1/auth/logout")).json(&json!({"refreshToken": refresh})).send().await.unwrap();
     assert_eq!(r.status(), 200);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_access_token_is_rejected_by_rest_authentication() {
+    let rt = TestRuntime::boot().await;
+    let (user_id, email): (uuid::Uuid, String) = sqlx::query_as(
+        "SELECT id, email FROM rootcx_system.users WHERE email = 'admin@test.local'",
+    )
+    .fetch_one(rt.pool())
+    .await
+    .unwrap();
+    let token = rootcx_core::auth::jwt::encode_access_for_audience(
+        rt.runtime.auth_config(),
+        user_id,
+        &email,
+        "https://tenant.rootcx.com/mcp",
+        "mcp:read",
+    )
+    .unwrap();
+
+    let requests = [
+        (Method::GET, "/api/v1/auth/me", None),
+        (
+            Method::POST,
+            "/api/v1/apps/any-app/rpc",
+            Some(json!({ "method": "read" })),
+        ),
+    ];
+    for (method, path, body) in requests {
+        let (status, _) = rt.request_as(method, path, &token, body.as_ref()).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "MCP token must not authenticate REST route {path}",
+        );
+    }
 
     rt.shutdown().await;
 }

@@ -122,6 +122,10 @@ Works with Claude Code, Codex, Cursor, or your favorite AI coding tool. You don'
 | **Channels** | Connect agents to Telegram, Slack, email |
 | **File storage** | Upload and serve files scoped per app |
 
+RootCX Core also includes an [official inbound MCP server](docs/mcp.md) for
+tenant context, manifest validation, and governed data actions. Application
+source, builds, tests, and deployment remain local through the RootCX CLI.
+
 ## Community
 
 - [Discord](https://discord.gg/W7sqMYtdws) - Questions, discussion, support

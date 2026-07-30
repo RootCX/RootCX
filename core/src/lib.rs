@@ -10,6 +10,7 @@ mod ipc;
 mod jobs;
 mod manifest;
 pub mod mcp;
+mod mcp_server;
 mod principal;
 mod routes;
 mod scheduler;

@@ -5,6 +5,14 @@ PG=/usr/lib/postgresql/16/bin
 PGDATA="${PGDATA:-/data/pgdata}"
 export PGHOST=/tmp
 
+# Docker Compose starts this entrypoint as root so a fresh named volume can be
+# prepared. Drop privileges before invoking any PostgreSQL binary.
+if [ "$(id -u)" -eq 0 ]; then
+  mkdir -p "$PGDATA"
+  chown postgres:postgres "$PGDATA"
+  exec runuser --preserve-environment -u postgres -- "$0" "$@"
+fi
+
 mkdir -p "$PGDATA"
 # Some CSI drivers relax directory permissions while remounting a retained
 # volume. PostgreSQL refuses to start unless PGDATA is 0700 or 0750.

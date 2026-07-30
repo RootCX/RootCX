@@ -17,6 +17,8 @@ axum = { version = "0.8", features = ["multipart"] }
 base64 = "0.22"
 tower-http = { version = "0.6", features = ["cors"] }
 async-trait = "0.1"
+rmcp = { version = "3.0.0", features = ["transport-streamable-http-server"] }
+schemars = "1"
 
 # Secret Vault (AES-256-GCM)
 aes-gcm = "0.10"

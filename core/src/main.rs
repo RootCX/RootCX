@@ -8,7 +8,12 @@ use rootcx_core::{Runtime, server};
 use rootcx_platform::service::ServiceConfig;
 use tracing_subscriber::EnvFilter;
 
-const API_PORT: u16 = rootcx_platform::DEFAULT_API_PORT;
+fn api_port() -> u16 {
+    std::env::var("ROOTCX_PORT")
+        .ok()
+        .map(|value| value.parse::<u16>().unwrap_or_else(|_| die("ROOTCX_PORT must be a valid TCP port")))
+        .unwrap_or(rootcx_platform::DEFAULT_API_PORT)
+}
 
 pub(crate) const SVC_NAME:  &str = "rootcx-core";
 pub(crate) const SVC_LABEL: &str = "com.rootcx.core";
@@ -91,12 +96,13 @@ async fn main() {
         .init();
 
     let data_dir = rootcx_platform::dirs::data_dir().unwrap_or_else(|e| die(e));
+    let api_port = api_port();
     let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| die("DATABASE_URL is required"));
     let res_dir = std::env::var("ROOTCX_RESOURCES").map(PathBuf::from).unwrap_or_else(|_| resources());
     let bun_bin = std::env::var("BUN_PATH").map(PathBuf::from).unwrap_or_else(|_| resolve_bun());
 
     let rt = Runtime::new(database_url, data_dir, res_dir, bun_bin)
-        .boot(API_PORT).await.unwrap_or_else(|e| {
+        .boot(api_port).await.unwrap_or_else(|e| {
             tracing::error!("boot: {e}"); std::process::exit(1);
         });
     let rt = Arc::new(rt);
@@ -111,7 +117,7 @@ async fn main() {
         std::process::exit(0);
     });
 
-    if let Err(e) = server::serve(rt, API_PORT).await {
+    if let Err(e) = server::serve(rt, api_port).await {
         tracing::error!("server: {e}");
         if daemon { let _ = std::fs::remove_file(&pid_file); }
         std::process::exit(1);

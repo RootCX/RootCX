@@ -65,6 +65,8 @@ test-image:
 # ── Development ───────────────────────────────────────────────────────────────
 
 DEV_DB := postgres://rootcx:rootcx@localhost:5480/rootcx
+DEV_COMPOSE := docker compose -f docker-compose.dev.yml
+DEV_POSTGRES_READY := $(DEV_COMPOSE) exec -T postgres pg_isready -h 127.0.0.1 -U rootcx -d rootcx
 
 CLAUDE_SETTINGS := $(HOME)/.claude/settings.json
 define set-plugin # $(1) = plugin key
@@ -99,8 +101,23 @@ dev:
 	cargo tauri dev
 
 dev-core:
-	docker compose -f docker-compose.dev.yml up -d
-	@echo "Waiting for Postgres..." && until docker compose -f docker-compose.dev.yml exec -T postgres pg_isready -U rootcx -d rootcx >/dev/null 2>&1; do sleep 0.5; done
+	$(DEV_COMPOSE) up -d
+	@echo "Waiting for Postgres..."; \
+	attempts=0; \
+	until $(DEV_POSTGRES_READY) >/dev/null 2>&1; do \
+		attempts=$$((attempts + 1)); \
+		if ! $(DEV_COMPOSE) ps --status running --services | grep -qx postgres; then \
+			echo "Postgres stopped before becoming ready:"; \
+			$(DEV_COMPOSE) logs --no-color --tail=100 postgres; \
+			exit 1; \
+		fi; \
+		if [ "$$attempts" -ge 60 ]; then \
+			echo "Postgres did not become ready within 30 seconds:"; \
+			$(DEV_COMPOSE) logs --no-color --tail=100 postgres; \
+			exit 1; \
+		fi; \
+		sleep 0.5; \
+	done
 	DATABASE_URL=$(DEV_DB) \
 	ROOTCX_TENANT_REF=$${ROOTCX_TENANT_REF:-local} \
 	ROOTCX_OIDC_ISSUER=$${ROOTCX_OIDC_ISSUER:-http://localhost:3000} \

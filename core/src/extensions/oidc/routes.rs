@@ -190,6 +190,8 @@ pub(crate) async fn delete_provider(
 pub(crate) struct TokenExchangeRequest {
     provider_id: String,
     id_token: String,
+    audience: Option<String>,
+    scope: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -253,12 +255,43 @@ pub(crate) async fn token_exchange(
     let role = extract_role_claim(&req.id_token, &provider)?;
     let user_id = find_or_create_user(&pool, &provider, &sub, &email, name.as_deref(), role.as_deref()).await?;
 
-    let access_token = jwt::encode_access(&auth_config, user_id, &email)?;
+    let access_token = if let Some(audience) = req.audience.as_deref() {
+        let expected = format!("{}/mcp", core_public_url().trim_end_matches('/'));
+        if audience != expected {
+            return Err(ApiError::BadRequest("invalid token audience".into()));
+        }
+        let scope = normalize_mcp_scope(req.scope.as_deref())?;
+        let access_token =
+            jwt::encode_access_for_audience(&auth_config, user_id, &email, audience, &scope)?;
+        if let Err(error) =
+            crate::extensions::onboarding::record_connection(&pool, user_id).await
+        {
+            tracing::warn!(?error, %user_id, "failed to record MCP connection");
+        }
+        access_token
+    } else {
+        jwt::encode_access(&auth_config, user_id, &email)?
+    };
 
     Ok(Json(TokenExchangeResponse {
         access_token,
         expires_in: auth_config.access_ttl.as_secs() as i64,
     }))
+}
+
+fn normalize_mcp_scope(scope: Option<&str>) -> Result<String, ApiError> {
+    let requested = scope.unwrap_or("mcp:read");
+    let mut scopes = requested.split_whitespace().collect::<Vec<_>>();
+    scopes.sort_unstable();
+    scopes.dedup();
+    if !scopes.contains(&"mcp:read")
+        || scopes
+            .iter()
+            .any(|scope| !matches!(*scope, "mcp:read" | "mcp:write"))
+    {
+        return Err(ApiError::BadRequest("invalid MCP scope".into()));
+    }
+    Ok(scopes.join(" "))
 }
 
 // ── Browser Flow (authorize + callback) ────────────────────────────────────

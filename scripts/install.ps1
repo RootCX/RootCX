@@ -18,7 +18,10 @@ $Repo = "RootCX/RootCX"
 $Arch = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment').PROCESSOR_ARCHITECTURE
 $Target = switch ($Arch) {
   "AMD64" { "x86_64-pc-windows-msvc" }
-  "ARM64" { "aarch64-pc-windows-msvc" }
+  "ARM64" {
+    Write-Host "error: Windows ARM64 is not available yet" -ForegroundColor Red
+    exit 1
+  }
   default {
     Write-Host "error: unsupported architecture: $Arch" -ForegroundColor Red
     exit 1
@@ -61,50 +64,79 @@ $InstallDir = if ($env:ROOTCX_INSTALL) { $env:ROOTCX_INSTALL } else { "${Home}\.
 $BinDir = "${InstallDir}\bin"
 $null = New-Item -ItemType Directory -Force -Path $BinDir
 
-# Resolve version — use curl.exe for consistency with download path (avoids PS 5.1 TLS/UA quirks)
+# Resolve the latest CLI release, not the latest release of another RootCX component.
 if ($Version -eq "latest") {
-  $json = & curl.exe -fsSL "https://api.github.com/repos/${Repo}/releases/latest"
+  $json = & curl.exe -fsSL "https://api.github.com/repos/${Repo}/releases?per_page=100"
   if ($LASTEXITCODE -ne 0 -or -not $json) {
     Write-Host "error: could not query GitHub releases API" -ForegroundColor Red
     exit 1
   }
-  $Version = ($json | ConvertFrom-Json).tag_name
+  $Version = (($json | ConvertFrom-Json) | Where-Object { $_.tag_name -like 'cli-v*' } | Select-Object -First 1).tag_name
   if (-not $Version) {
-    Write-Host "error: could not determine latest version" -ForegroundColor Red
+    Write-Host "error: could not determine latest CLI version" -ForegroundColor Red
     exit 1
   }
+} elseif ($Version -notlike 'cli-v*') {
+  $Version = "cli-v$($Version -replace '^v', '')"
 }
 
 $Archive = "rootcx-${Target}.tar.gz"
-$Url = "https://github.com/${Repo}/releases/download/${Version}/${Archive}"
-$ArchivePath = "${BinDir}\${Archive}"
+$ReleaseUrl = "https://github.com/${Repo}/releases/download/${Version}"
+$TempDir = Join-Path $InstallDir "install-$([Guid]::NewGuid().ToString('N'))"
+$ArchivePath = Join-Path $TempDir $Archive
+$ChecksumsPath = Join-Path $TempDir 'SHA256SUMS'
+$ExtractDir = Join-Path $TempDir 'extracted'
 
 Write-Host "installing rootcx ${Version} (${Target})" -ForegroundColor DarkGray
 
-Remove-Item -Force $ArchivePath -ErrorAction SilentlyContinue
+try {
+  $null = New-Item -ItemType Directory -Force -Path $TempDir, $ExtractDir
 
-# curl.exe is noticeably faster than Invoke-WebRequest on PS5
-& curl.exe "-#SfLo" $ArchivePath $Url
-if ($LASTEXITCODE -ne 0) {
-  try {
-    Invoke-RestMethod -Uri $Url -OutFile $ArchivePath
-  } catch {
-    Write-Host "error: could not download $Url" -ForegroundColor Red
-    exit 1
+  # curl.exe is noticeably faster than Invoke-WebRequest on PS5.
+  & curl.exe "-#SfLo" $ArchivePath "$ReleaseUrl/$Archive"
+  if ($LASTEXITCODE -ne 0) {
+    Invoke-RestMethod -Uri "$ReleaseUrl/$Archive" -OutFile $ArchivePath
   }
-}
+  & curl.exe "-fsLo" $ChecksumsPath "$ReleaseUrl/SHA256SUMS"
+  if ($LASTEXITCODE -ne 0) {
+    Remove-Item -Force $ChecksumsPath -ErrorAction SilentlyContinue
+  }
 
-# tar is shipped with Windows 10 1803+ and Windows 11
-& tar.exe -xzf $ArchivePath -C $BinDir
-if ($LASTEXITCODE -ne 0) {
-  Write-Host "error: could not extract $ArchivePath" -ForegroundColor Red
-  exit 1
-}
-Remove-Item -Force $ArchivePath
+  if (Test-Path $ChecksumsPath) {
+    $escapedArchive = [Regex]::Escape($Archive)
+    $checksumLine = Get-Content $ChecksumsPath | Where-Object { $_ -match "^([0-9a-fA-F]{64})\s+\*?${escapedArchive}$" } | Select-Object -First 1
+    if ($checksumLine) {
+      $expected = ([Regex]::Match($checksumLine, '^([0-9a-fA-F]{64})')).Groups[1].Value.ToLowerInvariant()
+    }
+  }
+  if (-not $expected) {
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/${Repo}/releases/tags/${Version}"
+    $asset = $release.assets | Where-Object { $_.name -eq $Archive } | Select-Object -First 1
+    if ($asset.digest -notmatch '^sha256:([0-9a-fA-F]{64})$') {
+      throw "checksum for $Archive is missing"
+    }
+    $expected = $Matches[1].ToLowerInvariant()
+  }
+  $actual = (Get-FileHash -Algorithm SHA256 $ArchivePath).Hash.ToLowerInvariant()
+  if ($actual -ne $expected) {
+    throw "checksum verification failed for $Archive"
+  }
 
-if (-not (Test-Path "${BinDir}\rootcx.exe")) {
-  Write-Host "error: rootcx.exe missing after extraction" -ForegroundColor Red
+  # tar is shipped with Windows 10 1803+ and Windows 11.
+  & tar.exe -xzf $ArchivePath -C $ExtractDir
+  if ($LASTEXITCODE -ne 0) {
+    throw "could not extract $ArchivePath"
+  }
+  $ExtractedBinary = Join-Path $ExtractDir 'rootcx.exe'
+  if (-not (Test-Path -PathType Leaf $ExtractedBinary)) {
+    throw "rootcx.exe is missing from the release archive"
+  }
+  Move-Item -Force $ExtractedBinary "${BinDir}\rootcx.exe"
+} catch {
+  Write-Host "error: $($_.Exception.Message)" -ForegroundColor Red
   exit 1
+} finally {
+  Remove-Item -Recurse -Force $TempDir -ErrorAction SilentlyContinue
 }
 
 Write-Host "rootcx ${Version} installed to ${BinDir}\rootcx.exe" -ForegroundColor Green

@@ -11,8 +11,6 @@
 //! Bad credentials (a Bearer that's neither a valid JWT nor a known share
 //! token) always 401.
 
-use std::sync::Arc;
-
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use serde_json::Value as JsonValue;
@@ -21,9 +19,7 @@ use sqlx::PgPool;
 use rootcx_types::{AppManifest, PublicRpc};
 
 use crate::api_error::ApiError;
-use crate::auth::AuthConfig;
-use crate::auth::identity::Identity;
-use crate::auth::jwt;
+use crate::auth::identity::{Identity, authenticate_parts};
 use crate::routes::SharedRuntime;
 
 use super::{ResolvedShare, resolve_token};
@@ -65,23 +61,7 @@ impl FromRequestParts<SharedRuntime> for CallerAuth {
         // JWT has at least two dots — cheap discriminator that doesn't leak
         // timing info between the two paths.
         if bearer.contains('.') {
-            let auth_config = parts
-                .extensions
-                .get::<Arc<AuthConfig>>()
-                .cloned()
-                .ok_or_else(|| ApiError::Internal("auth not configured".into()))?;
-
-            let claims = jwt::decode(&auth_config, &bearer)
-                .map_err(|_| ApiError::Unauthorized("invalid token".into()))?;
-
-            if claims.email.is_empty() {
-                return Err(ApiError::Unauthorized("invalid token type".into()));
-            }
-
-            let user_id = claims.sub.parse()
-                .map_err(|_| ApiError::Unauthorized("invalid token subject".into()))?;
-
-            return Ok(CallerAuth::User(Identity { user_id, email: claims.email }));
+            return authenticate_parts(parts, state).await.map(CallerAuth::User);
         }
 
         // No dot → either a share token or a malformed Bearer.
