@@ -31,7 +31,43 @@ pub(crate) enum FieldType {
     NumberArray,
 }
 
-pub(crate) type FieldTypes = HashMap<String, FieldType>;
+/// A field as the generated data paths see it. Sensitivity travels with the
+/// type — rather than in a second map threaded through every read path — so a
+/// caller that knows the type can never forget the flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Field {
+    pub(crate) field_type: FieldType,
+    pub(crate) sensitive: bool,
+}
+
+pub(crate) type FieldTypes = HashMap<String, Field>;
+
+impl Field {
+    fn from_field(field: &FieldContract) -> Result<Self, String> {
+        Ok(Self {
+            field_type: FieldType::from_field(field)?,
+            sensitive: field.sensitive,
+        })
+    }
+
+    fn readable(field_type: FieldType) -> Self {
+        Self {
+            field_type,
+            sensitive: false,
+        }
+    }
+}
+
+/// Matching field names, sorted. The generated SQL is a prepared-statement
+/// cache key, so field order must not vary between calls.
+fn sorted_names<'a>(types: &'a FieldTypes, pick: impl Fn(&Field) -> bool) -> Vec<&'a str> {
+    let mut names: Vec<&str> = types
+        .iter()
+        .filter_map(|(name, field)| pick(field).then_some(name.as_str()))
+        .collect();
+    names.sort_unstable();
+    names
+}
 
 impl DecimalType {
     fn from_field(field: &FieldContract) -> Result<Self, String> {
@@ -161,17 +197,19 @@ pub(crate) fn field_types(entity: &EntityContract) -> Result<FieldTypes, String>
     let mut types = entity
         .fields
         .iter()
-        .map(|field| Ok((field.name.clone(), FieldType::from_field(field)?)))
+        .map(|field| Ok((field.name.clone(), Field::from_field(field)?)))
         .collect::<Result<FieldTypes, String>>()?;
+    // System fields last so a manifest can never shadow one as sensitive and
+    // hide `id` from every response.
     types.extend(system_field_types());
     Ok(types)
 }
 
 pub(crate) fn system_field_types() -> FieldTypes {
     [
-        ("id".into(), FieldType::Uuid),
-        ("created_at".into(), FieldType::Timestamp),
-        ("updated_at".into(), FieldType::Timestamp),
+        ("id".into(), Field::readable(FieldType::Uuid)),
+        ("created_at".into(), Field::readable(FieldType::Timestamp)),
+        ("updated_at".into(), Field::readable(FieldType::Timestamp)),
     ]
     .into_iter()
     .collect()
@@ -196,18 +234,28 @@ pub(crate) fn sql_default(value: &JsonValue, field_type: &FieldType) -> Option<S
 }
 
 /// Build the one canonical database-row → JSON representation used by every
-/// app-data read path. PostgreSQL can represent NUMERIC exactly, but JSON/JS
-/// cannot; decimal columns therefore override their JSON value with text before
-/// the row leaves Postgres.
+/// app-data read path. Two transforms, in order:
+///
+/// 1. Sensitive fields are deleted. `to_jsonb(record.*)` takes the whole row as
+///    one value, so there is no column list to omit them from; `- text[]`
+///    removes the keys inside Postgres instead, before the row ever reaches the
+///    Core. Because every read path already routes through here, no caller can
+///    forget to strip them.
+/// 2. Decimal columns override their JSON value with text — PostgreSQL can
+///    represent NUMERIC exactly, JSON/JS cannot. This runs *after* the deletion
+///    so a sensitive decimal stays deleted instead of being re-added as text.
 pub(crate) fn row_json(record_ref: &str, types: &FieldTypes) -> String {
     let mut expression = format!("to_jsonb({record_ref}.*)");
-    let mut decimal_fields: Vec<&str> = types
-        .iter()
-        .filter_map(|(name, field_type)| field_type.is_decimal().then_some(name.as_str()))
-        .collect();
-    decimal_fields.sort_unstable();
 
-    for field in decimal_fields {
+    let sensitive = sorted_names(types, |field| field.sensitive);
+    if !sensitive.is_empty() {
+        let keys: Vec<String> = sensitive.iter().map(|name| quote_literal(name)).collect();
+        expression = format!("({expression} - ARRAY[{}]::text[])", keys.join(", "));
+    }
+
+    for field in sorted_names(types, |field| {
+        field.field_type.is_decimal() && !field.sensitive
+    }) {
         expression.push_str(&format!(
             " || jsonb_build_object({}, to_jsonb({record_ref}.{}::text))",
             quote_literal(field),
@@ -339,7 +387,85 @@ mod tests {
             references: None,
             is_primary_key: None,
             on_delete: None,
+            sensitive: false,
         }
+    }
+
+    fn types_of(entity_fields: &[(&str, &str, bool)]) -> FieldTypes {
+        let entity = EntityContract {
+            entity_name: "account".into(),
+            fields: entity_fields
+                .iter()
+                .map(|(name, field_type, sensitive)| FieldContract {
+                    name: (*name).into(),
+                    field_type: (*field_type).into(),
+                    precision: None,
+                    scale: None,
+                    required: false,
+                    default_value: None,
+                    enum_values: None,
+                    references: None,
+                    is_primary_key: None,
+                    on_delete: None,
+                    sensitive: *sensitive,
+                })
+                .collect(),
+            identity_kind: None,
+            identity_key: None,
+            indexes: vec![],
+            checks: vec![],
+        };
+        field_types(&entity).expect("valid entity")
+    }
+
+    /// Asserted on the exact string, not on `contains`: the projection is the
+    /// only thing standing between a sensitive column and the wire, so a
+    /// substring match would pass even if a later transform re-added the key.
+    /// Multi-field cases also pin the ordering, which must stay stable because
+    /// the generated SQL is a prepared-statement cache key.
+    #[test]
+    fn row_json_excludes_exactly_the_sensitive_fields() {
+        for (fields, expected) in [
+            // No sensitive field: byte-identical to the pre-feature projection.
+            (vec![("email", "text", false)], "to_jsonb(t.*)".to_string()),
+            (
+                vec![("email", "text", false), ("password_hash", "text", true)],
+                "(to_jsonb(t.*) - ARRAY['password_hash']::text[])".to_string(),
+            ),
+            // Two sensitive fields, sorted regardless of declaration order.
+            (
+                vec![("token", "text", true), ("password_hash", "text", true)],
+                "(to_jsonb(t.*) - ARRAY['password_hash', 'token']::text[])".to_string(),
+            ),
+            // A readable decimal still gets its exact-text override.
+            (
+                vec![("salary", "decimal", false)],
+                "to_jsonb(t.*) || jsonb_build_object('salary', to_jsonb(t.\"salary\"::text))"
+                    .to_string(),
+            ),
+            // A sensitive decimal must not come back through that override.
+            (
+                vec![("salary", "decimal", true)],
+                "(to_jsonb(t.*) - ARRAY['salary']::text[])".to_string(),
+            ),
+        ] {
+            assert_eq!(
+                row_json("t", &types_of(&fields)),
+                expected,
+                "projection mismatch for {fields:?}"
+            );
+        }
+    }
+
+    /// A manifest field named like a system column must not be able to hide
+    /// `id` from every response.
+    #[test]
+    fn sensitive_cannot_shadow_a_system_field() {
+        let types = types_of(&[("id", "uuid", true)]);
+        assert!(
+            !types["id"].sensitive,
+            "system fields must stay readable regardless of the manifest"
+        );
     }
 
     #[test]

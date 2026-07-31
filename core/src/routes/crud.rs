@@ -119,14 +119,11 @@ fn filter_bind_value(
     Ok(json_value_to_string(value))
 }
 
+/// Unknown and sensitive sort keys both fall back to `created_at`: ordering by
+/// a hidden field would rank rows by the value it hides.
 pub(crate) fn validate_sort_field(field: Option<&String>, types: &FieldTypes) -> String {
     match field {
-        Some(f)
-            if types.contains_key(f.as_str())
-                || matches!(f.as_str(), "created_at" | "updated_at" | "id") =>
-        {
-            quote_ident(f)
-        }
+        Some(f) if types.get(f.as_str()).is_some_and(|f| !f.sensitive) => quote_ident(f),
         _ => "\"created_at\"".to_string(),
     }
 }
@@ -205,8 +202,16 @@ fn build_field_condition(
     binds: &mut Vec<String>,
     idx: &mut usize,
 ) -> Result<String, ApiError> {
+    // A sensitive field is excluded from responses, so allowing it as a filter
+    // would turn row presence into an oracle for the value it hides.
+    if types.get(field).is_some_and(|f| f.sensitive) {
+        return Err(ApiError::BadRequest(format!(
+            "field '{field}' is sensitive and cannot be used as a filter"
+        )));
+    }
+
     let col = quote_ident(field);
-    let manifest_type = types.get(field);
+    let manifest_type = types.get(field).map(|f| &f.field_type);
     let cast = pg_cast_suffix(manifest_type);
     let is_jsonb = is_jsonb_type(manifest_type);
 
@@ -378,10 +383,13 @@ pub async fn list_records(
         if RESERVED_PARAMS.contains(&key.as_str()) {
             continue;
         }
-        let cast = pg_cast_suffix(types.get(key.as_str()));
-        idx += 1;
-        binds.push(val.clone());
-        conditions.push(format!("{} = ${}{}", quote_ident(key), idx, cast));
+        conditions.push(build_field_condition(
+            key,
+            &JsonValue::String(val.clone()),
+            &types,
+            &mut binds,
+            &mut idx,
+        )?);
     }
 
     let wh = join_where(&conditions);
@@ -607,7 +615,8 @@ pub async fn create_record(
     let mut tx = http_tx(&pool, &app_id, &identity).await?;
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
     for (k, v) in &entries {
-        query = bind_typed(query, v, types.get(*k)).map_err(ApiError::BadRequest)?;
+        query = bind_typed(query, v, types.get(*k).map(|f| &f.field_type))
+            .map_err(ApiError::BadRequest)?;
     }
     let (row,) = query.fetch_one(&mut *tx).await?;
     tx.commit().await?;
@@ -679,7 +688,7 @@ pub(crate) async fn bulk_insert(
             query = bind_typed(
                 query,
                 obj.get(key.as_str()).unwrap_or(&null_val),
-                types.get(key.as_str()),
+                types.get(key.as_str()).map(|f| &f.field_type),
             )
             .map_err(ApiError::BadRequest)?;
         }
@@ -796,7 +805,8 @@ pub async fn update_record(
     let mut tx = http_tx(&pool, &app_id, &identity).await?;
     let mut query = sqlx::query_as::<_, (JsonValue,)>(&q);
     for (k, v) in &entries {
-        query = bind_typed(query, v, types.get(*k)).map_err(ApiError::BadRequest)?;
+        query = bind_typed(query, v, types.get(*k).map(|f| &f.field_type))
+            .map_err(ApiError::BadRequest)?;
     }
     query = query.bind(uuid);
     let result = query
@@ -982,8 +992,110 @@ mod tests {
             ("price", FieldType::from_field(&decimal_field).unwrap()),
         ]
         .into_iter()
-        .map(|(key, value)| (key.to_string(), value))
+        .map(|(key, value)| {
+            (
+                key.to_string(),
+                crate::data_types::Field {
+                    field_type: value,
+                    sensitive: false,
+                },
+            )
+        })
         .collect()
+    }
+
+    fn sensitive_types() -> FieldTypes {
+        let mut types = types_fixture();
+        types.insert(
+            "password_hash".into(),
+            crate::data_types::Field {
+                field_type: FieldType::Text,
+                sensitive: true,
+            },
+        );
+        types
+    }
+
+    /// A sensitive field is absent from responses. Filtering on it would let a
+    /// caller confirm a value from row presence alone, so every filter shape
+    /// must be refused — including nested inside a logical operator.
+    #[test]
+    fn sensitive_fields_cannot_be_filtered() {
+        for clause in [
+            json!({"password_hash": "guess"}),
+            json!({"password_hash": {"$eq": "guess"}}),
+            json!({"password_hash": {"$like": "abc%"}}),
+            json!({"$or": [{"status": "active"}, {"password_hash": "guess"}]}),
+            json!({"$not": {"password_hash": "guess"}}),
+        ] {
+            let (mut binds, mut idx) = (Vec::new(), 0);
+            let error = build_where_clause(&clause, &sensitive_types(), &mut binds, &mut idx)
+                .expect_err(&format!(
+                    "must reject filtering a sensitive field: {clause}"
+                ));
+            assert!(
+                matches!(error, ApiError::BadRequest(ref m) if m.contains("sensitive")),
+                "expected a sensitive-field rejection for {clause}, got {error:?}"
+            );
+        }
+    }
+
+    /// Ordering by a hidden field ranks rows by the value it hides, so a
+    /// sensitive key must fall back. The readable, unknown, injection-shaped and
+    /// absent cases are pinned in the same test because this function was
+    /// rewritten for sensitivity and must not have lost its original guards.
+    #[test]
+    fn sort_key_is_honoured_only_when_readable_and_known() {
+        let types = sensitive_types();
+        for (input, expected, why) in [
+            (Some("password_hash"), "\"created_at\"", "sensitive key"),
+            (Some("status"), "\"status\"", "readable declared field"),
+            (Some("id"), "\"id\"", "system field"),
+            (Some("no_such_column"), "\"created_at\"", "unknown field"),
+            (Some("status; DROP TABLE t"), "\"created_at\"", "injection"),
+            (None, "\"created_at\"", "no sort requested"),
+        ] {
+            assert_eq!(
+                validate_sort_field(input.map(str::to_string).as_ref(), &types),
+                expected,
+                "wrong sort key for {why} ({input:?})"
+            );
+        }
+    }
+
+    /// The GET query-param filter now routes through `build_field_condition`
+    /// instead of building its own condition. Query params are always strings,
+    /// so the emitted SQL and binds must be identical to the previous inline
+    /// version for every field type.
+    #[test]
+    fn get_filter_matches_the_previous_inline_shape() {
+        let types = types_fixture();
+        for (field, value) in [
+            ("status", "active"),
+            ("age", "42"),
+            ("active", "true"),
+            ("created", "2026-01-01T00:00:00Z"),
+            ("price", "10.50"),
+            ("id", "00000000-0000-0000-0000-000000000000"),
+        ] {
+            let (mut binds, mut idx) = (Vec::new(), 0);
+            let sql = build_field_condition(
+                field,
+                &JsonValue::String(value.to_string()),
+                &types,
+                &mut binds,
+                &mut idx,
+            )
+            .expect("readable field must be filterable");
+
+            let expected_cast = pg_cast_suffix(types.get(field).map(|f| &f.field_type));
+            assert_eq!(
+                sql,
+                format!("{} = $1{expected_cast}", quote_ident(field)),
+                "SQL shape changed for {field}"
+            );
+            assert_eq!(binds, vec![value.to_string()], "bind changed for {field}");
+        }
     }
 
     #[test]

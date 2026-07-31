@@ -83,7 +83,7 @@ impl Tool for MutateDataTool {
                 );
                 let mut tx = begin().await.map_err(|e| e.to_string())?;
                 let mut q = sqlx::query_as::<_, (JsonValue,)>(&sql);
-                for (k, v) in &entries { q = bind_typed(q, v, types.get(*k))?; }
+                for (k, v) in &entries { q = bind_typed(q, v, types.get(*k).map(|f| &f.field_type))?; }
                 if let Some(id) = idem_id { q = q.bind(id); }
                 let (row,) = q.fetch_one(&mut *tx).await.map_err(|e| e.to_string())?;
                 tx.commit().await.map_err(|e| e.to_string())?;
@@ -110,7 +110,7 @@ impl Tool for MutateDataTool {
                 );
                 let mut tx = begin().await.map_err(|e| e.to_string())?;
                 let mut q = sqlx::query_as::<_, (JsonValue,)>(&sql);
-                for (k, v) in &entries { q = bind_typed(q, v, types.get(*k))?; }
+                for (k, v) in &entries { q = bind_typed(q, v, types.get(*k).map(|f| &f.field_type))?; }
                 q = q.bind(uuid);
                 let (row,) = q.fetch_optional(&mut *tx).await.map_err(|e| e.to_string())?
                     .ok_or_else(|| format!("record '{id}' not found"))?;

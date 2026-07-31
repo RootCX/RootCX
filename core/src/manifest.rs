@@ -576,6 +576,7 @@ mod tests {
             references: None,
             is_primary_key: None,
             on_delete: None,
+            sensitive: false,
         }
     }
 

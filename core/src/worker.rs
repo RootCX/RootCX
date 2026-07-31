@@ -1288,7 +1288,7 @@ async fn collection_exec(
             let sql = format!("SELECT {row} AS row FROM {tbl}{where_clause} LIMIT 1");
             let mut query = sqlx::query_as::<_, (JsonValue,)>(&sql);
             for (k, v) in obj.iter() {
-                query = bind_typed(query, v, types.get(k.as_str()))?;
+                query = bind_typed(query, v, types.get(k.as_str()).map(|f| &f.field_type))?;
             }
             return match query
                 .fetch_optional(&mut *conn)
@@ -1304,7 +1304,7 @@ async fn collection_exec(
         let sql = format!("SELECT {row} AS row FROM {tbl}{where_clause}");
         let mut query = sqlx::query_as::<_, (JsonValue,)>(&sql);
         for (k, v) in obj.iter() {
-            query = bind_typed(query, v, types.get(k.as_str()))?;
+            query = bind_typed(query, v, types.get(k.as_str()).map(|f| &f.field_type))?;
         }
         let rows: Vec<(JsonValue,)> = query
             .fetch_all(&mut *conn)
@@ -1350,7 +1350,7 @@ async fn collection_exec(
         if op == "update" && k == "id" {
             continue;
         }
-        query = bind_typed(query, v, types.get(k.as_str()))?;
+        query = bind_typed(query, v, types.get(k.as_str()).map(|f| &f.field_type))?;
     }
     if op == "update" {
         let id = obj

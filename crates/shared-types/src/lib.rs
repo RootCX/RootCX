@@ -312,6 +312,13 @@ pub struct FieldContract {
     pub is_primary_key: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_delete: Option<OnDeletePolicy>,
+    /// Never leaves the Core through a generated data path: excluded from every
+    /// read projection, and rejected as a filter or sort key so it cannot be
+    /// probed. Writes are unaffected — the app still sets the value. The app's
+    /// own `ctx.sql` may still select it explicitly; this governs the generated
+    /// surface, not the app's SQL.
+    #[serde(default)]
+    pub sensitive: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

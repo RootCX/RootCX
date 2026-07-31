@@ -1002,6 +1002,7 @@ mod tests {
             references: None,
             is_primary_key: None,
             on_delete: None,
+            sensitive: false,
         }
     }
 
@@ -1489,6 +1490,7 @@ mod tests {
             default_value: None,
             enum_values: None,
             references: Some(FieldReference { entity: target.to_string(), field: "id".to_string() }),
+            sensitive: false,
             is_primary_key: None,
             on_delete,
         }
