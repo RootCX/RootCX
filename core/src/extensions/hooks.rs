@@ -184,6 +184,10 @@ impl RuntimeExtension for HooksExtension {
         manifest: &rootcx_types::AppManifest,
         installed_by: uuid::Uuid,
     ) -> Result<(), RuntimeError> {
+        // Before the trigger early-return: every app needs its projection
+        // reconciled, whether or not it declares a trigger.
+        prune_sensitive_fields(pool, manifest).await?;
+
         let trigger = match &manifest.trigger {
             Some(t) => t,
             None => return Ok(()),
@@ -329,6 +333,35 @@ async fn sync_sensitive_fields(
     };
 
     query.execute(pool).await.map_err(RuntimeError::Schema)?;
+    Ok(())
+}
+
+/// Drop projections for entities the manifest no longer declares.
+///
+/// `sync_sensitive_fields` runs per declared entity, so it cannot see an entity
+/// that was *removed* from the manifest. Left behind, the row would keep stripping
+/// a column from a table that has been reshaped — or from a same-named entity
+/// re-added later without the flag. Reconciled against the whole manifest, in the
+/// same spirit as the permission-key re-sync on install.
+async fn prune_sensitive_fields(
+    pool: &PgPool,
+    manifest: &rootcx_types::AppManifest,
+) -> Result<(), RuntimeError> {
+    let declared: Vec<String> = manifest
+        .data_contract
+        .iter()
+        .map(|e| e.entity_name.clone())
+        .collect();
+
+    sqlx::query(
+        "DELETE FROM rootcx_system.sensitive_fields \
+         WHERE app_id = $1 AND entity <> ALL($2)",
+    )
+    .bind(&manifest.app_id)
+    .bind(&declared)
+    .execute(pool)
+    .await
+    .map_err(RuntimeError::Schema)?;
     Ok(())
 }
 

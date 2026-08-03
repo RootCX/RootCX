@@ -2623,3 +2623,69 @@ async fn t6_7_workflow_cannot_watch_an_app_the_owner_cannot_read() {
     assert_eq!(hooks, 0, "no hook may be left behind on the refused path");
     rt.shutdown().await;
 }
+
+/// Entities of `app_id` currently carrying a sensitive-field projection.
+async fn projected_entities(rt: &harness::TestRuntime, app_id: &str) -> Vec<String> {
+    sqlx::query_scalar::<_, Option<Vec<String>>>(
+        "SELECT array_agg(entity ORDER BY entity) FROM rootcx_system.sensitive_fields WHERE app_id = $1",
+    )
+    .bind(app_id)
+    .fetch_one(rt.pool())
+    .await
+    .unwrap()
+    .unwrap_or_default()
+}
+
+/// `sensitive_fields` is the projection both row-level triggers read to know what
+/// to strip. A stale row keeps stripping a column from a table that no longer has
+/// it — or from a same-named entity re-added later without the flag. Asserted end
+/// to end because the reconciliation is a single SQL statement with no Rust
+/// branch: a unit test would exercise sqlx, not the decision.
+#[tokio::test]
+async fn t6_8_sensitive_field_projection_is_reconciled_on_redeploy_and_uninstall() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+
+    let manifest = |entities: Value| {
+        json!({
+            "appId": "proj", "name": "proj", "version": "1.0.0",
+            "dataContract": entities
+        })
+    };
+    let secret_field = json!({"name": "api_key", "type": "text", "sensitive": true});
+    let plain_field = json!({"name": "label", "type": "text"});
+
+    // Two entities, both declaring a sensitive field.
+    rt.install_manifest(&manifest(json!([
+        {"entityName": "kept", "fields": [plain_field, secret_field]},
+        {"entityName": "dropped", "fields": [plain_field, secret_field]},
+    ])))
+    .await;
+
+    assert_eq!(
+        projected_entities(&rt, "proj").await,
+        vec!["dropped".to_string(), "kept".to_string()],
+        "both declaring entities are projected"
+    );
+
+    // Redeploy without `dropped`. `kept` still declares the flag, so this
+    // isolates the removed-entity path: the per-entity sync cannot see an entity
+    // that is gone from the manifest.
+    rt.install_manifest(&manifest(json!([
+        {"entityName": "kept", "fields": [plain_field, secret_field]},
+    ])))
+    .await;
+    assert_eq!(
+        projected_entities(&rt, "proj").await,
+        vec!["kept".to_string()],
+        "a removed entity leaves no projection, and a still-declared one keeps its own"
+    );
+
+    let (status, body) = rt.delete_json("/api/v1/apps/proj").await;
+    assert!(status.is_success(), "uninstall failed: {body}");
+    assert!(
+        projected_entities(&rt, "proj").await.is_empty(),
+        "uninstall leaves no orphan projection"
+    );
+    rt.shutdown().await;
+}
