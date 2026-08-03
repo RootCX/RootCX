@@ -184,7 +184,7 @@ pub async fn update_workflow(
 
     // Auto-register/unregister triggers when enabled state changes.
     if body.enabled.is_some() {
-        sync_record_change_hooks(&pool, workflow_id, identity.user_id).await;
+        sync_record_change_hooks(&pool, workflow_id, identity.user_id).await?;
         sync_schedule_cron(&pool, workflow_id, identity.user_id).await;
     }
 
@@ -223,34 +223,56 @@ pub async fn delete_workflow(
 
 /// Auto-register/unregister entity hooks for record-change triggers. Called on
 /// enable/disable and graph save. Idempotent: drops stale hooks, creates missing.
-async fn sync_record_change_hooks(pool: &sqlx::PgPool, workflow_id: Uuid, user_id: Uuid) {
+/// Reconcile the workflow's record-change hook against its graph.
+///
+/// A workflow legitimately watches another app — it gets its own synthetic
+/// `app_id` (`wf_app_id`), so the target is always foreign and cannot simply be
+/// pinned to the workflow's own app. But the target comes from the graph, which
+/// the caller supplies, and the hook receives the full row of every matching
+/// write: the trigger is SECURITY DEFINER, so its payload is not RLS-filtered.
+/// Owning the workflow therefore is not enough — the caller must be able to read
+/// the entity it wants to watch, or this is a second, ungated door onto another
+/// app's rows.
+async fn sync_record_change_hooks(
+    pool: &sqlx::PgPool,
+    workflow_id: Uuid,
+    user_id: Uuid,
+) -> Result<(), ApiError> {
     let row: Option<(bool, JsonValue)> = sqlx::query_as(
         "SELECT enabled, graph FROM rootcx_system.workflows WHERE id = $1",
     ).bind(workflow_id).fetch_optional(pool).await.ok().flatten();
 
-    let Some((enabled, graph_json)) = row else { return };
+    let Some((enabled, graph_json)) = row else { return Ok(()) };
 
     // Remove all hooks for this workflow first (idempotent reconciliation).
     sqlx::query(
         "DELETE FROM rootcx_system.entity_hooks WHERE action_type = 'workflow' AND action_config->>'workflow_id' = $1",
     ).bind(workflow_id.to_string()).execute(pool).await.ok();
 
-    if !enabled { return; }
+    if !enabled { return Ok(()); }
 
     // Find the recordChange trigger node and its configured params.
     let graph: rootcx_types::WorkflowGraph = match serde_json::from_value(graph_json) {
         Ok(g) => g,
-        Err(_) => return,
+        Err(_) => return Ok(()),
     };
     let trigger = graph.nodes.iter().find(|n| matches!(
         &n.kind, rootcx_types::WorkflowNodeKind::Trigger { trigger: rootcx_types::TriggerKind::RecordChange }
     ));
-    let Some(t) = trigger else { return };
+    let Some(t) = trigger else { return Ok(()) };
 
     let app = t.params.get("app").and_then(|v| v.as_str());
     let entity = t.params.get("entity").and_then(|v| v.as_str());
     let operation = t.params.get("operation").and_then(|v| v.as_str());
-    let (Some(app), Some(entity), Some(operation)) = (app, entity, operation) else { return };
+    let (Some(app), Some(entity), Some(operation)) = (app, entity, operation) else { return Ok(()) };
+
+    crate::governance::authority::require_perm(pool, user_id, &format!("app:{app}:{entity}.read"))
+        .await
+        .map_err(|_| {
+            ApiError::Forbidden(format!(
+                "cannot watch '{app}.{entity}': missing app:{app}:{entity}.read"
+            ))
+        })?;
 
     sqlx::query(
         "INSERT INTO rootcx_system.entity_hooks (app_id, entity, operation, action_type, action_config, active, created_by)
@@ -259,6 +281,8 @@ async fn sync_record_change_hooks(pool: &sqlx::PgPool, workflow_id: Uuid, user_i
     .bind(json!({ "workflow_id": workflow_id }))
     .bind(user_id)
     .execute(pool).await.ok();
+
+    Ok(())
 }
 
 /// Auto-register/unregister a pg_cron schedule for schedule-triggered workflows.

@@ -2567,3 +2567,59 @@ async fn t6_6_hook_and_transcript_endpoints_reject_unprivileged_callers() {
     }
     rt.shutdown().await;
 }
+
+/// Enabling a workflow registers a record-change hook on the app named in its
+/// graph. That target is caller-supplied and the hook payload is not RLS-filtered
+/// (the trigger is SECURITY DEFINER), so owning the workflow must not be enough
+/// to watch an app you cannot read — otherwise this is a second door onto another
+/// app's rows, alongside the hook API.
+#[tokio::test]
+async fn t6_7_workflow_cannot_watch_an_app_the_owner_cannot_read() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("hr", "salaries").await;
+    // May create and own workflows, but holds nothing on `hr`.
+    let (tok, _) = user_with(&rt, "outsider@t.local", &["platform:apps.create"]).await;
+
+    let graph = json!({
+        "nodes": [{
+            "id": "t", "kind": {"type": "trigger", "trigger": "recordChange"},
+            "params": {"app": "hr", "entity": "salaries", "operation": "INSERT"},
+            "position": [0, 0]
+        }],
+        "edges": []
+    });
+    let (status, body) = rt
+        .request_as(
+            Method::POST,
+            "/api/v1/workflows",
+            &tok,
+            Some(&json!({"name": "spy", "graph": graph})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "creating a workflow is allowed: {body}");
+    let wf_id = body["id"].as_str().expect("workflow id").to_string();
+
+    let (status, body) = rt
+        .request_as(
+            Method::PUT,
+            &format!("/api/v1/workflows/{wf_id}"),
+            &tok,
+            Some(&json!({"enabled": true})),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "watching hr.salaries without app:hr:salaries.read must be refused: {body}"
+    );
+
+    let hooks: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM rootcx_system.entity_hooks WHERE app_id = 'hr'",
+    )
+    .fetch_one(rt.pool())
+    .await
+    .unwrap();
+    assert_eq!(hooks, 0, "no hook may be left behind on the refused path");
+    rt.shutdown().await;
+}
