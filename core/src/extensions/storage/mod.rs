@@ -1,6 +1,7 @@
 pub mod backend;
 pub(crate) mod large_object;
 pub mod nonce;
+mod resumable;
 #[cfg(test)]
 #[path = "backend_test.rs"]
 mod backend_test;
@@ -34,6 +35,13 @@ pub(crate) fn max_file_bytes() -> usize {
         .and_then(|value| value.parse().ok())
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_MAX_FILE_BYTES)
+}
+
+pub(crate) fn spawn_upload_cleanup(
+    pool: PgPool,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    resumable::spawn_cleanup(pool, cancel);
 }
 
 async fn exec(pool: &PgPool, sql: &str) -> Result<(), RuntimeError> {
@@ -84,6 +92,19 @@ impl RuntimeExtension for StorageExtension {
         "#).await?;
         exec(pool, "DROP TRIGGER IF EXISTS trg_unlink_file_large_object ON rootcx_system.files").await?;
         exec(pool, "CREATE TRIGGER trg_unlink_file_large_object BEFORE DELETE ON rootcx_system.files FOR EACH ROW EXECUTE FUNCTION rootcx_system.unlink_file_large_object()").await?;
+        exec(pool, r#"
+            INSERT INTO rootcx_system.rbac_permissions (key, description, source_app)
+            SELECT 'app:' || app.id || ':storage.' || permission.action,
+                   permission.description,
+                   app.id
+            FROM rootcx_system.apps app
+            CROSS JOIN (VALUES
+                ('read', 'read app files'),
+                ('write', 'write app files')
+            ) AS permission(action, description)
+            ON CONFLICT (key) DO NOTHING
+        "#).await?;
+        resumable::bootstrap(pool).await?;
 
         info!("storage extension ready");
         Ok(())
@@ -100,6 +121,7 @@ impl RuntimeExtension for StorageExtension {
                 .route("/api/v1/apps/{app_id}/storage/upload", post(upload_file).layer(DefaultBodyLimit::max(max_file_bytes())))
                 // JWT-authenticated download/delete — scoped by app_id
                 .route("/api/v1/apps/{app_id}/storage/{file_id}", get(get_file).delete(delete_file))
+                .merge(resumable::routes())
         )
     }
 }

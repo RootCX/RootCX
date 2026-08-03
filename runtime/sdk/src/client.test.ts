@@ -1,6 +1,226 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { RuntimeClient, AgentEvent } from "./client";
 
+function storageSession(uploadedSize: number, maxChunkSize = 4) {
+  return {
+    id: "upload-1",
+    app_id: "catalog",
+    name: "catalog.xlsx",
+    content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    expected_size: 10,
+    uploaded_size: uploadedSize,
+    completed_file_id: null,
+    created_at: "2026-08-03T10:00:00Z",
+    expires_at: "2026-08-04T10:00:00Z",
+    state: "uploading",
+    max_chunk_size: maxChunkSize,
+  };
+}
+
+function jsonResponse(body: unknown, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  };
+}
+
+describe("resumable storage upload", () => {
+  let client: RuntimeClient;
+
+  beforeEach(() => {
+    client = new RuntimeClient({ baseUrl: "http://localhost:9100" });
+    client.setTokens("tok", null);
+  });
+
+  it("obeys the server chunk limit and reports committed progress", async () => {
+    let uploadedSize = 0;
+    const patchOffsets: number[] = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/storage/uploads") && method === "POST") {
+        return jsonResponse(storageSession(0), 201);
+      }
+      if (url.endsWith("/storage/uploads/upload-1") && method === "PATCH") {
+        const offset = Number(new Headers(init?.headers).get("Upload-Offset"));
+        const chunk = init?.body as Blob;
+        patchOffsets.push(offset);
+        uploadedSize += chunk.size;
+        return jsonResponse({ upload_id: "upload-1", uploaded_size: uploadedSize });
+      }
+      if (url.endsWith("/storage/uploads/upload-1/complete") && method === "POST") {
+        return jsonResponse({
+          file_id: "file-1",
+          name: "catalog.xlsx",
+          content_type: "application/octet-stream",
+          size: 10,
+          checksum: "abc",
+        }, 201);
+      }
+      throw new Error(`unexpected request: ${method} ${url}`);
+    });
+
+    const progress: number[] = [];
+    await client.uploadFileResumable(
+      "catalog",
+      new Blob(["0123456789"]),
+      {
+        name: "catalog.xlsx",
+        onProgress: ({ uploadedBytes }) => progress.push(uploadedBytes),
+      },
+    );
+
+    expect(patchOffsets).toEqual([0, 4, 8]);
+    expect(progress).toEqual([0, 4, 8, 10]);
+  });
+
+  it("recovers the committed offset after an ambiguous network failure", async () => {
+    let uploadedSize = 0;
+    let firstPatch = true;
+    const patchOffsets: number[] = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/storage/uploads") && method === "POST") {
+        return jsonResponse(storageSession(0, 5), 201);
+      }
+      if (url.endsWith("/storage/uploads/upload-1") && method === "PATCH") {
+        const offset = Number(new Headers(init?.headers).get("Upload-Offset"));
+        patchOffsets.push(offset);
+        uploadedSize = offset + (init?.body as Blob).size;
+        if (firstPatch) {
+          firstPatch = false;
+          throw new TypeError("connection reset after commit");
+        }
+        return jsonResponse({ upload_id: "upload-1", uploaded_size: uploadedSize });
+      }
+      if (url.endsWith("/storage/uploads/upload-1") && method === "GET") {
+        return jsonResponse(storageSession(uploadedSize, 5));
+      }
+      if (url.endsWith("/storage/uploads/upload-1/complete") && method === "POST") {
+        return jsonResponse({
+          file_id: "file-1",
+          name: "catalog.xlsx",
+          content_type: "application/octet-stream",
+          size: 10,
+          checksum: "abc",
+        });
+      }
+      throw new Error(`unexpected request: ${method} ${url}`);
+    });
+
+    await client.uploadFileResumable("catalog", new Blob(["0123456789"]), {
+      name: "catalog.xlsx",
+      maxRetries: 1,
+    });
+
+    expect(patchOffsets).toEqual([0, 5]);
+  });
+
+  it("resumes an existing session from its durable offset", async () => {
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/storage/uploads/upload-1") && method === "GET") {
+        return jsonResponse(storageSession(5, 5));
+      }
+      if (url.endsWith("/storage/uploads/upload-1") && method === "PATCH") {
+        expect(new Headers(init?.headers).get("Upload-Offset")).toBe("5");
+        return jsonResponse({ upload_id: "upload-1", uploaded_size: 10 });
+      }
+      if (url.endsWith("/storage/uploads/upload-1/complete") && method === "POST") {
+        return jsonResponse({
+          file_id: "file-1",
+          name: "catalog.xlsx",
+          content_type: "application/octet-stream",
+          size: 10,
+          checksum: "abc",
+        });
+      }
+      throw new Error(`unexpected request: ${method} ${url}`);
+    });
+
+    await client.uploadFileResumable("catalog", new Blob(["0123456789"]), {
+      name: "catalog.xlsx",
+      uploadId: "upload-1",
+    });
+  });
+
+  it("retries creation with the same upload id after an ambiguous failure", async () => {
+    const createdIds: string[] = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/storage/uploads") && method === "POST") {
+        const body = JSON.parse(init?.body as string) as { upload_id: string };
+        createdIds.push(body.upload_id);
+        if (createdIds.length === 1) {
+          throw new TypeError("connection reset after create commit");
+        }
+        return jsonResponse({
+          ...storageSession(0),
+          id: body.upload_id,
+          expected_size: 1,
+        }, 200);
+      }
+      const uploadId = createdIds[0];
+      if (url.endsWith(`/storage/uploads/${uploadId}`) && method === "PATCH") {
+        return jsonResponse({ upload_id: uploadId, uploaded_size: 1 });
+      }
+      if (url.endsWith(`/storage/uploads/${uploadId}/complete`) && method === "POST") {
+        return jsonResponse({
+          file_id: "file-1",
+          name: "catalog.xlsx",
+          content_type: "application/octet-stream",
+          size: 1,
+          checksum: "abc",
+        }, 201);
+      }
+      throw new Error(`unexpected request: ${method} ${url}`);
+    });
+
+    await client.uploadFileResumable("catalog", new Blob(["x"]), {
+      name: "catalog.xlsx",
+      maxRetries: 1,
+    });
+
+    expect(createdIds).toHaveLength(2);
+    expect(createdIds[0]).toBe(createdIds[1]);
+  });
+
+  it("retries completion after an ambiguous network failure", async () => {
+    let completionAttempts = 0;
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (url.endsWith("/storage/uploads") && method === "POST") {
+        return jsonResponse(storageSession(0), 201);
+      }
+      if (url.endsWith("/storage/uploads/upload-1") && method === "PATCH") {
+        return jsonResponse({ upload_id: "upload-1", uploaded_size: 10 });
+      }
+      if (url.endsWith("/storage/uploads/upload-1/complete") && method === "POST") {
+        completionAttempts += 1;
+        if (completionAttempts === 1) {
+          throw new TypeError("connection reset after completion commit");
+        }
+        return jsonResponse({
+          file_id: "file-1",
+          name: "catalog.xlsx",
+          content_type: "application/octet-stream",
+          size: 10,
+          checksum: "abc",
+        });
+      }
+      throw new Error(`unexpected request: ${method} ${url}`);
+    });
+
+    await client.uploadFileResumable("catalog", new Blob(["0123456789"]), {
+      name: "catalog.xlsx",
+      maxRetries: 1,
+    });
+
+    expect(completionAttempts).toBe(2);
+  });
+});
+
 describe("client.core()", () => {
   let client: RuntimeClient;
   let fetchedUrls: string[];

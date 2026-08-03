@@ -305,6 +305,44 @@ export interface QueryResult<T> {
   total: number;
 }
 
+export interface StorageUploadSession {
+  id: string;
+  appId: string;
+  name: string;
+  contentType: string;
+  expectedSize: number;
+  uploadedSize: number;
+  completedFileId: string | null;
+  createdAt: string;
+  expiresAt: string;
+  state: "uploading" | "completed";
+  maxChunkSize: number;
+}
+
+export interface StoredFile {
+  fileId: string;
+  name: string;
+  contentType: string;
+  size: number;
+  checksum: string;
+}
+
+export interface StorageUploadProgress {
+  uploadId: string;
+  uploadedBytes: number;
+  totalBytes: number;
+}
+
+export interface ResumableUploadOptions {
+  name: string;
+  contentType?: string;
+  uploadId?: string;
+  chunkSize?: number;
+  maxRetries?: number;
+  signal?: AbortSignal;
+  onProgress?: (progress: StorageUploadProgress) => void;
+}
+
 export type IdentityRecord<T> = T & { _source: { app: string; entity: string } };
 
 declare global {
@@ -353,6 +391,153 @@ export class RuntimeClient {
 
   getRefreshToken(): string | null {
     return this.refreshToken;
+  }
+
+  private storageUploadsUrl(appId: string): string {
+    return `${this.baseUrl}/api/v1/apps/${enc(appId)}/storage/uploads`;
+  }
+
+  async createStorageUpload(
+    appId: string,
+    input: { uploadId?: string; name: string; contentType?: string; size: number },
+  ): Promise<StorageUploadSession> {
+    const res = await this.authFetch(this.storageUploadsUrl(appId), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        upload_id: input.uploadId,
+        name: input.name,
+        content_type: input.contentType,
+        size: input.size,
+      }),
+    });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return mapStorageUpload(await res.json());
+  }
+
+  async getStorageUpload(appId: string, uploadId: string): Promise<StorageUploadSession> {
+    const res = await this.authFetch(
+      `${this.storageUploadsUrl(appId)}/${enc(uploadId)}`,
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return mapStorageUpload(await res.json());
+  }
+
+  async appendStorageUpload(
+    appId: string,
+    uploadId: string,
+    offset: number,
+    chunk: Blob,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    const res = await this.authFetch(
+      `${this.storageUploadsUrl(appId)}/${enc(uploadId)}`,
+      {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/offset+octet-stream",
+          "Upload-Offset": String(offset),
+        },
+        body: chunk,
+        signal,
+      },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    const result = await res.json() as { uploaded_size: number };
+    return result.uploaded_size;
+  }
+
+  async completeStorageUpload(appId: string, uploadId: string): Promise<StoredFile> {
+    const res = await this.authFetch(
+      `${this.storageUploadsUrl(appId)}/${enc(uploadId)}/complete`,
+      { method: "POST" },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return mapStoredFile(await res.json());
+  }
+
+  async cancelStorageUpload(appId: string, uploadId: string): Promise<void> {
+    const res = await this.authFetch(
+      `${this.storageUploadsUrl(appId)}/${enc(uploadId)}`,
+      { method: "DELETE" },
+    );
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+  }
+
+  async uploadFileResumable(
+    appId: string,
+    file: Blob,
+    options: ResumableUploadOptions,
+  ): Promise<StoredFile> {
+    const maxRetries = options.maxRetries ?? 3;
+    if (!Number.isInteger(maxRetries) || maxRetries < 0) {
+      throw new Error("maxRetries must be a non-negative integer");
+    }
+    throwIfAborted(options.signal);
+    let session: StorageUploadSession;
+    if (options.uploadId) {
+      session = await this.getStorageUpload(appId, options.uploadId);
+    } else {
+      const uploadId = globalThis.crypto.randomUUID();
+      session = await retryUploadOperation(
+        () => this.createStorageUpload(appId, {
+          uploadId,
+          name: options.name,
+          contentType: options.contentType ?? file.type,
+          size: file.size,
+        }),
+        maxRetries,
+        options.signal,
+      );
+    }
+    assertMatchingUpload(session, options.name, file.size);
+
+    const chunkSize = options.chunkSize ?? session.maxChunkSize;
+    if (!Number.isInteger(chunkSize) || chunkSize <= 0 || chunkSize > session.maxChunkSize) {
+      throw new Error(`chunkSize must be between 1 and ${session.maxChunkSize}`);
+    }
+
+    let offset = session.uploadedSize;
+    let consecutiveFailures = 0;
+    reportUploadProgress(options, session.id, offset, file.size);
+    while (offset < file.size) {
+      throwIfAborted(options.signal);
+      const end = Math.min(offset + chunkSize, file.size);
+      try {
+        const uploadedSize = await this.appendStorageUpload(
+          appId,
+          session.id,
+          offset,
+          file.slice(offset, end),
+          options.signal,
+        );
+        if (uploadedSize <= offset || uploadedSize > file.size) {
+          throw new Error(`invalid uploaded offset ${uploadedSize}`);
+        }
+        offset = uploadedSize;
+        consecutiveFailures = 0;
+        reportUploadProgress(options, session.id, offset, file.size);
+      } catch (error) {
+        throwIfAborted(options.signal);
+        if (!isRecoverableChunkError(error) || consecutiveFailures >= maxRetries) throw error;
+        consecutiveFailures += 1;
+        await retryDelay(consecutiveFailures, options.signal);
+        session = await retryUploadOperation(
+          () => this.getStorageUpload(appId, session.id),
+          maxRetries,
+          options.signal,
+        );
+        assertMatchingUpload(session, options.name, file.size);
+        offset = session.uploadedSize;
+        reportUploadProgress(options, session.id, offset, file.size);
+      }
+    }
+
+    return retryUploadOperation(
+      () => this.completeStorageUpload(appId, session.id),
+      maxRetries,
+      options.signal,
+    );
   }
 
   async listRecords<T = Record<string, unknown>>(
@@ -1065,6 +1250,114 @@ export class RuntimeClient {
 
 function enc(s: string): string {
   return encodeURIComponent(s);
+}
+
+interface StorageUploadWire {
+  id: string;
+  app_id: string;
+  name: string;
+  content_type: string;
+  expected_size: number;
+  uploaded_size: number;
+  completed_file_id: string | null;
+  created_at: string;
+  expires_at: string;
+  state: "uploading" | "completed";
+  max_chunk_size: number;
+}
+
+interface StorageFileWire {
+  file_id: string;
+  name: string;
+  content_type: string;
+  size: number;
+  checksum: string;
+}
+
+function mapStorageUpload(upload: StorageUploadWire): StorageUploadSession {
+  return {
+    id: upload.id,
+    appId: upload.app_id,
+    name: upload.name,
+    contentType: upload.content_type,
+    expectedSize: upload.expected_size,
+    uploadedSize: upload.uploaded_size,
+    completedFileId: upload.completed_file_id,
+    createdAt: upload.created_at,
+    expiresAt: upload.expires_at,
+    state: upload.state,
+    maxChunkSize: upload.max_chunk_size,
+  };
+}
+
+function mapStoredFile(file: StorageFileWire): StoredFile {
+  return {
+    fileId: file.file_id,
+    name: file.name,
+    contentType: file.content_type,
+    size: file.size,
+    checksum: file.checksum,
+  };
+}
+
+function assertMatchingUpload(session: StorageUploadSession, name: string, size: number): void {
+  if (session.name !== name || session.expectedSize !== size) {
+    throw new Error("upload session does not match the selected file");
+  }
+}
+
+function reportUploadProgress(
+  options: ResumableUploadOptions,
+  uploadId: string,
+  uploadedBytes: number,
+  totalBytes: number,
+): void {
+  options.onProgress?.({ uploadId, uploadedBytes, totalBytes });
+}
+
+function isRetryableUploadError(error: unknown): boolean {
+  return !(error instanceof RuntimeApiError) || error.status >= 500;
+}
+
+function isRecoverableChunkError(error: unknown): boolean {
+  return isRetryableUploadError(error)
+    || (error instanceof RuntimeApiError && error.status === 409);
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw signal.reason ?? new Error("upload aborted");
+}
+
+function retryDelay(attempt: number, signal?: AbortSignal): Promise<void> {
+  const delay = Math.min(250 * 2 ** (attempt - 1), 2_000);
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason ?? new Error("upload aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delay);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function retryUploadOperation<T>(
+  operation: () => Promise<T>,
+  maxRetries: number,
+  signal?: AbortSignal,
+): Promise<T> {
+  for (let attempt = 0; ; attempt += 1) {
+    throwIfAborted(signal);
+    try {
+      return await operation();
+    } catch (error) {
+      throwIfAborted(signal);
+      if (!isRetryableUploadError(error) || attempt === maxRetries) throw error;
+      await retryDelay(attempt + 1, signal);
+    }
+  }
 }
 
 const CORE_ROUTES: Record<string, string> = {

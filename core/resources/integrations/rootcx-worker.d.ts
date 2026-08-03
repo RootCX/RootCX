@@ -10,6 +10,22 @@ interface RootCxSqlResult {
   rowCount: number;
 }
 
+interface RootCxStoredFile {
+  fileId: string;
+  appId: string;
+  name: string;
+  contentType: string;
+  size: number;
+}
+
+interface RootCxBufferedFile extends RootCxStoredFile {
+  content: Uint8Array;
+}
+
+interface RootCxStreamingFile extends RootCxStoredFile {
+  stream: ReadableStream<Uint8Array>;
+}
+
 interface RootCxCtx {
   readonly appId: string;
   readonly runtimeUrl: string;
@@ -28,6 +44,10 @@ interface RootCxCtx {
   // Call another integration's action, gated by the (app x user) binding.
   callIntegration(integrationId: string, action: string, input?: Record<string, unknown>, asUser?: string): Promise<any>;
   uploadFile(content: string | Uint8Array, filename: string, contentType: string): Promise<string>;
+  downloadFile(fileId: string): Promise<RootCxBufferedFile>;
+  downloadFile(appId: string, fileId: string): Promise<RootCxBufferedFile>;
+  openFile(fileId: string): Promise<RootCxStreamingFile>;
+  openFile(appId: string, fileId: string): Promise<RootCxStreamingFile>;
   collection(entity: string): {
     insert(data: Record<string, unknown>): Promise<any>;
     update(data: Record<string, unknown>): Promise<any>;

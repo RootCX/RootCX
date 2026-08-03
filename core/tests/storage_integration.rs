@@ -2,8 +2,9 @@ mod harness;
 use axum::body::Bytes;
 use futures_util::{StreamExt, stream};
 use harness::TestRuntime;
-use reqwest::multipart;
+use reqwest::{Method, multipart};
 use serde_json::{Value, json};
+use sha2::Digest;
 use sqlx::postgres::types::Oid;
 
 #[tokio::test]
@@ -366,5 +367,559 @@ async fn rejected_uploads_leave_no_rows_or_large_objects() {
         );
     }
 
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn resumable_upload_state_machine_preserves_committed_bytes() {
+    let rt = TestRuntime::boot().await;
+    rt.install("kova_erp", "catalog_items").await;
+    let expected = b"large catalog payload";
+    let response = rt
+        .client
+        .post(rt.url("/api/v1/apps/kova_erp/storage/uploads"))
+        .bearer_auth(&rt.token)
+        .json(&json!({
+            "name": "catalog.xlsx",
+            "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "size": expected.len(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    let created: Value = response.json().await.unwrap();
+    let upload_id = created["id"].as_str().unwrap();
+    let upload_url = format!("/api/v1/apps/kova_erp/storage/uploads/{upload_id}");
+
+    let first = rt
+        .client
+        .patch(rt.url(&upload_url))
+        .bearer_auth(&rt.token)
+        .header("Content-Type", "application/offset+octet-stream")
+        .header("Upload-Offset", "0")
+        .body(expected[..7].to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(first.status(), 200, "{}", first.text().await.unwrap());
+
+    let incomplete = rt
+        .client
+        .post(rt.url(&format!("{upload_url}/complete")))
+        .bearer_auth(&rt.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(incomplete.status(), 400);
+
+    let stale = rt
+        .client
+        .patch(rt.url(&upload_url))
+        .bearer_auth(&rt.token)
+        .header("Content-Type", "application/offset+octet-stream")
+        .header("Upload-Offset", "0")
+        .body(b"corrupt".to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), 409);
+
+    let status: Value = rt
+        .client
+        .get(rt.url(&upload_url))
+        .bearer_auth(&rt.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["uploaded_size"], 7);
+
+    let second = rt
+        .client
+        .patch(rt.url(&upload_url))
+        .bearer_auth(&rt.token)
+        .header("Content-Type", "application/offset+octet-stream")
+        .header("Upload-Offset", "7")
+        .body(expected[7..].to_vec())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(second.status(), 200, "{}", second.text().await.unwrap());
+
+    let completed = rt
+        .client
+        .post(rt.url(&format!("{upload_url}/complete")))
+        .bearer_auth(&rt.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(completed.status(), 201);
+    let completed: Value = completed.json().await.unwrap();
+    assert_eq!(completed["size"], expected.len());
+    assert_eq!(
+        completed["checksum"],
+        hex::encode(sha2::Sha256::digest(expected))
+    );
+
+    let repeated = rt
+        .client
+        .post(rt.url(&format!("{upload_url}/complete")))
+        .bearer_auth(&rt.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(repeated.status(), 200);
+    let repeated: Value = repeated.json().await.unwrap();
+    assert_eq!(repeated["file_id"], completed["file_id"]);
+
+    let status: Value = rt
+        .client
+        .get(rt.url(&upload_url))
+        .bearer_auth(&rt.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["state"], "completed");
+    assert_eq!(status["completed_file_id"], completed["file_id"]);
+
+    let cancel = rt
+        .client
+        .delete(rt.url(&upload_url))
+        .bearer_auth(&rt.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cancel.status(), 409);
+
+    let file_id = completed["file_id"].as_str().unwrap();
+    let downloaded = rt
+        .client
+        .get(rt.url(&format!("/api/v1/apps/kova_erp/storage/{file_id}")))
+        .bearer_auth(&rt.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(downloaded.status(), 200);
+    assert_eq!(downloaded.bytes().await.unwrap().as_ref(), expected);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn resumable_upload_creation_is_idempotent_by_client_id() {
+    let rt = TestRuntime::boot().await;
+    rt.install("kova_erp", "catalog_items").await;
+    let upload_id = uuid::Uuid::new_v4();
+    let request = json!({
+        "upload_id": upload_id,
+        "name": "catalog.xlsx",
+        "content_type": "application/octet-stream",
+        "size": 10,
+    });
+
+    let create = || {
+        rt.client
+            .post(rt.url("/api/v1/apps/kova_erp/storage/uploads"))
+            .bearer_auth(&rt.token)
+            .json(&request)
+            .send()
+    };
+    let (first, repeated) = tokio::join!(create(), create());
+    let first = first.unwrap();
+    let repeated = repeated.unwrap();
+    let mut statuses = [first.status().as_u16(), repeated.status().as_u16()];
+    statuses.sort();
+    assert_eq!(statuses, [200, 201]);
+    let first: Value = first.json().await.unwrap();
+    let repeated: Value = repeated.json().await.unwrap();
+    assert_eq!(repeated["id"], first["id"]);
+
+    let sessions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM rootcx_system.storage_upload_sessions WHERE id = $1",
+    )
+    .bind(upload_id)
+    .fetch_one(rt.pool())
+    .await
+    .unwrap();
+    assert_eq!(sessions, 1);
+
+    let conflict = rt
+        .client
+        .post(rt.url("/api/v1/apps/kova_erp/storage/uploads"))
+        .bearer_auth(&rt.token)
+        .json(&json!({
+            "upload_id": upload_id,
+            "name": "different.xlsx",
+            "size": 10,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), 409);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelling_resumable_upload_unlinks_its_large_object() {
+    let rt = TestRuntime::boot().await;
+    rt.install("kova_erp", "catalog_items").await;
+    let response = rt
+        .client
+        .post(rt.url("/api/v1/apps/kova_erp/storage/uploads"))
+        .bearer_auth(&rt.token)
+        .json(&json!({"name": "cancel.xlsx", "size": 10}))
+        .send()
+        .await
+        .unwrap();
+    let created: Value = response.json().await.unwrap();
+    let upload_id: uuid::Uuid = created["id"].as_str().unwrap().parse().unwrap();
+    let oid: Oid = sqlx::query_scalar(
+        "SELECT content_oid FROM rootcx_system.storage_upload_sessions WHERE id = $1",
+    )
+    .bind(upload_id)
+    .fetch_one(rt.pool())
+    .await
+    .unwrap();
+
+    let response = rt
+        .client
+        .delete(rt.url(&format!(
+            "/api/v1/apps/kova_erp/storage/uploads/{upload_id}"
+        )))
+        .bearer_auth(&rt.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_largeobject_metadata WHERE oid = $1)")
+            .bind(oid)
+            .fetch_one(rt.pool())
+            .await
+            .unwrap();
+    assert!(!exists);
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn resumable_session_is_private_to_its_creator() {
+    let rt = TestRuntime::boot().await;
+    rt.install("private_files", "items").await;
+    let storage_permissions: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM rootcx_system.rbac_permissions WHERE key IN ('app:private_files:storage.read', 'app:private_files:storage.write')",
+    )
+    .fetch_one(rt.pool())
+    .await
+    .unwrap();
+    assert_eq!(storage_permissions, 2);
+    let response = rt
+        .client
+        .post(rt.url("/api/v1/apps/private_files/storage/uploads"))
+        .bearer_auth(&rt.token)
+        .json(&json!({"name": "private.xlsx", "size": 5}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    let created: Value = response.json().await.unwrap();
+    let upload_id = created["id"].as_str().unwrap();
+    let upload_url = rt.url(&format!(
+        "/api/v1/apps/private_files/storage/uploads/{upload_id}"
+    ));
+    let other_token = rt.register_and_login("other@test.local").await;
+
+    let forbidden = rt
+        .client
+        .get(&upload_url)
+        .bearer_auth(&other_token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forbidden.status(), 403);
+
+    let other_user_id: uuid::Uuid =
+        sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'other@test.local'")
+            .fetch_one(rt.pool())
+            .await
+            .unwrap();
+    sqlx::query(
+        r#"
+        INSERT INTO rootcx_system.rbac_roles (name, permissions)
+        VALUES ('private-files-writer', ARRAY['app:private_files:storage.write'])
+        ON CONFLICT (name) DO UPDATE SET permissions = EXCLUDED.permissions
+        "#,
+    )
+    .execute(rt.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, 'private-files-writer')",
+    )
+    .bind(other_user_id)
+    .execute(rt.pool())
+    .await
+    .unwrap();
+
+    for method in [Method::GET, Method::PATCH, Method::POST, Method::DELETE] {
+        let url = if method == Method::POST {
+            format!("{upload_url}/complete")
+        } else {
+            upload_url.clone()
+        };
+        let mut request = rt
+            .client
+            .request(method.clone(), url)
+            .bearer_auth(&other_token);
+        if method == Method::PATCH {
+            request = request
+                .header("Content-Type", "application/offset+octet-stream")
+                .header("Upload-Offset", "0")
+                .body("other");
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(
+            response.status(),
+            404,
+            "{method} exposed another user's upload"
+        );
+    }
+
+    let owner_response = rt
+        .client
+        .get(upload_url)
+        .bearer_auth(&rt.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(owner_response.status(), 200);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn concurrent_chunks_with_the_same_offset_commit_once() {
+    let rt = TestRuntime::boot().await;
+    rt.install("concurrent_files", "items").await;
+    let response = rt
+        .client
+        .post(rt.url("/api/v1/apps/concurrent_files/storage/uploads"))
+        .bearer_auth(&rt.token)
+        .json(&json!({"name": "catalog.xlsx", "size": 5}))
+        .send()
+        .await
+        .unwrap();
+    let created: Value = response.json().await.unwrap();
+    let upload_id = created["id"].as_str().unwrap();
+    let upload_url = rt.url(&format!(
+        "/api/v1/apps/concurrent_files/storage/uploads/{upload_id}"
+    ));
+
+    let first = rt
+        .client
+        .patch(&upload_url)
+        .bearer_auth(&rt.token)
+        .header("Content-Type", "application/offset+octet-stream")
+        .header("Upload-Offset", "0")
+        .body("aaaaa")
+        .send();
+    let second = rt
+        .client
+        .patch(&upload_url)
+        .bearer_auth(&rt.token)
+        .header("Content-Type", "application/offset+octet-stream")
+        .header("Upload-Offset", "0")
+        .body("bbbbb")
+        .send();
+    let (first, second) = tokio::join!(first, second);
+    let mut statuses = [first.unwrap().status(), second.unwrap().status()];
+    statuses.sort();
+    assert_eq!(
+        statuses,
+        [reqwest::StatusCode::OK, reqwest::StatusCode::CONFLICT]
+    );
+
+    let completed: Value = rt
+        .client
+        .post(format!("{upload_url}/complete"))
+        .bearer_auth(&rt.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let file_id = completed["file_id"].as_str().unwrap();
+    let bytes = rt
+        .client
+        .get(rt.url(&format!("/api/v1/apps/concurrent_files/storage/{file_id}")))
+        .bearer_auth(&rt.token)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert!(bytes.as_ref() == b"aaaaa" || bytes.as_ref() == b"bbbbb");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn rejected_chunks_roll_back_large_object_writes() {
+    let rt = TestRuntime::boot().await;
+    rt.install("bounded_files", "items").await;
+    let response = rt
+        .client
+        .post(rt.url("/api/v1/apps/bounded_files/storage/uploads"))
+        .bearer_auth(&rt.token)
+        .json(&json!({"name": "catalog.xlsx", "size": 4}))
+        .send()
+        .await
+        .unwrap();
+    let created: Value = response.json().await.unwrap();
+    let upload_id: uuid::Uuid = created["id"].as_str().unwrap().parse().unwrap();
+    let upload_url = rt.url(&format!(
+        "/api/v1/apps/bounded_files/storage/uploads/{upload_id}"
+    ));
+
+    for (case, content_type, body) in [
+        ("wrong content type", "application/octet-stream", "abcd"),
+        ("empty chunk", "application/offset+octet-stream", ""),
+        (
+            "declared size exceeded",
+            "application/offset+octet-stream",
+            "abcde",
+        ),
+    ] {
+        let response = rt
+            .client
+            .patch(&upload_url)
+            .bearer_auth(&rt.token)
+            .header("Content-Type", content_type)
+            .header("Upload-Offset", "0")
+            .body(body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 400, "{case}");
+
+        let uploaded_size: i64 = sqlx::query_scalar(
+            "SELECT uploaded_size FROM rootcx_system.storage_upload_sessions WHERE id = $1",
+        )
+        .bind(upload_id)
+        .fetch_one(rt.pool())
+        .await
+        .unwrap();
+        let stored_bytes: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COALESCE(SUM(octet_length(lo.data)), 0)::BIGINT
+            FROM rootcx_system.storage_upload_sessions s
+            LEFT JOIN pg_largeobject lo ON lo.loid = s.content_oid
+            WHERE s.id = $1
+            "#,
+        )
+        .bind(upload_id)
+        .fetch_one(rt.pool())
+        .await
+        .unwrap();
+        assert_eq!(uploaded_size, 0, "{case} advanced the durable offset");
+        assert_eq!(stored_bytes, 0, "{case} persisted rejected bytes");
+    }
+
+    const MAX_CHUNK_BYTES: usize = 16 * 1024 * 1024;
+    let response = rt
+        .client
+        .post(rt.url("/api/v1/apps/bounded_files/storage/uploads"))
+        .bearer_auth(&rt.token)
+        .json(&json!({"name": "too-large.bin", "size": MAX_CHUNK_BYTES + 1}))
+        .send()
+        .await
+        .unwrap();
+    let created: Value = response.json().await.unwrap();
+    let large_upload_id: uuid::Uuid = created["id"].as_str().unwrap().parse().unwrap();
+    let response = rt
+        .client
+        .patch(rt.url(&format!(
+            "/api/v1/apps/bounded_files/storage/uploads/{large_upload_id}"
+        )))
+        .bearer_auth(&rt.token)
+        .header("Content-Type", "application/offset+octet-stream")
+        .header("Upload-Offset", "0")
+        .body(vec![0_u8; MAX_CHUNK_BYTES + 1])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 400);
+    let uploaded_size: i64 = sqlx::query_scalar(
+        "SELECT uploaded_size FROM rootcx_system.storage_upload_sessions WHERE id = $1",
+    )
+    .bind(large_upload_id)
+    .fetch_one(rt.pool())
+    .await
+    .unwrap();
+    assert_eq!(uploaded_size, 0);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn expired_sessions_are_deleted_with_their_large_objects() {
+    let rt = TestRuntime::boot().await;
+    rt.install("expiring_files", "items").await;
+    let response = rt
+        .client
+        .post(rt.url("/api/v1/apps/expiring_files/storage/uploads"))
+        .bearer_auth(&rt.token)
+        .json(&json!({"name": "expired.xlsx", "size": 10}))
+        .send()
+        .await
+        .unwrap();
+    let created: Value = response.json().await.unwrap();
+    let upload_id: uuid::Uuid = created["id"].as_str().unwrap().parse().unwrap();
+    let oid: Oid = sqlx::query_scalar(
+        "SELECT content_oid FROM rootcx_system.storage_upload_sessions WHERE id = $1",
+    )
+    .bind(upload_id)
+    .fetch_one(rt.pool())
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE rootcx_system.storage_upload_sessions SET expires_at = now() - interval '1 second' WHERE id = $1",
+    )
+    .bind(upload_id)
+    .execute(rt.pool())
+    .await
+    .unwrap();
+
+    let trigger = rt
+        .client
+        .post(rt.url("/api/v1/apps/expiring_files/storage/uploads"))
+        .bearer_auth(&rt.token)
+        .json(&json!({"name": "next.xlsx", "size": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(trigger.status(), 201);
+
+    let session_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.storage_upload_sessions WHERE id = $1)",
+    )
+    .bind(upload_id)
+    .fetch_one(rt.pool())
+    .await
+    .unwrap();
+    let object_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_largeobject_metadata WHERE oid = $1)")
+            .bind(oid)
+            .fetch_one(rt.pool())
+            .await
+            .unwrap();
+    assert!(!session_exists);
+    assert!(!object_exists);
     rt.shutdown().await;
 }

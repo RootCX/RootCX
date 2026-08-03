@@ -129,6 +129,8 @@ impl RuntimeExtension for RbacExtension {
                 .map(|a| (format!("app:{app_id}:{}.{a}", e.entity_name), format!("{a} {}", e.entity_name))))
             .chain(["read", "write", "trigger"].into_iter()
                 .map(|a| (format!("app:{app_id}:cron.{a}"), format!("{a} crons"))))
+            .chain([("read", "read app files"), ("write", "write app files")]
+                .map(|(a, description)| (format!("app:{app_id}:storage.{a}"), description.into())))
             .unzip();
 
         if let Some(c) = &manifest.permissions {

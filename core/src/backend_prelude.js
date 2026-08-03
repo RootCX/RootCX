@@ -43,7 +43,7 @@
 //       ctx.sql(text, params) → { columns, rows, rowCount },
 //       ctx.selfAction(action, params),
 //       ctx.uploadFile(content, filename, contentType),
-//       ctx.downloadFile(appId, fileId),
+//       ctx.downloadFile(appId, fileId), ctx.openFile(appId, fileId),
 //       ctx.enqueueJob(payload),
 //       ctx.collection(entity).insert(data) / .update / .find / .findOne,
 //
@@ -177,7 +177,7 @@ function _uploadFile(content, filename, contentType) {
   });
 }
 
-function _downloadFile(appId, fileId) {
+function _requestDownload(appId, fileId, mode) {
   if (!_ctx) return Promise.reject(new Error("downloadFile: worker not started yet"));
   if (!fileId && appId) {
     fileId = appId;
@@ -195,9 +195,17 @@ function _downloadFile(appId, fileId) {
         reject(new Error("downloadFile: timeout waiting for file"));
       }
     }, 30_000);
-    _pendingDownloads.set(id, { resolve, reject, timer });
+    _pendingDownloads.set(id, { resolve, reject, timer, mode });
     _transport.send({ type: "storage_download", id, app_id: appId, file_id: fileId });
   });
+}
+
+function _downloadFile(appId, fileId) {
+  return _requestDownload(appId, fileId, "buffer");
+}
+
+function _openFile(appId, fileId) {
+  return _requestDownload(appId, fileId, "stream");
 }
 
 function _enqueueJob(payload) {
@@ -277,6 +285,7 @@ function _makeCtx() {
     emit: globalThis.emit,
     uploadFile: _uploadFile,
     downloadFile: _downloadFile,
+    openFile: _openFile,
     enqueueJob: _enqueueJob,
     sql: (sql, params = []) => _sqlQuery(sql, params),
     selfAction: (action, params = {}) => _selfAction(action, params),
@@ -333,12 +342,20 @@ function _dispatch(msg) {
       fetch(msg.url)
         .then(async (res) => {
           if (!res.ok) throw new Error(`download failed: ${res.status} ${await res.text()}`);
-          p.resolve({
+          const common = {
             fileId: msg.file_id,
             appId: msg.app_id,
             name: msg.name,
             contentType: msg.content_type,
             size: msg.size,
+          };
+          if (p.mode === "stream") {
+            if (!res.body) throw new Error("download failed: response has no body stream");
+            p.resolve({ ...common, stream: res.body });
+            return;
+          }
+          p.resolve({
+            ...common,
             content: new Uint8Array(await res.arrayBuffer()),
           });
         })
