@@ -321,6 +321,46 @@ describe("v2: serve()", () => {
     await w.close();
   });
 
+  test("ctx.openFile never uses the buffered download path", async () => {
+    const w = spawnWorker(`
+      Response.prototype.arrayBuffer = () => { throw new Error("buffered download used"); };
+      serve({
+        rpc: {
+          async download(_p: any, _c: any, ctx: any) {
+            const file = await ctx.openFile("kova_erp", "11111111-1111-1111-1111-111111111111");
+            return {
+              size: file.size,
+              text: await new Response(file.stream).text(),
+            };
+          },
+        },
+      });
+    `);
+    w.send(DISCOVER);
+    await w.readLine();
+    w.send({ type: "rpc", id: "r1", method: "download", params: {} });
+    const req = await w.readLine();
+    expect(req.type).toBe("storage_download");
+
+    w.send({
+      type: "storage_download_result",
+      id: req.id,
+      app_id: "kova_erp",
+      file_id: "11111111-1111-1111-1111-111111111111",
+      name: "catalog.xlsx",
+      content_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      size: 5,
+      url: "data:application/octet-stream;base64,aGVsbG8=",
+    });
+
+    expect(await w.readLine()).toEqual({
+      type: "rpc_response",
+      id: "r1",
+      result: { size: 5, text: "hello" },
+    });
+    await w.close();
+  });
+
   test("ctx.enqueueJob emits job_enqueue and resolves msg id", async () => {
     const w = spawnWorker(`
       serve({

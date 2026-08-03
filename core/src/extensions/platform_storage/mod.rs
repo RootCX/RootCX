@@ -7,6 +7,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
+use sqlx::postgres::types::Oid;
 use sqlx::PgPool;
 use tracing::info;
 use uuid::Uuid;
@@ -17,9 +18,9 @@ use crate::auth::identity::Identity;
 use crate::governance::authority::{has_permission, resolve_permissions};
 use crate::routes::SharedRuntime;
 
+use super::storage::large_object::{LargeObjectReader, LargeObjectWriter};
+use super::storage::max_file_bytes;
 use super::RuntimeExtension;
-
-const MAX_FILE_BYTES: usize = 64 * 1024 * 1024;
 
 fn check_storage_perm(permissions: &[String], bucket: &str, action: &str) -> Result<(), ApiError> {
     let specific = format!("storage:{bucket}:{action}");
@@ -29,6 +30,17 @@ fn check_storage_perm(permissions: &[String], bucket: &str, action: &str) -> Res
     } else {
         Err(ApiError::Forbidden(format!("permission denied: {global}")))
     }
+}
+
+fn content_type_allowed(allowed_types: Option<&[String]>, content_type: &str) -> bool {
+    let Some(types) = allowed_types else { return true };
+    types.is_empty() || types.iter().any(|allowed| {
+        if allowed.ends_with("/*") {
+            content_type.starts_with(allowed.trim_end_matches("/*"))
+        } else {
+            content_type == allowed
+        }
+    })
 }
 
 pub struct PlatformStorageExtension;
@@ -59,7 +71,9 @@ impl RuntimeExtension for PlatformStorageExtension {
                 is_folder     BOOLEAN NOT NULL DEFAULT false,
                 content_type  TEXT NOT NULL DEFAULT 'application/octet-stream',
                 size          BIGINT NOT NULL DEFAULT 0,
-                content       BYTEA NOT NULL DEFAULT '',
+                content       BYTEA DEFAULT '',
+                content_oid   OID,
+                checksum      TEXT,
                 metadata      JSONB NOT NULL DEFAULT '{}',
                 uploaded_by   UUID REFERENCES rootcx_system.users(id),
                 created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -76,6 +90,23 @@ impl RuntimeExtension for PlatformStorageExtension {
         ] {
             sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
         }
+        for ddl in [
+            "ALTER TABLE rootcx_system.storage_objects ALTER COLUMN content DROP NOT NULL",
+            "ALTER TABLE rootcx_system.storage_objects ADD COLUMN IF NOT EXISTS content_oid OID",
+            "ALTER TABLE rootcx_system.storage_objects ADD COLUMN IF NOT EXISTS checksum TEXT",
+            r#"CREATE OR REPLACE FUNCTION rootcx_system.unlink_storage_object_large_object()
+               RETURNS trigger LANGUAGE plpgsql AS $$
+               BEGIN
+                   IF OLD.content_oid IS NOT NULL THEN
+                       PERFORM lo_unlink(OLD.content_oid);
+                   END IF;
+                   RETURN OLD;
+               END $$"#,
+            "DROP TRIGGER IF EXISTS trg_unlink_storage_object_large_object ON rootcx_system.storage_objects",
+            "CREATE TRIGGER trg_unlink_storage_object_large_object BEFORE DELETE ON rootcx_system.storage_objects FOR EACH ROW EXECUTE FUNCTION rootcx_system.unlink_storage_object_large_object()",
+        ] {
+            sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
+        }
 
         info!("platform storage extension ready");
         Ok(())
@@ -87,7 +118,7 @@ impl RuntimeExtension for PlatformStorageExtension {
                 .route("/api/v1/storage/buckets", get(list_buckets).post(create_bucket))
                 .route("/api/v1/storage/buckets/{name}", delete(delete_bucket))
                 .route("/api/v1/storage/objects/{bucket}", get(list_objects).post(create_folder))
-                .route("/api/v1/storage/objects/{bucket}/upload", post(upload_object).layer(DefaultBodyLimit::max(MAX_FILE_BYTES)))
+                .route("/api/v1/storage/objects/{bucket}/upload", post(upload_object).layer(DefaultBodyLimit::max(max_file_bytes())))
                 .route("/api/v1/storage/objects/{bucket}/{id}", get(download_object).patch(rename_object).delete(delete_object))
                 .route("/api/v1/storage/objects/{bucket}/{id}/ancestors", get(get_ancestors))
         )
@@ -313,10 +344,11 @@ async fn upload_object(
     ).bind(&bucket).fetch_optional(&pool).await?;
 
     let (max_size, allowed_types) = bucket_row.ok_or_else(|| ApiError::NotFound(format!("bucket '{bucket}'")))?;
+    let storage_limit = max_file_bytes() as i64;
 
     let mut file_name = String::new();
     let mut content_type = String::from("application/octet-stream");
-    let mut data: Option<axum::body::Bytes> = None;
+    let mut writer: Option<LargeObjectWriter> = None;
     let mut parent_id: Option<Uuid> = None;
 
     while let Some(field) = multipart.next_field().await.map_err(|e| ApiError::BadRequest(e.to_string()))? {
@@ -328,54 +360,54 @@ async fn upload_object(
                 }
             }
             _ if field.file_name().is_some() => {
-                if data.is_some() {
+                if writer.is_some() {
                     return Err(ApiError::BadRequest("only one file field allowed".into()));
                 }
                 file_name = field.file_name().unwrap_or("upload").to_string();
                 content_type = field.content_type().unwrap_or("application/octet-stream").to_string();
-                data = Some(field.bytes().await.map_err(|e| ApiError::BadRequest(e.to_string()))?);
+                if !content_type_allowed(allowed_types.as_deref(), &content_type) {
+                    return Err(ApiError::BadRequest(format!("content type '{content_type}' not allowed in bucket '{bucket}'")));
+                }
+                let mut upload = LargeObjectWriter::create(&pool).await?;
+                let mut field = field;
+                while let Some(chunk) = field.chunk().await.map_err(|e| ApiError::BadRequest(e.to_string()))? {
+                    let next_size = upload.size() + chunk.len() as i64;
+                    if next_size > storage_limit {
+                        return Err(ApiError::BadRequest(format!("file exceeds storage limit ({storage_limit} bytes)")));
+                    }
+                    if let Some(max) = max_size && next_size > max {
+                        return Err(ApiError::BadRequest(format!("file exceeds bucket limit ({max} bytes)")));
+                    }
+                    upload.write(&chunk).await?;
+                }
+                writer = Some(upload);
             }
             _ => {}
         }
     }
 
-    let data = data.ok_or_else(|| ApiError::BadRequest("no file field".into()))?;
-    if data.is_empty() {
+    let mut writer = writer.ok_or_else(|| ApiError::BadRequest("no file field".into()))?;
+    if writer.size() == 0 {
         return Err(ApiError::BadRequest("empty file".into()));
     }
 
-    if let Some(types) = &allowed_types {
-        if !types.is_empty() && !types.iter().any(|t| {
-            if t.ends_with("/*") {
-                content_type.starts_with(t.trim_end_matches("/*"))
-            } else {
-                &content_type == t
-            }
-        }) {
-            return Err(ApiError::BadRequest(format!("content type '{content_type}' not allowed in bucket '{bucket}'")));
-        }
-    }
-
-    if let Some(max) = max_size {
-        if data.len() as i64 > max {
-            return Err(ApiError::BadRequest(format!("file exceeds bucket limit ({max} bytes)")));
-        }
-    }
-
     let id = Uuid::new_v4();
+    let size = writer.size();
+    let checksum = writer.checksum();
     sqlx::query(
-        "INSERT INTO rootcx_system.storage_objects (id, bucket, parent_id, name, is_folder, content_type, size, content, uploaded_by)
-         VALUES ($1, $2, $3, $4, false, $5, $6, $7, $8)",
+        "INSERT INTO rootcx_system.storage_objects (id, bucket, parent_id, name, is_folder, content_type, size, content, content_oid, checksum, uploaded_by)
+         VALUES ($1, $2, $3, $4, false, $5, $6, NULL, $7, $8, $9)",
     )
     .bind(id)
     .bind(&bucket)
     .bind(parent_id)
     .bind(&file_name)
     .bind(&content_type)
-    .bind(data.len() as i64)
-    .bind(&data[..])
+    .bind(size)
+    .bind(writer.oid())
+    .bind(&checksum)
     .bind(identity.user_id)
-    .execute(&pool)
+    .execute(writer.connection())
     .await
     .map_err(|e| {
         let msg = e.to_string();
@@ -387,12 +419,14 @@ async fn upload_object(
             ApiError::from(e)
         }
     })?;
+    writer.commit().await?;
 
     Ok((StatusCode::CREATED, Json(json!({
         "id": id.to_string(),
         "name": file_name,
         "content_type": content_type,
-        "size": data.len(),
+        "size": size,
+        "checksum": checksum,
     }))))
 }
 
@@ -413,25 +447,30 @@ async fn download_object(
         check_storage_perm(&perms, &bucket, "read")?;
     }
 
-    let row: Option<(String, String, bool, Vec<u8>)> = sqlx::query_as(
-        "SELECT name, content_type, is_folder, content FROM rootcx_system.storage_objects WHERE id = $1 AND bucket = $2",
+    let row: Option<(String, String, bool, i64, Option<Vec<u8>>, Option<Oid>)> = sqlx::query_as(
+        "SELECT name, content_type, is_folder, size, content, content_oid FROM rootcx_system.storage_objects WHERE id = $1 AND bucket = $2",
     ).bind(id).bind(&bucket).fetch_optional(&pool).await?;
 
-    let (name, content_type, is_folder, content) = row.ok_or_else(|| ApiError::NotFound(format!("object {id}")))?;
+    let (name, content_type, is_folder, size, inline, oid) = row.ok_or_else(|| ApiError::NotFound(format!("object {id}")))?;
 
     if is_folder {
         return Err(ApiError::BadRequest("cannot download a folder".into()));
     }
+    let body = match (inline, oid) {
+        (Some(content), _) => Body::from(content),
+        (None, Some(oid)) => LargeObjectReader::open(&pool, oid, size).await?.into_body(),
+        (None, None) => return Err(ApiError::Internal(format!("object {id} has no content"))),
+    };
 
     let safe_name: String = name.chars().filter(|c| !c.is_control() && *c != '"' && *c != '\\').collect();
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, content_type.parse().unwrap_or(header::HeaderValue::from_static("application/octet-stream")));
     headers.insert(header::CONTENT_DISPOSITION, format!("attachment; filename=\"{safe_name}\"").parse().unwrap_or(header::HeaderValue::from_static("attachment")));
-    headers.insert(header::CONTENT_LENGTH, content.len().to_string().parse().unwrap());
+    headers.insert(header::CONTENT_LENGTH, size.to_string().parse().unwrap());
     headers.insert(header::HeaderName::from_static("x-content-type-options"), header::HeaderValue::from_static("nosniff"));
     headers.insert(header::HeaderName::from_static("content-security-policy"), header::HeaderValue::from_static("sandbox"));
 
-    Ok((headers, Body::from(content)).into_response())
+    Ok((headers, body).into_response())
 }
 
 #[derive(Deserialize)]

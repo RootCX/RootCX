@@ -149,6 +149,7 @@ impl Runtime {
         seed::seed_assistant(&pool, &self.data_dir, &self.bun_bin, &wm, &secret_manager).await?;
         let workflow_events = extensions::workflows::events::WorkflowEvents::default();
         let scheduler = scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm), Arc::clone(&self.tool_registry), workflow_events.clone());
+        extensions::storage::spawn_upload_cleanup(pool.clone(), scheduler.cancel.clone());
 
         wm.start_deployed_apps(&pool, &secret_manager).await;
 
