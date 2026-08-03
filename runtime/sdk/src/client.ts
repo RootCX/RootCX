@@ -1,3 +1,11 @@
+import {
+  DEFAULT_STORAGE_CHUNK_SIZE,
+  DEFAULT_STORAGE_IDLE_TIMEOUT_MS,
+  sendStorageChunk,
+  supportsUploadProgress,
+  type StorageChunkResponse,
+} from "./storage-upload";
+
 export interface RuntimeClientOptions {
   baseUrl?: string;
   /**
@@ -329,7 +337,10 @@ export interface StoredFile {
 
 export interface StorageUploadProgress {
   uploadId: string;
+  /** Durable server offset. */
   uploadedBytes: number;
+  /** Browser-reported bytes sent for the current attempt. May move backward after a retry. */
+  transmittedBytes?: number;
   totalBytes: number;
 }
 
@@ -338,6 +349,8 @@ export interface ResumableUploadOptions {
   contentType?: string;
   uploadId?: string;
   chunkSize?: number;
+  /** Abort and resume a chunk after this duration without additional transmitted bytes. */
+  chunkIdleTimeoutMs?: number;
   maxRetries?: number;
   signal?: AbortSignal;
   onProgress?: (progress: StorageUploadProgress) => void;
@@ -473,6 +486,10 @@ export class RuntimeClient {
     if (!Number.isInteger(maxRetries) || maxRetries < 0) {
       throw new Error("maxRetries must be a non-negative integer");
     }
+    const chunkIdleTimeoutMs = options.chunkIdleTimeoutMs ?? DEFAULT_STORAGE_IDLE_TIMEOUT_MS;
+    if (!Number.isInteger(chunkIdleTimeoutMs) || chunkIdleTimeoutMs <= 0) {
+      throw new Error("chunkIdleTimeoutMs must be a positive integer");
+    }
     throwIfAborted(options.signal);
     let session: StorageUploadSession;
     if (options.uploadId) {
@@ -492,7 +509,7 @@ export class RuntimeClient {
     }
     assertMatchingUpload(session, options.name, file.size);
 
-    const chunkSize = options.chunkSize ?? session.maxChunkSize;
+    const chunkSize = options.chunkSize ?? Math.min(DEFAULT_STORAGE_CHUNK_SIZE, session.maxChunkSize);
     if (!Number.isInteger(chunkSize) || chunkSize <= 0 || chunkSize > session.maxChunkSize) {
       throw new Error(`chunkSize must be between 1 and ${session.maxChunkSize}`);
     }
@@ -504,12 +521,24 @@ export class RuntimeClient {
       throwIfAborted(options.signal);
       const end = Math.min(offset + chunkSize, file.size);
       try {
-        const uploadedSize = await this.appendStorageUpload(
+        const uploadedSize = await this.appendStorageUploadWithProgress(
           appId,
           session.id,
           offset,
           file.slice(offset, end),
-          options.signal,
+          {
+            signal: options.signal,
+            idleTimeoutMs: chunkIdleTimeoutMs,
+            onProgress: (chunkTransmittedBytes) => {
+              reportUploadProgress(
+                options,
+                session.id,
+                offset,
+                file.size,
+                Math.min(offset + chunkTransmittedBytes, end),
+              );
+            },
+          },
         );
         if (uploadedSize <= offset || uploadedSize > file.size) {
           throw new Error(`invalid uploaded offset ${uploadedSize}`);
@@ -538,6 +567,41 @@ export class RuntimeClient {
       maxRetries,
       options.signal,
     );
+  }
+
+  private async appendStorageUploadWithProgress(
+    appId: string,
+    uploadId: string,
+    offset: number,
+    chunk: Blob,
+    options: {
+      signal?: AbortSignal;
+      idleTimeoutMs: number;
+      onProgress: (uploadedBytes: number) => void;
+    },
+  ): Promise<number> {
+    if (!supportsUploadProgress()) {
+      return this.appendStorageUpload(appId, uploadId, offset, chunk, options.signal);
+    }
+
+    const url = `${this.storageUploadsUrl(appId)}/${enc(uploadId)}`;
+    const send = () => sendStorageChunk({
+      url,
+      token: this.accessToken,
+      offset,
+      chunk,
+      ...options,
+    });
+    let response = await send();
+    if (response.status === 401 && this.refreshToken && this.autoRefresh) {
+      try {
+        await this.refresh();
+      } catch {
+        return parseStorageChunkResponse(response);
+      }
+      response = await send();
+    }
+    return parseStorageChunkResponse(response);
   }
 
   async listRecords<T = Record<string, unknown>>(
@@ -1300,6 +1364,14 @@ function mapStoredFile(file: StorageFileWire): StoredFile {
   };
 }
 
+function parseStorageChunkResponse(response: StorageChunkResponse): number {
+  if (response.status < 200 || response.status >= 300) {
+    throw new RuntimeApiError(response.status, response.body);
+  }
+  const result = JSON.parse(response.body) as { uploaded_size: number };
+  return result.uploaded_size;
+}
+
 function assertMatchingUpload(session: StorageUploadSession, name: string, size: number): void {
   if (session.name !== name || session.expectedSize !== size) {
     throw new Error("upload session does not match the selected file");
@@ -1311,8 +1383,9 @@ function reportUploadProgress(
   uploadId: string,
   uploadedBytes: number,
   totalBytes: number,
+  transmittedBytes = uploadedBytes,
 ): void {
-  options.onProgress?.({ uploadId, uploadedBytes, totalBytes });
+  options.onProgress?.({ uploadId, uploadedBytes, transmittedBytes, totalBytes });
 }
 
 function isRetryableUploadError(error: unknown): boolean {
