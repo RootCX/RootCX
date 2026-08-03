@@ -311,12 +311,15 @@ pub async fn get_session(
     })))
 }
 
+/// Same gate as `get_session` / `list_sessions`: a transcript holds whatever the
+/// agent was shown, including rows a trigger fed it, so it is admin-only.
 pub async fn get_session_events(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path((app_id, session_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<SessionEventEntry>>, ApiError> {
     let pool = routes::pool(&rt);
+    crate::governance::authority::require_perm(&pool, identity.user_id, "admin:agents.manage").await?;
 
     // Verify session belongs to app
     let exists: bool = sqlx::query_scalar(
@@ -388,10 +391,15 @@ pub async fn reply_approval(
     }
 }
 
+/// Cross-app by construction — it carries every agent's tool inputs and replies
+/// for every app — so it is gated like the per-session reads rather than merely
+/// requiring authentication.
 pub async fn fleet_stream(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, ApiError> {
+    let pool = routes::pool(&rt);
+    crate::governance::authority::require_perm(&pool, identity.user_id, "admin:agents.manage").await?;
     let rx = routes::wm(&rt).subscribe_fleet();
     let stream = futures::stream::unfold(rx, |mut rx| async move {
         match rx.recv().await {

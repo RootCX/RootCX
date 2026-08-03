@@ -81,23 +81,52 @@ impl RuntimeExtension for AuditExtension {
         exec(pool, "CREATE INDEX IF NOT EXISTS idx_audit_table ON rootcx_system.audit_log (table_schema, table_name)")
             .await?;
 
+        // Row-shape projection shared by the two row-level triggers (audit and
+        // hooks). Derived from each manifest at deploy — see
+        // `hooks::sync_sensitive_fields` — so a trigger reads one indexed row
+        // instead of walking `apps.manifest` JSON on every written row. Created
+        // here because the audit extension bootstraps before hooks, and its
+        // trigger function already depends on the table existing.
+        exec(
+            pool,
+            r#"
+            CREATE TABLE IF NOT EXISTS rootcx_system.sensitive_fields (
+                app_id TEXT NOT NULL,
+                entity TEXT NOT NULL,
+                fields TEXT[] NOT NULL,
+                PRIMARY KEY (app_id, entity)
+            )"#,
+        )
+        .await?;
+
         exec(
             pool,
             r#"
             CREATE OR REPLACE FUNCTION rootcx_system.audit_trigger_fn()
             RETURNS TRIGGER AS $$
-            DECLARE rec_id TEXT; v_actor UUID; v_delegator UUID; v_trigger TEXT;
+            DECLARE rec_id TEXT; v_actor UUID; v_delegator UUID; v_trigger TEXT; sensitive TEXT[];
             BEGIN
                 rec_id := CASE WHEN TG_OP = 'DELETE' THEN OLD.id::TEXT ELSE NEW.id::TEXT END;
                 v_actor := nullif(current_setting('rootcx.actor_uid', true), '')::UUID;
                 v_delegator := nullif(current_setting('rootcx.delegator_uid', true), '')::UUID;
                 v_trigger := nullif(current_setting('rootcx.trigger_ref', true), '');
+
+                -- SECURITY DEFINER, so this reads the row before RLS and before
+                -- the read paths' projection. A manifest's sensitive fields must
+                -- be stripped here too, or the audit trail becomes a durable
+                -- plaintext copy of every credential column ever written. One
+                -- indexed lookup, kept in sync at deploy (`sync_sensitive_fields`).
+                SELECT COALESCE(fields, ARRAY[]::text[]) INTO sensitive
+                FROM rootcx_system.sensitive_fields
+                WHERE app_id = TG_TABLE_SCHEMA AND entity = TG_TABLE_NAME;
+                sensitive := COALESCE(sensitive, ARRAY[]::text[]);
+
                 INSERT INTO rootcx_system.audit_log
                     (table_schema, table_name, record_id, operation, old_record, new_record, actor_uid, delegator_uid, trigger_ref)
                 VALUES (
                     TG_TABLE_SCHEMA, TG_TABLE_NAME, rec_id, TG_OP,
-                    CASE WHEN TG_OP IN ('UPDATE','DELETE') THEN to_jsonb(OLD) ELSE NULL END,
-                    CASE WHEN TG_OP IN ('INSERT','UPDATE') THEN to_jsonb(NEW) ELSE NULL END,
+                    CASE WHEN TG_OP IN ('UPDATE','DELETE') THEN to_jsonb(OLD) - sensitive END,
+                    CASE WHEN TG_OP IN ('INSERT','UPDATE') THEN to_jsonb(NEW) - sensitive END,
                     v_actor, v_delegator, v_trigger
                 );
                 RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;

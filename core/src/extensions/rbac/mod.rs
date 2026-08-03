@@ -129,6 +129,8 @@ impl RuntimeExtension for RbacExtension {
                 .map(|a| (format!("app:{app_id}:{}.{a}", e.entity_name), format!("{a} {}", e.entity_name))))
             .chain(["read", "write", "trigger"].into_iter()
                 .map(|a| (format!("app:{app_id}:cron.{a}"), format!("{a} crons"))))
+            .chain(["read", "write"].into_iter()
+                .map(|a| (format!("app:{app_id}:hook.{a}"), format!("{a} entity hooks"))))
             .unzip();
 
         if let Some(c) = &manifest.permissions {
@@ -141,6 +143,15 @@ impl RuntimeExtension for RbacExtension {
         // Always generate the invoke permission so it is grantable per role
         keys.push(format!("app:{app_id}:invoke"));
         descs.push("invoke the app's agent".into());
+
+        // Reaching another principal's trigger is a separate, elevated grant: a
+        // hook or cron receives whatever its owner can reach, so managing your
+        // own does not imply managing theirs. (`cron.manage_others` was already
+        // enforced but never minted, so it was invisible in the role picker.)
+        for kind in ["cron", "hook"] {
+            keys.push(format!("app:{app_id}:{kind}.manage_others"));
+            descs.push(format!("read and delete {kind}s owned by other users"));
+        }
 
         let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
         sqlx::query("DELETE FROM rootcx_system.rbac_permissions WHERE source_app = $1")

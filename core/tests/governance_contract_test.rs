@@ -2516,3 +2516,54 @@ async fn typed_bind_uuid_number_decimal_date_bool_array_jsonb() {
 
     rt.shutdown().await;
 }
+
+/// Hook and agent-transcript endpoints were reachable by any authenticated user.
+/// A hook fires with its owner's authority and its payload lands verbatim in an
+/// agent prompt, so registering or reading one is privileged. Asserted end to end
+/// because the defect was a missing extractor gate — route wiring a unit test
+/// cannot reach.
+#[tokio::test]
+async fn t6_6_hook_and_transcript_endpoints_reject_unprivileged_callers() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    // Holds the app's data permissions but none of the trigger/agent grants.
+    let (tok, _) = user_with(&rt, "sales@t.local", &["app:crm:contacts.read"]).await;
+
+    let hook = json!({"entity": "contacts", "operation": "INSERT", "action_type": "job"});
+    let session = Uuid::new_v4();
+    for (method, path, body, why) in [
+        (
+            Method::GET,
+            "/api/v1/apps/crm/hooks".to_string(),
+            None,
+            "list hooks",
+        ),
+        (
+            Method::POST,
+            "/api/v1/apps/crm/hooks".to_string(),
+            Some(&hook),
+            "register a hook on a table",
+        ),
+        (
+            Method::GET,
+            format!("/api/v1/apps/crm/agent/sessions/{session}/events"),
+            None,
+            "read an agent transcript",
+        ),
+        (
+            Method::GET,
+            "/api/v1/agents/stream".to_string(),
+            None,
+            "subscribe to every app's agent events",
+        ),
+    ] {
+        let (status, body) = rt.request_as(method.clone(), &path, &tok, body).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{why} must require an explicit grant ({method} {path}): {body}"
+        );
+    }
+    rt.shutdown().await;
+}
