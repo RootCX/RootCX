@@ -53,7 +53,12 @@ pub trait RuntimeExtension: Send + Sync {
 }
 
 /// Build all built-in extensions in correct bootstrap order.
-/// Auth must come before RBAC (rbac_assignments references users table).
+///
+/// The order is load-bearing; `bootstrap_order_satisfies_declared_dependencies`
+/// enforces it. Current constraints:
+/// * audit before hooks — audit creates `sensitive_fields`, read by the hooks trigger
+/// * auth before rbac — `rbac_assignments` references the users table
+/// * rbac before service_accounts — they register keys into `rbac_permissions`
 pub fn builtin_extensions(auth_config: Arc<AuthConfig>) -> Vec<Box<dyn RuntimeExtension>> {
     vec![
         Box::new(audit::AuditExtension),
@@ -75,4 +80,60 @@ pub fn builtin_extensions(auth_config: Arc<AuthConfig>) -> Vec<Box<dyn RuntimeEx
         Box::new(platform_storage::PlatformStorageExtension),
         Box::new(workflows::WorkflowExtension),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `builtin_extensions` order is load-bearing: each bootstrap runs in
+    /// sequence, and several create objects a later one depends on. Nothing else
+    /// enforces it — a reorder compiles fine and the failure surfaces late (a
+    /// plpgsql function resolves its tables at call time, not at creation, so a
+    /// misordered trigger dependency breaks the first write rather than boot).
+    ///
+    /// One test for all the ordering constraints, keyed on `name()` so it does
+    /// not encode positions and survives inserting an unrelated extension.
+    #[test]
+    fn bootstrap_order_satisfies_declared_dependencies() {
+        let secret = b"test-secret-key-for-unit-tests!!";
+        let config = Arc::new(AuthConfig {
+            encoding_key: jsonwebtoken::EncodingKey::from_secret(secret),
+            decoding_key: jsonwebtoken::DecodingKey::from_secret(secret),
+            access_ttl: std::time::Duration::from_secs(900),
+            refresh_ttl: std::time::Duration::from_secs(86400),
+        });
+        let extensions = builtin_extensions(config);
+        let names: Vec<&str> = extensions.iter().map(|e| e.name()).collect();
+
+        let position = |name: &str| {
+            names
+                .iter()
+                .position(|n| *n == name)
+                .unwrap_or_else(|| panic!("extension '{name}' is missing from builtin_extensions"))
+        };
+
+        for (earlier, later, why) in [
+            (
+                "audit",
+                "hooks",
+                "audit creates rootcx_system.sensitive_fields, which the hooks trigger reads",
+            ),
+            (
+                "auth",
+                "rbac",
+                "rbac_assignments references the users table",
+            ),
+            (
+                "rbac",
+                "service_accounts",
+                "service accounts register permission keys into rbac_permissions",
+            ),
+        ] {
+            assert!(
+                position(earlier) < position(later),
+                "'{earlier}' must bootstrap before '{later}': {why} (order: {names:?})"
+            );
+        }
+    }
 }
