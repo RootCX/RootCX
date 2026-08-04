@@ -250,15 +250,7 @@ fn field_to_column(field: &rootcx_types::FieldContract, pk_types: &HashMap<Strin
                 parts.push(format!("DEFAULT {default_sql}"));
             }
 
-    let col_def = parts.join(" ");
-
-    if let Some(ref enum_values) = field.enum_values
-        && !enum_values.is_empty() {
-            let values_list: Vec<String> = enum_values.iter().map(|v| format!("'{}'", v.replace('\'', "''"))).collect();
-            return format!("{col_def} CHECK ({col_name} IN ({}))", values_list.join(", "));
-        }
-
-    col_def
+    parts.join(" ")
 }
 
 async fn load_entity(
@@ -718,14 +710,12 @@ mod tests {
     }
 
     #[test]
-    fn field_to_column_with_enum() {
+    fn field_to_column_leaves_enum_checks_to_schema_sync() {
         let pk_types = HashMap::new();
         let mut f = field("color", "text");
         f.enum_values = Some(vec!["red".to_string(), "blue".to_string()]);
         let col = field_to_column(&f, &pk_types);
-        assert!(col.contains("CHECK"), "expected CHECK in: {col}");
-        assert!(col.contains("'red'"), "expected 'red' in: {col}");
-        assert!(col.contains("'blue'"), "expected 'blue' in: {col}");
+        assert!(!col.contains("CHECK"), "enum CHECK must be managed by schema sync: {col}");
     }
 
     #[test]

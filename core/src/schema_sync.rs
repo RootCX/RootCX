@@ -716,6 +716,43 @@ async fn read_managed_check_hashes(
         .collect())
 }
 
+/// Find enum CHECKs emitted inline by Core versions predating managed checks.
+/// PostgreSQL named those `<table>_<column>_check`. Match that exact name and
+/// the exact constrained column so unrelated untagged CHECKs remain untouched.
+async fn read_legacy_enum_checks(
+    pool: &PgPool,
+    schema: &str,
+    entity: &EntityContract,
+) -> Result<Vec<String>, RuntimeError> {
+    let mut names = Vec::new();
+    for field in entity.fields.iter().filter(|field| {
+        field.enum_values.as_ref().is_some_and(|values| !values.is_empty())
+    }) {
+        let legacy_name = format!("{}_{}_check", entity.entity_name, field.name);
+        let found: Option<String> = sqlx::query_scalar(
+            "SELECT con.conname \
+             FROM pg_constraint con \
+             JOIN pg_class t ON t.oid = con.conrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             JOIN pg_attribute a ON a.attrelid = t.oid AND a.attname = $3 \
+             WHERE n.nspname = $1 AND t.relname = $2 AND con.contype = 'c' \
+               AND con.conname = $4 AND con.conkey = ARRAY[a.attnum]::SMALLINT[] \
+               AND obj_description(con.oid, 'pg_constraint') IS NULL",
+        )
+        .bind(schema)
+        .bind(&entity.entity_name)
+        .bind(&field.name)
+        .bind(legacy_name)
+        .fetch_optional(pool)
+        .await
+        .map_err(RuntimeError::Schema)?;
+        if let Some(name) = found {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
 /// Reconcile owned CHECKs for one entity: add new, replace changed (drop-first,
 /// since `ADD CONSTRAINT` has no `IF NOT EXISTS`), drop removed. Idempotent.
 async fn reconcile_checks(
@@ -728,14 +765,24 @@ async fn reconcile_checks(
     let desired: Vec<(String, String)> =
         by_name.iter().map(|(n, expr)| (n.clone(), check_spec_hash(expr))).collect();
     let managed = read_managed_check_hashes(pool, schema, &entity.entity_name).await?;
+    let legacy = read_legacy_enum_checks(pool, schema, entity).await?;
 
     let ops = compute_managed_diff(&desired, &managed);
-    if ops.iter().all(|o| matches!(o, ManagedOp::Keep(_))) {
+    if legacy.is_empty() && ops.iter().all(|o| matches!(o, ManagedOp::Keep(_))) {
         return Ok(());
     }
 
     let fq = format!("{}.{}", quote_ident(schema), quote_ident(&entity.entity_name));
     let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
+    for name in legacy {
+        sqlx::query(&format!(
+            "ALTER TABLE {fq} DROP CONSTRAINT {}",
+            quote_ident(&name)
+        ))
+        .execute(&mut *tx)
+        .await
+        .map_err(RuntimeError::Schema)?;
+    }
     for op in &ops {
         let drop = |name: &str| format!("ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS {}", quote_ident(name));
         match op {
