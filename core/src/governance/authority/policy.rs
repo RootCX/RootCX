@@ -88,6 +88,10 @@ pub async fn effective_under_parent(pool: &PgPool, child_agent_uid: Uuid, parent
 
 /// Resolve the effective read-only permissions for a public share: the
 /// creator's actual permissions intersected with the app's declared entities.
+///
+/// Narrowed through the scope lattice, so a creator who may only read their own
+/// rows gets a share scoped to those rows instead of an empty set — the share
+/// reads as its creator, so `.own` resolves against them.
 pub async fn share_read_perms(
     pool: &PgPool, app_id: &str, creator_id: Uuid,
     entities: &[rootcx_types::EntityContract],
@@ -95,8 +99,9 @@ pub async fn share_read_perms(
     let (_, creator_perms) = resolve_permissions(pool, creator_id).await?;
     Ok(entities
         .iter()
-        .map(|e| format!("app:{app_id}:{}.read", e.entity_name))
-        .filter(|key| super::perms::has_permission(&creator_perms, key))
+        .filter_map(|e| {
+            super::perms::meet(&format!("app:{app_id}:{}.read", e.entity_name), &creator_perms)
+        })
         .collect())
 }
 

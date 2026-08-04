@@ -107,6 +107,30 @@ impl RbacExtension {
         Ok(())
     }
 
+    /// Flag keys that predate the `.own` reservation.
+    ///
+    /// The permission lattice reads `.own` as "weaker than the base key" and
+    /// narrows a delegated agent's authority along it, so an app that means
+    /// something unrelated by the suffix would have that narrowing resolve to the
+    /// wrong capability. `validate_perm_key` refuses it at every ingestion door
+    /// from now on; this only reports keys already stored. A warning, not an
+    /// error: refusing to boot would strand a tenant over a key that its next
+    /// deploy rejects anyway.
+    pub(super) async fn warn_on_reserved_own_keys(&self, pool: &PgPool) -> Result<(), RuntimeError> {
+        let reserved: Vec<String> = sqlx::query_scalar(
+            "SELECT key FROM rootcx_system.rbac_permissions WHERE split_part(key, ':', 3) LIKE '%.own'",
+        ).fetch_all(pool).await.map_err(RuntimeError::Schema)?;
+
+        if !reserved.is_empty() {
+            tracing::warn!(
+                keys = ?reserved,
+                "permission keys use the reserved '.own' suffix; rename them before declaring \
+                 row ownership on their entity, or delegated agents will narrow to the wrong key"
+            );
+        }
+        Ok(())
+    }
+
     /// Rename permission keys: tool.X → tool:X, integration.X.Y → integration:X:Y,
     /// {app}:X → app:{app}:X. Also updates role permission arrays.
     pub(super) async fn migrate_permission_keys(&self, pool: &PgPool) -> Result<(), RuntimeError> {

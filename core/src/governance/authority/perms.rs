@@ -56,18 +56,37 @@ fn dfs_cycle<'a>(
     None
 }
 
+/// The weakest key satisfying both grants, or `None` when they are disjoint.
+///
+/// Gating and narrowing ask different questions. `has_permission` answers a
+/// partial order — "does the holder satisfy this requirement?" — and stays exact:
+/// it also backs the anti-escalation subset check in `delegation::act_as`, which
+/// must not accept a weaker key as equivalent. This answers a lattice meet —
+/// "what is the weaker of these two?" — and is used only where authority is
+/// narrowed. Scope: `All ⊐ Own`, encoded as the `.own` suffix, which
+/// `manifest::validate_perm_key` reserves for core-minted keys so the relation is
+/// a fact about provenance rather than a naming convention.
+pub(crate) fn meet(key: &str, other: &[String]) -> Option<String> {
+    if has_permission(other, key) {
+        return Some(key.to_string());
+    }
+    // Descend only: an `All` grant narrows to `Own`, never the reverse — an
+    // already-scoped key has nothing weaker to fall back to.
+    if key.ends_with(".own") {
+        return None;
+    }
+    let scoped = format!("{key}.own");
+    has_permission(other, &scoped).then_some(scoped)
+}
+
+/// Authority narrowed to what both sides allow. A delegated agent runs with this
+/// set, so it must never exceed either grant — where the two disagree on scope,
+/// the weaker scope wins rather than the pair cancelling out.
 pub fn intersect_permissions(a: &[String], b: &[String]) -> Vec<String> {
     if a.iter().any(|p| p == "*") { return b.to_vec(); }
     if b.iter().any(|p| p == "*") { return a.to_vec(); }
-    let mut result: Vec<String> = a.iter()
-        .filter(|p| has_permission(b, p))
-        .cloned()
-        .collect();
-    for p in b {
-        if has_permission(a, p) && !result.contains(p) {
-            result.push(p.clone());
-        }
-    }
+    let mut result: Vec<String> = a.iter().filter_map(|p| meet(p, b)).collect();
+    result.extend(b.iter().filter_map(|p| meet(p, a)));
     result.sort_unstable();
     result.dedup();
     result
@@ -163,11 +182,81 @@ mod tests {
         assert!(intersect_permissions(&empty, &empty).is_empty());
         assert!(intersect_permissions(&["x".into()], &empty).is_empty());
     }
+    /// The scope lattice: where two grants disagree on scope, narrowing must
+    /// yield the WEAKER key rather than cancelling out. Before this existed the
+    /// pair below intersected to nothing, which denied the delegated agent
+    /// everything. The direction matters as much as the non-emptiness: emitting
+    /// the base key instead would widen the agent past its own grant.
+    #[test]
+    fn intersect_narrows_to_the_weaker_scope() {
+        let cases: Vec<(&[&str], &[&str], Vec<&str>, &str)> = vec![
+            (
+                &["app:crm:c.read"],
+                &["app:crm:c.read.own"],
+                vec!["app:crm:c.read.own"],
+                "agent sees all, human only their own -> own",
+            ),
+            (
+                &["app:crm:c.read.own"],
+                &["app:crm:c.read"],
+                vec!["app:crm:c.read.own"],
+                "symmetric: argument order must not change the result",
+            ),
+            (
+                &["app:crm:c.read.own"],
+                &["app:crm:c.read.own"],
+                vec!["app:crm:c.read.own"],
+                "both scoped -> unchanged",
+            ),
+            (
+                &["app:crm:*"],
+                &["app:crm:c.read.own"],
+                vec!["app:crm:c.read.own"],
+                "an app wildcard already covers the scoped key",
+            ),
+            (
+                &["app:crm:c.read"],
+                &["app:crm:other.read.own"],
+                vec![],
+                "different entities stay disjoint",
+            ),
+            (
+                &["app:crm:c.read.own"],
+                &["app:crm:c.write"],
+                vec![],
+                "different actions stay disjoint",
+            ),
+        ];
+        for (a, b, expected, why) in cases {
+            let a: Vec<String> = a.iter().map(|s| s.to_string()).collect();
+            let b: Vec<String> = b.iter().map(|s| s.to_string()).collect();
+            assert_eq!(intersect_permissions(&a, &b), expected, "{why}");
+        }
+    }
+
     #[test]
     fn has_permission_exact() {
         assert!(has_permission(&["app:crm:customer.read".into()], "app:crm:customer.read"));
         assert!(!has_permission(&["app:crm:customer.read".into()], "app:crm:customer.write"));
     }
+    /// Regression guard for the one refactor this design forbids: moving the
+    /// scope lattice into `has_permission`. That would silently widen every gate
+    /// built on it — including the anti-escalation subset check in
+    /// `delegation::act_as`, which must never accept a weaker key as equivalent.
+    /// `meet` is where the relation lives; here it must stay invisible.
+    #[test]
+    fn has_permission_ignores_the_scope_lattice() {
+        for (held, required, why) in [
+            ("app:crm:c.read", "app:crm:c.read.own", "base must not satisfy scoped"),
+            ("app:crm:c.read.own", "app:crm:c.read", "scoped must not satisfy base"),
+        ] {
+            assert!(
+                !has_permission(&[held.to_string()], required),
+                "{why} (held={held}, required={required})"
+            );
+        }
+    }
+
     #[test]
     fn has_permission_wildcards() {
         assert!(has_permission(&["*".into()], "anything"));

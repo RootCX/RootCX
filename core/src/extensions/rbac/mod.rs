@@ -111,6 +111,8 @@ impl RuntimeExtension for RbacExtension {
             self.migrate_permission_keys(pool).await?;
         }
 
+        self.warn_on_reserved_own_keys(pool).await?;
+
         info!("RBAC extension ready");
         Ok(())
     }

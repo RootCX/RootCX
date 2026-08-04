@@ -437,12 +437,24 @@ fn validate_ident(value: &str, label: &str) -> Result<(), RuntimeError> {
 /// charset that excludes it: `[a-z0-9_:.*]`. Validated at every ingestion door
 /// (manifest install + role API), never at the encoding boundary.
 pub fn validate_perm_key(key: &str) -> Result<(), String> {
-    if !key.is_empty()
-        && key.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b':' | b'.' | b'*'))
+    if key.is_empty()
+        || !key.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b':' | b'.' | b'*'))
     {
-        return Ok(());
+        return Err(format!("permission key '{key}' must match [a-z0-9_:.*]"));
     }
-    Err(format!("permission key '{key}' must match [a-z0-9_:.*]"))
+    // Reserved so that `.own` is a provenance guarantee, not a convention: the
+    // permission lattice treats `X.own` as strictly weaker than `X`, and
+    // `intersect_permissions` narrows a delegated agent's authority along it.
+    // An app free to declare `billing` and `billing.own` as *unrelated*
+    // capabilities would make that narrowing invent a grant nobody made.
+    // Checked on the action segment only, so `app:own_data:x.read` stays legal.
+    let action = key.rsplit(':').next().unwrap_or(key);
+    if action == "own" || action.ends_with(".own") {
+        return Err(format!(
+            "permission key '{key}': the '.own' suffix is reserved for core row-scoped keys"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_perm_key_schema(key: &str) -> Result<(), RuntimeError> {
@@ -584,6 +596,30 @@ mod tests {
 
     fn entity(name: &str, fields: Vec<FieldContract>) -> EntityContract {
         EntityContract { entity_name: name.to_string(), fields, identity_kind: None, identity_key: None, indexes: vec![], checks: vec![] }
+    }
+
+    /// `.own` marks a row-scoped key that `intersect_permissions` treats as
+    /// strictly weaker than its base. An app declaring it as an unrelated
+    /// capability would make a delegated agent narrow to the wrong one, so the
+    /// suffix is refused at every ingestion door rather than merely discouraged.
+    #[test]
+    fn validate_perm_key_reserves_the_own_suffix() {
+        for key in ["contacts.read.own", "billing.own", "app:crm:contacts.read.own", "own"] {
+            let error = validate_perm_key(key).expect_err(&format!("must reject '{key}'"));
+            assert!(
+                error.contains("reserved"),
+                "expected a reservation error for '{key}', got: {error}"
+            );
+        }
+        // The suffix is only reserved on the action segment, and only whole:
+        // these remain legal keys.
+        for key in ["contacts.read", "owner.read", "own_data.read", "app:crm:disown.read"] {
+            assert!(
+                validate_perm_key(key).is_ok(),
+                "'{key}' must stay valid: {:?}",
+                validate_perm_key(key)
+            );
+        }
     }
 
     #[test]
