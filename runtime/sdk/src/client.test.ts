@@ -300,6 +300,73 @@ describe("cron methods", () => {
   });
 });
 
+describe("collection import methods", () => {
+  let client: RuntimeClient;
+  let calls: { url: string; method: string; body?: unknown }[];
+
+  beforeEach(() => {
+    client = new RuntimeClient({ baseUrl: "http://localhost:9100" });
+    client.setTokens("tok", null);
+    calls = [];
+    vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+      calls.push({
+        url,
+        method: init?.method ?? "GET",
+        body: init?.body ? JSON.parse(init.body as string) : undefined,
+      });
+      return jsonResponse({ id: "import-1" }, 200);
+    });
+  });
+
+  it("routes the lifecycle without changing the governed request", async () => {
+    const input = {
+      mode: "upsert" as const,
+      columns: ["supplier_ref", "description"],
+      conflictColumns: ["supplier_ref"],
+      sourceFileId: "file-1",
+      idempotencyKey: "checksum:mapping-v1",
+    };
+    const cases = [
+      {
+        call: () => client.createCollectionImport("catalog", "offers", input),
+        path: "/imports",
+        method: "POST",
+        body: input,
+      },
+      {
+        call: () => client.listCollectionImports("catalog", "offers"),
+        path: "/imports",
+        method: "GET",
+      },
+      {
+        call: () => client.getCollectionImport("catalog", "offers", "import-1"),
+        path: "/imports/import-1",
+        method: "GET",
+      },
+      {
+        call: () => client.cancelCollectionImport("catalog", "offers", "import-1"),
+        path: "/imports/import-1",
+        method: "DELETE",
+      },
+      {
+        call: () => client.retryCollectionImport("catalog", "offers", "import-1"),
+        path: "/imports/import-1/retry",
+        method: "POST",
+      },
+    ];
+
+    for (const testCase of cases) {
+      calls = [];
+      await testCase.call();
+      expect(calls[0]).toEqual({
+        url: `http://localhost:9100/api/v1/apps/catalog/collections/offers${testCase.path}`,
+        method: testCase.method,
+        body: testCase.body,
+      });
+    }
+  });
+});
+
 function sseStream(chunks: string[]) {
   const encoder = new TextEncoder();
   let i = 0;

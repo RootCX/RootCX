@@ -19,6 +19,7 @@ Base: `/api/v1/apps/{app_id}/collections/{entity}`
 | GET | `/` | — | `T[]` |
 | POST | `/` | `{field:value,...}` | `T` (201) |
 | POST | `/bulk` | `[{...},...]` | `T[]` (201) |
+| GET/POST | `/imports` | import request | import run (202) |
 | POST | `/query` | `QueryOptions` | `{data:T[],total:number}` |
 | GET | `/{id}` | — | `T` |
 | PATCH | `/{id}` | `{field:value,...}` | `T` |
@@ -46,3 +47,5 @@ Base: `/api/v1/apps/{app_id}/jobs` — POST `/`, GET `/`, GET `/{job_id}`.
 **Job statuses:** `pending` → `running` → `completed` | `failed`
 
 Use jobs for long-running work (bulk fetches, batch imports, async syncs) that would exceed the 30s RPC timeout.
+
+For large normalized datasets, enqueue a job and use `ctx.collection(entity).importRows(rows, options)` inside `onJob`. See `references/collections.md`.

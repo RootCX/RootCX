@@ -63,7 +63,9 @@
 //   to send based on the negotiated version (see `worker_protocol` in
 //   `worker.rs`).
 
-const PROTOCOL_VERSION = 2;
+//   v3 — adds governed, streaming collection imports.
+
+const PROTOCOL_VERSION = 3;
 
 // ─── Transport layer ─────────────────────────────────────────────────────────
 // Encapsulates the wire format and I/O channel. The rest of the prelude
@@ -148,6 +150,8 @@ let _sqlSeq = 0;
 const _pendingSql = new Map();
 let _saSeq = 0;
 const _pendingSelf = new Map();
+let _importSeq = 0;
+const _pendingImports = new Map();
 
 // ─── Primitives exposed via ctx ──────────────────────────────────────────────
 
@@ -237,6 +241,108 @@ function _collectionOp(op, entity, data) {
   });
 }
 
+function _createCollectionImport(entity, params) {
+  if (!_ctx) return Promise.reject(new Error("collection import: worker not started yet"));
+  const id = `imp_${++_importSeq}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (_pendingImports.has(id)) {
+        _pendingImports.delete(id);
+        reject(new Error(`collection import on ${entity}: timeout waiting for session`));
+      }
+    }, 30_000);
+    _pendingImports.set(id, { resolve, reject, timer });
+    _transport.send({ type: "collection_import_create", id, entity, params });
+  });
+}
+
+function _postgresArray(values) {
+  if (!Array.isArray(values)) throw new Error("importRows: array field value must be an array");
+  return `{${values.map((value) => {
+    if (value === null || value === undefined) return "NULL";
+    return `"${String(value).replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+  }).join(",")}}`;
+}
+
+function _csvValue(value, fieldType) {
+  if (value === null || value === undefined) return "\\N";
+  let text;
+  if (fieldType === "[text]" || fieldType === "[number]") text = _postgresArray(value);
+  else if (value instanceof Date && fieldType === "date") text = value.toISOString().slice(0, 10);
+  else if (value instanceof Date) text = value.toISOString();
+  else if (typeof value === "object") text = JSON.stringify(value);
+  else text = String(value);
+  if (text === "\\N" || /[",\r\n]/.test(text)) return `"${text.replaceAll('"', '""')}"`;
+  return text;
+}
+
+function _rowIterator(rows) {
+  if (rows?.[Symbol.asyncIterator]) return rows[Symbol.asyncIterator]();
+  if (rows?.[Symbol.iterator]) return rows[Symbol.iterator]();
+  throw new Error("importRows: rows must be iterable");
+}
+
+function _csvStream(rows, columns, entityName) {
+  const iterator = _rowIterator(rows);
+  const encoder = new TextEncoder();
+  const targetChunkChars = 1024 * 1024;
+  const entity = _boot?.manifest?.dataContract?.find((entry) => entry.entityName === entityName);
+  const fieldTypes = new Map(entity?.fields?.map((field) => [field.name, field.type]) ?? []);
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        const lines = [];
+        let chars = 0;
+        while (chars < targetChunkChars) {
+          const next = await iterator.next();
+          if (next.done) break;
+          const row = next.value;
+          if (!row || typeof row !== "object" || Array.isArray(row)) {
+            throw new Error("importRows: each row must be an object");
+          }
+          const line = columns
+            .map((column) => _csvValue(row[column], fieldTypes.get(column)))
+            .join(",") + "\n";
+          lines.push(line);
+          chars += line.length;
+        }
+        if (lines.length === 0) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(encoder.encode(lines.join("")));
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    async cancel() {
+      await iterator.return?.();
+    },
+  });
+}
+
+async function _importRows(entity, rows, options) {
+  const columns = options?.columns;
+  if (!Array.isArray(columns) || columns.length === 0) {
+    throw new Error("importRows: options.columns is required");
+  }
+  const session = await _createCollectionImport(entity, options);
+  if (session.status === "completed") return session;
+  if (!session.upload_url) {
+    throw new Error(`collection import cannot upload in status ${session.status}`);
+  }
+  const response = await fetch(session.upload_url, {
+    method: "POST",
+    headers: { "content-type": "text/csv" },
+    body: _csvStream(rows, columns, entity),
+    duplex: "half",
+  });
+  if (!response.ok) {
+    throw new Error(`collection import failed: ${response.status} ${await response.text()}`);
+  }
+  return response.json();
+}
+
 // SQL proxy: app SQL is executed by the core under the caller's RLS identity.
 // The app never holds a DB connection. Returns { columns, rows, rowCount }.
 // No identity travels on the message: the core binds it to this worker's sole
@@ -305,6 +411,8 @@ function _makeCtx() {
         // Read ops use `where` as the equality map ({col: value}). Empty {} = full scan.
         find: (where = {}) => _collectionOp("find", entity, where),
         findOne: (where = {}) => _collectionOp("findOne", entity, where),
+        createImport: (options) => _createCollectionImport(entity, options),
+        importRows: (rows, options) => _importRows(entity, rows, options),
       };
     },
   };
@@ -373,6 +481,15 @@ function _dispatch(msg) {
       } else {
         p.resolve({ msgId: msg.msg_id });
       }
+      return;
+    }
+
+    case "collection_import_result": {
+      const pending = _pendingImports.get(msg.id);
+      if (!pending) return;
+      _pendingImports.delete(msg.id);
+      clearTimeout(pending.timer);
+      msg.error ? pending.reject(new Error(msg.error)) : pending.resolve(msg.result);
       return;
     }
 

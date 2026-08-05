@@ -1,4 +1,4 @@
-// Ambient type declarations for the RootCX worker prelude (v2).
+// Ambient type declarations for the RootCX worker prelude (v3).
 // The prelude (`core/src/backend_prelude.js`) injects these globals at
 // runtime via `--preload`. This file provides TypeScript with the shapes
 // so integrations can call `serve()`, `log.*`, `emit()` etc. without
@@ -24,6 +24,23 @@ interface RootCxBufferedFile extends RootCxStoredFile {
 
 interface RootCxStreamingFile extends RootCxStoredFile {
   stream: ReadableStream<Uint8Array>;
+}
+
+interface RootCxCollectionImportOptions {
+  mode: "append" | "upsert" | "replace";
+  columns: string[];
+  conflictColumns?: string[];
+  allowEmpty?: boolean;
+  sourceFileId?: string;
+  idempotencyKey?: string;
+}
+
+interface RootCxCollectionImport {
+  id: string;
+  status: "pending" | "loading" | "publishing" | "completed" | "failed" | "cancelled";
+  rows_loaded: number;
+  bytes_received: number;
+  upload_url?: string;
 }
 
 interface RootCxCtx {
@@ -53,6 +70,11 @@ interface RootCxCtx {
     update(data: Record<string, unknown>): Promise<any>;
     find(where?: Record<string, unknown>): Promise<any[]>;
     findOne(where?: Record<string, unknown>): Promise<any>;
+    createImport(options: RootCxCollectionImportOptions): Promise<RootCxCollectionImport>;
+    importRows(
+      rows: Iterable<Record<string, unknown>> | AsyncIterable<Record<string, unknown>>,
+      options: RootCxCollectionImportOptions,
+    ): Promise<{ id: string; status: "completed"; rows_loaded: number; bytes_received: number }>;
   };
 }
 

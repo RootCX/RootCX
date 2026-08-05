@@ -64,6 +64,7 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .route("/api/v1/tools/{tool_name}/execute", post(crate::tools::routes::execute_tool));
 
     router = router.merge(crate::mcp_server::router(runtime.clone()));
+    router = router.merge(crate::collection_imports::routes());
 
     for ext in runtime.extensions() {
         if let Some(ext_router) = ext.routes() {

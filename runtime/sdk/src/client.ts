@@ -356,6 +356,39 @@ export interface ResumableUploadOptions {
   onProgress?: (progress: StorageUploadProgress) => void;
 }
 
+export type CollectionImportMode = "append" | "upsert" | "replace";
+
+export interface CreateCollectionImportInput {
+  mode: CollectionImportMode;
+  columns: string[];
+  conflictColumns?: string[];
+  allowEmpty?: boolean;
+  sourceFileId?: string;
+  idempotencyKey?: string;
+}
+
+export interface CollectionImport {
+  id: string;
+  app_id: string;
+  entity: string;
+  mode: CollectionImportMode;
+  columns: string[];
+  conflict_columns: string[];
+  allow_empty: boolean;
+  source_file_id: string | null;
+  source_checksum: string | null;
+  idempotency_key: string | null;
+  status: "pending" | "loading" | "publishing" | "completed" | "failed" | "cancelled";
+  rows_loaded: number;
+  bytes_received: number;
+  cancel_requested: boolean;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  upload_url?: string;
+}
+
 export type IdentityRecord<T> = T & { _source: { app: string; entity: string } };
 
 declare global {
@@ -671,6 +704,48 @@ export class RuntimeClient {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async createCollectionImport(
+    appId: string,
+    entity: string,
+    input: CreateCollectionImportInput,
+  ): Promise<CollectionImport> {
+    const url = `${this.baseUrl}/api/v1/apps/${enc(appId)}/collections/${enc(entity)}/imports`;
+    const res = await this.authFetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async listCollectionImports(appId: string, entity: string): Promise<CollectionImport[]> {
+    const url = `${this.baseUrl}/api/v1/apps/${enc(appId)}/collections/${enc(entity)}/imports`;
+    const res = await this.authFetch(url);
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async getCollectionImport(appId: string, entity: string, id: string): Promise<CollectionImport> {
+    const url = `${this.baseUrl}/api/v1/apps/${enc(appId)}/collections/${enc(entity)}/imports/${enc(id)}`;
+    const res = await this.authFetch(url);
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+    return res.json();
+  }
+
+  async cancelCollectionImport(appId: string, entity: string, id: string): Promise<void> {
+    const url = `${this.baseUrl}/api/v1/apps/${enc(appId)}/collections/${enc(entity)}/imports/${enc(id)}`;
+    const res = await this.authFetch(url, { method: "DELETE" });
+    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
+  }
+
+  async retryCollectionImport(appId: string, entity: string, id: string): Promise<CollectionImport> {
+    const url = `${this.baseUrl}/api/v1/apps/${enc(appId)}/collections/${enc(entity)}/imports/${enc(id)}/retry`;
+    const res = await this.authFetch(url, { method: "POST" });
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
   }

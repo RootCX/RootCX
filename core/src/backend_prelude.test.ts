@@ -100,15 +100,15 @@ afterAll(() => {
   for (const f of tmpFiles) try { unlinkSync(f); } catch {}
 });
 
-// ─── v2 protocol: serve()-based workers ──────────────────────────────────────
+// ─── v3 protocol: serve()-based workers ──────────────────────────────────────
 
-describe("v2: serve()", () => {
+describe("v3: serve()", () => {
   test("discover responds with protocol version and methods", async () => {
     const w = spawnWorker(`serve({ rpc: { ping: () => "pong", echo: (p: any) => p } });`);
     w.send(DISCOVER);
     const msg = await w.readLine();
     expect(msg.type).toBe("discover");
-    expect(msg.protocol).toBe(2);
+    expect(msg.protocol).toBe(3);
     expect(msg.methods).toEqual(["ping", "echo"]);
     await w.close();
   });
@@ -392,6 +392,128 @@ describe("v2: serve()", () => {
     await w.close();
   });
 
+  test("ctx.collection.importRows creates a governed session and streams escaped CSV", async () => {
+    const w = spawnWorker(`
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async (url: any, init: any) => {
+        if (String(url) !== "data:application/json,%7B%7D") return originalFetch(url, init);
+        const csv = await new Response(init.body).text();
+        return new Response(JSON.stringify({ csv }), { status: 200 });
+      };
+      serve({
+        rpc: {
+          async ingest(_p: any, _c: any, ctx: any) {
+            return ctx.collection("items").importRows([
+              { sku: "A,1", label: "quoted \\\"name\\\"", metadata: { active: true } },
+              { sku: "B2", label: null, metadata: null },
+            ], { mode: "append", columns: ["sku", "label", "metadata"] });
+          },
+        },
+      });
+    `);
+    w.send(DISCOVER);
+    await w.readLine();
+    w.send({ type: "rpc", id: "r1", method: "ingest", params: {} });
+    const request = await w.readLine();
+    expect(request).toEqual({
+      type: "collection_import_create",
+      id: expect.any(String),
+      entity: "items",
+      params: { mode: "append", columns: ["sku", "label", "metadata"] },
+    });
+    w.send({
+      type: "collection_import_result",
+      id: request.id,
+      result: { id: "import-1", upload_url: "data:application/json,%7B%7D" },
+    });
+    expect(await w.readLine()).toEqual({
+      type: "rpc_response",
+      id: "r1",
+      result: {
+        csv: '"A,1","quoted ""name""","{""active"":true}"\nB2,\\N,\\N\n',
+      },
+    });
+    await w.close();
+  });
+
+  test("ctx.collection.importRows reuses an already completed idempotent import", async () => {
+    const w = spawnWorker(`
+      globalThis.fetch = () => { throw new Error("completed import must not upload again"); };
+      serve({
+        rpc: {
+          async ingest(_p: any, _c: any, ctx: any) {
+            return ctx.collection("items").importRows(
+              [{ sku: "unused" }],
+              { mode: "append", columns: ["sku"], idempotencyKey: "source:mapping-v1" },
+            );
+          },
+        },
+      });
+    `);
+    w.send(DISCOVER);
+    await w.readLine();
+    w.send({ type: "rpc", id: "r1", method: "ingest", params: {} });
+    const request = await w.readLine();
+    w.send({
+      type: "collection_import_result",
+      id: request.id,
+      result: { id: "import-1", status: "completed", rows_loaded: 42 },
+    });
+    expect(await w.readLine()).toEqual({
+      type: "rpc_response",
+      id: "r1",
+      result: { id: "import-1", status: "completed", rows_loaded: 42 },
+    });
+    await w.close();
+  });
+
+  test("ctx.collection.importRows serializes manifest arrays and dates for PostgreSQL COPY", async () => {
+    const w = spawnWorker(`
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = async (url: any, init: any) => {
+        if (String(url) !== "data:application/json,%7B%7D") return originalFetch(url, init);
+        return new Response(JSON.stringify({ csv: await new Response(init.body).text() }));
+      };
+      serve({
+        rpc: {
+          ingest(_p: any, _c: any, ctx: any) {
+            return ctx.collection("items").importRows([{
+              tags: ["hand", "outdoor"],
+              quantities: [1, 2.5],
+              available_on: new Date("2026-08-04T12:34:56Z"),
+            }], { mode: "append", columns: ["tags", "quantities", "available_on"] });
+          },
+        },
+      });
+    `);
+    w.send({
+      ...DISCOVER,
+      manifest: {
+        dataContract: [{
+          entityName: "items",
+          fields: [
+            { name: "tags", type: "[text]" },
+            { name: "quantities", type: "[number]" },
+            { name: "available_on", type: "date" },
+          ],
+        }],
+      },
+    });
+    await w.readLine();
+    w.send({ type: "rpc", id: "r1", method: "ingest", params: {} });
+    const request = await w.readLine();
+    w.send({
+      type: "collection_import_result",
+      id: request.id,
+      result: { id: "import-1", status: "pending", upload_url: "data:application/json,%7B%7D" },
+    });
+    const response = await w.readLine();
+    expect(response.result.csv).toBe(
+      '"{""hand"",""outdoor""}","{""1"",""2.5""}",2026-08-04\n',
+    );
+    await w.close();
+  });
+
   test("jobs execute serially within one worker", async () => {
     const w = spawnWorker(`
       let active = 0;
@@ -451,7 +573,7 @@ describe("v2 compat: old flat serve() signature", () => {
     let disc = await w.readLine();
     while (disc.type === "log") disc = await w.readLine();
 
-    expect(disc.protocol).toBe(2);
+    expect(disc.protocol).toBe(3);
     expect(disc.methods).toEqual(["ping", "echo"]);
 
     w.send({ type: "rpc", id: "r1", method: "ping", params: {} });

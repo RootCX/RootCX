@@ -2,6 +2,7 @@ mod api_error;
 pub mod app_migrations;
 pub mod auth;
 mod crons;
+mod collection_imports;
 mod data_types;
 mod error;
 pub mod extensions;
@@ -53,6 +54,7 @@ const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// transactions can never starve the auto-commit / HTTP / agent paths. Well
 /// under PG server `max_connections` (50).
 pub(crate) const POOL_MAX_CONNECTIONS: u32 = 20;
+const COLLECTION_IMPORT_POOL_CONNECTIONS: u32 = 2;
 
 pub struct Runtime {
     database_url: String,
@@ -113,6 +115,12 @@ impl Runtime {
             .connect(&self.database_url)
             .await
             .map_err(RuntimeError::Database)?;
+        let collection_import_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(COLLECTION_IMPORT_POOL_CONNECTIONS)
+            .acquire_timeout(std::time::Duration::from_secs(10))
+            .connect(&self.database_url)
+            .await
+            .map_err(RuntimeError::Database)?;
 
         // Phase 0d: env_clear() on spawn + setuid(1001) already prevent workers
         // from reading core secrets. remove_var was here as belt-and-suspenders
@@ -126,6 +134,7 @@ impl Runtime {
         for ext in &self.extensions {
             ext.bootstrap(&pool).await?;
         }
+        collection_imports::bootstrap(&pool).await?;
         crons::add_deferred_constraints(&pool).await?;
 
         // Backfill delegations for pre-existing triggers (runs after extensions
@@ -159,6 +168,8 @@ impl Runtime {
         info!("runtime boot complete");
         Ok(ReadyRuntime {
             pool,
+            collection_import_pool,
+            collection_import_slots: tokio::sync::Semaphore::new(1),
             extensions: self.extensions,
             auth_config: self.auth_config,
             secret_manager,
@@ -180,6 +191,8 @@ impl Runtime {
 /// Nothing mutates after boot — shared via Arc, no Mutex.
 pub struct ReadyRuntime {
     pool: PgPool,
+    collection_import_pool: PgPool,
+    collection_import_slots: tokio::sync::Semaphore,
     extensions: Vec<Box<dyn RuntimeExtension>>,
     auth_config: Arc<auth::AuthConfig>,
     secret_manager: Arc<SecretManager>,
@@ -202,6 +215,7 @@ impl ReadyRuntime {
         self.mcp_manager.stop_all().await;
         self.worker_manager.stop_all().await;
         self.scheduler.cancel.cancel();
+        self.collection_import_pool.close().await;
         self.pool.close().await;
         info!("runtime shutdown complete");
     }
@@ -223,6 +237,8 @@ impl ReadyRuntime {
 
     pub fn auth_config(&self) -> &Arc<auth::AuthConfig> { &self.auth_config }
     pub fn pool(&self) -> &PgPool { &self.pool }
+    pub fn collection_import_pool(&self) -> &PgPool { &self.collection_import_pool }
+    pub fn collection_import_slots(&self) -> &tokio::sync::Semaphore { &self.collection_import_slots }
     pub fn workflow_events(&self) -> &extensions::workflows::events::WorkflowEvents { &self.workflow_events }
     /// Nudge the scheduler to poll now instead of waiting for the next tick.
     pub fn wake_scheduler(&self) { self.scheduler.wake.notify_one(); }

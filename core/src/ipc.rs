@@ -153,6 +153,13 @@ pub enum OutboundMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    CollectionImportResult {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        result: Option<JsonValue>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     SqlQueryResult {
         id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -215,10 +222,13 @@ pub enum OutboundMessage {
 ///   stdin dispatcher and builds a `ctx` (`collection`, `uploadFile`, …).
 ///   The worker MUST announce `protocol: 2` in its `discover` response.
 ///
+/// * **v3** — adds governed collection-import sessions. Rows travel directly
+///   to a Core-issued upload URL; credentials and database access remain in Core.
+///
 /// Adding a new version = add a const, bump the scaffold template, teach
 /// the supervisor which messages are safe to send based on the negotiated
 /// version. Never remove a version without an explicit migration plan.
-pub const LATEST_PROTOCOL_VERSION: u32 = 2;
+pub const LATEST_PROTOCOL_VERSION: u32 = 3;
 
 fn default_protocol_version() -> u32 {
     1
@@ -353,6 +363,12 @@ pub enum InboundMessage {
         id: String,
         #[serde(default)]
         payload: JsonValue,
+    },
+    CollectionImportCreate {
+        id: String,
+        entity: String,
+        #[serde(default)]
+        params: JsonValue,
     },
 }
 
@@ -503,6 +519,14 @@ mod tests {
                     error: None,
                 },
                 "job_enqueue_result",
+            ),
+            (
+                OutboundMessage::CollectionImportResult {
+                    id: "imp1".into(),
+                    result: Some(json!({"status": "pending"})),
+                    error: None,
+                },
+                "collection_import_result",
             ),
             (OutboundMessage::Shutdown, "shutdown"),
             (

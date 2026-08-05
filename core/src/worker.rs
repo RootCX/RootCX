@@ -953,6 +953,29 @@ async fn supervisor_loop(
                                 let _ = tx.send(msg).await;
                             });
                         }
+                        InboundMessage::CollectionImportCreate { id, entity, params } => {
+                            let pool = config.pool.clone();
+                            let runtime_url = config.runtime_url.clone();
+                            let app_id = config.app_id.clone();
+                            let state = config.identity.clone();
+                            let tx = outbound_tx.clone();
+                            tokio::spawn(async move {
+                                let (result, error) = match crate::collection_imports::create_for_worker(
+                                    &pool,
+                                    &runtime_url,
+                                    &app_id,
+                                    &entity,
+                                    params,
+                                    state,
+                                )
+                                .await
+                                {
+                                    Ok(value) => (Some(value), None),
+                                    Err(error) => (None, Some(error)),
+                                };
+                                let _ = tx.send(OutboundMessage::CollectionImportResult { id, result, error }).await;
+                            });
+                        }
                     },
                     Some(IpcEvent::Output(line)) => {
                         emit_log(&log_tx, "stdout", &line);

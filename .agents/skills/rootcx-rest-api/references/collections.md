@@ -7,6 +7,7 @@ Base: `/api/v1/apps/{app_id}/collections/{entity}`
 | GET | `/` | — | `T[]` |
 | POST | `/` | `{field:value,...}` | `T` (201) |
 | POST | `/bulk` | `[{...},...]` | `T[]` (201) |
+| GET/POST | `/imports` | import request | import run (202) |
 | POST | `/query` | `QueryOptions` | `{data:T[],total:number}` |
 | GET | `/{id}` | — | `T` |
 | PATCH | `/{id}` | `{field:value,...}` | `T` |
@@ -29,3 +30,22 @@ Base: `/api/v1/apps/{app_id}/collections/{entity}`
 **Where operators:** `$eq` `$ne` `$gt` `$gte` `$lt` `$lte` `$like` `$ilike` `$in` `$nin` `$contains` `$isNull`
 **Logical:** `$and` `$or` (arrays) `$not` (object)
 **Shorthand:** `{"field":"value"}` = `{"field":{"$eq":"value"}}`, `{"field":null}` = IS NULL
+
+## Large collection imports
+
+Use `/bulk` only for interactive JSON batches of at most 1,000 rows. For a large, already-normalized dataset, enqueue a worker job and stream rows through the governed import path:
+
+```ts
+await ctx.collection("catalog_offer").importRows(rows, {
+  mode: "append",
+  columns: ["import_run_id", "source_item_id", "description"],
+  sourceFileId: fileId,
+  idempotencyKey: `${checksum}:mapping-v1`,
+});
+```
+
+The Core accepts `append`, `upsert`, and atomic `replace`. Existing collection permissions govern the operation (`create`; `create+update`; or `create+update+delete`). A linked Storage file also requires `storage.read`. XLSX/CSV parsing and business mapping stay in the app; Core owns the streaming CSV transport, temporary staging table, RLS-governed publication, retries, progress, and summary audit event.
+
+REST lifecycle: `POST /imports`, `GET /imports`, `GET|DELETE /imports/{id}`, and `POST /imports/{id}/retry`. POST normalized CSV to the one-hour, single-use `upload_url` returned by create/retry.
+
+Empty streams are rejected by default, especially to prevent an accidental empty `replace`. Set `allowEmpty: true` only for an intentionally empty publication.

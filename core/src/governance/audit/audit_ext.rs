@@ -111,6 +111,12 @@ impl RuntimeExtension for AuditExtension {
                 v_delegator := nullif(current_setting('rootcx.delegator_uid', true), '')::UUID;
                 v_trigger := nullif(current_setting('rootcx.trigger_ref', true), '');
 
+                -- Governed collection imports write one summary event after
+                -- publication instead of millions of duplicate row snapshots.
+                IF nullif(current_setting('rootcx.bulk_import_id', true), '') IS NOT NULL THEN
+                    RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+                END IF;
+
                 -- SECURITY DEFINER, so this reads the row before RLS and before
                 -- the read paths' projection. A manifest's sensitive fields must
                 -- be stripped here too, or the audit trail becomes a durable
