@@ -336,6 +336,7 @@ async function _importRows(entity, rows, options) {
     headers: { "content-type": "text/csv" },
     body: _csvStream(rows, columns, entity),
     duplex: "half",
+    timeout: false,
   });
   if (!response.ok) {
     throw new Error(`collection import failed: ${response.status} ${await response.text()}`);
@@ -447,7 +448,7 @@ function _dispatch(msg) {
         p.reject(new Error(msg.error));
         return;
       }
-      fetch(msg.url)
+      fetch(msg.url, { timeout: false })
         .then(async (res) => {
           if (!res.ok) throw new Error(`download failed: ${res.status} ${await res.text()}`);
           const common = {

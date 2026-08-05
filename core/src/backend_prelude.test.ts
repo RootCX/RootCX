@@ -321,8 +321,14 @@ describe("v3: serve()", () => {
     await w.close();
   });
 
-  test("ctx.openFile never uses the buffered download path", async () => {
+  test("ctx.openFile streams without buffering or Bun's wall-clock timeout", async () => {
     const w = spawnWorker(`
+      const originalFetch = globalThis.fetch;
+      let fetchTimeout: unknown;
+      globalThis.fetch = (url: any, init: any) => {
+        fetchTimeout = init?.timeout;
+        return originalFetch(url, init);
+      };
       Response.prototype.arrayBuffer = () => { throw new Error("buffered download used"); };
       serve({
         rpc: {
@@ -331,6 +337,7 @@ describe("v3: serve()", () => {
             return {
               size: file.size,
               text: await new Response(file.stream).text(),
+              fetchTimeout,
             };
           },
         },
@@ -356,7 +363,7 @@ describe("v3: serve()", () => {
     expect(await w.readLine()).toEqual({
       type: "rpc_response",
       id: "r1",
-      result: { size: 5, text: "hello" },
+      result: { size: 5, text: "hello", fetchTimeout: false },
     });
     await w.close();
   });
@@ -398,7 +405,7 @@ describe("v3: serve()", () => {
       globalThis.fetch = async (url: any, init: any) => {
         if (String(url) !== "data:application/json,%7B%7D") return originalFetch(url, init);
         const csv = await new Response(init.body).text();
-        return new Response(JSON.stringify({ csv }), { status: 200 });
+        return new Response(JSON.stringify({ csv, fetchTimeout: init.timeout }), { status: 200 });
       };
       serve({
         rpc: {
@@ -431,6 +438,7 @@ describe("v3: serve()", () => {
       id: "r1",
       result: {
         csv: '"A,1","quoted ""name""","{""active"":true}"\nB2,\\N,\\N\n',
+        fetchTimeout: false,
       },
     });
     await w.close();
