@@ -319,6 +319,24 @@ pub struct FieldContract {
     /// surface, not the app's SQL.
     #[serde(default)]
     pub sensitive: bool,
+    /// This column holds the id of the user a row belongs to. The Core then mints
+    /// `{entity}.{action}.own` permission keys next to the unscoped ones, and
+    /// generates Row-Level Security policies confining a holder of a `.own` key
+    /// to rows whose value here matches the caller. Enforced by Postgres, so it
+    /// holds for the generated API and for the app's own `ctx.sql` alike.
+    ///
+    /// A NULL here means "belongs to nobody": invisible to a confined caller,
+    /// still visible to one holding the unscoped key. Nothing is required of an
+    /// existing table, so adopting this never needs a backfill.
+    ///
+    /// At most one field per entity may set this, and it must be typed
+    /// `entity_link`, `uuid` or `text` to hold a user id; anything else is refused
+    /// at install. Note this scopes rows, not columns — a confined caller reads its
+    /// own row *whole*, so mark any credential column [`sensitive`] as well.
+    ///
+    /// [`sensitive`]: FieldContract::sensitive
+    #[serde(default)]
+    pub owner: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

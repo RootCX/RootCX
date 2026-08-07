@@ -1,7 +1,9 @@
-# Migration Guide: v0.22 (trigger + transcript authorization)
+# Migration Guide: v0.22 (row ownership, trigger + transcript authorization)
 
-Five endpoints that were reachable by any authenticated user now require a
-permission, and two row-level triggers stop copying fields marked `sensitive`.
+A field can now declare that it owns the row, which lets a role read and write
+only its own records. Alongside that: five endpoints that were reachable by any
+authenticated user require a permission, two row-level triggers stop copying
+fields marked `sensitive`, and a rejected manifest answers `400` instead of `500`.
 
 ## Upgrading an existing tenant
 
@@ -12,6 +14,8 @@ Nothing to do. The upgrade is additive:
 - The sensitive-field projection (`rootcx_system.sensitive_fields`) stays empty
   until an app redeploys, and an empty strip list is a no-op — so an unredeployed
   tenant's hook payloads and audit rows are byte-identical to before.
+- No manifest declares `owner` yet, so no `.own` key and no row-scoped policy
+  exists until one does. Every table's SQL is unchanged.
 
 Nothing in Studio, the SDK, the Rust client or the CLI calls the newly-gated
 endpoints, so no first-party client breaks. If you drive these endpoints from

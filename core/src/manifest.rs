@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::RuntimeError;
 use crate::data_types::{FieldType, FieldTypes, field_types, sql_default, system_field_types};
 use crate::extensions::RuntimeExtension;
-use rootcx_types::{AppManifest, EntityContract};
+use rootcx_types::{AppManifest, EntityContract, FieldContract};
 
 pub const SYSTEM_FIELDS: &[&str] = &["id", "created_at", "updated_at"];
 
@@ -57,15 +57,19 @@ pub async fn install_app(
             for stmt in &fk_statements {
                 sqlx::query(stmt).execute(pool).await.map_err(RuntimeError::Schema)?;
             }
-            if let Some(ref key) = entity.identity_key {
-                let idx = format!(
-                    "CREATE INDEX IF NOT EXISTS {} ON {}.{} ({})",
-                    quote_ident(&format!("idx_identity_{}_{}", entity.entity_name, key)),
-                    quote_ident(app_id),
-                    quote_ident(&entity.entity_name),
-                    quote_ident(key),
-                );
-                sqlx::query(&idx).execute(pool).await.map_err(RuntimeError::Schema)?;
+            let table = &entity.entity_name;
+            if let Some(key) = &entity.identity_key {
+                let name = format!("idx_identity_{table}_{key}");
+                create_index(pool, app_id, table, &name, key).await?;
+            }
+            // A confined caller's every query carries `owner = <me>`, so the column
+            // needs an index or each read seq-scans the whole table. Named exactly
+            // like the foreign-key index `generate_foreign_keys` emits: when the
+            // owner is a referencing `entity_link` that index already exists and
+            // this is a no-op, rather than a second index on the same column.
+            if let Some(owner) = owner_field(entity) {
+                let name = format!("idx_{app_id}_{table}_{owner}");
+                create_index(pool, app_id, table, &name, owner).await?;
             }
             drop_orphaned_identity_indexes(pool, app_id, entity).await?;
         }
@@ -93,6 +97,26 @@ pub async fn install_app(
         "app installed successfully"
     );
 
+    Ok(())
+}
+
+/// A single-column index on an app table, created if absent. Every identifier is
+/// quoted here rather than at each call site, so a caller cannot forget one.
+async fn create_index(
+    pool: &PgPool,
+    app_id: &str,
+    table: &str,
+    name: &str,
+    column: &str,
+) -> Result<(), RuntimeError> {
+    let sql = format!(
+        "CREATE INDEX IF NOT EXISTS {} ON {}.{} ({})",
+        quote_ident(name),
+        quote_ident(app_id),
+        quote_ident(table),
+        quote_ident(column),
+    );
+    sqlx::query(&sql).execute(pool).await.map_err(RuntimeError::Schema)?;
     Ok(())
 }
 
@@ -297,8 +321,7 @@ pub async fn field_type_map(
     let Some(entity) = load_entity(pool, app_id, entity).await? else {
         return Ok(system_field_types());
     };
-    field_types(&entity)
-        .map_err(|message| crate::RuntimeError::Schema(sqlx::Error::Protocol(message)))
+    field_types(&entity).map_err(crate::RuntimeError::Invalid)
 }
 
 pub async fn entity_identity(
@@ -427,9 +450,9 @@ fn validate_ident(value: &str, label: &str) -> Result<(), RuntimeError> {
     {
         return Ok(());
     }
-    Err(RuntimeError::Schema(sqlx::Error::Protocol(format!(
+    Err(RuntimeError::Invalid(format!(
         "{label} '{value}' must be snake_case (lowercase letters, digits, underscores; start with a letter)"
-    ))))
+    )))
 }
 
 /// Permission keys are CSV-encoded into the `rootcx.effective_perms` GUC
@@ -442,12 +465,67 @@ pub fn validate_perm_key(key: &str) -> Result<(), String> {
     {
         return Err(format!("permission key '{key}' must match [a-z0-9_:.*]"));
     }
-    // Reserved so that `.own` is a provenance guarantee, not a convention: the
-    // permission lattice treats `X.own` as strictly weaker than `X`, and
-    // `intersect_permissions` narrows a delegated agent's authority along it.
-    // An app free to declare `billing` and `billing.own` as *unrelated*
-    // capabilities would make that narrowing invent a grant nobody made.
-    // Checked on the action segment only, so `app:own_data:x.read` stays legal.
+    Ok(())
+}
+
+/// The column holding the owning user's id, when the entity declares one.
+///
+/// Accepts any column that can hold a user id — an `entity_link` to `core:users`
+/// (typed UUID, and it earns a foreign key and index for free), a bare `uuid`, or
+/// `text`. Text is not a concession: the bundled gmail, google_calendar and
+/// imap_smtp integrations store `user_id` as text across nine tables, and confining
+/// those per user is the same need. The generated policy casts the *caller's* id to
+/// the column's type rather than the column to text, so each shape stays indexable
+/// (see `rbac::owner_predicate`).
+pub(crate) fn owner_field(entity: &EntityContract) -> Option<&str> {
+    entity
+        .fields
+        .iter()
+        .find(|f| f.owner)
+        .map(|f| f.name.as_str())
+}
+
+fn validate_owner_field(entity: &EntityContract) -> Result<(), String> {
+    let owners: Vec<&FieldContract> = entity.fields.iter().filter(|f| f.owner).collect();
+
+    // Zero is the norm. Two would make "the owner" ambiguous, and silently picking
+    // one decides who sees what — so refuse rather than guess.
+    let [owner] = owners[..] else {
+        if owners.is_empty() {
+            return Ok(());
+        }
+        let names: Vec<&str> = owners.iter().map(|f| f.name.as_str()).collect();
+        return Err(format!(
+            "entity '{}' marks {} fields as owner ({}); exactly one column may own a row",
+            entity.entity_name, owners.len(), names.join(", ")
+        ));
+    };
+
+    // A user id is compared as-is against the caller's, so the column has to be
+    // able to hold one. Anything else would build a policy matching no row, which
+    // reads as an access bug rather than as the manifest mistake it is.
+    if !matches!(owner.field_type.as_str(), "entity_link" | "uuid" | "text") {
+        return Err(format!(
+            "entity '{}': owner field '{}' is '{}'; must be entity_link, uuid or text to hold a user id",
+            entity.entity_name, owner.name, owner.field_type
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a key an *app* wants to declare. Stricter than `validate_perm_key`:
+/// it also refuses the `.own` suffix, which the core mints for row-scoped keys.
+///
+/// The two are separate because they guard opposite directions. `.own` must be
+/// *grantable* — a role holding `contacts.read.own` is the whole point — but not
+/// *declarable*: the permission lattice reads `X.own` as strictly weaker than `X`
+/// and narrows a delegated agent's authority along it, so an app free to declare
+/// `billing` and `billing.own` as unrelated capabilities would make that
+/// narrowing invent a grant nobody made. Reserving it at the declaration door
+/// keeps the relation a fact about provenance while leaving the grant API open.
+pub fn validate_declared_perm_key(key: &str) -> Result<(), String> {
+    validate_perm_key(key)?;
+    // Action segment only, so an app named `own_data` stays legal.
     let action = key.rsplit(':').next().unwrap_or(key);
     if action == "own" || action.ends_with(".own") {
         return Err(format!(
@@ -458,7 +536,7 @@ pub fn validate_perm_key(key: &str) -> Result<(), String> {
 }
 
 fn validate_perm_key_schema(key: &str) -> Result<(), RuntimeError> {
-    validate_perm_key(key).map_err(|m| RuntimeError::Schema(sqlx::Error::Protocol(m)))
+    validate_declared_perm_key(key).map_err(RuntimeError::Invalid)
 }
 
 pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
@@ -476,9 +554,7 @@ pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
         validate_ident(&entity.entity_name, "entity name")?;
         for field in &entity.fields {
             validate_ident(&field.name, "field name")?;
-            FieldType::from_field(field).map_err(|message| {
-                RuntimeError::Schema(sqlx::Error::Protocol(message))
-            })?;
+            FieldType::from_field(field).map_err(RuntimeError::Invalid)?;
         }
         for field in &entity.fields {
             if field.field_type != "entity_link" { continue; }
@@ -486,38 +562,40 @@ pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
                 match parse_entity_ref(&refs.entity) {
                     RefTarget::Core(name) => {
                         if resolve_core_entity(&name).is_none() {
-                            return Err(RuntimeError::Schema(sqlx::Error::Protocol(format!(
+                            return Err(RuntimeError::Invalid(format!(
                                 "field '{}' references 'core:{name}' — unknown core entity", field.name
-                            ))));
+                            )));
                         }
                     }
                     RefTarget::App { app, entity: ent } => {
-                        return Err(RuntimeError::Schema(sqlx::Error::Protocol(format!(
+                        return Err(RuntimeError::Invalid(format!(
                             "field '{}' references '{app}:{ent}' — cross-app references not yet supported", field.name
-                        ))));
+                        )));
                     }
                     RefTarget::Local(ref target) => {
                         if !all_entity_names.contains(&target.as_str()) {
-                            return Err(RuntimeError::Schema(sqlx::Error::Protocol(format!(
+                            return Err(RuntimeError::Invalid(format!(
                                 "field '{}' references entity '{target}' which is not defined in this manifest", field.name
-                            ))));
+                            )));
                         }
                     }
                 }
             }
         }
 
+        validate_owner_field(entity).map_err(RuntimeError::Invalid)?;
+
         if let (Some(kind), Some(key)) = (&entity.identity_kind, &entity.identity_key) {
             validate_ident(kind, "identityKind")?;
             if !entity.fields.iter().any(|f| f.name == *key) {
-                return Err(RuntimeError::Schema(sqlx::Error::Protocol(format!(
+                return Err(RuntimeError::Invalid(format!(
                     "identityKey '{key}' not found in fields of entity '{}'", entity.entity_name
-                ))));
+                )));
             }
         } else if entity.identity_kind.is_some() != entity.identity_key.is_some() {
-            return Err(RuntimeError::Schema(sqlx::Error::Protocol(
+            return Err(RuntimeError::Invalid(
                 "identityKind and identityKey must both be set or both be absent".into()
-            )));
+            ));
         }
     }
     Ok(())
@@ -590,7 +668,7 @@ mod tests {
             references: None,
             is_primary_key: None,
             on_delete: None,
-            sensitive: false,
+            sensitive: false, owner: false,
         }
     }
 
@@ -605,7 +683,7 @@ mod tests {
     #[test]
     fn validate_perm_key_reserves_the_own_suffix() {
         for key in ["contacts.read.own", "billing.own", "app:crm:contacts.read.own", "own"] {
-            let error = validate_perm_key(key).expect_err(&format!("must reject '{key}'"));
+            let error = validate_declared_perm_key(key).expect_err(&format!("must reject '{key}'"));
             assert!(
                 error.contains("reserved"),
                 "expected a reservation error for '{key}', got: {error}"
@@ -615,11 +693,42 @@ mod tests {
         // these remain legal keys.
         for key in ["contacts.read", "owner.read", "own_data.read", "app:crm:disown.read"] {
             assert!(
-                validate_perm_key(key).is_ok(),
+                validate_declared_perm_key(key).is_ok(),
                 "'{key}' must stay valid: {:?}",
-                validate_perm_key(key)
+                validate_declared_perm_key(key)
             );
         }
+    }
+
+    /// Refuse, at install, any owner declaration no working policy can be built
+    /// from. Both failures are silent if they reach the DDL: two owners make
+    /// "mine" ambiguous so the generator picks one and quietly decides who sees
+    /// what, and a type that cannot hold a user id yields a policy matching no
+    /// row — which reads as an access bug, not as the manifest mistake it is.
+    #[test]
+    fn an_owner_declaration_no_policy_can_use_is_refused() {
+        for field_type in ["entity_link", "uuid", "text"] {
+            let mut owner = field("user_id", field_type);
+            owner.owner = true;
+            assert!(
+                validate_owner_field(&entity("profile", vec![owner])).is_ok(),
+                "'{field_type}' can hold a user id and must be accepted"
+            );
+        }
+
+        for field_type in ["number", "boolean", "json", "timestamp", "[text]"] {
+            let mut owner = field("user_id", field_type);
+            owner.owner = true;
+            let error = validate_owner_field(&entity("profile", vec![owner]))
+                .expect_err(&format!("'{field_type}' cannot hold a user id"));
+            assert!(error.contains("must be entity_link, uuid or text"), "{field_type}: {error}");
+        }
+
+        let (mut a, mut b) = (field("user_id", "uuid"), field("assignee", "uuid"));
+        (a.owner, b.owner) = (true, true);
+        let error = validate_owner_field(&entity("profile", vec![a, b]))
+            .expect_err("two owner columns leave 'mine' undefined");
+        assert!(error.contains("exactly one column may own a row"), "{error}");
     }
 
     #[test]

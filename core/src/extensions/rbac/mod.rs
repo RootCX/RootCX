@@ -14,6 +14,14 @@ use rootcx_types::AppManifest;
 
 pub struct RbacExtension;
 
+/// The per-entity actions minted as permission keys, both unscoped and as `.own`
+/// twins. Shared by the two minting sites so neither can gain an action the other
+/// lacks. It must also match the actions `RLS_POLICIES` gates on — a key with no
+/// policy is an unenforceable grant, a policy with no key is unreachable — which
+/// `minted_actions_match_the_policies` checks, since the two lists are built for
+/// different purposes and cannot simply be one.
+const ENTITY_ACTIONS: [&str; 4] = ["create", "read", "update", "delete"];
+
 pub(super) async fn exec(pool: &PgPool, sql: &str) -> Result<(), RuntimeError> {
     sqlx::query(sql).execute(pool).await.map_err(RuntimeError::Schema)?;
     Ok(())
@@ -127,7 +135,7 @@ impl RuntimeExtension for RbacExtension {
         // these, leaving custom-permission apps with ungrantable, invisible
         // entity keys and deny-all data for every non-admin.)
         let (mut keys, mut descs): (Vec<String>, Vec<String>) = manifest.data_contract.iter()
-            .flat_map(|e| ["create", "read", "update", "delete"]
+            .flat_map(|e| ENTITY_ACTIONS
                 .map(|a| (format!("app:{app_id}:{}.{a}", e.entity_name), format!("{a} {}", e.entity_name))))
             .chain(["read", "write", "trigger"].into_iter()
                 .map(|a| (format!("app:{app_id}:cron.{a}"), format!("{a} crons"))))
@@ -136,6 +144,16 @@ impl RuntimeExtension for RbacExtension {
             .chain([("read", "read app files"), ("write", "write app files")]
                 .map(|(a, description)| (format!("app:{app_id}:storage.{a}"), description.into())))
             .unzip();
+
+        // Row-scoped twins, only where a row can be owned. Described distinctly
+        // from the unscoped key: the role picker lists them adjacently, so two
+        // rows both reading "read contacts" would be a coin toss for the operator.
+        for entity in manifest.data_contract.iter().filter(|e| crate::manifest::owner_field(e).is_some()) {
+            for action in ENTITY_ACTIONS {
+                keys.push(format!("app:{app_id}:{}.{action}.own", entity.entity_name));
+                descs.push(format!("{action} only their own {}", entity.entity_name));
+            }
+        }
 
         if let Some(c) = &manifest.permissions {
             for p in &c.permissions {
@@ -205,11 +223,16 @@ impl RuntimeExtension for RbacExtension {
     async fn on_table_created(
         &self,
         pool: &PgPool,
-        _manifest: &AppManifest,
+        manifest: &AppManifest,
         schema: &str,
         table: &str,
     ) -> Result<(), RuntimeError> {
-        apply_table_rls(pool, schema, table).await
+        let owner = manifest
+            .data_contract
+            .iter()
+            .find(|e| e.entity_name == table)
+            .and_then(crate::manifest::owner_field);
+        apply_table_rls(pool, schema, table, owner).await
     }
 
     fn routes(&self) -> Option<Router<SharedRuntime>> {
@@ -225,12 +248,22 @@ impl RuntimeExtension for RbacExtension {
     }
 }
 
-/// Enable + FORCE RLS on an app table, grant the restricted executor CRUD on
-/// it, and (re)create the four permission-gated policies. Idempotent: safe to
-/// call on every install and on the retroactive boot pass. `schema`/`table`
-/// are validated snake_case identifiers (see `manifest::validate_manifest`).
-pub(crate) async fn apply_table_rls(pool: &PgPool, schema: &str, table: &str) -> Result<(), RuntimeError> {
-    use crate::manifest::{quote_ident, quote_literal};
+/// Enable + FORCE RLS on an app table, grant the restricted executor CRUD on it,
+/// and (re)create its permission-gated policies. Idempotent: safe to call on every
+/// install and on the retroactive boot pass. `schema`/`table` are validated
+/// snake_case identifiers (see `manifest::validate_manifest`).
+///
+/// `owner` is the column holding the owning user's id when the entity declares
+/// one, which adds a row-scoped twin per command, confining a holder of a `.own`
+/// key to its own rows. Passing `None` reproduces the pre-ownership SQL exactly, so
+/// a table that declares nothing is untouched.
+pub(crate) async fn apply_table_rls(
+    pool: &PgPool,
+    schema: &str,
+    table: &str,
+    owner: Option<&str>,
+) -> Result<(), RuntimeError> {
+    use crate::manifest::quote_ident;
     let qt = format!("{}.{}", quote_ident(schema), quote_ident(table));
 
     exec(pool, &format!("GRANT USAGE ON SCHEMA {} TO rootcx_app_executor", quote_ident(schema))).await?;
@@ -242,27 +275,134 @@ pub(crate) async fn apply_table_rls(pool: &PgPool, schema: &str, table: &str) ->
     exec(pool, &format!("ALTER TABLE {qt} ENABLE ROW LEVEL SECURITY")).await?;
     exec(pool, &format!("ALTER TABLE {qt} FORCE ROW LEVEL SECURITY")).await?;
 
-    // The `(SELECT ...)` wrapper makes the planner evaluate check_access once
-    // per query (constant args) instead of once per row — mandatory for perf.
-    for (policy, kind, action) in [
-        ("rootcx_rls_select", "FOR SELECT USING", "read"),
-        ("rootcx_rls_insert", "FOR INSERT WITH CHECK", "create"),
-        ("rootcx_rls_delete", "FOR DELETE USING", "delete"),
-    ] {
-        let req = quote_literal(&format!("app:{schema}:{table}.{action}"));
-        exec(pool, &format!("DROP POLICY IF EXISTS {policy} ON {qt}")).await?;
-        exec(pool, &format!(
-            "CREATE POLICY {policy} ON {qt} {kind} ((SELECT rootcx_system.check_access({req})))",
-        )).await?;
+    // "This row is mine", or None when there is no owner to compare against — in
+    // which case every `_own` policy below is dropped and not recreated, so removing
+    // the declaration removes the confinement instead of stranding it.
+    let mine = owner_predicate(pool, schema, table, owner).await?;
+
+    for (policy, command, action, clauses) in RLS_POLICIES {
+        set_policy(
+            pool, &qt, policy, command, clauses,
+            Some(&gate(&format!("app:{schema}:{table}.{action}"))),
+        ).await?;
+
+        // The row-scoped twin. PERMISSIVE, so Postgres ORs it with the unscoped
+        // policy above: access becomes `unscoped OR (scoped AND mine)`, which only
+        // ever *adds* what a `.own` holder can reach and leaves every existing
+        // grant bit-identical. RESTRICTIVE would AND instead, and lock every app
+        // already in production out of its own data.
+        let scoped = mine.as_ref().map(|mine| {
+            format!("{} AND {mine}", gate(&format!("app:{schema}:{table}.{action}.own")))
+        });
+        set_policy(
+            pool, &qt, &format!("{policy}_own"), command, clauses, scoped.as_deref(),
+        ).await?;
     }
-    // UPDATE needs both USING (visible rows) and WITH CHECK (new rows).
-    let upd = quote_literal(&format!("app:{schema}:{table}.update"));
-    exec(pool, &format!("DROP POLICY IF EXISTS rootcx_rls_update ON {qt}")).await?;
-    exec(pool, &format!(
-        "CREATE POLICY rootcx_rls_update ON {qt} FOR UPDATE \
-         USING ((SELECT rootcx_system.check_access({upd}))) \
-         WITH CHECK ((SELECT rootcx_system.check_access({upd})))",
-    )).await?;
 
     Ok(())
+}
+
+/// The policies every app table carries, one per SQL command: the policy name,
+/// the command, the permission action gating it, and the clauses it needs.
+///
+/// UPDATE is the only command taking its predicate twice — USING picks the rows it
+/// may touch, WITH CHECK vets the row it leaves behind. Both are load-bearing for
+/// a row-scoped policy: USING alone would still let a confined caller hand its own
+/// row to somebody else.
+const RLS_POLICIES: [(&str, &str, &str, &[&str]); 4] = [
+    ("rootcx_rls_select", "SELECT", "read", &["USING"]),
+    ("rootcx_rls_insert", "INSERT", "create", &["WITH CHECK"]),
+    ("rootcx_rls_delete", "DELETE", "delete", &["USING"]),
+    ("rootcx_rls_update", "UPDATE", "update", &["USING", "WITH CHECK"]),
+];
+
+/// A permission requirement as an RLS predicate. The `(SELECT ...)` wrapper makes
+/// the planner evaluate `check_access` once per query (its arguments are constant)
+/// instead of once per row — mandatory for perf, not cosmetic.
+fn gate(key: &str) -> String {
+    format!("(SELECT rootcx_system.check_access({}))", crate::manifest::quote_literal(key))
+}
+
+/// (Re)define one policy, or drop it when there is no predicate. Dropped first
+/// either way, so every call is a redefinition rather than a duplicate — which is
+/// what makes `apply_table_rls` safe to run on each install and on every boot.
+async fn set_policy(
+    pool: &PgPool,
+    qt: &str,
+    name: &str,
+    command: &str,
+    clauses: &[&str],
+    predicate: Option<&str>,
+) -> Result<(), RuntimeError> {
+    exec(pool, &format!("DROP POLICY IF EXISTS {name} ON {qt}")).await?;
+    let Some(predicate) = predicate else { return Ok(()) };
+    let body = clauses
+        .iter()
+        .map(|clause| format!("{clause} ({predicate})"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    exec(pool, &format!("CREATE POLICY {name} ON {qt} FOR {command} {body}")).await
+}
+
+/// "This row is mine", as SQL — or `None` when there is no column to compare.
+///
+/// The caller's id is cast to the column's type, never the column to text:
+/// `owner::text = $guc` is not indexable, so on a `uuid` column it would turn every
+/// read by a confined caller into a sequential scan. The type comes from the
+/// catalog, not the manifest — the boot pass has only a column name, and the
+/// catalog is what the policy actually runs against. As in `gate`, the
+/// `(SELECT ...)` wrapper keeps the GUC read an InitPlan: once per query.
+///
+/// A column that is not there yields `None`, leaving the row-scoped policies
+/// absent — and absent means deny, since a `.own` key grants nothing without a
+/// policy honouring it. Fail-closed is how a projection row that outlived its
+/// column stays survivable.
+async fn owner_predicate(
+    pool: &PgPool,
+    schema: &str,
+    table: &str,
+    owner: Option<&str>,
+) -> Result<Option<String>, RuntimeError> {
+    let Some(owner) = owner else { return Ok(None) };
+
+    let column_type: Option<String> = sqlx::query_scalar(
+        "SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a
+          WHERE a.attrelid = to_regclass($1) AND a.attname = $2 AND a.attnum > 0 AND NOT a.attisdropped",
+    )
+    .bind(format!("{}.{}", crate::manifest::quote_ident(schema), crate::manifest::quote_ident(table)))
+    .bind(owner)
+    .fetch_optional(pool).await.map_err(RuntimeError::Schema)?
+    .flatten();
+
+    let Some(column_type) = column_type else {
+        tracing::warn!(
+            %schema, %table, %owner,
+            "owner column is missing; row-scoped policies not created (holders of the \
+             '.own' keys stay denied until the next deploy adds the column)"
+        );
+        return Ok(None);
+    };
+
+    Ok(Some(format!(
+        "{} = (SELECT nullif(current_setting('rootcx.user_id', true), ''))::{column_type}",
+        crate::manifest::quote_ident(owner),
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every minted key must have a policy enforcing it, and every policy a key
+    /// that reaches it. The two lists exist separately because one maps SQL
+    /// commands and the other names permissions, so nothing but this stops a
+    /// fifth action being added to one and silently missing from the other.
+    #[test]
+    fn minted_actions_match_the_policies() {
+        let mut minted = ENTITY_ACTIONS;
+        let mut gated = RLS_POLICIES.map(|(_, _, action, _)| action);
+        minted.sort_unstable();
+        gated.sort_unstable();
+        assert_eq!(minted, gated);
+    }
 }

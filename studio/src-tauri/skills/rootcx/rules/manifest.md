@@ -39,6 +39,8 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
 - `"required": true` = mandatory on create; omit key for optional
 - `"enum_values": [...]` restricts text fields to fixed values
 - `decimal` is for exact values such as money. `precision` and `scale` are optional, but must be declared together (for example `"precision": 19, "scale": 4`). Decimal values and defaults cross the API as JSON strings so JavaScript never rounds them.
+- `"sensitive": true` keeps a column out of every API response, filter and sort. It stays writable and usable in SQL inside the app; it just never travels back over the wire.
+- `"owner": true` marks the column holding the id of the user a row belongs to. Core then mints `{entity}.{action}.own` permissions next to the unscoped ones, and a role holding only those reaches that user's own rows. One column per entity, typed `entity_link` (to `core:users`), `uuid` or `text`. Rows whose owner is NULL belong to nobody, so adopting this on an existing table needs no backfill. It scopes rows, not columns: a confined caller reads its own row whole, so mark credential columns `"sensitive": true` too.
 
 ---
 

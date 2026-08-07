@@ -288,48 +288,53 @@ fn validate_trigger(
         .collect()
 }
 
-/// The entity's sensitive field names, or empty when the entity is absent from
-/// the manifest or declares none. Empty means "strip nothing", which is what
-/// makes the projection additive: an app that predates the flag reads as empty
-/// and its triggers behave exactly as before.
-fn sensitive_field_names(manifest: &rootcx_types::AppManifest, table: &str) -> Vec<String> {
-    manifest
-        .data_contract
-        .iter()
-        .find(|e| e.entity_name == table)
+/// The entity's derived row shape: which fields never leave the Core, and which
+/// column owns the row. Neither is set when the entity is absent from the manifest
+/// or declares neither — which is what makes the projection additive, since nothing
+/// projected means every trigger and policy behaves exactly as before.
+fn row_shape<'m>(
+    manifest: &'m rootcx_types::AppManifest,
+    table: &str,
+) -> (Vec<String>, Option<&'m str>) {
+    let entity = manifest.data_contract.iter().find(|e| e.entity_name == table);
+    let sensitive = entity
         .into_iter()
-        .flat_map(|e| e.fields.iter())
+        .flat_map(|e| &e.fields)
         .filter(|f| f.sensitive)
         .map(|f| f.name.clone())
-        .collect()
+        .collect();
+    (sensitive, entity.and_then(crate::manifest::owner_field))
 }
 
-/// Project the entity's sensitive field names into `sensitive_fields`, so the
-/// row-level trigger reads one indexed row instead of walking `apps.manifest`
-/// JSON on every write. Upserted (not inserted) so a redeploy that adds or
-/// clears the flag reconciles, mirroring how permission keys are re-synced on
-/// install. An entity with none is deleted rather than stored empty, keeping the
-/// table proportional to what actually declares a sensitive field.
+/// Project the entity's row shape into `sensitive_fields`, so the row-level
+/// triggers and the retroactive RLS pass each read one indexed row instead of
+/// walking `apps.manifest` JSON. Upserted so a redeploy that adds or clears either
+/// declaration reconciles, mirroring how permission keys are re-synced on install.
+/// An entity declaring neither is deleted rather than stored empty, keeping the
+/// table proportional to what actually declares something.
 async fn sync_sensitive_fields(
     pool: &PgPool,
     manifest: &rootcx_types::AppManifest,
     schema: &str,
     table: &str,
 ) -> Result<(), RuntimeError> {
-    let fields = sensitive_field_names(manifest, table);
+    let (fields, owner) = row_shape(manifest, table);
 
-    let query = if fields.is_empty() {
+    let query = if fields.is_empty() && owner.is_none() {
         sqlx::query("DELETE FROM rootcx_system.sensitive_fields WHERE app_id = $1 AND entity = $2")
             .bind(schema)
             .bind(table)
     } else {
         sqlx::query(
-            "INSERT INTO rootcx_system.sensitive_fields (app_id, entity, fields) VALUES ($1, $2, $3) \
-             ON CONFLICT (app_id, entity) DO UPDATE SET fields = EXCLUDED.fields",
+            "INSERT INTO rootcx_system.sensitive_fields (app_id, entity, fields, owner_field) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (app_id, entity) \
+             DO UPDATE SET fields = EXCLUDED.fields, owner_field = EXCLUDED.owner_field",
         )
         .bind(schema)
         .bind(table)
         .bind(&fields)
+        .bind(owner)
     };
 
     query.execute(pool).await.map_err(RuntimeError::Schema)?;
@@ -610,6 +615,7 @@ mod tests {
                     is_primary_key: None,
                     on_delete: None,
                     sensitive: *sensitive,
+                    owner: false,
                 })
                 .collect(),
             identity_kind: None,
@@ -681,28 +687,38 @@ mod tests {
         }
     }
 
-    /// Feeds the projection the row-level triggers read. An empty result means
-    /// "strip nothing", so the absent-entity and no-flag cases are what keep an
-    /// upgrade on a pre-flag app behaviourally identical.
+    /// Feeds the projection the row-level triggers and the retroactive RLS pass
+    /// read. Projecting nothing means "strip nothing, confine nobody", so the
+    /// absent-entity and no-flag cases are what keep an upgrade on a pre-flag app
+    /// behaviourally identical.
     #[test]
-    fn sensitive_field_names_projects_only_flagged_fields() {
+    fn row_shape_projects_only_what_the_entity_declares() {
         let m = manifest_with(
             "accounts",
             &[("email", false), ("password_hash", true), ("token", true)],
         );
         assert_eq!(
-            sensitive_field_names(&m, "accounts"),
-            vec!["password_hash".to_string(), "token".to_string()],
-            "only flagged fields, in declaration order"
+            row_shape(&m, "accounts"),
+            (vec!["password_hash".to_string(), "token".to_string()], None),
+            "only flagged fields, in declaration order, and no owner",
         );
-        assert!(
-            sensitive_field_names(&m, "other_entity").is_empty(),
-            "an entity absent from the manifest strips nothing"
+        assert_eq!(
+            row_shape(&m, "other_entity"),
+            (vec![], None),
+            "an entity absent from the manifest projects nothing",
         );
-        assert!(
-            sensitive_field_names(&manifest_with("accounts", &[("email", false)]), "accounts")
-                .is_empty(),
-            "an entity with no flagged field strips nothing"
+        assert_eq!(
+            row_shape(&manifest_with("accounts", &[("email", false)]), "accounts"),
+            (vec![], None),
+            "an entity declaring neither projects nothing",
+        );
+
+        let mut owned = manifest_with("accounts", &[("user_id", false), ("token", true)]);
+        owned.data_contract[0].fields[0].owner = true;
+        assert_eq!(
+            row_shape(&owned, "accounts"),
+            (vec!["token".to_string()], Some("user_id")),
+            "the two declarations are independent and travel together",
         );
     }
 

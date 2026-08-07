@@ -52,7 +52,9 @@ impl From<crate::RuntimeError> for ApiError {
             // Worker/Job/IPC errors are user-facing (e.g., "no worker for app 'x'")
             crate::RuntimeError::Conflict(_) => Self::Conflict(e.to_string()),
             crate::RuntimeError::NotFound(_) => Self::NotFound(e.to_string()),
-            crate::RuntimeError::Cron(_) => Self::BadRequest(e.to_string()),
+            crate::RuntimeError::Cron(_) | crate::RuntimeError::Invalid(_) => {
+                Self::BadRequest(e.to_string())
+            }
             crate::RuntimeError::Worker(_) | crate::RuntimeError::Job(_) | crate::RuntimeError::Ipc(_) => {
                 Self::Internal(e.to_string())
             }
@@ -61,5 +63,33 @@ impl From<crate::RuntimeError> for ApiError {
                 Self::Internal("internal error".into())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    fn status_of(error: crate::RuntimeError) -> StatusCode {
+        ApiError::from(error).into_response().status()
+    }
+
+    /// A rejected manifest must reach its author with the reason. These once
+    /// travelled as `Schema(sqlx::Error::Protocol(..))`, which the catch-all arm
+    /// turned into `500 internal error` — the validator's message was written,
+    /// then discarded before the response. The pairing with a genuine database
+    /// failure is the point: that one must stay opaque.
+    #[test]
+    fn a_rejected_manifest_is_a_bad_request_not_an_internal_error() {
+        assert_eq!(
+            status_of(crate::RuntimeError::Invalid("field 'x' has unknown type".into())),
+            StatusCode::BAD_REQUEST,
+        );
+        assert_eq!(
+            status_of(crate::RuntimeError::Schema(sqlx::Error::PoolClosed)),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a real schema failure stays opaque",
+        );
     }
 }

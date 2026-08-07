@@ -1849,27 +1849,33 @@ async fn identity_index_cleanup_on_removal() {
     rt.shutdown().await;
 }
 
+/// A refused manifest is the author's mistake, so it must come back as 400 with
+/// the reason. This used to assert 500: the validator's message was built and then
+/// dropped by the catch-all error arm, leaving "internal error" and nothing to act
+/// on.
 #[tokio::test]
 async fn identity_manifest_validation_rejects_invalid() {
     let rt = TestRuntime::boot().await;
 
-    // identityKind without identityKey
-    let (s, _) = rt.post_json("/api/v1/apps", &json!({
-        "appId": "bad_id", "name": "Bad", "version": "1.0.0",
-        "dataContract": [{ "entityName": "items", "identityKind": "product", "fields": [
-            { "name": "sku", "type": "text" }
-        ]}]
-    })).await;
-    assert_eq!(s, 500, "should reject identityKind without identityKey");
-
-    // identityKey pointing to nonexistent field
-    let (s2, _) = rt.post_json("/api/v1/apps", &json!({
-        "appId": "bad_id2", "name": "Bad", "version": "1.0.0",
-        "dataContract": [{ "entityName": "items", "identityKind": "product", "identityKey": "missing_field", "fields": [
-            { "name": "sku", "type": "text" }
-        ]}]
-    })).await;
-    assert_eq!(s2, 500, "should reject identityKey referencing nonexistent field");
+    for (app_id, entity, expected) in [
+        (
+            "bad_id",
+            json!({ "entityName": "items", "identityKind": "product", "fields": [{ "name": "sku", "type": "text" }] }),
+            "identityKind and identityKey must both be set",
+        ),
+        (
+            "bad_id2",
+            json!({ "entityName": "items", "identityKind": "product", "identityKey": "missing_field",
+                    "fields": [{ "name": "sku", "type": "text" }] }),
+            "identityKey 'missing_field' not found",
+        ),
+    ] {
+        let (s, body) = rt.post_json("/api/v1/apps", &json!({
+            "appId": app_id, "name": "Bad", "version": "1.0.0", "dataContract": [entity],
+        })).await;
+        assert_eq!(s, 400, "{app_id} must be refused as a bad request: {body}");
+        assert!(body.to_string().contains(expected), "{app_id}: {body}");
+    }
 
     rt.shutdown().await;
 }

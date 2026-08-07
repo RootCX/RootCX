@@ -99,6 +99,16 @@ impl RuntimeExtension for AuditExtension {
         )
         .await?;
 
+        // Row ownership joined the same projection rather than getting a table of
+        // its own: it is the same fact (this entity's row shape, derived from the
+        // manifest at deploy), it has the same single writer, and a second table
+        // would mean a second bootstrap-order constraint to keep straight.
+        exec(
+            pool,
+            "ALTER TABLE rootcx_system.sensitive_fields ADD COLUMN IF NOT EXISTS owner_field TEXT",
+        )
+        .await?;
+
         exec(
             pool,
             r#"

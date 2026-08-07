@@ -388,6 +388,7 @@ mod tests {
             is_primary_key: None,
             on_delete: None,
             sensitive: false,
+            owner: false,
         }
     }
 
@@ -408,6 +409,7 @@ mod tests {
                     is_primary_key: None,
                     on_delete: None,
                     sensitive: *sensitive,
+                    owner: false,
                 })
                 .collect(),
             identity_kind: None,

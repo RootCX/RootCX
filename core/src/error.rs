@@ -6,6 +6,12 @@ pub enum RuntimeError {
     #[error("schema migration error: {0}")]
     Schema(sqlx::Error),
 
+    /// A manifest the Core refuses to install. Distinct from `Schema` because the
+    /// author has to be told what to fix: wrapped as a `sqlx` error it mapped to
+    /// `500 internal error`, which discards the message the validator built.
+    #[error("invalid manifest: {0}")]
+    Invalid(String),
+
     #[error("secret vault error: {0}")]
     Secret(String),
 

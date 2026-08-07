@@ -341,13 +341,19 @@ impl RbacExtension {
             exec(pool, &format!("REVOKE EXECUTE ON FUNCTION {sig} FROM PUBLIC")).await?;
         }
 
-        // Retroactive RLS over tables that predate this refactor.
-        let tables: Vec<(String, String)> = sqlx::query_as(
-            "SELECT schemaname, tablename FROM pg_tables
-             WHERE schemaname IN (SELECT id FROM rootcx_system.apps WHERE id <> 'core')",
+        // Retroactive RLS over tables that predate this refactor. The owner column
+        // is read from the projection synced at deploy rather than re-parsed from
+        // `apps.manifest`: the stored manifest is never revalidated after install,
+        // so a table is the trustworthy source here, and it is one indexed lookup.
+        let tables: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT t.schemaname, t.tablename, s.owner_field
+               FROM pg_tables t
+               LEFT JOIN rootcx_system.sensitive_fields s
+                 ON s.app_id = t.schemaname AND s.entity = t.tablename
+              WHERE t.schemaname IN (SELECT id FROM rootcx_system.apps WHERE id <> 'core')",
         ).fetch_all(pool).await.map_err(RuntimeError::Schema)?;
-        for (schema, table) in tables {
-            apply_table_rls(pool, &schema, &table).await?;
+        for (schema, table, owner) in tables {
+            apply_table_rls(pool, &schema, &table, owner.as_deref()).await?;
         }
 
         info!("governance ready");
