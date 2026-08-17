@@ -863,6 +863,33 @@ mod tests {
         assert!(ddl.contains("\"updated_at\""), "expected updated_at in: {ddl}");
     }
 
+    /// The bundled integrations are installed through the very validator this
+    /// module exposes, so a manifest the validator refuses is an integration that
+    /// cannot be deployed at all — and the failure only shows up in production, as
+    /// a 400 with no log line. Peppol shipped `"type": "string"` for months that
+    /// way. Nothing here mocks the manifests: they are read from `resources/`.
+    #[test]
+    fn every_bundled_integration_manifest_installs() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/integrations");
+        let manifests: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("resources/integrations must be readable")
+            .map(|entry| entry.expect("readable dir entry").path().join("manifest.json"))
+            .filter(|path| path.exists())
+            .collect();
+
+        // An empty list would make every assertion below vacuous, so a renamed
+        // resources directory has to fail here rather than pass quietly.
+        assert!(!manifests.is_empty(), "no bundled manifest found under {}", dir.display());
+
+        for path in manifests {
+            let raw = std::fs::read_to_string(&path).expect("readable manifest");
+            let manifest: AppManifest = serde_json::from_str(&raw)
+                .unwrap_or_else(|e| panic!("{}: manifest does not parse: {e}", path.display()));
+            validate_manifest(&manifest)
+                .unwrap_or_else(|e| panic!("{}: manifest would be refused at install: {e}", path.display()));
+        }
+    }
+
     #[test]
     fn generate_foreign_keys_basic() {
         let accounts = entity("accounts", vec![field("name", "text")]);

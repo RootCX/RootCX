@@ -243,11 +243,11 @@
     {
       "entityName": "connected_databases",
       "fields": [
-        { "name": "notion_database_id", "type": "string" },
-        { "name": "title", "type": "string" },
+        { "name": "notion_database_id", "type": "text" },
+        { "name": "title", "type": "text" },
         { "name": "schema_snapshot", "type": "json" },
         { "name": "field_mapping", "type": "json" },
-        { "name": "last_synced_at", "type": "string" }
+        { "name": "last_synced_at", "type": "text" }
       ]
     }
   ],

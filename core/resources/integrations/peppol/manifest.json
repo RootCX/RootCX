@@ -428,21 +428,21 @@
     {
       "entityName": "incoming_documents",
       "fields": [
-        { "name": "document_ulid", "type": "string" },
-        { "name": "document_type", "type": "string" },
-        { "name": "document_number", "type": "string" },
-        { "name": "issue_date", "type": "string" },
-        { "name": "due_date", "type": "string" },
-        { "name": "currency", "type": "string" },
+        { "name": "document_ulid", "type": "text" },
+        { "name": "document_type", "type": "text" },
+        { "name": "document_number", "type": "text" },
+        { "name": "issue_date", "type": "text" },
+        { "name": "due_date", "type": "text" },
+        { "name": "currency", "type": "text" },
         { "name": "amount", "type": "number" },
-        { "name": "sender_peppol_id", "type": "string" },
-        { "name": "sender_name", "type": "string" },
-        { "name": "sender_vat", "type": "string" },
-        { "name": "receiver_peppol_id", "type": "string" },
-        { "name": "receiver_name", "type": "string" },
-        { "name": "status", "type": "string" },
-        { "name": "instance_identifier", "type": "string" },
-        { "name": "as4_message_id", "type": "string" },
+        { "name": "sender_peppol_id", "type": "text" },
+        { "name": "sender_name", "type": "text" },
+        { "name": "sender_vat", "type": "text" },
+        { "name": "receiver_peppol_id", "type": "text" },
+        { "name": "receiver_name", "type": "text" },
+        { "name": "status", "type": "text" },
+        { "name": "instance_identifier", "type": "text" },
+        { "name": "as4_message_id", "type": "text" },
         { "name": "xml", "type": "file" },
         { "name": "attachments", "type": "json" }
       ]
@@ -450,11 +450,11 @@
     {
       "entityName": "outgoing_status",
       "fields": [
-        { "name": "document_ulid", "type": "string" },
-        { "name": "status", "type": "string" },
-        { "name": "as4_message_id", "type": "string" },
-        { "name": "error_message", "type": "string" },
-        { "name": "delivered_at", "type": "string" }
+        { "name": "document_ulid", "type": "text" },
+        { "name": "status", "type": "text" },
+        { "name": "as4_message_id", "type": "text" },
+        { "name": "error_message", "type": "text" },
+        { "name": "delivered_at", "type": "text" }
       ]
     }
   ]
