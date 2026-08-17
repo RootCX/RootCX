@@ -30,6 +30,7 @@ RUN chmod 0755 /usr/local/bin/rootcx-core /usr/local/bin/core-entrypoint /opt/ro
 
 ENV BUN_PATH=/opt/rootcx/resources/bun \
     ROOTCX_RESOURCES=/opt/rootcx/resources \
+    ROOTCX_BIND=1 \
     HOME=/data \
     XDG_DATA_HOME=/data
 
