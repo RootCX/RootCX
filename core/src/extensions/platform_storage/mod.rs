@@ -706,6 +706,10 @@ mod tests {
                 .await
                 .expect("bootstrap core schema dependency");
             use crate::extensions::RuntimeExtension;
+            crate::extensions::audit::AuditExtension
+                .bootstrap(&pool)
+                .await
+                .expect("bootstrap audit dependency");
             let secret = b"platform-storage-test-secret-32b";
             crate::extensions::auth::AuthExtension {
                 config: Arc::new(crate::auth::AuthConfig {
