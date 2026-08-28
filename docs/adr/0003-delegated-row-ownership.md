@@ -193,18 +193,26 @@ fails the test.
    confined read through the owning app is unaffected.
 
    **Why `coalesce` is fail-open on an unset GUC.** `SET LOCAL ROLE
-   rootcx_app_executor` appears exactly once in the codebase, in `begin_app_tx`,
-   which always has the app schema in hand. So every path that evaluates RLS at all
-   — the CRUD routes, the SQL proxy's `run_sql` and `TxSession`, the agent tools in
-   `core/src/tools/`, the worker's collection ops — poses the GUC, and all five pass
-   the schema of the app whose data the unit of work is for. Everything else (schema
-   sync, the audit and hooks triggers, the retroactive RLS pass, the worker's own
-   bookkeeping) runs on the core's superuser pool, which bypasses RLS and never
-   reaches a policy. Unset therefore means "no policy is being evaluated", where
-   denying buys nothing and would strand any future caller reading an app table
-   directly. `nullif` is part of the same reasoning: a pooled connection that once
-   served an app keeps the GUC as `''` rather than unset, and `''` means the same
-   "nobody said" as absent.
+   rootcx_app_executor` appears exactly once in the codebase, in
+   `begin_app_tx_with_invocation`, which always has the app schema in hand — and so
+   does the lone call to `set_rls_context`, in the same function. Every path that
+   evaluates RLS at all funnels through it: the CRUD routes, the SQL proxy's
+   `run_sql` and `TxSession`, the agent tools in `core/src/tools/`, and the worker's
+   collection ops, `ctx.sql` and transactions. Each passes the schema of the app
+   whose data the unit of work touches. Everything else (schema sync, the audit and
+   hooks triggers, the retroactive RLS pass, the worker's own bookkeeping) runs on
+   the core's superuser pool, which bypasses RLS and never reaches a policy. Unset
+   therefore means "no policy is being evaluated", where denying buys nothing and
+   would strand any future caller reading an app table directly. `nullif` is part of
+   the same reasoning: a pooled connection that once served an app keeps the GUC as
+   `''` rather than unset, and `''` means the same "nobody said" as absent.
+
+   The schema is the *target's*, not the caller's, and that distinction is
+   load-bearing in one place: an agent tool takes an optional `app` argument, so a
+   delegated agent in app A writing app B's table opens the transaction on B. It is
+   B's resolvers that must answer, and they do. An invocation context (action or
+   job) rides alongside without touching this — it names which capability is
+   running, not whose data.
 
    **What this constrains later.** Cross-app SQL, when it arrives, will need the
    guard keyed on a *set* of schemas the transaction is entitled to rather than the
@@ -302,13 +310,13 @@ shapes.
 
 ```
 $ ROOTCX_RESOURCES=~/.rootcx/bin cargo test -p rootcx-core --test row_ownership_test
-cargo test: 16 passed (1 suite, 36.80s)
+cargo test: 16 passed (1 suite, 37.54s)
 
 $ cargo test -p rootcx-core --lib -- --test-threads=1
-cargo test: 365 passed (1 suite, 3.22s)
+cargo test: 367 passed (1 suite, 3.04s)
 
 $ ROOTCX_RESOURCES=~/.rootcx/bin cargo test -p rootcx-core --test governance_contract_test
-cargo test: 78 passed, 1 ignored (1 suite, 149.39s)
+cargo test: 80 passed, 1 ignored (1 suite, 156.05s)
 
 $ cargo check --workspace
 0 errors (2 pre-existing warnings)
