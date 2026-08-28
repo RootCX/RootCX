@@ -1,4 +1,4 @@
-// Ambient type declarations for the RootCX worker prelude (v2).
+// Ambient type declarations for the RootCX worker prelude (v3).
 // The prelude (`core/src/backend_prelude.js`) injects these globals at
 // runtime via `--preload`. This file provides TypeScript with the shapes
 // so integrations can call `serve()`, `log.*`, `emit()` etc. without
@@ -8,6 +8,11 @@ interface RootCxSqlResult {
   columns: string[];
   rows: unknown[][];
   rowCount: number;
+}
+
+interface RootCxTransaction {
+  /** Run one statement in this transaction under the caller's governed identity. */
+  sql(text: string, params?: unknown[]): Promise<RootCxSqlResult>;
 }
 
 interface RootCxStoredFile {
@@ -36,6 +41,12 @@ interface RootCxCtx {
   // Run SQL through the core under the caller's RLS identity. The app holds
   // no DB connection; params are positional ($1, $2, …).
   sql(text: string, params?: unknown[]): Promise<RootCxSqlResult>;
+  /**
+   * Run database work atomically. The Core commits only when the callback and
+   * every tx.sql call succeed; otherwise it rolls back. External capabilities
+   * are intentionally unavailable inside the callback.
+   */
+  transaction<T>(callback: (tx: RootCxTransaction) => T | PromiseLike<T>): Promise<T>;
   // Privileged self-action over IPC (integrations) — no token replay.
   selfAction(action: string, params?: Record<string, unknown>): Promise<any>;
   // Invoke one of this app's own actions; credentials resolve for the caller.

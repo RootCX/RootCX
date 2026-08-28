@@ -215,10 +215,14 @@ pub enum OutboundMessage {
 ///   stdin dispatcher and builds a `ctx` (`collection`, `uploadFile`, …).
 ///   The worker MUST announce `protocol: 2` in its `discover` response.
 ///
+/// * **v3** — adds governed callback transactions (`ctx.transaction`) over
+///   SqlBegin/SqlExec/SqlCommit/SqlRollback. Older workers keep all v1/v2
+///   capabilities and never receive transaction-only messages.
+///
 /// Adding a new version = add a const, bump the scaffold template, teach
 /// the supervisor which messages are safe to send based on the negotiated
 /// version. Never remove a version without an explicit migration plan.
-pub const LATEST_PROTOCOL_VERSION: u32 = 2;
+pub const LATEST_PROTOCOL_VERSION: u32 = 3;
 
 fn default_protocol_version() -> u32 {
     1
@@ -303,8 +307,9 @@ pub enum InboundMessage {
     /// Open a multi-statement transaction. The core calls `begin_app_tx` (same
     /// sandbox as single-statement SqlQuery: RLS, role drop, search_path, audit
     /// GUCs) and holds the TX open. The worker sends `SqlExec` messages against
-    /// this TX, then `SqlCommit` or `SqlRollback`. Max 1 open TX per worker.
-    /// TX auto-rollbacks on worker exit. Hard 60s wall-time limit.
+    /// this TX, then `SqlCommit` or `SqlRollback`. Core applies per-worker and
+    /// global concurrency caps. TX auto-rollbacks on worker exit and has a
+    /// 60-second wall-time deadline.
     SqlBegin {
         id: String,
     },
@@ -503,6 +508,28 @@ mod tests {
                     error: None,
                 },
                 "job_enqueue_result",
+            ),
+            (
+                OutboundMessage::SqlBeginResult {
+                    id: "tb1".into(),
+                    tx_id: Some("tx1".into()),
+                    error: None,
+                },
+                "sql_begin_result",
+            ),
+            (
+                OutboundMessage::SqlExecResult {
+                    id: "te1".into(),
+                    columns: Some(vec!["id".into()]),
+                    rows: Some(vec![vec![json!(1)]]),
+                    row_count: Some(1),
+                    error: None,
+                },
+                "sql_exec_result",
+            ),
+            (
+                OutboundMessage::SqlEndResult { id: "tc1".into(), error: None },
+                "sql_end_result",
             ),
             (OutboundMessage::Shutdown, "shutdown"),
             (

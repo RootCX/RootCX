@@ -100,15 +100,15 @@ afterAll(() => {
   for (const f of tmpFiles) try { unlinkSync(f); } catch {}
 });
 
-// ─── v2 protocol: serve()-based workers ──────────────────────────────────────
+// ─── v3 protocol: serve()-based workers ──────────────────────────────────────
 
-describe("v2: serve()", () => {
+describe("v3: serve()", () => {
   test("discover responds with protocol version and methods", async () => {
     const w = spawnWorker(`serve({ rpc: { ping: () => "pong", echo: (p: any) => p } });`);
     w.send(DISCOVER);
     const msg = await w.readLine();
     expect(msg.type).toBe("discover");
-    expect(msg.protocol).toBe(2);
+    expect(msg.protocol).toBe(3);
     expect(msg.methods).toEqual(["ping", "echo"]);
     await w.close();
   });
@@ -237,6 +237,214 @@ describe("v2: serve()", () => {
       id: "r1",
       result: { id: "1", name: "test" },
     });
+    await w.close();
+  });
+
+  test("ctx.transaction serializes statements, commits, and returns the callback value", async () => {
+    const w = spawnWorker(`
+      serve({ rpc: {
+        async save(_params: any, _caller: any, ctx: any) {
+          return ctx.transaction(async (tx: any) => {
+            const first = tx.sql("INSERT first RETURNING id", [1]);
+            const second = tx.sql("INSERT second RETURNING id", [2]);
+            const [a, b] = await Promise.all([first, second]);
+            return { ids: [a.rows[0][0], b.rows[0][0]] };
+          });
+        },
+      } });
+    `);
+    w.send(DISCOVER);
+    await w.readLine();
+    w.send({ type: "rpc", id: "r1", method: "save", params: {} });
+
+    const begin = await w.readLine();
+    expect(begin.type).toBe("sql_begin");
+    w.send({ type: "sql_begin_result", id: begin.id, tx_id: "core-tx" });
+
+    const first = await w.readLine();
+    expect(first).toMatchObject({ type: "sql_exec", tx_id: "core-tx", sql: "INSERT first RETURNING id", params: [1] });
+    expect(await w.noOutput()).toBe(true);
+    w.send({ type: "sql_exec_result", id: first.id, rows: [["a"]], columns: ["id"], row_count: 1 });
+
+    const second = await w.readLine();
+    expect(second).toMatchObject({ type: "sql_exec", tx_id: "core-tx", sql: "INSERT second RETURNING id", params: [2] });
+    w.send({ type: "sql_exec_result", id: second.id, rows: [["b"]], columns: ["id"], row_count: 1 });
+
+    const commit = await w.readLine();
+    expect(commit).toMatchObject({ type: "sql_commit", tx_id: "core-tx" });
+    w.send({ type: "sql_end_result", id: commit.id });
+    expect(await w.readLine()).toEqual({ type: "rpc_response", id: "r1", result: { ids: ["a", "b"] } });
+    await w.close();
+  });
+
+  test("a tx.sql error poisons the callback outcome even when application code catches it", async () => {
+    const w = spawnWorker(`
+      serve({ rpc: {
+        async save(_p: any, _c: any, ctx: any) {
+          return ctx.transaction(async (tx: any) => {
+            try { await tx.sql("BROKEN"); } catch (_) {}
+            return "must-not-commit";
+          });
+        },
+      } });
+    `);
+    w.send(DISCOVER);
+    await w.readLine();
+    w.send({ type: "rpc", id: "r1", method: "save", params: {} });
+    const begin = await w.readLine();
+    w.send({ type: "sql_begin_result", id: begin.id, tx_id: "core-tx" });
+    const exec = await w.readLine();
+    w.send({ type: "sql_exec_result", id: exec.id, error: "constraint failed" });
+    const rollback = await w.readLine();
+    expect(rollback.type).toBe("sql_rollback");
+    w.send({ type: "sql_end_result", id: rollback.id });
+    expect(await w.readLine()).toEqual({ type: "rpc_response", id: "r1", error: "constraint failed" });
+    await w.close();
+  });
+
+  test("callback failure rolls back and keeps the original error if rollback also fails", async () => {
+    const w = spawnWorker(`
+      serve({ rpc: {
+        fail: (_p: any, _c: any, ctx: any) => ctx.transaction(() => { throw new Error("business failure"); }),
+      } });
+    `);
+    w.send(DISCOVER);
+    await w.readLine();
+    w.send({ type: "rpc", id: "r1", method: "fail", params: {} });
+    const begin = await w.readLine();
+    w.send({ type: "sql_begin_result", id: begin.id, tx_id: "core-tx" });
+    const rollback = await w.readLine();
+    expect(rollback.type).toBe("sql_rollback");
+    w.send({ type: "sql_end_result", id: rollback.id, error: "connection lost" });
+    const logLine = await w.readLine();
+    expect(logLine).toMatchObject({ type: "log", level: "error" });
+    expect(logLine.message).toContain("connection lost");
+    expect(await w.readLine()).toEqual({ type: "rpc_response", id: "r1", error: "business failure" });
+    await w.close();
+  });
+
+  test("transaction rejects nesting", async () => {
+    const w = spawnWorker(`
+      serve({ rpc: {
+        async inspect(_p: any, _c: any, ctx: any) {
+          let error = "";
+          await ctx.transaction(async (tx: any) => {
+            try { await ctx.transaction(() => null); } catch (e: any) { error = e.message; }
+          });
+          return error;
+        },
+      } });
+    `);
+    w.send(DISCOVER);
+    await w.readLine();
+    w.send({ type: "rpc", id: "r1", method: "inspect", params: {} });
+    const begin = await w.readLine();
+    w.send({ type: "sql_begin_result", id: begin.id, tx_id: "core-tx" });
+    const commit = await w.readLine();
+    expect(commit.type).toBe("sql_commit");
+    w.send({ type: "sql_end_result", id: commit.id });
+    const response = await w.readLine();
+    expect(response.result).toBe("nested transactions are not supported; use the current tx");
+    await w.close();
+  });
+
+  test("transaction exposes only tx.sql while its callback is active", async () => {
+    const w = spawnWorker(`
+      serve({ rpc: {
+        async inspect(_p: any, _c: any, ctx: any) {
+          const errors: Array<{ capability: string; error: string }> = [];
+          await ctx.transaction(async (_tx: any) => {
+            for (const [capability, call] of [
+              ["ctx.sql", () => ctx.sql("SELECT outside")],
+              ["ctx.collection", () => ctx.collection("items").find()],
+              ["global emit", () => globalThis.emit("outside-effect")],
+              ["global uploadFile", () => globalThis.uploadFile("x", "x.txt", "text/plain")],
+            ]) {
+              try { await call(); }
+              catch (e: any) { errors.push({ capability, error: e.message }); }
+            }
+          });
+          return errors;
+        },
+      } });
+    `);
+    w.send(DISCOVER);
+    await w.readLine();
+    w.send({ type: "rpc", id: "r1", method: "inspect", params: {} });
+    const begin = await w.readLine();
+    w.send({ type: "sql_begin_result", id: begin.id, tx_id: "core-tx" });
+    const commit = await w.readLine();
+    expect(commit.type).toBe("sql_commit");
+    w.send({ type: "sql_end_result", id: commit.id });
+    const response = await w.readLine();
+    expect(response.result).toEqual([
+      { capability: "ctx.sql", error: expect.stringContaining("ctx.sql cannot be used inside") },
+      { capability: "ctx.collection", error: expect.stringContaining("ctx.collection cannot be used inside") },
+      { capability: "global emit", error: expect.stringContaining("emit cannot be used inside") },
+      { capability: "global uploadFile", error: expect.stringContaining("uploadFile cannot be used inside") },
+    ]);
+    await w.close();
+  });
+
+  test("transaction capability guard is isolated to its async invocation", async () => {
+    const w = spawnWorker(`
+      let release: () => void;
+      serve({ rpc: {
+        hold: (_p: any, _c: any, ctx: any) => ctx.transaction(
+          () => new Promise<void>((resolve) => {
+            release = resolve;
+            log.info("transaction callback is waiting");
+          }),
+        ),
+        outside: () => {
+          globalThis.emit("outside-allowed");
+          release();
+          return "released";
+        },
+      } });
+    `);
+    w.send(DISCOVER);
+    await w.readLine();
+    w.send({ type: "rpc", id: "holding", method: "hold", params: {} });
+    const begin = await w.readLine();
+    w.send({ type: "sql_begin_result", id: begin.id, tx_id: "core-tx" });
+    expect(await w.readLine()).toMatchObject({ type: "log", level: "info" });
+
+    w.send({ type: "rpc", id: "outside", method: "outside", params: {} });
+    const event = await w.readLine();
+    expect(event).toMatchObject({ type: "event", name: "outside-allowed" });
+
+    const messages = [await w.readLine(), await w.readLine()];
+    const outsideResponse = messages.find((message) => message.type === "rpc_response");
+    const commit = messages.find((message) => message.type === "sql_commit");
+    expect(outsideResponse).toEqual({ type: "rpc_response", id: "outside", result: "released" });
+    expect(commit).toMatchObject({ type: "sql_commit", tx_id: "core-tx" });
+    w.send({ type: "sql_end_result", id: commit.id });
+    expect(await w.readLine()).toEqual({ type: "rpc_response", id: "holding" });
+    await w.close();
+  });
+
+  test("transaction handle expires when its callback returns", async () => {
+    const w = spawnWorker(`
+      let leaked: any;
+      serve({ rpc: {
+        async inspect(_p: any, _c: any, ctx: any) {
+          await ctx.transaction(async (tx: any) => { leaked = tx; });
+          try { await leaked.sql("SELECT late"); }
+          catch (e: any) { return e.message; }
+        },
+      } });
+    `);
+    w.send(DISCOVER);
+    await w.readLine();
+    w.send({ type: "rpc", id: "r1", method: "inspect", params: {} });
+    const begin = await w.readLine();
+    w.send({ type: "sql_begin_result", id: begin.id, tx_id: "core-tx" });
+    const commit = await w.readLine();
+    expect(commit.type).toBe("sql_commit");
+    w.send({ type: "sql_end_result", id: commit.id });
+    const response = await w.readLine();
+    expect(response.result).toBe("transaction is no longer active");
     await w.close();
   });
 
@@ -440,9 +648,9 @@ describe("v2: serve()", () => {
   });
 });
 
-// ─── v2 compat: old serve(handlers) flat signature ──────────────────────────
+// ─── v3 compat: old serve(handlers) flat signature ──────────────────────────
 
-describe("v2 compat: old flat serve() signature", () => {
+describe("v3 compat: old flat serve() signature", () => {
   test("serve({ method: fn }) works without rpc wrapper", async () => {
     const w = spawnWorker(`serve({ ping: () => "pong", echo: (p: any) => p });`);
     w.send(DISCOVER);
@@ -451,7 +659,7 @@ describe("v2 compat: old flat serve() signature", () => {
     let disc = await w.readLine();
     while (disc.type === "log") disc = await w.readLine();
 
-    expect(disc.protocol).toBe(2);
+    expect(disc.protocol).toBe(3);
     expect(disc.methods).toEqual(["ping", "echo"]);
 
     w.send({ type: "rpc", id: "r1", method: "ping", params: {} });

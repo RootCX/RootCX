@@ -25,6 +25,14 @@ const BACKEND_PRELUDE: &str = include_str!("backend_prelude.js");
 /// token to forge. See docs/security-context-token-confusion.md.
 type WorkerKey = (String, String);
 
+fn worker_key_belongs_to_principal(key: &WorkerKey, user_id: uuid::Uuid) -> bool {
+    if crate::extensions::agents::agent_user_id(&key.0) == user_id {
+        return true;
+    }
+    let user_prefix = user_id.to_string();
+    key.1 == user_prefix || key.1.starts_with(&format!("{user_prefix}|"))
+}
+
 /// Who a worker process acts as, for its whole life. Each distinct principal
 /// gets its own process, so a worker can never act as another (the cross-user
 /// confused deputy is structurally impossible). Three kinds never share a
@@ -175,9 +183,18 @@ impl WorkerManager {
             Some((boot, sup)) => (Some(boot), sup),
             None => (None, None),
         };
+        let mut identity = principal.rls_state();
+        if identity.audit_actor_id.is_none() {
+            if identity.is_delegated {
+                identity.audit_actor_id = Some(crate::extensions::agents::agent_user_id(app_id));
+                identity.audit_delegator_id = identity.user_id;
+            } else {
+                identity.audit_actor_id = identity.user_id;
+            }
+        }
         let config = WorkerConfig {
             app_id: app_id.to_string(),
-            identity: principal.rls_state(),
+            identity,
             run_onstart: principal.run_onstart(),
             entry_point,
             working_dir: app_dir,
@@ -294,14 +311,17 @@ impl WorkerManager {
     }
 
     pub async fn invalidate_for_principal(&self, user_id: uuid::Uuid) {
-        let target = self.workers.read().await.keys()
-            .find(|(app_id, _)| crate::extensions::agents::agent_user_id(app_id) == user_id)
-            .map(|(app_id, _)| app_id.clone());
-        if let Some(app_id) = target {
-            info!(app_id = %app_id, %user_id, "invalidating worker (permission change)");
-            if let Err(e) = self.stop_app(&app_id).await {
-                error!(app_id = %app_id, "invalidate stop: {e}");
+        let affected: Vec<(WorkerKey, SupervisorHandle)> = self.workers.read().await.iter()
+            .filter(|(key, _)| worker_key_belongs_to_principal(key, user_id))
+            .map(|(key, handle)| (key.clone(), handle.clone()))
+            .collect();
+
+        for (key, handle) in affected {
+            info!(app_id = %key.0, %user_id, "invalidating worker (permission change)");
+            if let Err(e) = handle.stop().await {
+                error!(app_id = %key.0, "invalidate stop: {e}");
             }
+            self.workers.write().await.remove(&key);
         }
     }
 
@@ -342,6 +362,7 @@ impl WorkerManager {
         let identity = crate::governance::enforcement::ContextState {
             user_id: payload.invoker_user_id, is_delegated: true, effective_perms,
             connection_id: None,
+            audit_actor_id: Some(agent_uid), audit_delegator_id: payload.invoker_user_id,
         };
         // An agent invoke is always a delegated principal, never anonymous.
         let session_id = payload.session_id.clone();
@@ -614,7 +635,7 @@ fn resolve_entry_point(app_dir: &Path) -> Result<PathBuf, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::Principal;
+    use super::{Principal, worker_key_belongs_to_principal};
     use crate::governance::enforcement::ContextState;
     use uuid::Uuid;
 
@@ -624,6 +645,8 @@ mod tests {
             is_delegated: delegated,
             effective_perms: perms.iter().map(|s| s.to_string()).collect(),
             connection_id: None,
+            audit_actor_id: uid,
+            audit_delegator_id: None,
         })
     }
 
@@ -638,6 +661,46 @@ mod tests {
             user(Some(u), true, &["c", "b", "a"]).key(),
             "permission order must not change the worker key",
         );
+    }
+
+    #[test]
+    fn permission_invalidation_selects_every_worker_owned_by_the_principal() {
+        let user_id = Uuid::new_v4();
+        let agent_app = "agent-owned-by-principal";
+        let agent_id = crate::extensions::agents::agent_user_id(agent_app);
+        let cases = [
+            (
+                "direct human worker",
+                ("app-a".to_string(), user(Some(user_id), false, &[]).key()),
+                user_id,
+                true,
+            ),
+            (
+                "delegated human worker",
+                ("app-b".to_string(), user(Some(user_id), true, &["app:x:read"]).key()),
+                user_id,
+                true,
+            ),
+            (
+                "agent worker",
+                (agent_app.to_string(), user(None, true, &[]).key()),
+                agent_id,
+                true,
+            ),
+            (
+                "unrelated worker",
+                ("app-c".to_string(), user(Some(Uuid::new_v4()), true, &[]).key()),
+                user_id,
+                false,
+            ),
+        ];
+        for (label, key, principal, expected) in cases {
+            assert_eq!(
+                worker_key_belongs_to_principal(&key, principal),
+                expected,
+                "wrong invalidation decision for {label}",
+            );
+        }
     }
 
     // The security-critical property: distinct principals NEVER share a worker.
@@ -688,14 +751,14 @@ mod tests {
         assert!(!p.run_onstart());
         // A real user is classified as User, never Anonymous/System.
         assert!(matches!(
-            Principal::from_request(ContextState { user_id: Some(Uuid::new_v4()), is_delegated: false, effective_perms: vec![], connection_id: None }),
+            Principal::from_request(ContextState { user_id: Some(Uuid::new_v4()), is_delegated: false, effective_perms: vec![], connection_id: None, audit_actor_id: None, audit_delegator_id: None }),
             Principal::User(_)
         ));
         // A delegated no-user principal (cron/webhook agent) is a real authority,
         // NOT anonymous: it must get its own worker. Guards against simplifying
         // from_request to a `user_id.is_none()` check alone.
         assert!(matches!(
-            Principal::from_request(ContextState { user_id: None, is_delegated: true, effective_perms: vec![], connection_id: None }),
+            Principal::from_request(ContextState { user_id: None, is_delegated: true, effective_perms: vec![], connection_id: None, audit_actor_id: None, audit_delegator_id: None }),
             Principal::User(_)
         ));
     }

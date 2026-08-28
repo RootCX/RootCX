@@ -36,6 +36,10 @@ pub struct ContextState {
     /// credential resolution uses this connection instead of the created_at
     /// fallback. Inherited through sub-calls (ctx.action re-entries).
     pub connection_id: Option<String>,
+    /// Audit attribution is distinct from the RLS owner. In a delegated worker
+    /// the responsible human owns rows while the app/agent is the actor.
+    pub audit_actor_id: Option<Uuid>,
+    pub audit_delegator_id: Option<Uuid>,
 }
 
 impl ContextState {
@@ -47,6 +51,8 @@ impl ContextState {
                 is_delegated: c.effective_perms.is_some(),
                 effective_perms: c.effective_perms.clone().unwrap_or_default(),
                 connection_id: c.connection_id.clone(),
+                audit_actor_id: if c.effective_perms.is_none() { c.user_id.parse().ok() } else { None },
+                audit_delegator_id: None,
             },
             None => Self::default(),
         }
@@ -290,7 +296,10 @@ pub async fn run_sql(
 ) -> Result<SqlOk, String> {
     validate_sql(sql)?;
 
-    let mut tx = begin_app_tx(pool, app_schema, state, state.user_id, None, "app_sql", TIMEOUT_INTERACTIVE_MS)
+    let mut tx = begin_app_tx(
+        pool, app_schema, state, state.audit_actor_id, state.audit_delegator_id,
+        "app_sql", TIMEOUT_INTERACTIVE_MS,
+    )
         .await.map_err(|e| e.to_string())?;
 
     let args = build_typed_args(&mut *tx, sql, params).await?;
@@ -327,6 +336,7 @@ static TX_SEMAPHORE: Semaphore = Semaphore::const_new(TX_MAX_CONCURRENT);
 
 enum TxCmd {
     Exec { sql: String, params: Vec<JsonValue>, reply: oneshot::Sender<Result<SqlOk, String>> },
+    Poison { error: String, reply: oneshot::Sender<Result<(), String>> },
     Commit { reply: oneshot::Sender<Result<(), String>> },
     Rollback { reply: oneshot::Sender<Result<(), String>> },
 }
@@ -344,6 +354,17 @@ async fn round_trip<R>(
     reply_rx.await.unwrap_or_else(|_| Err(TX_GONE.into()))
 }
 
+fn try_enqueue<R>(
+    cmd_tx: &mpsc::Sender<TxCmd>,
+    make: impl FnOnce(oneshot::Sender<Result<R, String>>) -> TxCmd,
+) -> Result<oneshot::Receiver<Result<R, String>>, String> {
+    let (reply, receive) = oneshot::channel();
+    cmd_tx
+        .try_send(make(reply))
+        .map_err(|e| format!("transaction command queue unavailable: {e}"))?;
+    Ok(receive)
+}
+
 /// Cloneable handle to send statements to an open transaction's task without
 /// borrowing the session. Lets the supervisor spawn an exec round-trip instead
 /// of awaiting it inline (which would head-of-line-block the worker's loop).
@@ -356,6 +377,26 @@ impl TxExec {
     pub async fn exec(&self, sql: String, params: Vec<JsonValue>) -> Result<SqlOk, String> {
         round_trip(&self.cmd_tx, |reply| TxCmd::Exec { sql, params, reply }).await
     }
+
+    /// Enqueue without yielding so commands preserve the worker IPC order even
+    /// when their replies are awaited by separate tasks.
+    pub fn enqueue_exec(
+        &self,
+        sql: String,
+        params: Vec<JsonValue>,
+    ) -> Result<oneshot::Receiver<Result<SqlOk, String>>, String> {
+        try_enqueue(&self.cmd_tx, |reply| TxCmd::Exec { sql, params, reply })
+    }
+
+    /// Poison a transaction for an execution error detected before PostgreSQL
+    /// (for example the worker's SQL rate limit). A poisoned transaction can
+    /// only roll back; commit will fail closed.
+    pub fn enqueue_poison(
+        &self,
+        error: String,
+    ) -> Result<oneshot::Receiver<Result<(), String>>, String> {
+        try_enqueue(&self.cmd_tx, |reply| TxCmd::Poison { error, reply })
+    }
 }
 
 /// Handle to a governed multi-statement transaction running on its own task.
@@ -364,9 +405,9 @@ impl TxExec {
 /// terminates on the first of: commit, rollback, the wall-time deadline, or this
 /// handle being dropped (worker crash/stop closes the command channel). On exit
 /// it reports its `tx_id` on the `done` channel so the supervisor can clear its
-/// slot. The pooled connection and the TX permit are therefore ALWAYS released
-/// within `TX_MAX_WALL_TIME`, no matter how the worker dies — there is no path
-/// that leaks them.
+/// slot. The task and TX permit are released by `TX_MAX_WALL_TIME`; at an
+/// exhausted deadline the SQLx transaction is dropped so its driver-managed
+/// rollback begins without awaiting more network I/O in this task.
 pub struct TxSession {
     pub tx_id: String,
     cmd_tx: mpsc::Sender<TxCmd>,
@@ -389,6 +430,7 @@ impl TxSession {
             .try_acquire()
             .map_err(|_| "too many concurrent transactions; retry".to_string())?;
 
+        let deadline = TokioInstant::now() + TX_MAX_WALL_TIME;
         let pool = pool.clone();
         let app_schema = app_schema.to_string();
         let state = state.clone();
@@ -405,40 +447,91 @@ impl TxSession {
             // `done` therefore guarantees the connection is returned on every
             // path — including the channel-closed (worker crash/stop) path.
             {
-                let mut pg_tx = match begin_app_tx(
-                    &pool, &app_schema, &state, state.user_id, None, "app_tx", TIMEOUT_INTERACTIVE_MS,
+                let mut pg_tx = match tokio::time::timeout_at(
+                    deadline,
+                    begin_app_tx(
+                        &pool, &app_schema, &state, state.audit_actor_id, state.audit_delegator_id,
+                        "app_tx", TIMEOUT_INTERACTIVE_MS,
+                    ),
                 ).await {
-                    Ok(t) => { let _ = ready_tx.send(Ok(())); t }
-                    Err(e) => { let _ = ready_tx.send(Err(e.to_string())); return; }
+                    Ok(Ok(t)) => { let _ = ready_tx.send(Ok(())); t }
+                    Ok(Err(e)) => { let _ = ready_tx.send(Err(e.to_string())); return; }
+                    Err(_) => { let _ = ready_tx.send(Err("transaction deadline exceeded".into())); return; }
                 };
 
-                let deadline = TokioInstant::now() + TX_MAX_WALL_TIME;
+                let mut failed: Option<String> = None;
                 loop {
                     tokio::select! {
                         biased;
-                        _ = sleep_until(deadline) => { let _ = pg_tx.rollback().await; break; }
+                        _ = sleep_until(deadline) => {
+                            // The deadline is already exhausted, so do not await
+                            // network I/O beyond it. Dropping Transaction starts
+                            // SQLx's rollback-on-drop and releases our ownership.
+                            drop(pg_tx);
+                            break;
+                        }
                         cmd = cmd_rx.recv() => match cmd {
                             Some(TxCmd::Exec { sql, params, reply }) => {
-                                let result = match validate_sql(&sql) {
-                                    Err(e) => Err(e),
-                                    Ok(()) => match build_typed_args(&mut *pg_tx, &sql, &params).await {
-                                        Err(e) => Err(e),
-                                        Ok(args) => match sqlx::query_with(&sql, args)
-                                            .fetch_all(&mut *pg_tx).await
-                                        {
-                                            Err(e) => Err(e.to_string()),
-                                            Ok(rows) => serialize_rows(rows),
-                                        },
-                                    },
+                                if let Some(reason) = &failed {
+                                    let _ = reply.send(Err(format!("transaction is aborted: {reason}")));
+                                    continue;
+                                }
+                                let execution = async {
+                                    validate_sql(&sql)?;
+                                    let args = build_typed_args(&mut *pg_tx, &sql, &params).await?;
+                                    let rows = sqlx::query_with(&sql, args)
+                                        .fetch_all(&mut *pg_tx).await
+                                        .map_err(|e| e.to_string())?;
+                                    serialize_rows(rows)
                                 };
-                                let _ = reply.send(result);
+                                match tokio::time::timeout_at(deadline, execution).await {
+                                    Ok(result) => {
+                                        if let Err(error) = &result {
+                                            failed = Some(error.clone());
+                                        }
+                                        let _ = reply.send(result);
+                                    }
+                                    Err(_) => {
+                                        let _ = reply.send(Err("transaction deadline exceeded".into()));
+                                        drop(pg_tx);
+                                        break;
+                                    }
+                                }
+                            }
+                            Some(TxCmd::Poison { error, reply }) => {
+                                if failed.is_none() {
+                                    failed = Some(error);
+                                }
+                                let _ = reply.send(Ok(()));
                             }
                             Some(TxCmd::Commit { reply }) => {
-                                let _ = reply.send(pg_tx.commit().await.map_err(|e| e.to_string()));
+                                if let Some(reason) = failed {
+                                    let rollback = match tokio::time::timeout_at(deadline, pg_tx.rollback()).await {
+                                        Ok(result) => result.map_err(|e| e.to_string()),
+                                        Err(_) => Err("transaction deadline exceeded during rollback".into()),
+                                    };
+                                    let error = match rollback {
+                                        Ok(()) => format!("transaction rolled back after statement error: {reason}"),
+                                        Err(rollback_error) => format!(
+                                            "transaction failed ({reason}) and rollback failed ({rollback_error})"
+                                        ),
+                                    };
+                                    let _ = reply.send(Err(error));
+                                } else {
+                                    let result = match tokio::time::timeout_at(deadline, pg_tx.commit()).await {
+                                        Ok(result) => result.map_err(|e| e.to_string()),
+                                        Err(_) => Err("transaction deadline exceeded during commit".into()),
+                                    };
+                                    let _ = reply.send(result);
+                                }
                                 break;
                             }
                             Some(TxCmd::Rollback { reply }) => {
-                                let _ = reply.send(pg_tx.rollback().await.map_err(|e| e.to_string()));
+                                let result = match tokio::time::timeout_at(deadline, pg_tx.rollback()).await {
+                                    Ok(result) => result.map_err(|e| e.to_string()),
+                                    Err(_) => Err("transaction deadline exceeded during rollback".into()),
+                                };
+                                let _ = reply.send(result);
                                 break;
                             }
                             // Channel closed (handle dropped on worker crash/stop):

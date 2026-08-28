@@ -52,6 +52,7 @@ mod tests {
             "src/lib/utils.ts",
             "src/App.tsx",
             "backend/index.ts",
+            "backend/rootcx-worker.d.ts",
         ] {
             assert!(app.join(f).exists(), "missing {f}");
         }

@@ -35,6 +35,30 @@ const result = await ctx.sql("SELECT id, name FROM contacts WHERE org_id = $1", 
 - Max 1000 rows per query (add LIMIT, paginate if needed)
 - 8-second timeout per query
 
+### `ctx.transaction(callback)` (worker protocol v3)
+
+Use a callback transaction when several statements must commit or roll back as
+one governed database change:
+
+```typescript
+const value = await ctx.transaction(async (tx) => {
+  const created = await tx.sql(
+    "INSERT INTO orders (number) VALUES ($1) RETURNING id", [number],
+  );
+  await tx.sql("INSERT INTO order_lines (order_id, article_id) VALUES ($1, $2)", [
+    created.rows[0][0], articleId,
+  ]);
+  return { id: created.rows[0][0] };
+});
+```
+
+The Core hides begin/commit/rollback, preserves statement call order and rolls
+back on callback or statement failure. Catching a `tx.sql` error cannot make the
+transaction commit. Only `tx.sql` belongs inside the callback; collection,
+integration, storage, event and job operations are rejected because they are not
+part of the PostgreSQL transaction. Core limits the resource to 60 seconds with
+a 30-second idle ceiling; interactive RPCs retain their 30-second timeout.
+
 ### `ctx.collection(entity)` (unchanged)
 
 Structured CRUD on the app's own schema. Same API as before.

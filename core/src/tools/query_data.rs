@@ -63,6 +63,8 @@ impl Tool for QueryDataTool {
             is_delegated: true,
             effective_perms: ctx.permissions.clone(),
             connection_id: None,
+            audit_actor_id: Some(ctx.user_id),
+            audit_delegator_id: ctx.invoker_user_id,
         };
         let mut tx = enforcement::begin_app_tx(&ctx.pool, app, &state, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool", enforcement::TIMEOUT_AGENT_TOOL_MS)
             .await.map_err(|e| e.to_string())?;

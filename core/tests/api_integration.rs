@@ -2355,6 +2355,226 @@ async fn ipc_v2_collection_op_round_trip() {
     rt.shutdown().await;
 }
 
+const IPC_V3_TRANSACTION_BACKEND: &[u8] = br#"
+        serve({ rpc: {
+            ping() { return "pong"; },
+            async commit(_params, _caller, ctx) {
+                return ctx.transaction(async (tx) => {
+                    await tx.sql("INSERT INTO items (first_name, last_name) VALUES ($1, $2)", ["Ada", "Lovelace"]);
+                    await tx.sql("INSERT INTO items (first_name, last_name) VALUES ($1, $2)", ["Grace", "Hopper"]);
+                    return { committed: true };
+                });
+            },
+            async rollback(_params, _caller, ctx) {
+                return ctx.transaction(async (tx) => {
+                    await tx.sql("INSERT INTO items (first_name, last_name) VALUES ($1, $2)", ["Must", "Rollback"]);
+                    throw new Error("business failure");
+                });
+            },
+            async caught_sql_error(_params, _caller, ctx) {
+                return ctx.transaction(async (tx) => {
+                    await tx.sql("INSERT INTO items (first_name, last_name) VALUES ($1, $2)", ["Also", "Rollback"]);
+                    try { await tx.sql("INSERT INTO missing_table VALUES (1)"); } catch (_) {}
+                    return { committed: "must not happen" };
+                });
+            },
+            async concurrent(params, _caller, ctx) {
+                return ctx.transaction(async (tx) => {
+                    await tx.sql("INSERT INTO items (first_name, last_name) VALUES ($1, $2)", [params.name, "Concurrent"]);
+                    await tx.sql("SELECT pg_sleep(0.2)");
+                    return { name: params.name };
+                });
+            },
+        } });
+    "#;
+
+async fn deploy_transaction_worker(app_id: &str) -> (TestRuntime, StatusCode) {
+    let rt = TestRuntime::boot().await;
+    rt.install(app_id, "items").await;
+    let (status, _) = rt.deploy(
+        app_id,
+        &make_tar_gz(&[("index.ts", IPC_V3_TRANSACTION_BACKEND)]),
+    ).await;
+    (rt, status)
+}
+
+async fn wait_for_transaction_worker(rt: &TestRuntime, app_id: &str) {
+    for _ in 0..25 {
+        let response = rt.post_json(
+            &format!("/api/v1/apps/{app_id}/rpc"),
+            &json!({ "method": "ping", "params": {} }),
+        ).await;
+        if response.0 == StatusCode::OK {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    panic!("transaction worker {app_id} never became ready");
+}
+
+#[tokio::test]
+async fn ipc_v3_transaction_is_atomic_across_worker_and_database() {
+    let (rt, deploy_status) = deploy_transaction_worker("ipctxatomic").await;
+    assert_eq!(deploy_status, StatusCode::OK);
+    wait_for_transaction_worker(&rt, "ipctxatomic").await;
+
+    let (commit_status, commit_result) = rt.post_json(
+        "/api/v1/apps/ipctxatomic/rpc",
+        &json!({ "method": "commit", "params": {} }),
+    ).await;
+    assert_eq!(commit_status, StatusCode::OK, "commit failed: {commit_result}");
+
+    for method in ["rollback", "caught_sql_error"] {
+        let (status, error) = rt.post_json("/api/v1/apps/ipctxatomic/rpc", &json!({
+            "method": method, "params": {}
+        })).await;
+        assert!(
+            status.is_server_error(),
+            "failure variant {method} must roll back: {status} {error}",
+        );
+    }
+
+    let (status, rows) = rt.get_json("/api/v1/apps/ipctxatomic/collections/items").await;
+    assert_eq!(status, StatusCode::OK);
+    let names: std::collections::HashSet<_> = rows.as_array().unwrap().iter()
+        .map(|row| row["first_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        std::collections::HashSet::from(["Ada", "Grace"]),
+        "only the successful callback may persist",
+    );
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn ipc_v3_same_worker_runs_transactions_concurrently() {
+    let (rt, deploy_status) = deploy_transaction_worker("ipctxconcurrent").await;
+    assert_eq!(deploy_status, StatusCode::OK);
+    wait_for_transaction_worker(&rt, "ipctxconcurrent").await;
+
+    let first_payload = json!({
+        "method": "concurrent", "params": {"name": "Linus"}
+    });
+    let second_payload = json!({
+        "method": "concurrent", "params": {"name": "Margaret"}
+    });
+    let first = rt.post_json("/api/v1/apps/ipctxconcurrent/rpc", &first_payload);
+    let second = rt.post_json("/api/v1/apps/ipctxconcurrent/rpc", &second_payload);
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(first.0, StatusCode::OK, "first concurrent transaction failed: {}", first.1);
+    assert_eq!(second.0, StatusCode::OK, "second concurrent transaction failed: {}", second.1);
+
+    let (status, rows) = rt.get_json("/api/v1/apps/ipctxconcurrent/collections/items").await;
+    assert_eq!(status, StatusCode::OK);
+    let names: std::collections::HashSet<_> = rows.as_array().unwrap().iter()
+        .map(|row| row["first_name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, std::collections::HashSet::from(["Linus", "Margaret"]));
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn ipc_v3_transaction_audit_records_only_committed_direct_actor() {
+    let (rt, deploy_status) = deploy_transaction_worker("ipctxaudit").await;
+    assert_eq!(deploy_status, StatusCode::OK);
+    wait_for_transaction_worker(&rt, "ipctxaudit").await;
+
+    let (commit_status, commit_result) = rt.post_json(
+        "/api/v1/apps/ipctxaudit/rpc",
+        &json!({ "method": "commit", "params": {} }),
+    ).await;
+    assert_eq!(commit_status, StatusCode::OK, "audit setup commit failed: {commit_result}");
+    let (rollback_status, _) = rt.post_json(
+        "/api/v1/apps/ipctxaudit/rpc",
+        &json!({ "method": "rollback", "params": {} }),
+    ).await;
+    assert!(rollback_status.is_server_error());
+
+    let admin_id: uuid::Uuid = sqlx::query_scalar(
+        "SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'",
+    ).fetch_one(rt.pool()).await.unwrap();
+    let audit: Vec<(Option<uuid::Uuid>, Option<uuid::Uuid>)> = sqlx::query_as(
+        "SELECT actor_uid, delegator_uid FROM rootcx_system.audit_log \
+         WHERE table_schema = 'ipctxaudit' AND table_name = 'items' ORDER BY id",
+    ).fetch_all(rt.pool()).await.unwrap();
+    assert_eq!(
+        audit,
+        vec![(Some(admin_id), None); 2],
+        "rolled-back writes must be absent and committed writes attributed to the direct caller",
+    );
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn ipc_v3_raw_worker_cannot_commit_after_transaction_queue_saturation() {
+    let rt = TestRuntime::boot().await;
+    rt.install("ipctxqueue", "items").await;
+
+    // A hostile v3 worker bypasses the public prelude Adapter and fills the
+    // Core command queue while the first statement holds the TX executor.
+    // Queue rejection must remove the session before its following Commit can
+    // observe it, and all already-accepted writes must roll back.
+    let backend = br#"
+        const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+        let buffer = "";
+        let rpcId = null;
+        process.stdin.on("data", (chunk) => {
+          buffer += chunk.toString();
+          let newline;
+          while ((newline = buffer.indexOf("\n")) >= 0) {
+            const line = buffer.slice(0, newline).trim();
+            buffer = buffer.slice(newline + 1);
+            if (!line) continue;
+            const message = JSON.parse(line);
+            if (message.type === "discover") {
+              send({ type: "discover", protocol: 3, methods: ["saturate"] });
+            } else if (message.type === "rpc") {
+              rpcId = message.id;
+              send({ type: "sql_begin", id: "begin" });
+            } else if (message.type === "sql_begin_result") {
+              const txId = message.tx_id;
+              send({ type: "sql_exec", id: "block", tx_id: txId, sql: "SELECT pg_sleep(1)", params: [] });
+              for (let i = 0; i < 12; i++) {
+                send({
+                  type: "sql_exec", id: `write-${i}`, tx_id: txId,
+                  sql: "INSERT INTO items (first_name, last_name) VALUES ($1, $2)",
+                  params: [`Queue-${i}`, "MustRollback"],
+                });
+              }
+              send({ type: "sql_commit", id: "commit", tx_id: txId });
+            } else if (message.type === "sql_end_result" && message.id === "commit") {
+              send({
+                type: "rpc_response", id: rpcId,
+                result: { commitRejected: Boolean(message.error), error: message.error },
+              });
+            }
+          }
+        });
+    "#;
+    let (status, _) = rt.deploy("ipctxqueue", &make_tar_gz(&[("index.ts", backend)])).await;
+    assert_eq!(status, 200);
+
+    let mut result = json!(null);
+    for _ in 0..25 {
+        let (status, body) = rt.post_json("/api/v1/apps/ipctxqueue/rpc", &json!({
+            "method": "saturate", "params": {}
+        })).await;
+        if status == StatusCode::OK {
+            result = body;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert_eq!(result["commitRejected"], true, "saturated TX commit must fail closed: {result}");
+
+    let (status, rows) = rt.get_json("/api/v1/apps/ipctxqueue/collections/items").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rows, json!([]), "accepted writes before saturation must roll back");
+    rt.shutdown().await;
+}
+
 // ── SECURITY: cross-user context-token confused deputy ──────────────────────
 // Regression lock for docs/security-context-token-confusion.md. A malicious app
 // must only ever act under the identity of its ACTUAL caller. It cannot select,

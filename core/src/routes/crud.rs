@@ -27,6 +27,8 @@ fn http_context(identity: &Identity) -> ContextState {
         is_delegated: false,
         effective_perms: vec![],
         connection_id: None,
+        audit_actor_id: Some(identity.user_id),
+        audit_delegator_id: None,
     }
 }
 

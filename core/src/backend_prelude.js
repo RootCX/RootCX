@@ -5,6 +5,8 @@
 // the IPC contract between a worker process and the Core supervisor. The
 // contract is versioned; this file is the canonical reference for the JS
 // side. The Rust side lives in `core/src/ipc.rs` — keep them in sync.
+
+import { AsyncLocalStorage } from "node:async_hooks";
 //
 // ──────────────── Architecture ────────────────
 //
@@ -51,6 +53,12 @@
 //
 //       { "type": "discover", "protocol": 2, "methods": [ ... ] }
 //
+//   v3 — adds governed callback transactions:
+//
+//       ctx.transaction(async (tx) => tx.sql(text, params))
+//
+//     v3 keeps every v1/v2 capability and announces `protocol: 3`.
+//
 // ──────────────── Evolution rules ────────────────
 //
 //   * Adding an OPTIONAL field to an existing outbound message → no bump.
@@ -63,7 +71,7 @@
 //   to send based on the negotiated version (see `worker_protocol` in
 //   `worker.rs`).
 
-const PROTOCOL_VERSION = 2;
+const PROTOCOL_VERSION = 3;
 
 // ─── Transport layer ─────────────────────────────────────────────────────────
 // Encapsulates the wire format and I/O channel. The rest of the prelude
@@ -93,6 +101,7 @@ function _createJsonLinesTransport() {
 }
 
 const _transport = _createJsonLinesTransport();
+const _transactionScope = new AsyncLocalStorage();
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -106,6 +115,15 @@ const _resolve = (fn, args, ok, fail) => {
   } catch (e) { fail(e); }
 };
 
+function _outsideTransactionGlobal(capability, run) {
+  if (_transactionScope.getStore()) {
+    throw new Error(
+      `${capability} cannot be used inside ctx.transaction; move it before/after the transaction`,
+    );
+  }
+  return run();
+}
+
 // ─── Stateless globals (both v1 and v2) ──────────────────────────────────────
 
 globalThis.log = {
@@ -113,15 +131,20 @@ globalThis.log = {
   warn: (message) => _transport.send({ type: "log", level: "warn", message }),
   error: (message) => _transport.send({ type: "log", level: "error", message }),
 };
-globalThis.emit = (name, data) => _transport.send({ type: "event", name, data: data ?? {} });
+globalThis.emit = (name, data) => _outsideTransactionGlobal(
+  "emit", () => _transport.send({ type: "event", name, data: data ?? {} }),
+);
 
-// v1 legacy alias: pre-`serve()` apps reach for `globalThis.uploadFile`
-// directly (e.g. Peppol prior to the v2 migration). v2 apps should use
-// `ctx.uploadFile`. DO NOT remove without a migration plan.
-globalThis.uploadFile = (content, filename, contentType) =>
-  _uploadFile(content, filename, contentType);
-globalThis.downloadFile = (appId, fileId) => _downloadFile(appId, fileId);
-globalThis.enqueueJob = (payload) => _enqueueJob(payload);
+// Keep v1 aliases until legacy workers migrate to ctx capabilities.
+globalThis.uploadFile = (content, filename, contentType) => _outsideTransactionGlobal(
+  "uploadFile", () => _uploadFile(content, filename, contentType),
+);
+globalThis.downloadFile = (appId, fileId) => _outsideTransactionGlobal(
+  "downloadFile", () => _downloadFile(appId, fileId),
+);
+globalThis.enqueueJob = (payload) => _outsideTransactionGlobal(
+  "enqueueJob", () => _enqueueJob(payload),
+);
 
 console.log = (...a) => log.info(a.map(String).join(" "));
 console.warn = (...a) => log.warn(a.map(String).join(" "));
@@ -146,6 +169,8 @@ let _opSeq = 0;
 const _pendingOps = new Map();
 let _sqlSeq = 0;
 const _pendingSql = new Map();
+let _txSeq = 0;
+const _pendingTx = new Map();
 let _saSeq = 0;
 const _pendingSelf = new Map();
 
@@ -255,6 +280,103 @@ function _sqlQuery(sql, params) {
   });
 }
 
+function _transactionRequest(type, payload, label) {
+  const id = `tx_${++_txSeq}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (_pendingTx.has(id)) {
+        _pendingTx.delete(id);
+        reject(new Error(`${label}: timeout waiting for Core`));
+      }
+    }, 65_000);
+    _pendingTx.set(id, { resolve, reject, timer });
+    _transport.send({ type, id, ...payload });
+  });
+}
+
+function _beginTransaction() {
+  return _transactionRequest("sql_begin", {}, "ctx.transaction");
+}
+
+function _transactionSql(txId, sql, params) {
+  return _transactionRequest(
+    "sql_exec",
+    { tx_id: txId, sql, params: params ?? [] },
+    "tx.sql",
+  );
+}
+
+function _endTransaction(txId, commit) {
+  return _transactionRequest(
+    commit ? "sql_commit" : "sql_rollback",
+    { tx_id: txId },
+    commit ? "ctx.transaction commit" : "ctx.transaction rollback",
+  );
+}
+
+async function _runTransaction(callback, invocation) {
+  if (typeof callback !== "function") {
+    throw new TypeError("ctx.transaction requires a callback");
+  }
+  if (invocation.transactionActive) {
+    throw new Error("nested transactions are not supported; use the current tx");
+  }
+
+  invocation.transactionActive = true;
+  let txId = null;
+  let transactionOpen = false;
+  let closed = false;
+  let firstSqlError = null;
+  let queue = Promise.resolve();
+
+  try {
+    txId = await _beginTransaction();
+    transactionOpen = true;
+
+    const tx = Object.freeze({
+      sql(sql, params = []) {
+        if (closed) {
+          return Promise.reject(new Error("transaction is no longer active"));
+        }
+        const operation = queue.then(async () => {
+          if (firstSqlError) throw firstSqlError;
+          try {
+            return await _transactionSql(txId, sql, params);
+          } catch (error) {
+            firstSqlError = error;
+            throw error;
+          }
+        });
+        // Preserve call order and wait for unobserved statements before commit.
+        queue = operation.then(() => undefined, () => undefined);
+        return operation;
+      },
+    });
+
+    const result = await _transactionScope.run(true, () => callback(tx));
+    closed = true;
+    await queue;
+    if (firstSqlError) throw firstSqlError;
+
+    transactionOpen = false;
+    await _endTransaction(txId, true);
+    return result;
+  } catch (error) {
+    closed = true;
+    await queue;
+    if (transactionOpen) {
+      try {
+        await _endTransaction(txId, false);
+      } catch (rollbackError) {
+        log.error(`ctx.transaction rollback failed: ${_err(rollbackError)}`);
+      }
+    }
+    throw error;
+  } finally {
+    invocation.transactionActive = false;
+  }
+}
+
 // Privileged self-action over IPC (integrations). The core scopes the action
 // to this worker's sole in-flight unit-of-work identity — no token to replay.
 function _selfAction(action, params) {
@@ -276,35 +398,64 @@ function _selfAction(action, params) {
 // (no active unit) ctx.sql denies (no identity) and ctx.collection runs
 // BYPASSRLS on the self-schema.
 function _makeCtx() {
+  const invocation = { transactionActive: false };
+  const outsideTransaction = (capability, run) => {
+    if (invocation.transactionActive) {
+      return Promise.reject(new Error(
+        `${capability} cannot be used inside ctx.transaction; use tx.sql or move it before/after the transaction`,
+      ));
+    }
+    return run();
+  };
   return {
     appId: _boot.app_id,
     runtimeUrl: _boot.runtime_url,
     credentials: _boot.credentials,
     agentConfig: _boot.agent_config,
     log: globalThis.log,
-    emit: globalThis.emit,
-    uploadFile: _uploadFile,
-    downloadFile: _downloadFile,
-    openFile: _openFile,
-    enqueueJob: _enqueueJob,
-    sql: (sql, params = []) => _sqlQuery(sql, params),
-    selfAction: (action, params = {}) => _selfAction(action, params),
+    emit: (name, data) => {
+      if (invocation.transactionActive) {
+        throw new Error("ctx.emit cannot be used inside ctx.transaction");
+      }
+      return globalThis.emit(name, data);
+    },
+    uploadFile: (...args) => outsideTransaction("ctx.uploadFile", () => _uploadFile(...args)),
+    downloadFile: (...args) => outsideTransaction("ctx.downloadFile", () => _downloadFile(...args)),
+    openFile: (...args) => outsideTransaction("ctx.openFile", () => _openFile(...args)),
+    enqueueJob: (payload) => outsideTransaction("ctx.enqueueJob", () => _enqueueJob(payload)),
+    sql: (sql, params = []) => outsideTransaction("ctx.sql", () => _sqlQuery(sql, params)),
+    transaction: (callback) => _runTransaction(callback, invocation),
+    selfAction: (action, params = {}) => outsideTransaction(
+      "ctx.selfAction", () => _selfAction(action, params),
+    ),
     // Invoke one of THIS app's own actions, with the caller's own credentials
     // resolved by the core. The same-app sibling of callIntegration below.
     // Returns the action's raw result envelope.
-    action: (name, input = {}) => _selfAction("triggerAction", { actionName: name, input }),
+    action: (name, input = {}) => outsideTransaction(
+      "ctx.action", () => _selfAction("triggerAction", { actionName: name, input }),
+    ),
     // Mediated integration call: the core resolves credentials via the
     // (app × user) binding and executes — the worker never sees a token.
     // `asUser` requires that user's own binding of this integration to this app.
-    callIntegration: (integrationId, action, input = {}, asUser) =>
-      _selfAction("call_integration", { integrationId, action, input, asUser }),
+    callIntegration: (integrationId, action, input = {}, asUser) => outsideTransaction(
+      "ctx.callIntegration",
+      () => _selfAction("call_integration", { integrationId, action, input, asUser }),
+    ),
     collection(entity) {
       return {
-        insert: (data) => _collectionOp("insert", entity, data),
-        update: (data) => _collectionOp("update", entity, data),
+        insert: (data) => outsideTransaction(
+          "ctx.collection", () => _collectionOp("insert", entity, data),
+        ),
+        update: (data) => outsideTransaction(
+          "ctx.collection", () => _collectionOp("update", entity, data),
+        ),
         // Read ops use `where` as the equality map ({col: value}). Empty {} = full scan.
-        find: (where = {}) => _collectionOp("find", entity, where),
-        findOne: (where = {}) => _collectionOp("findOne", entity, where),
+        find: (where = {}) => outsideTransaction(
+          "ctx.collection", () => _collectionOp("find", entity, where),
+        ),
+        findOne: (where = {}) => outsideTransaction(
+          "ctx.collection", () => _collectionOp("findOne", entity, where),
+        ),
       };
     },
   };
@@ -393,6 +544,35 @@ function _dispatch(msg) {
       msg.error
         ? p.reject(new Error(msg.error))
         : p.resolve({ columns: msg.columns ?? [], rows: msg.rows ?? [], rowCount: msg.row_count ?? 0 });
+      return;
+    }
+
+    case "sql_begin_result": {
+      const p = _pendingTx.get(msg.id);
+      if (!p) return;
+      _pendingTx.delete(msg.id);
+      clearTimeout(p.timer);
+      msg.error ? p.reject(new Error(msg.error)) : p.resolve(msg.tx_id);
+      return;
+    }
+
+    case "sql_exec_result": {
+      const p = _pendingTx.get(msg.id);
+      if (!p) return;
+      _pendingTx.delete(msg.id);
+      clearTimeout(p.timer);
+      msg.error
+        ? p.reject(new Error(msg.error))
+        : p.resolve({ columns: msg.columns ?? [], rows: msg.rows ?? [], rowCount: msg.row_count ?? 0 });
+      return;
+    }
+
+    case "sql_end_result": {
+      const p = _pendingTx.get(msg.id);
+      if (!p) return;
+      _pendingTx.delete(msg.id);
+      clearTimeout(p.timer);
+      msg.error ? p.reject(new Error(msg.error)) : p.resolve(undefined);
       return;
     }
 

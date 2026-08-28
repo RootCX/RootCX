@@ -17,6 +17,7 @@ use crate::RuntimeError;
 use crate::extensions::agents::approvals::{ApprovalRequest, ApprovalResponse, PendingApprovals};
 use crate::extensions::agents::supervision::{PolicyDecision, PolicyEvaluator};
 use crate::extensions::logs::{LOG_CHANNEL_CAPACITY, LogEntry, emit_log, spawn_output_reader};
+use crate::governance::enforcement::{SqlOk, TX_MISMATCH, TX_NONE, TxSession};
 use crate::ipc::{
     AgentBootConfig, AgentInvokePayload, InboundMessage, IpcEvent, IpcReader, IpcWriter,
     OutboundMessage, PendingRpcs, RpcCaller,
@@ -27,7 +28,9 @@ const MAX_CRASHES: u32 = 5;
 const CRASH_WINDOW: Duration = Duration::from_secs(60);
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
 const IPC_SEND_TIMEOUT: Duration = Duration::from_secs(5);
-use crate::governance::enforcement::{TX_MISMATCH, TX_NONE, TxSession};
+
+const TRANSACTION_PROTOCOL_VERSION: u32 = 3;
+const MAX_OPEN_TRANSACTIONS_PER_WORKER: usize = 4;
 
 fn dead() -> RuntimeError {
     RuntimeError::Worker("supervisor actor dead".into())
@@ -36,18 +39,19 @@ fn dead() -> RuntimeError {
 /// Resolve the active transaction for an inbound TX message: present AND its
 /// `tx_id` matches. Returns the matching session or a stable reason string.
 fn match_session<'a>(
-    open: &'a Option<TxSession>,
+    open: &'a HashMap<String, TxSession>,
     tx_id: &str,
 ) -> Result<&'a TxSession, &'static str> {
-    match open {
-        Some(s) if s.tx_id == tx_id => Ok(s),
-        Some(_) => Err(TX_MISMATCH),
-        None => Err(TX_NONE),
+    match open.get(tx_id) {
+        Some(session) => Ok(session),
+        None if open.is_empty() => Err(TX_NONE),
+        None => Err(TX_MISMATCH),
     }
 }
 
 /// Sliding-window rate limit (best-effort DoS guard). Trims entries older than
-/// 1s, then admits iff under `max` in the window. Shared by SqlQuery and SqlExec.
+/// 1s, then admits iff under `max` in the window. Shared by SqlBegin, SqlQuery
+/// and SqlExec.
 fn rate_admit(times: &mut Vec<Instant>, max: usize) -> bool {
     let now = Instant::now();
     times.retain(|t| now.duration_since(*t) < Duration::from_secs(1));
@@ -70,6 +74,36 @@ fn finish_tx(session: TxSession, commit: bool, id: String, out: mpsc::Sender<Out
         let _ = out
             .send(OutboundMessage::SqlEndResult { id, error: r.err() })
             .await;
+    });
+}
+
+fn sql_exec_result(id: String, result: Result<SqlOk, String>) -> OutboundMessage {
+    match result {
+        Ok(ok) => OutboundMessage::SqlExecResult {
+            id,
+            columns: Some(ok.columns),
+            rows: Some(ok.rows),
+            row_count: Some(ok.row_count),
+            error: None,
+        },
+        Err(error) => OutboundMessage::SqlExecResult {
+            id,
+            columns: None,
+            rows: None,
+            row_count: None,
+            error: Some(error),
+        },
+    }
+}
+
+/// Queue failure must remove the session before rollback so commit fails closed.
+fn abort_tx(session: TxSession, id: String, error: String, out: mpsc::Sender<OutboundMessage>) {
+    tokio::spawn(async move {
+        let rollback_error = session.rollback().await.err();
+        let detail = rollback_error
+            .map(|e| format!("; rollback failed: {e}"))
+            .unwrap_or_default();
+        let _ = out.send(sql_exec_result(id, Err(format!("{error}{detail}")))).await;
     });
 }
 
@@ -312,11 +346,14 @@ async fn supervisor_loop(
     let mut job_payloads: HashMap<i64, JsonValue> = HashMap::new();
     // Per-worker SQL-proxy rate limiter (best-effort DoS guard).
     let mut sql_query_times: Vec<Instant> = Vec::new();
-    // Multi-statement transaction (max 1 open per worker). `tx_done_rx` receives
+    // Governed transactions keyed by core-generated IDs. Per-worker and global
+    // caps prevent one app process from monopolizing the shared pool while still
+    // allowing concurrent RPC handlers for the same principal.
+    // `tx_done_rx` receives
     // a session's tx_id when its task exits for ANY reason (commit, rollback,
     // wall-time deadline, crash) — the single source of truth for clearing the
     // slot, so the supervisor never has to remember to do it on each path.
-    let mut open_tx: Option<TxSession> = None;
+    let mut open_txs: HashMap<String, TxSession> = HashMap::new();
     let (tx_done_tx, mut tx_done_rx) = mpsc::channel::<String>(4);
     // Marks the end of the onStart phase (first Rpc/Job/AgentInvoke dispatched).
     // Only the lifecycle worker (config.run_onstart) bypasses RLS for self-schema
@@ -351,9 +388,7 @@ async fn supervisor_loop(
             // A TX task ended (commit, rollback, deadline, or worker death).
             // Clear the slot iff it's still the active session.
             Some(done_id) = tx_done_rx.recv() => {
-                if open_tx.as_ref().map(|s| s.tx_id.as_str()) == Some(done_id.as_str()) {
-                    open_tx = None;
-                }
+                open_txs.remove(&done_id);
             }
 
             Some(cmd) = cmd_rx.recv() => {
@@ -404,7 +439,7 @@ async fn supervisor_loop(
                         job_payloads.clear();
                         // Drop any open TX handle → its task rolls back and frees
                         // the connection + slot at once (the deadline is the backstop).
-                        open_tx = None;
+                        open_txs.clear();
                         status = WorkerStatus::Stopped;
                         crash_times.clear();
                         info!(app_id = %app_id, "worker stopped");
@@ -765,9 +800,28 @@ async fn supervisor_loop(
                             });
                         }
                         InboundMessage::SqlBegin { id } => {
-                            if open_tx.is_some() {
+                            if worker_protocol < TRANSACTION_PROTOCOL_VERSION {
                                 let _ = outbound_tx.send(OutboundMessage::SqlBeginResult {
-                                    id, tx_id: None, error: Some("a transaction is already open".into()),
+                                    id, tx_id: None, error: Some("transactions require worker protocol v3".into()),
+                                }).await;
+                                continue;
+                            }
+                            if open_txs.len() >= MAX_OPEN_TRANSACTIONS_PER_WORKER {
+                                let _ = outbound_tx.send(OutboundMessage::SqlBeginResult {
+                                    id, tx_id: None,
+                                    error: Some(format!(
+                                        "too many open transactions in this worker (max {MAX_OPEN_TRANSACTIONS_PER_WORKER})"
+                                    )),
+                                }).await;
+                                continue;
+                            }
+                            // Begin acquires a pooled connection, so include it
+                            // in the SQL operation rate limit. Concurrency caps
+                            // alone do not bound begin/rollback churn.
+                            if !rate_admit(&mut sql_query_times, 100) {
+                                let _ = outbound_tx.send(OutboundMessage::SqlBeginResult {
+                                    id, tx_id: None,
+                                    error: Some("rate limited (100 SQL operations/s)".into()),
                                 }).await;
                                 continue;
                             }
@@ -776,7 +830,7 @@ async fn supervisor_loop(
                             ).await {
                                 Ok(session) => {
                                     let tid = session.tx_id.clone();
-                                    open_tx = Some(session);
+                                    open_txs.insert(tid.clone(), session);
                                     OutboundMessage::SqlBeginResult { id, tx_id: Some(tid), error: None }
                                 }
                                 Err(e) => OutboundMessage::SqlBeginResult { id, tx_id: None, error: Some(e) },
@@ -784,49 +838,102 @@ async fn supervisor_loop(
                             let _ = outbound_tx.send(msg).await;
                         }
                         InboundMessage::SqlExec { id, tx_id, sql, params } => {
-                            let exec_err = |e: &str| OutboundMessage::SqlExecResult {
-                                id: id.clone(), columns: None, rows: None, row_count: None,
-                                error: Some(e.into()),
-                            };
-                            let session = match match_session(&open_tx, &tx_id) {
+                            if worker_protocol < TRANSACTION_PROTOCOL_VERSION {
+                                let _ = outbound_tx
+                                    .send(sql_exec_result(
+                                        id,
+                                        Err("transactions require worker protocol v3".into()),
+                                    ))
+                                    .await;
+                                continue;
+                            }
+                            let session = match match_session(&open_txs, &tx_id) {
                                 Ok(s) => s,
-                                Err(e) => { let _ = outbound_tx.send(exec_err(e)).await; continue; }
+                                Err(error) => {
+                                    let _ = outbound_tx
+                                        .send(sql_exec_result(id, Err(error.into())))
+                                        .await;
+                                    continue;
+                                }
                             };
                             // Same per-worker rate limit as single-statement SqlQuery.
                             if !rate_admit(&mut sql_query_times, 100) {
-                                let _ = outbound_tx.send(exec_err("rate limited (100 queries/s)")).await;
+                                let error = "rate limited (100 queries/s)".to_string();
+                                let poisoned = session.executor().enqueue_poison(error.clone());
+                                let out = outbound_tx.clone();
+                                match poisoned {
+                                    Ok(reply) => {
+                                        tokio::spawn(async move {
+                                            let poison_error = match reply.await {
+                                                Ok(Ok(())) => None,
+                                                Ok(Err(e)) => Some(e),
+                                                Err(e) => Some(e.to_string()),
+                                            };
+                                            let final_error = poison_error
+                                                .map(|e| format!("{error}; failed to poison transaction: {e}"))
+                                                .unwrap_or(error);
+                                            let _ = out.send(sql_exec_result(id, Err(final_error))).await;
+                                        });
+                                    }
+                                    Err(enqueue_error) => {
+                                        let session = open_txs.remove(&tx_id).unwrap();
+                                        abort_tx(
+                                            session,
+                                            id,
+                                            format!(
+                                                "{error}; transaction aborted because its command queue was unavailable: {enqueue_error}"
+                                            ),
+                                            out,
+                                        );
+                                    }
+                                }
                                 continue;
                             }
-                            // Spawn the round-trip so a slow statement (up to 8s) never
-                            // head-of-line-blocks the worker's other IPC (agent streams,
-                            // RPC responses). `open_tx` stays put; the cloned exec handle
-                            // routes to the same TX task.
-                            let exec = session.executor();
+                            // Enqueue before yielding to preserve Exec…Exec…Commit order.
+                            let reply = session.executor().enqueue_exec(sql, params);
                             let out = outbound_tx.clone();
-                            tokio::spawn(async move {
-                                let msg = match exec.exec(sql, params).await {
-                                    Ok(ok) => OutboundMessage::SqlExecResult {
-                                        id, columns: Some(ok.columns), rows: Some(ok.rows),
-                                        row_count: Some(ok.row_count), error: None,
-                                    },
-                                    Err(e) => OutboundMessage::SqlExecResult {
-                                        id, columns: None, rows: None, row_count: None, error: Some(e),
-                                    },
-                                };
-                                let _ = out.send(msg).await;
-                            });
+                            match reply {
+                                Ok(reply) => {
+                                    tokio::spawn(async move {
+                                        let result = reply.await
+                                            .unwrap_or_else(|_| Err("transaction no longer active".into()));
+                                        let _ = out.send(sql_exec_result(id, result)).await;
+                                    });
+                                }
+                                Err(enqueue_error) => {
+                                    let session = open_txs.remove(&tx_id).unwrap();
+                                    abort_tx(
+                                        session,
+                                        id,
+                                        format!(
+                                            "transaction aborted because its command queue was unavailable: {enqueue_error}"
+                                        ),
+                                        out,
+                                    );
+                                }
+                            }
                         }
                         InboundMessage::SqlCommit { id, tx_id } => {
-                            // `.err()` keeps only the 'static reason, dropping the open_tx
-                            // borrow so `take()` is free below.
-                            match match_session(&open_tx, &tx_id).err() {
-                                None => finish_tx(open_tx.take().unwrap(), true, id, outbound_tx.clone()),
+                            if worker_protocol < TRANSACTION_PROTOCOL_VERSION {
+                                let _ = outbound_tx.send(OutboundMessage::SqlEndResult {
+                                    id, error: Some("transactions require worker protocol v3".into()),
+                                }).await;
+                                continue;
+                            }
+                            match match_session(&open_txs, &tx_id).err() {
+                                None => finish_tx(open_txs.remove(&tx_id).unwrap(), true, id, outbound_tx.clone()),
                                 Some(e) => { let _ = outbound_tx.send(OutboundMessage::SqlEndResult { id, error: Some(e.into()) }).await; }
                             }
                         }
                         InboundMessage::SqlRollback { id, tx_id } => {
-                            match match_session(&open_tx, &tx_id).err() {
-                                None => finish_tx(open_tx.take().unwrap(), false, id, outbound_tx.clone()),
+                            if worker_protocol < TRANSACTION_PROTOCOL_VERSION {
+                                let _ = outbound_tx.send(OutboundMessage::SqlEndResult {
+                                    id, error: Some("transactions require worker protocol v3".into()),
+                                }).await;
+                                continue;
+                            }
+                            match match_session(&open_txs, &tx_id).err() {
+                                None => finish_tx(open_txs.remove(&tx_id).unwrap(), false, id, outbound_tx.clone()),
                                 Some(e) => { let _ = outbound_tx.send(OutboundMessage::SqlEndResult { id, error: Some(e.into()) }).await; }
                             }
                         }
@@ -985,7 +1092,7 @@ async fn supervisor_loop(
                         onstart_done = false;
                         // Drop the stale TX handle so the respawned process can
                         // open a fresh one (its task rolls back + frees the slot).
-                        open_tx = None;
+                        open_txs.clear();
 
                         let now = Instant::now();
                         crash_times.retain(|t| now.duration_since(*t) < CRASH_WINDOW);
@@ -1438,9 +1545,9 @@ mod tests {
         // The mismatch branch is a security guard: a stale/replayed TX message
         // must not land on a newer session that reused the slot. Pin all three
         // outcomes so a swapped TX_NONE/TX_MISMATCH or a wrong comparison fails.
-        let open = Some(TxSession::dummy("tx-current"));
+        let open = HashMap::from([("tx-current".to_string(), TxSession::dummy("tx-current"))]);
         assert!(matches!(match_session(&open, "tx-current"), Ok(s) if s.tx_id == "tx-current"));
         assert_eq!(match_session(&open, "tx-stale").err().unwrap(), TX_MISMATCH);
-        assert_eq!(match_session(&None, "tx-current").err().unwrap(), TX_NONE);
+        assert_eq!(match_session(&HashMap::new(), "tx-current").err().unwrap(), TX_NONE);
     }
 }

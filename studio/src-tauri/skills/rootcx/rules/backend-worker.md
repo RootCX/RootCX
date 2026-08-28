@@ -4,31 +4,18 @@ Apps can have a `backend/` directory with a Bun worker for server-side logic. Co
 
 Deps: add `backend/package.json` for backend-only npm deps. Core runs `bun install` there at deploy. Do NOT put backend deps in the root `package.json` (that one is for the frontend/Vite).
 
-## IPC protocol
+## Governed runtime
 
-Core sends `discover` immediately after spawn. Worker listens on stdin, responds on stdout. JSON-lines (one JSON object per line).
-
-**Messages Core → Worker:**
-- `{ type: "discover", app_id, runtime_url, database_url, credentials }` — init handshake
-- `{ type: "rpc", id, method, params, caller }` — caller includes `authToken` for Core API calls
-- `{ type: "job", id, payload, caller }` — async job dispatch (caller has authToken if enqueued by a user)
-- `{ type: "shutdown" }` — graceful exit
-
-**Messages Worker → Core:**
-- `{ type: "discover", methods: [...] }` — handshake response (list exposed RPC methods)
-- `{ type: "rpc_response", id, result }` or `{ type: "rpc_response", id, error }`
-- `{ type: "job_result", id, result }` or `{ type: "job_result", id, error }`
-- `{ type: "log", level: "info"|"warn"|"error", message }` — structured logging
-
-**Caller shape:** `{ userId: string, username: string, authToken?: string }`
-- `authToken` is the caller's JWT — use it for `Authorization: Bearer` when calling Core REST API
-- Always check `caller` for authorization in RPC handlers
+Use the Core-injected `serve()` and `ctx` Interface. A v3 worker never parses
+JSON-lines itself and never receives a database URL, user token, or forgeable
+identity context.
 
 ## Data access
 
-- **Simple CRUD**: use Core REST API via `runtime_url` with `caller.authToken` (see [REST API](./rest-api.md))
-- **Custom SQL** (transactions, sequences, JOINs): connect to PostgreSQL via `database_url` from discover
-- All apps share one PG instance — cross-app queries are possible
+- **Independent CRUD**: use `ctx.collection(entity)`.
+- **One SQL statement**: use `ctx.sql(text, params)`.
+- **Atomic workflow**: use `ctx.transaction(async tx => ...)` and only `tx.sql` inside.
+- SQL always inherits the worker's fixed identity, RLS, audit context, scoped search path and restricted role.
 - **NEVER use SQLite or file-based storage** — PostgreSQL is the only database
 
 ## Frontend → Worker
@@ -38,59 +25,32 @@ const client = useRuntimeClient();
 const result = await client.rpc(appId, "method_name", { ...params });
 ```
 
-## Minimal worker template
+## Callback transactions
 
 ```typescript
-import { createInterface } from "readline";
-import postgres from "postgres";
-
-interface Caller { userId: string; username: string; authToken?: string }
-
-const write = (m: any) => process.stdout.write(JSON.stringify(m) + "\n");
-const rl = createInterface({ input: process.stdin });
-let sql: ReturnType<typeof postgres>;
-let runtimeUrl: string;
-let appId: string;
-
-rl.on("line", (l) => {
-  let m: any;
-  try { m = JSON.parse(l); } catch { return; }
-
-  switch (m.type) {
-    case "discover":
-      appId = m.app_id;
-      runtimeUrl = m.runtime_url;
-      sql = postgres(m.database_url);
-      write({ type: "discover", methods: ["ping"] });
-      break;
-    case "rpc":
-      handleRpc(m);
-      break;
-    case "shutdown":
-      process.exit(0);
-  }
-});
-
-async function handleRpc(m: any) {
-  try {
-    const result = await dispatch(m.method, m.params ?? {}, m.caller);
-    write({ type: "rpc_response", id: m.id, result });
-  } catch (e: any) {
-    write({ type: "rpc_response", id: m.id, error: e.message });
-  }
-}
-
-async function dispatch(method: string, params: any, caller: Caller | null): Promise<any> {
-  switch (method) {
-    case "ping": return { pong: true };
-    default: throw new Error(`unknown method: ${method}`);
-  }
-}
+serve({ rpc: {
+  createOrder: async (params, _caller, ctx) =>
+    ctx.transaction(async (tx) => {
+      const order = await tx.sql(
+        "INSERT INTO orders (number) VALUES ($1) RETURNING id", [params.number],
+      );
+      await tx.sql("INSERT INTO order_lines (order_id, article_id) VALUES ($1, $2)", [
+        order.rows[0][0], params.articleId,
+      ]);
+      return { id: order.rows[0][0] };
+    }),
+} });
 ```
+
+Commit occurs only when the callback and every statement succeed. Statement
+calls are serialized in call order. Any statement error poisons the transaction,
+even if caught. Nesting and use of collection/integration/storage/event/job
+capabilities inside the callback are rejected. Core enforces 8 seconds per
+statement, 1,000 returned rows, 30 seconds idle and a 60-second resource ceiling.
 
 ## Rules
 
 - Entry point: `index.ts` → `index.js` → `main.ts` → `main.js` → `src/index.ts`
-- RPC timeout: 30s. Always respond with matching `id`
-- Use `caller.authToken` for authenticated Core API calls from the worker
+- RPC timeout: 30s; keep interactive transactions below it.
+- Put external effects before/after the transaction, or persist an outbox row.
 - Crash recovery: max 5 crashes in 60s → failed state

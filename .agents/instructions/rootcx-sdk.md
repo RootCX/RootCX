@@ -320,9 +320,9 @@ Deps: add `backend/package.json` for backend-only npm deps. Core runs `bun insta
 Core sends `discover` immediately after spawn. Worker listens on stdin, responds on stdout. JSON-lines (one JSON object per line).
 
 **Messages Core → Worker:**
-- `{ type: "discover", app_id, runtime_url, database_url, credentials }` — init handshake
-- `{ type: "rpc", id, method, params, caller }` — caller includes `authToken` for Core API calls
-- `{ type: "job", id, payload, caller }` — async job dispatch (caller has authToken if enqueued by a user)
+- `{ type: "discover", app_id, runtime_url, credentials }` — init handshake
+- `{ type: "rpc", id, method, params, caller }` — invocation with its authenticated caller identity
+- `{ type: "job", id, payload, caller }` — async job dispatch
 - `{ type: "shutdown" }` — graceful exit
 
 **Messages Worker → Core:**
@@ -331,16 +331,16 @@ Core sends `discover` immediately after spawn. Worker listens on stdin, responds
 - `{ type: "job_result", id, result }` or `{ type: "job_result", id, error }`
 - `{ type: "log", level: "info"|"warn"|"error", message }` — structured logging
 
-**Caller shape:** `{ userId: string, username: string, authToken?: string }`
-- `authToken` is the caller's JWT — use it for `Authorization: Bearer` when calling Core REST API
-- Always check `caller` for authorization in RPC handlers
+**Caller shape:** `{ userId: string, username: string }`
+- Authorization, row-level access and audit attribution remain enforced by Core.
+- Application-level business authorization can additionally inspect `caller`.
 
 ### Data access
 
-- **Simple CRUD**: use Core REST API via `runtime_url` with `caller.authToken`
-- **Custom SQL** (transactions, sequences, JOINs): connect to PostgreSQL via `database_url` from discover
-- All apps share one PG instance — cross-app queries are possible
-- **NEVER use SQLite or file-based storage** — PostgreSQL is the only database
+- **Simple CRUD**: use `ctx.collection(entity)`.
+- **Custom SQL**: use `ctx.sql(query, params)`; Core validates and executes it under the caller's governed database session.
+- **Atomic multi-statement work**: use `ctx.transaction(async (tx) => { ... })` and only `tx.sql(...)` inside the callback.
+- Never connect directly to PostgreSQL from application workers. Core owns credentials, identity propagation, row-level access, auditing, limits and transaction lifecycle.
 
 ### Core REST API — Collections
 
@@ -395,7 +395,7 @@ Actions + auth — base `/api/v1/integrations`:
 | POST | `/{integration_id}/auth/credentials` | `{field:value,...}` | — |
 | DELETE | `/{integration_id}/auth` | — | disconnect |
 
-**From a worker:** `POST {runtime_url}/api/v1/integrations/{integration_id}/actions/{action_id}` with `Authorization: Bearer {authToken}`, body = action input.
+**From a worker:** use `ctx.callIntegration(integrationId, actionId, input)`. Core keeps the caller identity and enforces the app/user binding without exposing or replaying a bearer token.
 
 ### Core REST API — Jobs
 
@@ -412,10 +412,10 @@ Base: `/api/v1/apps/{app_id}/jobs`
 **Job statuses:** `pending` → `running` → `completed` | `failed`
 
 **Flow:**
-1. Worker (or frontend) enqueues: `POST /api/v1/apps/{app_id}/jobs` with `{payload:{...}}` + `Authorization: Bearer {authToken}`
-2. Core scheduler claims pending jobs and dispatches to worker via IPC: `{ type: "job", id, payload, caller }` — `caller` has `userId`, `username`, `authToken` (short-lived JWT minted by Core from the enqueuing user)
+1. A worker enqueues with `ctx.enqueueJob(payload)`; a frontend uses its authenticated Core endpoint.
+2. Core scheduler claims pending jobs and dispatches them through governed IPC with the originating caller identity.
 3. Worker processes and responds: `{ type: "job_result", id, result }` or `{ type: "job_result", id, error }`
-4. Use `caller.authToken` in job handlers for authenticated Core API calls (collections, integrations, etc.)
+4. Job handlers use `ctx` capabilities for collections, integrations, storage and further jobs; credentials are never passed to application code.
 
 Use jobs for long-running work (bulk fetches, batch imports, async syncs) that would exceed the 30s RPC timeout.
 
@@ -447,51 +447,21 @@ const result = await client.rpc(appId, "method_name", { ...params });
 ### Minimal worker template
 
 ```typescript
-import { createInterface } from "readline";
-import postgres from "postgres";
+/// <reference path="./rootcx-worker.d.ts" />
 
-interface Caller { userId: string; username: string; authToken?: string }
-
-const write = (m: any) => process.stdout.write(JSON.stringify(m) + "\n");
-const rl = createInterface({ input: process.stdin });
-let sql: ReturnType<typeof postgres>;
-let runtimeUrl: string;
-let appId: string;
-
-rl.on("line", (l) => {
-  let m: any;
-  try { m = JSON.parse(l); } catch { return; }
-
-  switch (m.type) {
-    case "discover":
-      appId = m.app_id;
-      runtimeUrl = m.runtime_url;
-      sql = postgres(m.database_url);
-      write({ type: "discover", methods: ["ping"] });
-      break;
-    case "rpc":
-      handleRpc(m);
-      break;
-    case "shutdown":
-      process.exit(0);
-  }
+serve({
+  rpc: {
+    ping: async (_params, _caller, ctx) => {
+      return ctx.transaction(async (tx) => {
+        const rows = await tx.sql(
+          "SELECT id, status FROM app_public.orders WHERE status = $1",
+          ["pending"],
+        );
+        return { pong: true, rows };
+      });
+    },
+  },
 });
-
-async function handleRpc(m: any) {
-  try {
-    const result = await dispatch(m.method, m.params ?? {}, m.caller);
-    write({ type: "rpc_response", id: m.id, result });
-  } catch (e: any) {
-    write({ type: "rpc_response", id: m.id, error: e.message });
-  }
-}
-
-async function dispatch(method: string, params: any, caller: Caller | null): Promise<any> {
-  switch (method) {
-    case "ping": return { pong: true };
-    default: throw new Error(`unknown method: ${method}`);
-  }
-}
 ```
 
 ### serve() API (v2)
@@ -512,7 +482,7 @@ serve({
 });
 ```
 
-`ctx`: `{ appId, runtimeUrl, databaseUrl, credentials, log: { info, warn, error }, emit(name, data?), collection(entity): { insert, update }, uploadFile() }`
+`ctx` exposes governed capabilities such as `sql`, `transaction`, `collection`, `actions`, integrations, storage, jobs and logging. The generated `rootcx-worker.d.ts` is the source of truth for editor completion and types.
 
 **Cron → onJob:** `useCrons().create({ schedule, payload })` → pg_cron → pgmq → scheduler → `onJob(payload)`.
 
@@ -520,7 +490,6 @@ serve({
 
 - Entry point: `index.ts` → `index.js` → `main.ts` → `main.js` → `src/index.ts`
 - RPC timeout: 30s. Always respond with matching `id`
-- Use `caller.authToken` for authenticated Core API calls from the worker
 - Crash recovery: max 5 crashes in 60s → failed state
 
 ---
