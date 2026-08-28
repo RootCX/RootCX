@@ -433,14 +433,17 @@ async fn owner_predicate(
     for index in (0..chain.len() - 1).rev() {
         let (parent, _) = chain[index + 1];
         let (entity, link) = chain[index];
-        let (Some(pk), Some(_)) = (
+        let (Some(pk), Some(_link_type)) = (
             primary_key(pool, schema, parent).await?,
             column_type(pool, schema, entity, link).await?,
         ) else {
             tracing::warn!(%schema, %entity, %link, %parent, "the delegation link or its target's primary key is missing; row-scoped policies not created");
             return Ok(None);
         };
-        let Some(pk_type) = column_type(pool, schema, parent, &pk).await? else { return Ok(None) };
+        let Some(pk_type) = column_type(pool, schema, parent, &pk).await? else {
+            tracing::warn!(%schema, %parent, %pk, "the delegation target's primary key has no type in the catalog; row-scoped policies not created");
+            return Ok(None);
+        };
         let resolver = owner_resolver_name(schema, parent);
         declare_owner_resolver(pool, schema, parent, &resolver, &pk, &pk_type, &mine).await?;
         mine = format!(
