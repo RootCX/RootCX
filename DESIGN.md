@@ -72,7 +72,8 @@ CREATE OR REPLACE FUNCTION rootcx_system."rootcx_own.school.assignment"()
   RETURNS SETOF uuid
   LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $rootcx$
     SELECT "id" FROM "school"."assignment"
-     WHERE "enrollment_id" = ANY (ARRAY(SELECT rootcx_system."rootcx_own.school.enrollment"()))
+     WHERE coalesce(nullif(current_setting('rootcx.app_id', true), ''), 'school') = 'school'
+       AND "enrollment_id" = ANY (ARRAY(SELECT rootcx_system."rootcx_own.school.enrollment"()))
   $rootcx$;
 
 REVOKE ALL ON FUNCTION rootcx_system."rootcx_own.school.assignment"() FROM PUBLIC;
@@ -166,18 +167,52 @@ fails the test.
    suffix on anything an app declares, so an app cannot mint a `.own` key that
    means something else.
 
+7. **A resolver answers only its own app.** RLS predicates are evaluated as the
+   *invoking* role, so `rootcx_app_executor` must hold `EXECUTE` on the resolvers —
+   and every app's `ctx.sql` runs as that same role. Left there, app A could call
+   `rootcx_system."rootcx_own.B.entity"()` and enumerate the primary keys of the
+   caller's rows in app B. Apps are mutually untrusted, so each resolver carries a
+   guard on the app the transaction belongs to:
+
+   ```sql
+   WHERE coalesce(nullif(current_setting('rootcx.app_id', true), ''), 'school') = 'school'
+     AND "enrollment_id" = ANY (ARRAY(SELECT rootcx_system."rootcx_own.school.enrollment"()))
+   ```
+
+   `rootcx.app_id` is a fourth GUC posed by `set_rls_context`, folded into the
+   existing single `set_config` round-trip, before the drop to the executor role —
+   and `set_config` is revoked from that role, so an app cannot claim to be another
+   one. `EXECUTE` is revoked from `PUBLIC` as well, so nothing else in the database
+   can call a resolver at all. Asserted both ways in
+   `one_app_cannot_resolve_another_s_ownership`: from its own app the resolver
+   returns the caller's row, from a bystander app it returns the empty set, and the
+   confined read through the owning app is unaffected.
+
+   **Why `coalesce` is fail-open on an unset GUC.** `SET LOCAL ROLE
+   rootcx_app_executor` appears exactly once in the codebase, in `begin_app_tx`,
+   which always has the app schema in hand. So every path that evaluates RLS at all
+   — the CRUD routes, the SQL proxy's `run_sql` and `TxSession`, the agent tools in
+   `core/src/tools/`, the worker's collection ops — poses the GUC, and all five pass
+   the schema of the app whose data the unit of work is for. Everything else (schema
+   sync, the audit and hooks triggers, the retroactive RLS pass, the worker's own
+   bookkeeping) runs on the core's superuser pool, which bypasses RLS and never
+   reaches a policy. Unset therefore means "no policy is being evaluated", where
+   denying buys nothing and would strand any future caller reading an app table
+   directly. `nullif` is part of the same reasoning: a pooled connection that once
+   served an app keeps the GUC as `''` rather than unset, and `''` means the same
+   "nobody said" as absent.
+
+   **What this constrains later.** Cross-app SQL, when it arrives, will need the
+   guard keyed on a *set* of schemas the transaction is entitled to rather than the
+   single one — otherwise a legitimate cross-app read of a delegated table would
+   lose its `.own` branch (the unscoped branch is unaffected). Today cross-app
+   entity references are refused at install, so nothing legitimate crosses.
+
 **What this does not defend against, by construction.** An app controls the data in
 its own schema, so it controls who owns what — it can point a link at anyone's
 parent row. That is equally true of the direct case (the app writes `user_id`), and
 it is the intended semantics: ownership *is* data. What RLS guarantees is that a
 *confined caller* cannot do it, and the audit trail records who did.
-
-**Known bounded disclosure.** RLS predicates are evaluated as the invoking role, so
-`rootcx_app_executor` must hold `EXECUTE` on the resolvers — and an app's `ctx.sql`
-runs as that same role. An app can therefore call another app's resolver and learn
-the primary keys of rows *the current caller already owns* in that app. No other
-user's rows and no column values are reachable. `EXECUTE` is revoked from `PUBLIC`
-so nothing else in the database can call them.
 
 ---
 
@@ -247,7 +282,8 @@ too deep. Each logs a warning naming the entity.
 | --- | --- |
 | `crates/shared-types/src/lib.rs` | `FieldContract::owner` doc: the two shapes. No type change. |
 | `core/src/manifest.rs` | `owner_parent`, `owner_map`, `MAX_OWNER_CHAIN`, `validate_owner_chains`; the `references` check in `validate_owner_field`; resolver pruning on uninstall. |
-| `core/src/extensions/rbac/mod.rs` | `OwnerMap`, `owner_resolver_name`, the chain-walking `owner_predicate`, `declare_owner_resolver`, `prune_owner_resolvers`, `column_type`, `primary_key`. |
+| `core/src/extensions/rbac/mod.rs` | `OwnerMap`, `owner_resolver_name`, the chain-walking `owner_predicate`, `declare_owner_resolver` (with the `rootcx.app_id` guard), `prune_owner_resolvers`, `column_type`, `primary_key`. |
+| `core/src/governance/enforcement/sql_proxy.rs` | `set_rls_context` takes the app schema and poses `rootcx.app_id`, in the existing `set_config` round-trip. |
 | `core/src/extensions/rbac/bootstrap.rs` | Boot replay groups the projection per schema. |
 | `core/src/extensions/hooks.rs` | `row_shape` and `sync_sensitive_fields` carry `owner_parent`. |
 | `core/src/governance/audit/audit_ext.rs` | `owner_parent` column on `sensitive_fields`. |
@@ -262,24 +298,25 @@ shapes.
 
 ```
 $ ROOTCX_RESOURCES=~/.rootcx/bin cargo test -p rootcx-core --test row_ownership_test
-cargo test: 14 passed (1 suite, 31.74s)
+cargo test: 15 passed (1 suite, 37.52s)
 
 $ cargo test -p rootcx-core --lib -- --test-threads=1
-cargo test: 365 passed (1 suite, 3.08s)
+cargo test: 365 passed (1 suite, 2.98s)
 
 $ ROOTCX_RESOURCES=~/.rootcx/bin cargo test -p rootcx-core --test governance_contract_test
-cargo test: 78 passed, 1 ignored (1 suite, 152.98s)
+cargo test: 78 passed, 1 ignored (1 suite, 148.38s)
 
 $ cargo check --workspace
 0 errors (2 pre-existing warnings)
 ```
 
-`row_ownership_test` was 8 tests; the 6 added cover delegation end to end
+`row_ownership_test` was 8 tests; the 7 added cover delegation end to end
 (`own_follows_a_two_link_delegation_chain`), the no-widening property
 (`no_grant_on_the_chain_widens_what_own_sees`), the generated SQL shape and its plan
 (`each_link_is_crossed_by_an_indexable_resolver`), install refusal
-(`a_delegation_that_cannot_terminate_is_refused`), and resolver lifecycle
-(`resolvers_track_the_declaration`); plus `manifest.rs` unit tests
+(`a_delegation_that_cannot_terminate_is_refused`), resolver lifecycle
+(`resolvers_track_the_declaration`), and the cross-app guard
+(`one_app_cannot_resolve_another_s_ownership`); plus `manifest.rs` unit tests
 `a_delegation_chain_must_terminate_and_stay_short` and
 `a_resolver_name_that_would_be_truncated_is_refused`.
 

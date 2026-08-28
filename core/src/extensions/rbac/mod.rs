@@ -459,8 +459,24 @@ async fn owner_predicate(
 /// unfiltered. That is the whole point: ownership must be a property of the data,
 /// not of the caller's grants on the tables the chain passes through, or a caller
 /// holding `child.read.own` would see a different set of rows depending on whether
-/// it also held `parent.read`. It discloses nothing but the ids of rows already the
-/// caller's own, and only to the executor role.
+/// it also held `parent.read`.
+///
+/// Which is why it also checks `rootcx.app_id`. An RLS predicate is evaluated as
+/// the *invoking* role, so `rootcx_app_executor` must hold EXECUTE — and an app's
+/// `ctx.sql` runs as that same role. Without the guard, any app could call another
+/// app's resolver and enumerate the caller's row ids there, which apps being
+/// mutually untrusted is exactly what must not happen. The GUC is posed by
+/// `set_rls_context` before the drop to the executor, and `set_config` is revoked
+/// from that role, so an app cannot claim to be another.
+///
+/// `coalesce` makes an unset GUC pass rather than deny. Every path that evaluates
+/// RLS at all goes through `begin_app_tx` — the single `SET LOCAL ROLE
+/// rootcx_app_executor` in the codebase — so unset means the core's own superuser
+/// pool, which bypasses RLS and never reaches a policy anyway. Fail-closed there
+/// would buy nothing and would strand any future caller that reads an app table
+/// directly. `nullif` is part of that: a pooled connection that once served an app
+/// keeps the GUC as `''` rather than unset, and `''` means the same "nobody said"
+/// as absent.
 async fn declare_owner_resolver(
     pool: &PgPool,
     schema: &str,
@@ -470,12 +486,15 @@ async fn declare_owner_resolver(
     pk_type: &str,
     mine: &str,
 ) -> Result<(), RuntimeError> {
-    use crate::manifest::quote_ident;
+    use crate::manifest::{quote_ident, quote_literal};
     let signature = format!("rootcx_system.{}()", quote_ident(resolver));
+    let own_app = quote_literal(schema);
     exec(pool, &format!(
         "CREATE OR REPLACE FUNCTION {signature} RETURNS SETOF {pk_type} \
          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $rootcx$ \
-         SELECT {} FROM {}.{} WHERE {mine} $rootcx$",
+         SELECT {} FROM {}.{} \
+          WHERE coalesce(nullif(current_setting('rootcx.app_id', true), ''), {own_app}) = {own_app} \
+            AND {mine} $rootcx$",
         quote_ident(pk), quote_ident(schema), quote_ident(entity),
     )).await?;
     // A new function is executable by PUBLIC by default, and this one names a

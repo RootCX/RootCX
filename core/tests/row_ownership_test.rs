@@ -634,3 +634,50 @@ async fn resolvers_track_the_declaration() {
 
     rt.shutdown().await;
 }
+
+/// A resolver bypasses RLS by design, and RLS predicates run as the *invoking*
+/// role, so `rootcx_app_executor` must hold EXECUTE on it — and every app's
+/// `ctx.sql` runs as that same role. Apps being mutually untrusted, an app must not
+/// be able to call another app's resolver and enumerate the caller's row ids there.
+///
+/// The resolver therefore also checks `rootcx.app_id`, posed by `set_rls_context`
+/// before the drop to the executor. `set_config` is revoked from that role, so an
+/// app cannot claim to be another one. Both directions are asserted, because a
+/// guard that denies everything would pass the first half on its own.
+#[tokio::test]
+async fn one_app_cannot_resolve_another_s_ownership() {
+    let rt = harness::TestRuntime::boot().await;
+    install_chained(&rt).await;
+    rt.install("crm", "contacts").await;
+
+    let (_, mine) = user_with(&rt, "jean@t.local", &["app:school:submission.read.own"]).await;
+    stack_for(&rt, mine, "jean").await;
+    let context = rootcx_core::governance::enforcement::ContextState {
+        user_id: Some(mine),
+        is_delegated: false,
+        effective_perms: vec![],
+        connection_id: None,
+        audit_actor_id: Some(mine),
+        audit_delegator_id: None,
+    };
+
+    let probe = "SELECT rootcx_system.\"rootcx_own.school.assignment\"() AS id";
+    for (label, app, expected) in [
+        ("its own app", "school", 1),
+        ("a bystander app", "crm", 0),
+    ] {
+        let ok = rootcx_core::governance::enforcement::run_sql(rt.pool(), app, &context, probe, &[])
+            .await
+            .unwrap_or_else(|e| panic!("{label}: the call itself must succeed, not error: {e}"));
+        assert_eq!(ok.row_count, expected, "{label}: resolver answered the wrong caller");
+    }
+
+    // And the guard confines the resolver, not the feature: the same caller's
+    // confined read through its own app still returns its row.
+    let ok = rootcx_core::governance::enforcement::run_sql(
+        rt.pool(), "school", &context, "SELECT note FROM school.submission", &[],
+    ).await.unwrap();
+    assert_eq!(ok.row_count, 1, "the app's own confined read must be unaffected: {ok:?}");
+
+    rt.shutdown().await;
+}

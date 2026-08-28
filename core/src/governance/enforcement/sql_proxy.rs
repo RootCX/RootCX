@@ -2,7 +2,7 @@
 //!
 //! Apps never hold a DB connection. They send SQL over IPC; the core executes
 //! it inside a transaction that (1) scopes the search_path to the app schema
-//! (never `rootcx_system`), (2) poses the three RLS identity GUCs, and (3)
+//! (never `rootcx_system`), (2) poses the RLS identity GUCs, and (3)
 //! drops to the non-superuser `rootcx_app_executor` role before running the
 //! statement. RLS — not the app — decides what rows are visible.
 
@@ -96,11 +96,17 @@ impl ContextState {
     }
 }
 
-/// Pose the three RLS identity GUCs for the open transaction. MUST run before
+/// Pose the RLS identity GUCs for the open transaction. MUST run before
 /// `SET LOCAL ROLE rootcx_app_executor` — the executor cannot call `set_config`
 /// (revoked), so the app can never rewrite its own identity.
+///
+/// `rootcx.app_id` names the app this unit of work belongs to. The identity GUCs
+/// say who the caller is; this one says on whose behalf the SQL runs, which is what
+/// lets the generated ownership resolvers refuse an app that is not their own (see
+/// `rbac::declare_owner_resolver`).
 pub async fn set_rls_context(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    app_schema: &str,
     state: &ContextState,
 ) -> Result<(), sqlx::Error> {
     let uid = state.user_id.map(|u| u.to_string()).unwrap_or_default();
@@ -109,11 +115,13 @@ pub async fn set_rls_context(
     sqlx::query(
         "SELECT set_config('rootcx.user_id', $1, true), \
                 set_config('rootcx.is_delegated', $2, true), \
-                set_config('rootcx.effective_perms', $3, true)",
+                set_config('rootcx.effective_perms', $3, true), \
+                set_config('rootcx.app_id', $4, true)",
     )
     .bind(uid)
     .bind(delegated)
     .bind(perms)
+    .bind(app_schema)
     .execute(&mut **tx)
     .await?;
     Ok(())
@@ -183,7 +191,7 @@ pub async fn begin_app_tx_with_invocation<'a>(
         .execute(&mut *tx).await?;
     sqlx::query("SET LOCAL idle_in_transaction_session_timeout = '30000'")
         .execute(&mut *tx).await?;
-    set_rls_context(&mut tx, state).await?;
+    set_rls_context(&mut tx, app_schema, state).await?;
     set_invocation_context(&mut tx, invocation).await?;
     crate::extensions::audit::set_context(&mut tx, audit_actor, audit_delegator, trigger_ref).await?;
     sqlx::query("SET LOCAL ROLE rootcx_app_executor").execute(&mut *tx).await?;
