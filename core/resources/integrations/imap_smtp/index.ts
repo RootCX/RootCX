@@ -57,7 +57,7 @@ async function withImap<T>(creds: Creds, fn: (client: ImapFlow) => Promise<T>): 
   const client = new ImapFlow({
     host: creds.imapHost, port: creds.imapPort, secure: true,
     auth: { user: creds.username, pass: creds.password },
-    logger: false, tls: { rejectUnauthorized: false },
+    logger: false, tls: { rejectUnauthorized: true },
     greetingTimeout: 16_000, socketTimeout: 30_000,
   });
   await client.connect();
@@ -69,8 +69,9 @@ async function sendEmail(creds: Creds, input: any, userId: string, ctx: RootCxCt
   const { to, subject, body, cc, bcc, html } = input;
   const transport = createTransport({
     host: creds.smtpHost, port: 587, secure: false,
+    requireTLS: true,
     auth: { user: creds.username, pass: creds.password },
-    tls: { rejectUnauthorized: false },
+    tls: { rejectUnauthorized: true },
   });
   const mailOptions: any = {
     from: creds.username, to, subject,
