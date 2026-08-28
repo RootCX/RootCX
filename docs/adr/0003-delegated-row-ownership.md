@@ -1,4 +1,8 @@
-# Delegated row ownership
+# ADR 0003: Delegated row ownership
+
+Status: Proposed (2026-08-28)
+
+## Context
 
 A permission key is table-wide. `owner: true` already narrowed one to "the rows
 whose user id column is mine". This extends that to rows that carry no user id at
@@ -298,27 +302,37 @@ shapes.
 
 ```
 $ ROOTCX_RESOURCES=~/.rootcx/bin cargo test -p rootcx-core --test row_ownership_test
-cargo test: 15 passed (1 suite, 37.52s)
+cargo test: 16 passed (1 suite, 36.80s)
 
 $ cargo test -p rootcx-core --lib -- --test-threads=1
-cargo test: 365 passed (1 suite, 2.98s)
+cargo test: 365 passed (1 suite, 3.22s)
 
 $ ROOTCX_RESOURCES=~/.rootcx/bin cargo test -p rootcx-core --test governance_contract_test
-cargo test: 78 passed, 1 ignored (1 suite, 148.38s)
+cargo test: 78 passed, 1 ignored (1 suite, 149.39s)
 
 $ cargo check --workspace
 0 errors (2 pre-existing warnings)
 ```
 
-`row_ownership_test` was 8 tests; the 7 added cover delegation end to end
+`row_ownership_test` was 8 tests; the 8 added cover delegation end to end
 (`own_follows_a_two_link_delegation_chain`), the no-widening property
 (`no_grant_on_the_chain_widens_what_own_sees`), the generated SQL shape and its plan
 (`each_link_is_crossed_by_an_indexable_resolver`), install refusal
 (`a_delegation_that_cannot_terminate_is_refused`), resolver lifecycle
-(`resolvers_track_the_declaration`), and the cross-app guard
-(`one_app_cannot_resolve_another_s_ownership`); plus `manifest.rs` unit tests
-`a_delegation_chain_must_terminate_and_stay_short` and
+(`resolvers_track_the_declaration`), the cross-app guard
+(`one_app_cannot_resolve_another_s_ownership`), and the boot replay
+(`the_boot_pass_rebuilds_a_delegated_chain_from_the_projection`); plus `manifest.rs`
+unit tests `a_delegation_chain_must_terminate_and_stay_short` and
 `a_resolver_name_that_would_be_truncated_is_refused`.
+
+The boot replay is the one path install-path tests cannot reach: it rebuilds from
+the projection rather than the manifest, and delegation is what forces it to group
+per schema. The test drops the resolvers and the `_own` policies while leaving the
+projection intact — the state a tenant is in on its first boot after this feature
+ships — runs the pass, and asserts the confined caller reads exactly its own
+submission two links away. Behavior, not catalog rows: a predicate rebuilt into the
+wrong shape would satisfy a policy count and still confine the wrong caller.
+Verified to fail without the rebuild.
 
 Without `ROOTCX_RESOURCES` pointing at a directory containing the `bun` binary the
 harness cannot boot (`boot failed: Worker(...)`) — unrelated to this change. Under

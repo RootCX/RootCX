@@ -681,3 +681,68 @@ async fn one_app_cannot_resolve_another_s_ownership() {
 
     rt.shutdown().await;
 }
+
+/// The boot pass rebuilds policies from the `sensitive_fields` projection, not from
+/// the manifest — a path structurally different from install, and the one every
+/// existing tenant takes when it first boots on a core that has this feature. No
+/// install-path test can reach it.
+///
+/// Delegation is what makes that path non-trivial: resolving one entity needs the
+/// projection rows of the entities it defers to, so the pass has to group per schema
+/// rather than handle each table on its own. Get that wrong and the table simply
+/// ends up with no row-scoped policies — `.own` holders are denied, silently, and it
+/// reads as an access bug rather than a boot bug.
+///
+/// So this asserts the rebuilt *behavior*, not the presence of catalog rows: a
+/// predicate rebuilt into the wrong shape would satisfy a policy count and still
+/// confine the wrong caller.
+#[tokio::test]
+async fn the_boot_pass_rebuilds_a_delegated_chain_from_the_projection() {
+    let rt = harness::TestRuntime::boot().await;
+    install_chained(&rt).await;
+
+    let (tok, mine) = user_with(&rt, "jean@t.local", &["app:school:submission.read.own"]).await;
+    stack_for(&rt, mine, "jean").await;
+    let (_, theirs) = user_with(&rt, "marie@t.local", &[]).await;
+    stack_for(&rt, theirs, "marie").await;
+
+    // Put the tenant in the state it is in before the pass runs: the projection is
+    // there (it is written at deploy and survives), the artifacts derived from it
+    // are not. Policies first — a resolver cannot be dropped while one names it.
+    let policies: Vec<(String, String)> = sqlx::query_as(
+        "SELECT tablename, policyname FROM pg_policies \
+          WHERE schemaname = 'school' AND policyname LIKE '%\\_own'",
+    ).fetch_all(rt.pool()).await.unwrap();
+    assert_eq!(policies.len(), 12, "three owned entities, four commands each");
+    for (table, policy) in policies {
+        sqlx::query(&format!("DROP POLICY {policy} ON school.{table}"))
+            .execute(rt.pool()).await.unwrap();
+    }
+    for entity in ["assignment", "enrollment"] {
+        sqlx::query(&format!("DROP FUNCTION rootcx_system.\"rootcx_own.school.{entity}\"()"))
+            .execute(rt.pool()).await.unwrap();
+    }
+
+    use rootcx_core::extensions::RuntimeExtension;
+    rootcx_core::extensions::rbac::RbacExtension.bootstrap(rt.pool()).await
+        .expect("the boot pass must survive a schema whose ownership is delegated");
+
+    let rebuilt: Vec<String> = sqlx::query_scalar(
+        "SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+          WHERE n.nspname = 'rootcx_system' AND p.proname LIKE 'rootcx\\_own.%' ORDER BY 1",
+    ).fetch_all(rt.pool()).await.unwrap();
+    assert_eq!(
+        rebuilt, ["rootcx_own.school.assignment", "rootcx_own.school.enrollment"],
+        "the chain must be reconstructible from the projection alone",
+    );
+
+    let (s, body) = rt.request_as(
+        Method::GET, "/api/v1/apps/school/collections/submission", &tok, None,
+    ).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let rows = body.as_array().expect("list returns an array");
+    assert_eq!(rows.len(), 1, "the rebuilt policy must confine, not deny or open: {body}");
+    assert_eq!(rows[0]["note"], json!("jean"), "and confine to the caller's own root");
+
+    rt.shutdown().await;
+}
