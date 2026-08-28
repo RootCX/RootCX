@@ -122,7 +122,8 @@ impl RootCxMcp {
         )
         .await
         .map_err(api_error_message)?;
-        let onboarding = crate::extensions::onboarding::read_status(self.runtime.pool())
+        let onboarding =
+            crate::extensions::onboarding::read_status(self.runtime.pool(), identity.user_id)
             .await
             .map_err(api_error_message)?;
         let workspace_url = std::env::var("ROOTCX_PUBLIC_URL")
