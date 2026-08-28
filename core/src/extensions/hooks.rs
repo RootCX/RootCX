@@ -288,14 +288,15 @@ fn validate_trigger(
         .collect()
 }
 
-/// The entity's derived row shape: which fields never leave the Core, and which
-/// column owns the row. Neither is set when the entity is absent from the manifest
-/// or declares neither — which is what makes the projection additive, since nothing
-/// projected means every trigger and policy behaves exactly as before.
+/// The entity's derived row shape: which fields never leave the Core, which column
+/// decides who owns the row, and the sibling entity that column defers to when
+/// ownership is delegated. Nothing is set when the entity is absent from the
+/// manifest or declares none of it — which is what makes the projection additive,
+/// since nothing projected means every trigger and policy behaves exactly as before.
 fn row_shape<'m>(
     manifest: &'m rootcx_types::AppManifest,
     table: &str,
-) -> (Vec<String>, Option<&'m str>) {
+) -> (Vec<String>, Option<&'m str>, Option<&'m str>) {
     let entity = manifest.data_contract.iter().find(|e| e.entity_name == table);
     let sensitive = entity
         .into_iter()
@@ -303,7 +304,11 @@ fn row_shape<'m>(
         .filter(|f| f.sensitive)
         .map(|f| f.name.clone())
         .collect();
-    (sensitive, entity.and_then(crate::manifest::owner_field))
+    (
+        sensitive,
+        entity.and_then(crate::manifest::owner_field),
+        entity.and_then(crate::manifest::owner_parent),
+    )
 }
 
 /// Project the entity's row shape into `sensitive_fields`, so the row-level
@@ -318,7 +323,7 @@ async fn sync_sensitive_fields(
     schema: &str,
     table: &str,
 ) -> Result<(), RuntimeError> {
-    let (fields, owner) = row_shape(manifest, table);
+    let (fields, owner, parent) = row_shape(manifest, table);
 
     let query = if fields.is_empty() && owner.is_none() {
         sqlx::query("DELETE FROM rootcx_system.sensitive_fields WHERE app_id = $1 AND entity = $2")
@@ -326,15 +331,17 @@ async fn sync_sensitive_fields(
             .bind(table)
     } else {
         sqlx::query(
-            "INSERT INTO rootcx_system.sensitive_fields (app_id, entity, fields, owner_field) \
-             VALUES ($1, $2, $3, $4) \
+            "INSERT INTO rootcx_system.sensitive_fields (app_id, entity, fields, owner_field, owner_parent) \
+             VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (app_id, entity) \
-             DO UPDATE SET fields = EXCLUDED.fields, owner_field = EXCLUDED.owner_field",
+             DO UPDATE SET fields = EXCLUDED.fields, owner_field = EXCLUDED.owner_field, \
+                           owner_parent = EXCLUDED.owner_parent",
         )
         .bind(schema)
         .bind(table)
         .bind(&fields)
         .bind(owner)
+        .bind(parent)
     };
 
     query.execute(pool).await.map_err(RuntimeError::Schema)?;
@@ -699,17 +706,17 @@ mod tests {
         );
         assert_eq!(
             row_shape(&m, "accounts"),
-            (vec!["password_hash".to_string(), "token".to_string()], None),
+            (vec!["password_hash".to_string(), "token".to_string()], None, None),
             "only flagged fields, in declaration order, and no owner",
         );
         assert_eq!(
             row_shape(&m, "other_entity"),
-            (vec![], None),
+            (vec![], None, None),
             "an entity absent from the manifest projects nothing",
         );
         assert_eq!(
             row_shape(&manifest_with("accounts", &[("email", false)]), "accounts"),
-            (vec![], None),
+            (vec![], None, None),
             "an entity declaring neither projects nothing",
         );
 
@@ -717,7 +724,7 @@ mod tests {
         owned.data_contract[0].fields[0].owner = true;
         assert_eq!(
             row_shape(&owned, "accounts"),
-            (vec!["token".to_string()], Some("user_id")),
+            (vec!["token".to_string()], Some("user_id"), None),
             "the two declarations are independent and travel together",
         );
     }

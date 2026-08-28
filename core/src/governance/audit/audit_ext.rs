@@ -103,11 +103,15 @@ impl RuntimeExtension for AuditExtension {
         // its own: it is the same fact (this entity's row shape, derived from the
         // manifest at deploy), it has the same single writer, and a second table
         // would mean a second bootstrap-order constraint to keep straight.
-        exec(
-            pool,
-            "ALTER TABLE rootcx_system.sensitive_fields ADD COLUMN IF NOT EXISTS owner_field TEXT",
-        )
-        .await?;
+        // `owner_parent` names the sibling entity `owner_field` links to when
+        // ownership is delegated, and is NULL when the column holds a user id
+        // outright. Added separately from `owner_field` so a tenant that upgraded
+        // through the direct-ownership release gains it without a rewrite.
+        for column in ["owner_field", "owner_parent"] {
+            exec(pool, &format!(
+                "ALTER TABLE rootcx_system.sensitive_fields ADD COLUMN IF NOT EXISTS {column} TEXT",
+            )).await?;
+        }
 
         exec(
             pool,

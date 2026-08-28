@@ -217,6 +217,14 @@ impl RuntimeExtension for RbacExtension {
         .execute(pool).await.map_err(RuntimeError::Schema)?;
         info!(app = %app_id, user = %installed_by, "app admin role assigned");
 
+        // Every table's policies are current by now (`on_table_created` ran for all
+        // of them), so a resolver this manifest no longer delegates to has no
+        // dependent left and is safe to drop.
+        let delegated: Vec<String> = manifest.data_contract.iter()
+            .filter_map(|e| crate::manifest::owner_parent(e).map(str::to_string))
+            .collect();
+        prune_owner_resolvers(pool, app_id, &delegated).await?;
+
         Ok(())
     }
 
@@ -227,12 +235,7 @@ impl RuntimeExtension for RbacExtension {
         schema: &str,
         table: &str,
     ) -> Result<(), RuntimeError> {
-        let owner = manifest
-            .data_contract
-            .iter()
-            .find(|e| e.entity_name == table)
-            .and_then(crate::manifest::owner_field);
-        apply_table_rls(pool, schema, table, owner).await
+        apply_table_rls(pool, schema, table, &crate::manifest::owner_map(&manifest.data_contract)).await
     }
 
     fn routes(&self) -> Option<Router<SharedRuntime>> {
@@ -253,15 +256,14 @@ impl RuntimeExtension for RbacExtension {
 /// install and on the retroactive boot pass. `schema`/`table` are validated
 /// snake_case identifiers (see `manifest::validate_manifest`).
 ///
-/// `owner` is the column holding the owning user's id when the entity declares
-/// one, which adds a row-scoped twin per command, confining a holder of a `.own`
-/// key to its own rows. Passing `None` reproduces the pre-ownership SQL exactly, so
-/// a table that declares nothing is untouched.
+/// `owners` describes ownership for every entity of the schema, since resolving a
+/// delegated one needs its ancestors too. A table absent from the map gets exactly
+/// the pre-ownership SQL, so a schema that declares nothing is untouched.
 pub(crate) async fn apply_table_rls(
     pool: &PgPool,
     schema: &str,
     table: &str,
-    owner: Option<&str>,
+    owners: &OwnerMap,
 ) -> Result<(), RuntimeError> {
     use crate::manifest::quote_ident;
     let qt = format!("{}.{}", quote_ident(schema), quote_ident(table));
@@ -278,7 +280,7 @@ pub(crate) async fn apply_table_rls(
     // "This row is mine", or None when there is no owner to compare against — in
     // which case every `_own` policy below is dropped and not recreated, so removing
     // the declaration removes the confinement instead of stranding it.
-    let mine = owner_predicate(pool, schema, table, owner).await?;
+    let mine = owner_predicate(pool, schema, table, owners).await?;
 
     for (policy, command, action, clauses) in RLS_POLICIES {
         set_policy(
@@ -344,49 +346,195 @@ async fn set_policy(
     exec(pool, &format!("CREATE POLICY {name} ON {qt} FOR {command} {body}")).await
 }
 
-/// "This row is mine", as SQL — or `None` when there is no column to compare.
+/// Ownership per entity of one schema: the owning column, and the sibling entity
+/// that column defers to when ownership is delegated rather than held outright.
+pub(crate) type OwnerMap = std::collections::HashMap<String, (String, Option<String>)>;
+
+/// The `rootcx_system` function answering "which rows of this entity are the
+/// caller's". Separated by `.`, which `validate_ident` bars from both halves, so no
+/// pair of (schema, entity) can ever produce one name.
+pub(crate) fn owner_resolver_name(schema: &str, entity: &str) -> String {
+    format!("rootcx_own.{schema}.{entity}")
+}
+
+/// "This row is mine", as SQL — or `None` when it cannot be answered.
 ///
-/// The caller's id is cast to the column's type, never the column to text:
-/// `owner::text = $guc` is not indexable, so on a `uuid` column it would turn every
-/// read by a confined caller into a sequential scan. The type comes from the
-/// catalog, not the manifest — the boot pass has only a column name, and the
-/// catalog is what the policy actually runs against. As in `gate`, the
-/// `(SELECT ...)` wrapper keeps the GUC read an InitPlan: once per query.
+/// For a directly-owned row it is one comparison. The caller's id is cast to the
+/// column's type, never the column to text: `owner::text = $guc` is not indexable,
+/// so on a `uuid` column it would turn every read by a confined caller into a
+/// sequential scan. The type comes from the catalog, not the manifest — the boot
+/// pass has only a column name, and the catalog is what the policy actually runs
+/// against. As in `gate`, the `(SELECT ...)` wrapper keeps the GUC read an InitPlan:
+/// once per query.
 ///
-/// A column that is not there yields `None`, leaving the row-scoped policies
-/// absent — and absent means deny, since a `.own` key grants nothing without a
-/// policy honouring it. Fail-closed is how a projection row that outlived its
-/// column stays survivable.
+/// For a delegated row the answer lives in another table, and reaching it from
+/// inside a policy has two hazards. Read it inline and Postgres applies *that*
+/// table's policies to the subquery, so who owns a row would start depending on
+/// what the caller may read, and a chain would recurse until Postgres refuses the
+/// table outright. So each link is crossed through a `SECURITY DEFINER` resolver
+/// (see `declare_owner_resolver`), which makes ownership a fact about the data
+/// alone and cuts the recursion at a function boundary. Its result set is compared
+/// with `= ANY (ARRAY(...))` rather than `IN (...)`: both are evaluated once per
+/// query, but only the array form lets the planner drive the link column's index.
+///
+/// Anything unanswerable yields `None`, leaving the row-scoped policies absent —
+/// and absent means deny, since a `.own` key grants nothing without a policy
+/// honouring it. Fail-closed is how a projection that outlived its column, or one
+/// hand-edited into a loop, stays survivable.
 async fn owner_predicate(
     pool: &PgPool,
     schema: &str,
     table: &str,
-    owner: Option<&str>,
+    owners: &OwnerMap,
 ) -> Result<Option<String>, RuntimeError> {
-    let Some(owner) = owner else { return Ok(None) };
+    // Walk to the entity that holds a real user id. Bounded and loop-checked here
+    // as well as at install: the boot pass replays a projection nobody revalidates,
+    // and Postgres reports policy recursion only once the table is queried — by
+    // which time the table is unusable.
+    let mut chain: Vec<(&str, &str)> = Vec::new();
+    let mut current = table;
+    loop {
+        let Some((column, parent)) = owners.get(current) else {
+            if !chain.is_empty() {
+                tracing::warn!(%schema, %table, %current, "ownership is delegated to an entity that declares none; row-scoped policies not created");
+            }
+            return Ok(None);
+        };
+        if chain.iter().any(|(entity, _)| *entity == current) {
+            tracing::warn!(%schema, %table, %current, "ownership delegation loops; row-scoped policies not created");
+            return Ok(None);
+        }
+        chain.push((current, column.as_str()));
+        let Some(parent) = parent else { break };
+        if chain.len() >= crate::manifest::MAX_OWNER_CHAIN {
+            tracing::warn!(%schema, %table, "ownership delegation is too deep; row-scoped policies not created");
+            return Ok(None);
+        }
+        current = parent.as_str();
+    }
 
-    let column_type: Option<String> = sqlx::query_scalar(
-        "SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a
-          WHERE a.attrelid = to_regclass($1) AND a.attname = $2 AND a.attnum > 0 AND NOT a.attisdropped",
-    )
-    .bind(format!("{}.{}", crate::manifest::quote_ident(schema), crate::manifest::quote_ident(table)))
-    .bind(owner)
-    .fetch_optional(pool).await.map_err(RuntimeError::Schema)?
-    .flatten();
-
-    let Some(column_type) = column_type else {
+    let (root, root_column) = chain[chain.len() - 1];
+    let Some(root_type) = column_type(pool, schema, root, root_column).await? else {
         tracing::warn!(
-            %schema, %table, %owner,
+            %schema, table = %root, column = %root_column,
             "owner column is missing; row-scoped policies not created (holders of the \
              '.own' keys stay denied until the next deploy adds the column)"
         );
         return Ok(None);
     };
+    let mut mine = format!(
+        "{} = (SELECT nullif(current_setting('rootcx.user_id', true), ''))::{root_type}",
+        crate::manifest::quote_ident(root_column),
+    );
 
-    Ok(Some(format!(
-        "{} = (SELECT nullif(current_setting('rootcx.user_id', true), ''))::{column_type}",
-        crate::manifest::quote_ident(owner),
-    )))
+    // Descend back towards `table`, materialising one resolver per link crossed.
+    // Idempotent, and done here rather than in a pass of its own so a child's
+    // policy can never be created before the resolver it names exists.
+    for index in (0..chain.len() - 1).rev() {
+        let (parent, _) = chain[index + 1];
+        let (entity, link) = chain[index];
+        let (Some(pk), Some(_)) = (
+            primary_key(pool, schema, parent).await?,
+            column_type(pool, schema, entity, link).await?,
+        ) else {
+            tracing::warn!(%schema, %entity, %link, %parent, "the delegation link or its target's primary key is missing; row-scoped policies not created");
+            return Ok(None);
+        };
+        let Some(pk_type) = column_type(pool, schema, parent, &pk).await? else { return Ok(None) };
+        let resolver = owner_resolver_name(schema, parent);
+        declare_owner_resolver(pool, schema, parent, &resolver, &pk, &pk_type, &mine).await?;
+        mine = format!(
+            "{} = ANY (ARRAY(SELECT rootcx_system.{}()))",
+            crate::manifest::quote_ident(link),
+            crate::manifest::quote_ident(&resolver),
+        );
+    }
+
+    Ok(Some(mine))
+}
+
+/// The set of primary keys of `entity` the caller owns.
+///
+/// `SECURITY DEFINER`, so it runs as the core role and reads the parent table
+/// unfiltered. That is the whole point: ownership must be a property of the data,
+/// not of the caller's grants on the tables the chain passes through, or a caller
+/// holding `child.read.own` would see a different set of rows depending on whether
+/// it also held `parent.read`. It discloses nothing but the ids of rows already the
+/// caller's own, and only to the executor role.
+async fn declare_owner_resolver(
+    pool: &PgPool,
+    schema: &str,
+    entity: &str,
+    resolver: &str,
+    pk: &str,
+    pk_type: &str,
+    mine: &str,
+) -> Result<(), RuntimeError> {
+    use crate::manifest::quote_ident;
+    let signature = format!("rootcx_system.{}()", quote_ident(resolver));
+    exec(pool, &format!(
+        "CREATE OR REPLACE FUNCTION {signature} RETURNS SETOF {pk_type} \
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $rootcx$ \
+         SELECT {} FROM {}.{} WHERE {mine} $rootcx$",
+        quote_ident(pk), quote_ident(schema), quote_ident(entity),
+    )).await?;
+    // A new function is executable by PUBLIC by default, and this one names a
+    // specific user's rows.
+    exec(pool, &format!("REVOKE ALL ON FUNCTION {signature} FROM PUBLIC")).await?;
+    exec(pool, &format!("GRANT EXECUTE ON FUNCTION {signature} TO rootcx_app_executor")).await
+}
+
+/// Drop the schema's resolvers for entities no longer named in `keep`. Called once
+/// the app's policies are current, so nothing dropped can still be referenced.
+pub(crate) async fn prune_owner_resolvers(
+    pool: &PgPool,
+    schema: &str,
+    keep: &[String],
+) -> Result<(), RuntimeError> {
+    let existing: Vec<String> = sqlx::query_scalar(
+        "SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+          WHERE n.nspname = 'rootcx_system' AND p.proname LIKE 'rootcx\\_own.%'",
+    ).fetch_all(pool).await.map_err(RuntimeError::Schema)?;
+
+    for name in existing {
+        let Some((owner_schema, entity)) = name["rootcx_own.".len()..].split_once('.') else { continue };
+        if owner_schema != schema || keep.iter().any(|k| k == entity) { continue }
+        exec(pool, &format!(
+            "DROP FUNCTION IF EXISTS rootcx_system.{}()", crate::manifest::quote_ident(&name),
+        )).await?;
+    }
+    Ok(())
+}
+
+async fn column_type(
+    pool: &PgPool,
+    schema: &str,
+    table: &str,
+    column: &str,
+) -> Result<Option<String>, RuntimeError> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT format_type(a.atttypid, a.atttypmod) FROM pg_attribute a
+          WHERE a.attrelid = to_regclass($1) AND a.attname = $2 AND a.attnum > 0 AND NOT a.attisdropped",
+    )
+    .bind(qualified(schema, table))
+    .bind(column)
+    .fetch_optional(pool).await.map_err(RuntimeError::Schema)?)
+}
+
+/// The single-column primary key a delegation link points at. Read from the
+/// catalog rather than assumed to be `id`, since an entity may name its own.
+async fn primary_key(pool: &PgPool, schema: &str, table: &str) -> Result<Option<String>, RuntimeError> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT a.attname FROM pg_index i
+           JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0]
+          WHERE i.indrelid = to_regclass($1) AND i.indisprimary AND i.indnatts = 1",
+    )
+    .bind(qualified(schema, table))
+    .fetch_optional(pool).await.map_err(RuntimeError::Schema)?)
+}
+
+fn qualified(schema: &str, table: &str) -> String {
+    format!("{}.{}", crate::manifest::quote_ident(schema), crate::manifest::quote_ident(table))
 }
 
 #[cfg(test)]

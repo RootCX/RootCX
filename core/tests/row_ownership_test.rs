@@ -354,3 +354,283 @@ async fn an_unowned_legacy_row_is_nobody_s() {
 
     rt.shutdown().await;
 }
+
+// ── Delegated ownership ─────────────────────────────────────────────────
+//
+// A row that carries no user id can still belong to someone: a submission is
+// mine because its assignment is, and that assignment because its enrollment is.
+// Two links, because at one link the chain builder and a single-hop special case
+// are indistinguishable.
+
+async fn install_chained(rt: &harness::TestRuntime) {
+    let link = |target: &str| json!({
+        "name": format!("{target}_id"), "type": "entity_link",
+        "references": { "entity": target, "field": "id" }, "owner": true,
+    });
+    rt.install_manifest(&json!({
+        "appId": "school", "name": "school", "version": "1.0.0",
+        "dataContract": [
+            { "entityName": "enrollment", "fields": [
+                { "name": "user_id", "type": "uuid", "owner": true },
+                { "name": "label", "type": "text" }]},
+            { "entityName": "assignment", "fields": [
+                link("enrollment"), { "name": "title", "type": "text" }]},
+            { "entityName": "submission", "fields": [
+                link("assignment"), { "name": "note", "type": "text" }]},
+        ]
+    })).await;
+}
+
+/// One enrollment, assignment and submission belonging to `owner`, created by the
+/// admin so no fixture depends on the policies under test.
+async fn stack_for(rt: &harness::TestRuntime, owner: Uuid, tag: &str) -> (String, String) {
+    let id = |v: Value| v["id"].as_str().expect("created record returns its id").to_string();
+    let enrollment = id(rt.create("school", "enrollment", &json!({"user_id": owner, "label": tag})).await);
+    let assignment = id(rt.create("school", "assignment",
+        &json!({"enrollment_id": enrollment, "title": tag})).await);
+    let submission = id(rt.create("school", "submission",
+        &json!({"assignment_id": assignment, "note": tag})).await);
+    (assignment, submission)
+}
+
+/// The feature itself: `.own` on a table that holds no user id anywhere confines
+/// its holder to the rows reachable from its own root, two links away — for reads
+/// and, through `WITH CHECK`, for the re-parenting that would otherwise be the way
+/// out of the scope.
+#[tokio::test]
+async fn own_follows_a_two_link_delegation_chain() {
+    let rt = harness::TestRuntime::boot().await;
+    install_chained(&rt).await;
+
+    let scoped = ["read", "update", "delete", "create"]
+        .map(|action| format!("app:school:submission.{action}.own"));
+    let scoped: Vec<&str> = scoped.iter().map(String::as_str).collect();
+    let (tok, mine) = user_with(&rt, "jean@t.local", &scoped).await;
+    let (_, theirs) = user_with(&rt, "marie@t.local", &[]).await;
+    let (my_assignment, my_submission) = stack_for(&rt, mine, "jean").await;
+    let (their_assignment, their_submission) = stack_for(&rt, theirs, "marie").await;
+    // A submission hanging off nothing: unowned all the way down.
+    rt.create("school", "submission", &json!({"note": "orphan"})).await;
+
+    let (s, body) = rt.request_as(Method::GET, "/api/v1/apps/school/collections/submission", &tok, None).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let rows = body.as_array().expect("list returns an array");
+    assert_eq!(rows.len(), 1, "ownership must resolve through both links: {body}");
+    assert_eq!(rows[0]["note"], json!("jean"));
+
+    for (label, method, id, patch, expected) in [
+        ("read another's submission", Method::GET, &their_submission, None, StatusCode::NOT_FOUND),
+        ("edit its own", Method::PATCH, &my_submission, Some(json!({"note": "revised"})), StatusCode::OK),
+        // Visible and writable, but the row would come to rest under a root that
+        // is not the caller's — the only escape a confined UPDATE has left.
+        ("re-parent its own away", Method::PATCH, &my_submission,
+         Some(json!({"assignment_id": their_assignment})), StatusCode::FORBIDDEN),
+        ("delete another's", Method::DELETE, &their_submission, None, StatusCode::NOT_FOUND),
+    ] {
+        let path = format!("/api/v1/apps/school/collections/submission/{id}");
+        let (s, response) = rt.request_as(method, &path, &tok, patch.as_ref()).await;
+        assert_eq!(s, expected, "{label}: {response}");
+    }
+
+    for (label, assignment, expected) in [
+        ("under its own assignment", json!(my_assignment), StatusCode::CREATED),
+        ("under another's assignment", json!(their_assignment), StatusCode::FORBIDDEN),
+        // No parent at all is no different from a parent that is not the caller's.
+        ("under no assignment", json!(null), StatusCode::FORBIDDEN),
+    ] {
+        let body = json!({"assignment_id": assignment, "note": "new"});
+        let (s, response) = rt.request_as(
+            Method::POST, "/api/v1/apps/school/collections/submission", &tok, Some(&body),
+        ).await;
+        assert_eq!(s, expected, "create {label}: {response}");
+    }
+
+    rt.shutdown().await;
+}
+
+/// The security property that makes delegation safe to grant: what a `.own` key
+/// reaches is decided by the data alone. The chain is resolved by `SECURITY
+/// DEFINER` functions precisely so it never consults the caller's grants on the
+/// tables it crosses, and every permissive policy Postgres ORs in is gated on a key
+/// this caller does not hold. So neither holding nothing on the parents nor holding
+/// everything on them changes the answer.
+#[tokio::test]
+async fn no_grant_on_the_chain_widens_what_own_sees() {
+    let rt = harness::TestRuntime::boot().await;
+    install_chained(&rt).await;
+
+    let (blind, mine) = user_with(&rt, "jean@t.local", &["app:school:submission.read.own"]).await;
+    // The same scope, plus unscoped authority over every table the chain crosses.
+    let (informed, also_mine) = user_with(&rt, "paul@t.local", &[
+        "app:school:submission.read.own",
+        "app:school:enrollment.read", "app:school:enrollment.update",
+        "app:school:assignment.read", "app:school:assignment.update",
+    ]).await;
+    let (_, theirs) = user_with(&rt, "marie@t.local", &[]).await;
+    for (owner, tag) in [(mine, "jean"), (also_mine, "paul"), (theirs, "marie")] {
+        stack_for(&rt, owner, tag).await;
+    }
+
+    for (label, token, tag) in [
+        ("no grant at all on the parents", &blind, "jean"),
+        ("full unscoped authority over the parents", &informed, "paul"),
+    ] {
+        let (s, body) = rt.request_as(
+            Method::GET, "/api/v1/apps/school/collections/submission", token, None,
+        ).await;
+        assert_eq!(s, StatusCode::OK, "{label}: {body}");
+        let rows = body.as_array().expect("list returns an array");
+        assert_eq!(rows.len(), 1, "{label}: the scope is the same either way: {body}");
+        assert_eq!(rows[0]["note"], json!(tag), "{label}: and it is the caller's own row");
+    }
+
+    rt.shutdown().await;
+}
+
+/// What the generated SQL is, and what it costs.
+///
+/// The shape is asserted against the catalog because it is the security boundary:
+/// each link must be crossed through the `SECURITY DEFINER` resolver, never by an
+/// inline subquery — which Postgres would run under the *caller's* policies on the
+/// parent table, coupling ownership to grants and making a longer chain recurse
+/// until the table is unreadable. The cost is asserted against the planner, because
+/// `= ANY (ARRAY(...))` and the equivalent `IN (...)` are indistinguishable by
+/// reading and differ by a whole sequential scan.
+#[tokio::test]
+async fn each_link_is_crossed_by_an_indexable_resolver() {
+    let rt = harness::TestRuntime::boot().await;
+    install_chained(&rt).await;
+
+    let qual: String = sqlx::query_scalar(
+        "SELECT qual FROM pg_policies WHERE schemaname = 'school' AND tablename = 'submission' \
+           AND policyname = 'rootcx_rls_select_own'",
+    ).fetch_one(rt.pool()).await.unwrap();
+    assert!(
+        qual.contains("assignment_id = ANY (ARRAY( SELECT rootcx_system.\"rootcx_own.school.assignment\"()"),
+        "the policy must reach its parent through the resolver, as an array: {qual}",
+    );
+
+    // And the middle resolver must in turn defer to the root's, rather than
+    // re-deriving ownership itself.
+    let body: String = sqlx::query_scalar(
+        "SELECT pg_get_functiondef(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+          WHERE n.nspname = 'rootcx_system' AND p.proname = 'rootcx_own.school.assignment'",
+    ).fetch_one(rt.pool()).await.unwrap();
+    assert!(body.contains("rootcx_own.school.enrollment"), "the chain must compose: {body}");
+    assert!(body.contains("SECURITY DEFINER"), "a link crossed under RLS would recurse: {body}");
+
+    let (_, mine) = user_with(&rt, "jean@t.local", &["app:school:submission.read.own"]).await;
+    stack_for(&rt, mine, "jean").await;
+    // Everyone else's work, so the caller's own rows are the needle they are in
+    // production. A table where every row belongs to the caller has no plan worth
+    // asserting on: a sequential scan is then the correct choice.
+    for sql in [
+        "INSERT INTO school.enrollment (user_id) SELECT gen_random_uuid() FROM generate_series(1, 2000)",
+        "INSERT INTO school.assignment (enrollment_id) SELECT id FROM school.enrollment",
+        "INSERT INTO school.submission (assignment_id) SELECT id FROM school.assignment",
+        "ANALYZE school.submission",
+    ] {
+        sqlx::query(sql).execute(rt.pool()).await.unwrap();
+    }
+    let plan: Vec<String> = sqlx::query_scalar(
+        "EXPLAIN SELECT * FROM school.submission \
+          WHERE assignment_id = ANY (ARRAY(SELECT rootcx_system.\"rootcx_own.school.assignment\"()))",
+    ).fetch_all(rt.pool()).await.unwrap();
+    let plan = plan.join("\n");
+    assert!(
+        plan.contains("Index Scan") || plan.contains("Bitmap Index Scan"),
+        "a confined read must ride the link's index; plan was:\n{plan}",
+    );
+
+    rt.shutdown().await;
+}
+
+/// A delegation that cannot terminate is refused at install, with the manifest
+/// mistake named. Left to the database, a loop is reported by Postgres as
+/// `infinite recursion detected in policy` only once the table is queried — after
+/// the deploy has been declared a success, and with the table unreadable until the
+/// manifest is fixed. A chain ending on an entity that owns nothing is quieter
+/// still: the policies simply match no row, which reads as an access bug.
+#[tokio::test]
+async fn a_delegation_that_cannot_terminate_is_refused() {
+    let rt = harness::TestRuntime::boot().await;
+
+    let link = |target: &str| json!({
+        "name": format!("{target}_id"), "type": "entity_link",
+        "references": { "entity": target, "field": "id" }, "owner": true,
+    });
+    for (label, needle, entities) in [
+        ("a chain ending on an entity that owns nothing", "declares no owner field", json!([
+            { "entityName": "ticket", "fields": [{ "name": "subject", "type": "text" }]},
+            { "entityName": "comment", "fields": [link("ticket")]},
+        ])),
+        ("two entities each owned by the other", "in a loop", json!([
+            { "entityName": "ticket", "fields": [link("comment")]},
+            { "entityName": "comment", "fields": [link("ticket")]},
+        ])),
+    ] {
+        let (s, body) = rt.post_json("/api/v1/apps", &json!({
+            "appId": "helpdesk", "name": "helpdesk", "version": "1.0.0", "dataContract": entities,
+        })).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{label}: {body}");
+        assert!(body.to_string().contains(needle), "{label}: {body}");
+
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = 'helpdesk')",
+        ).fetch_one(rt.pool()).await.unwrap();
+        assert!(!exists, "{label}: validation must run before any DDL");
+    }
+
+    rt.shutdown().await;
+}
+
+/// The resolvers live in `rootcx_system`, so neither a redeploy that drops the
+/// delegation nor dropping the app takes them with it. Both must reconcile: a
+/// resolver left behind is a callable description of who owns what in a schema that
+/// may since have been reshaped, or removed entirely.
+#[tokio::test]
+async fn resolvers_track_the_declaration() {
+    let rt = harness::TestRuntime::boot().await;
+    install_chained(&rt).await;
+
+    let resolvers = async || {
+        sqlx::query_scalar::<_, String>(
+            "SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+              WHERE n.nspname = 'rootcx_system' AND p.proname LIKE 'rootcx\\_own.%' ORDER BY 1",
+        ).fetch_all(rt.pool()).await.unwrap()
+    };
+    assert_eq!(
+        resolvers().await,
+        ["rootcx_own.school.assignment", "rootcx_own.school.enrollment"],
+        "one resolver per entity another entity defers to, and none for the leaf",
+    );
+
+    // Redeploy with the last link dropped: `assignment` is nobody's parent now.
+    rt.install_manifest(&json!({
+        "appId": "school", "name": "school", "version": "1.0.1",
+        "dataContract": [
+            { "entityName": "enrollment", "fields": [
+                { "name": "user_id", "type": "uuid", "owner": true }]},
+            { "entityName": "assignment", "fields": [
+                { "name": "enrollment_id", "type": "entity_link",
+                  "references": { "entity": "enrollment", "field": "id" }, "owner": true }]},
+            { "entityName": "submission", "fields": [
+                { "name": "assignment_id", "type": "entity_link",
+                  "references": { "entity": "assignment", "field": "id" }}]},
+        ]
+    })).await;
+    assert_eq!(
+        resolvers().await, ["rootcx_own.school.enrollment"],
+        "a redeploy that stops delegating must leave no resolver behind",
+    );
+    let left: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_policies WHERE schemaname = 'school' \
+           AND tablename = 'submission' AND policyname LIKE '%\\_own'",
+    ).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(left, 0, "nor any policy confining a table that claims no owner");
+
+    assert_eq!(rt.delete("/api/v1/apps/school").await, StatusCode::OK);
+    assert!(resolvers().await.is_empty(), "uninstall must take the resolvers with it");
+
+    rt.shutdown().await;
+}

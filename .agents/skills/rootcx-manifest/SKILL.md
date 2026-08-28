@@ -45,7 +45,22 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
 - `"required": true` = mandatory on create; omit key for optional
 - `"enum_values": [...]` restricts text fields to fixed values
 - `"sensitive": true` keeps a column out of every API response, filter and sort. It stays writable and usable in SQL inside the app; it just never travels back over the wire.
-- `"owner": true` marks the column holding the id of the user a row belongs to. Core then mints `{entity}.{action}.own` permissions next to the unscoped ones, and a role holding only those reaches that user's own rows. One column per entity, typed `entity_link` (to `core:users`), `uuid` or `text`. Rows whose owner is NULL belong to nobody, so adopting this on an existing table needs no backfill. It scopes rows, not columns: a confined caller reads its own row whole, so mark credential columns `"sensitive": true` too.
+- `"owner": true` marks the column deciding which user a row belongs to. Core then mints `{entity}.{action}.own` permissions next to the unscoped ones, and a role holding only those reaches that user's own rows. One column per entity. Rows whose owner is NULL belong to nobody, so adopting this on an existing table needs no backfill. It scopes rows, not columns: a confined caller reads its own row whole, so mark credential columns `"sensitive": true` too.
+  - **Direct** — a `uuid`, `text`, or `entity_link` to `core:users` column holding the user id itself.
+  - **Delegated** — an `entity_link` to another entity of the same app: the row belongs to whoever owns the row it links to. That entity must be marked `"owner": true` in turn, so the chain ends on a real user id. This is how a table that stores no user id anywhere still has owners.
+
+```json
+{ "entityName": "enrollment", "fields": [
+    { "name": "user_id", "type": "uuid", "owner": true }] },
+{ "entityName": "assignment", "fields": [
+    { "name": "enrollment_id", "type": "entity_link",
+      "references": { "entity": "enrollment", "field": "id" }, "owner": true }] },
+{ "entityName": "submission", "fields": [
+    { "name": "assignment_id", "type": "entity_link",
+      "references": { "entity": "assignment", "field": "id" }, "owner": true }] }
+```
+
+  A role holding `app:school:submission.read.own` now sees the submissions hanging off its own enrollments, and no others. Ownership is resolved from the data alone, so grants on `assignment` or `enrollment` neither widen nor narrow it. Refused at install: a chain that loops, one spanning more than four entities, one ending on an entity that declares no owner, and an `entity_link` owner with no `references`. Cost: one indexed lookup per link, so keep the link columns indexed (`entity_link` already is).
 
 ---
 
