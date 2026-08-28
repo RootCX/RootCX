@@ -73,7 +73,8 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
             FROM rootcx_system.cron_schedules WHERE id = p_cron_id;
             v_msg := jsonb_build_object(
                 'app_id',  p_app_id,
-                'payload', p_payload || jsonb_build_object('cron_id', p_cron_id::text)
+                'payload', p_payload || jsonb_build_object('cron_id', p_cron_id::text),
+                'cron_id', p_cron_id::text
             );
             IF v_user_id IS NOT NULL THEN
                 v_msg := v_msg || jsonb_build_object('user_id', v_user_id::text);
@@ -322,7 +323,9 @@ pub async fn list_runs(
 pub async fn trigger(pool: &PgPool, app_id: &str, cron_id: Uuid) -> Result<i64, RuntimeError> {
     require_pg_cron()?;
     let row = get(pool, app_id, cron_id).await?;
-    let msg_id = crate::jobs::enqueue(pool, app_id, row.payload, row.created_by).await?;
+    let msg_id = crate::jobs::enqueue_cron(
+        pool, app_id, cron_id, row.payload, row.created_by,
+    ).await?;
     info!(app_id, id = %cron_id, msg_id, "cron triggered manually");
     Ok(msg_id)
 }

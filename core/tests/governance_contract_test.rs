@@ -1383,6 +1383,9 @@ async fn t5_4_app_cannot_rewrite_identity_gucs() {
         "SELECT set_config('rootcx.is_delegated', '0', true)",
         "SELECT set_config('rootcx.effective_perms', '*', true)",
         "SELECT set_config('rootcx.actor_uid', '00000000-0000-0000-0000-000000000001', true)",
+        "SELECT set_config('rootcx.invocation_kind', 'action', true)",
+        "SELECT set_config('rootcx.invocation_name', 'forged', true)",
+        "SELECT set_config('rootcx.action_id', 'forged', true)",
     ] {
         let res = exec_as_executor(pool, "crm", sql).await;
         assert!(res.is_err(), "executor must not call set_config: {sql}");
@@ -2031,7 +2034,7 @@ async fn sql_proxy_row_cap_boundary_1000_succeeds() {
 // and that the governance gate (validate_sql) still bites inside a TX.
 // ══════════════════════════════════════════════════════════════════════════════
 
-use rootcx_core::governance::enforcement::{ContextState, TxSession};
+use rootcx_core::governance::enforcement::{ContextState, InvocationContext, TxSession};
 
 fn writer_state(uid: Uuid) -> ContextState {
     ContextState {
@@ -2068,6 +2071,62 @@ async fn tx_commit_persists_all_statements_atomically() {
     session.commit().await.unwrap();
     assert_eq!(contact_count(&rt).await, 2, "commit persists every statement");
 
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn tx_pins_core_invocation_context_for_its_entire_lifetime() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let (_, uid) = user_with(&rt, "txscope@t.local", &["app:crm:contacts.read"]).await;
+    let (done, _done_rx) = tokio::sync::mpsc::channel::<String>(4);
+    let invocation = InvocationContext::action("approve_purchase");
+
+    let session = TxSession::begin_with_invocation(
+        rt.pool(), "crm", &writer_state(uid), &invocation, done,
+    ).await.unwrap();
+    for attempt in 1..=2 {
+        let result = session.executor().exec(
+            "SELECT current_setting('rootcx.invocation_kind', true), current_setting('rootcx.invocation_name', true), current_setting('rootcx.action_id', true)".into(),
+            vec![],
+        ).await.unwrap();
+        assert_eq!(
+            result.rows,
+            vec![vec![json!("action"), json!("approve_purchase"), json!("approve_purchase")]],
+            "statement {attempt} lost or changed the transaction invocation context",
+        );
+    }
+    session.rollback().await.unwrap();
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn internal_and_job_contexts_are_distinct_and_fail_closed() {
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let (_, uid) = user_with(&rt, "ctxscope@t.local", &["app:crm:contacts.read"]).await;
+    let state = writer_state(uid);
+    let cases = [
+        (InvocationContext::default(), vec![json!(""), json!(""), json!("")]),
+        (
+            InvocationContext::job("stock-minimum-purchase-proposals"),
+            vec![json!("job"), json!("stock-minimum-purchase-proposals"), json!("")],
+        ),
+    ];
+
+    for (invocation, expected) in cases {
+        let result = rootcx_core::governance::enforcement::run_sql_with_invocation(
+            rt.pool(),
+            "crm",
+            &state,
+            &invocation,
+            "SELECT current_setting('rootcx.invocation_kind', true), current_setting('rootcx.invocation_name', true), current_setting('rootcx.action_id', true)",
+            &[],
+        ).await.unwrap();
+        assert_eq!(result.rows, vec![expected], "wrong Core-owned invocation context");
+    }
     rt.shutdown().await;
 }
 

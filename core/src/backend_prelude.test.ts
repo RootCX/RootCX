@@ -100,15 +100,15 @@ afterAll(() => {
   for (const f of tmpFiles) try { unlinkSync(f); } catch {}
 });
 
-// ─── v3 protocol: serve()-based workers ──────────────────────────────────────
+// ─── v4 protocol: serve()-based workers ──────────────────────────────────────
 
-describe("v3: serve()", () => {
+describe("v4: serve()", () => {
   test("discover responds with protocol version and methods", async () => {
     const w = spawnWorker(`serve({ rpc: { ping: () => "pong", echo: (p: any) => p } });`);
     w.send(DISCOVER);
     const msg = await w.readLine();
     expect(msg.type).toBe("discover");
-    expect(msg.protocol).toBe(3);
+    expect(msg.protocol).toBe(4);
     expect(msg.methods).toEqual(["ping", "echo"]);
     await w.close();
   });
@@ -219,7 +219,10 @@ describe("v3: serve()", () => {
     w.send(DISCOVER);
     await w.readLine(); // discover
 
-    w.send({ type: "rpc", id: "r1", method: "createItem", params: { name: "test" } });
+    w.send({
+      type: "rpc", id: "r1", invocation_id: "core-invocation-1",
+      method: "createItem", params: { name: "test" },
+    });
 
     // Prelude should emit collection_op before rpc_response
     const cop = await w.readLine();
@@ -227,6 +230,7 @@ describe("v3: serve()", () => {
     expect(cop.op).toBe("insert");
     expect(cop.entity).toBe("items");
     expect(cop.data).toEqual({ name: "test" });
+    expect(cop.invocation_id).toBe("core-invocation-1");
 
     // Simulate Core sending back the result
     w.send({ type: "collection_op_result", id: cop.id, result: { id: "1", name: "test" } });
@@ -255,14 +259,19 @@ describe("v3: serve()", () => {
     `);
     w.send(DISCOVER);
     await w.readLine();
-    w.send({ type: "rpc", id: "r1", method: "save", params: {} });
+    w.send({
+      type: "rpc", id: "r1", invocation_id: "core-invocation-tx",
+      method: "save", params: {},
+    });
 
     const begin = await w.readLine();
     expect(begin.type).toBe("sql_begin");
+    expect(begin.invocation_id).toBe("core-invocation-tx");
     w.send({ type: "sql_begin_result", id: begin.id, tx_id: "core-tx" });
 
     const first = await w.readLine();
     expect(first).toMatchObject({ type: "sql_exec", tx_id: "core-tx", sql: "INSERT first RETURNING id", params: [1] });
+    expect(first.invocation_id).toBe("core-invocation-tx");
     expect(await w.noOutput()).toBe(true);
     w.send({ type: "sql_exec_result", id: first.id, rows: [["a"]], columns: ["id"], row_count: 1 });
 
@@ -272,6 +281,7 @@ describe("v3: serve()", () => {
 
     const commit = await w.readLine();
     expect(commit).toMatchObject({ type: "sql_commit", tx_id: "core-tx" });
+    expect(commit.invocation_id).toBe("core-invocation-tx");
     w.send({ type: "sql_end_result", id: commit.id });
     expect(await w.readLine()).toEqual({ type: "rpc_response", id: "r1", result: { ids: ["a", "b"] } });
     await w.close();
@@ -648,9 +658,9 @@ describe("v3: serve()", () => {
   });
 });
 
-// ─── v3 compat: old serve(handlers) flat signature ──────────────────────────
+// ─── v4 compat: old serve(handlers) flat signature ──────────────────────────
 
-describe("v3 compat: old flat serve() signature", () => {
+describe("v4 compat: old flat serve() signature", () => {
   test("serve({ method: fn }) works without rpc wrapper", async () => {
     const w = spawnWorker(`serve({ ping: () => "pong", echo: (p: any) => p });`);
     w.send(DISCOVER);
@@ -659,7 +669,7 @@ describe("v3 compat: old flat serve() signature", () => {
     let disc = await w.readLine();
     while (disc.type === "log") disc = await w.readLine();
 
-    expect(disc.protocol).toBe(3);
+    expect(disc.protocol).toBe(4);
     expect(disc.methods).toEqual(["ping", "echo"]);
 
     w.send({ type: "rpc", id: "r1", method: "ping", params: {} });

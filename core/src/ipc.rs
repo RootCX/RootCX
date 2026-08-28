@@ -99,12 +99,14 @@ pub enum OutboundMessage {
     },
     Rpc {
         id: String,
+        invocation_id: String,
         method: String,
         params: JsonValue,
         caller: Option<RpcCaller>,
     },
     Job {
         id: String,
+        invocation_id: String,
         payload: JsonValue,
         #[serde(skip_serializing_if = "Option::is_none")]
         caller: Option<RpcCaller>,
@@ -219,10 +221,14 @@ pub enum OutboundMessage {
 ///   SqlBegin/SqlExec/SqlCommit/SqlRollback. Older workers keep all v1/v2
 ///   capabilities and never receive transaction-only messages.
 ///
+/// * **v4** — binds worker capabilities to a Core-created invocation lifetime.
+///   Workflow-scoped workers must include `invocation_id` on collection and SQL
+///   messages. Older workers remain valid only for non-workflow scopes.
+///
 /// Adding a new version = add a const, bump the scaffold template, teach
 /// the supervisor which messages are safe to send based on the negotiated
 /// version. Never remove a version without an explicit migration plan.
-pub const LATEST_PROTOCOL_VERSION: u32 = 3;
+pub const LATEST_PROTOCOL_VERSION: u32 = 4;
 
 fn default_protocol_version() -> u32 {
     1
@@ -288,6 +294,8 @@ pub enum InboundMessage {
     },
     CollectionOp {
         id: String,
+        #[serde(default)]
+        invocation_id: Option<String>,
         op: String,
         entity: String,
         #[serde(default)]
@@ -300,6 +308,8 @@ pub enum InboundMessage {
     /// user's identity. The worker has no identity field to forge.
     SqlQuery {
         id: String,
+        #[serde(default)]
+        invocation_id: Option<String>,
         sql: String,
         #[serde(default)]
         params: Vec<JsonValue>,
@@ -312,10 +322,14 @@ pub enum InboundMessage {
     /// 60-second wall-time deadline.
     SqlBegin {
         id: String,
+        #[serde(default)]
+        invocation_id: Option<String>,
     },
     /// Execute a statement inside an open transaction (opened by `SqlBegin`).
     SqlExec {
         id: String,
+        #[serde(default)]
+        invocation_id: Option<String>,
         tx_id: String,
         sql: String,
         #[serde(default)]
@@ -324,11 +338,15 @@ pub enum InboundMessage {
     /// Commit the open transaction.
     SqlCommit {
         id: String,
+        #[serde(default)]
+        invocation_id: Option<String>,
         tx_id: String,
     },
     /// Rollback the open transaction.
     SqlRollback {
         id: String,
+        #[serde(default)]
+        invocation_id: Option<String>,
         tx_id: String,
     },
     /// Privileged self-action a worker can invoke. The requesting user is the
@@ -466,6 +484,7 @@ mod tests {
             (
                 OutboundMessage::Rpc {
                     id: "r1".into(),
+                    invocation_id: "i1".into(),
                     method: "echo".into(),
                     params: json!({}),
                     caller: None,
@@ -475,6 +494,7 @@ mod tests {
             (
                 OutboundMessage::Job {
                     id: "j1".into(),
+                    invocation_id: "i2".into(),
                     payload: json!({}),
                     caller: None,
                 },

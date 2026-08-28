@@ -34,6 +34,10 @@ pub struct JobMessage {
     pub payload: JsonValue,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_id: Option<uuid::Uuid>,
+    /// Core-owned cron provenance. It is outside `payload`, so app callers of
+    /// `enqueueJob` and the HTTP jobs API cannot manufacture workflow authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -48,11 +52,30 @@ pub struct Job {
 
 pub async fn enqueue(pool: &PgPool, app_id: &str, payload: JsonValue, user_id: Option<uuid::Uuid>) -> Result<i64, RuntimeError> {
     let msg = serde_json::to_value(JobMessage {
-        app_id: app_id.to_string(), payload, user_id,
+        app_id: app_id.to_string(), payload, user_id, cron_id: None,
     }).map_err(err)?;
     let (msg_id,): (i64,) = sqlx::query_as(&format!("SELECT pgmq.send('{QUEUE}', $1)"))
         .bind(&msg).fetch_one(pool).await.map_err(err)?;
     info!(msg_id, app_id, "job enqueued");
+    Ok(msg_id)
+}
+
+pub async fn enqueue_cron(
+    pool: &PgPool,
+    app_id: &str,
+    cron_id: uuid::Uuid,
+    payload: JsonValue,
+    user_id: Option<uuid::Uuid>,
+) -> Result<i64, RuntimeError> {
+    let msg = serde_json::to_value(JobMessage {
+        app_id: app_id.to_string(),
+        payload,
+        user_id,
+        cron_id: Some(cron_id),
+    }).map_err(err)?;
+    let (msg_id,): (i64,) = sqlx::query_as(&format!("SELECT pgmq.send('{QUEUE}', $1)"))
+        .bind(&msg).fetch_one(pool).await.map_err(err)?;
+    info!(msg_id, app_id, %cron_id, "cron job enqueued");
     Ok(msg_id)
 }
 
@@ -130,11 +153,26 @@ pub async fn list_archived(pool: &PgPool, app_id: &str, limit: i64) -> Result<Ve
 
 #[cfg(test)]
 mod tests {
-    use super::{delivery_exhausted, MAX_DELIVERIES};
+    use super::{delivery_exhausted, JobMessage, MAX_DELIVERIES};
+    use serde_json::json;
 
     #[test]
     fn delivery_limit_allows_last_attempt_then_exhausts() {
         assert!(!delivery_exhausted(MAX_DELIVERIES));
         assert!(delivery_exhausted(MAX_DELIVERIES + 1));
+    }
+
+    #[test]
+    fn payload_cannot_forge_cron_provenance() {
+        let forged = uuid::Uuid::new_v4();
+        let message = serde_json::to_value(JobMessage {
+            app_id: "app".into(),
+            payload: json!({"cron_id": forged, "type": "forged"}),
+            user_id: None,
+            cron_id: None,
+        }).unwrap();
+
+        assert!(message.get("cron_id").is_none());
+        assert_eq!(message["payload"]["cron_id"], forged.to_string());
     }
 }

@@ -59,6 +59,10 @@ import { AsyncLocalStorage } from "node:async_hooks";
 //
 //     v3 keeps every v1/v2 capability and announces `protocol: 3`.
 //
+//   v4 — binds collection and SQL capabilities to a Core-created invocation
+//     lifetime. The invocation ID is routing metadata, never action authority;
+//     Core fixes workflow authority outside this process.
+//
 // ──────────────── Evolution rules ────────────────
 //
 //   * Adding an OPTIONAL field to an existing outbound message → no bump.
@@ -71,7 +75,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 //   to send based on the negotiated version (see `worker_protocol` in
 //   `worker.rs`).
 
-const PROTOCOL_VERSION = 3;
+const PROTOCOL_VERSION = 4;
 
 // ─── Transport layer ─────────────────────────────────────────────────────────
 // Encapsulates the wire format and I/O channel. The rest of the prelude
@@ -248,7 +252,7 @@ function _enqueueJob(payload) {
   });
 }
 
-function _collectionOp(op, entity, data) {
+function _collectionOp(invocationId, op, entity, data) {
   const id = `cop_${++_opSeq}`;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -258,7 +262,7 @@ function _collectionOp(op, entity, data) {
       }
     }, 30_000);
     _pendingOps.set(id, { resolve, reject, timer });
-    _transport.send({ type: "collection_op", id, op, entity, data });
+    _transport.send({ type: "collection_op", id, invocation_id: invocationId, op, entity, data });
   });
 }
 
@@ -266,7 +270,7 @@ function _collectionOp(op, entity, data) {
 // The app never holds a DB connection. Returns { columns, rows, rowCount }.
 // No identity travels on the message: the core binds it to this worker's sole
 // in-flight unit of work, so the worker cannot name another user's identity.
-function _sqlQuery(sql, params) {
+function _sqlQuery(invocationId, sql, params) {
   const id = `sql_${++_sqlSeq}`;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -276,11 +280,11 @@ function _sqlQuery(sql, params) {
       }
     }, 30_000);
     _pendingSql.set(id, { resolve, reject, timer });
-    _transport.send({ type: "sql_query", id, sql, params: params ?? [] });
+    _transport.send({ type: "sql_query", id, invocation_id: invocationId, sql, params: params ?? [] });
   });
 }
 
-function _transactionRequest(type, payload, label) {
+function _transactionRequest(invocationId, type, payload, label) {
   const id = `tx_${++_txSeq}`;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -290,24 +294,26 @@ function _transactionRequest(type, payload, label) {
       }
     }, 65_000);
     _pendingTx.set(id, { resolve, reject, timer });
-    _transport.send({ type, id, ...payload });
+    _transport.send({ type, id, invocation_id: invocationId, ...payload });
   });
 }
 
-function _beginTransaction() {
-  return _transactionRequest("sql_begin", {}, "ctx.transaction");
+function _beginTransaction(invocationId) {
+  return _transactionRequest(invocationId, "sql_begin", {}, "ctx.transaction");
 }
 
-function _transactionSql(txId, sql, params) {
+function _transactionSql(invocationId, txId, sql, params) {
   return _transactionRequest(
+    invocationId,
     "sql_exec",
     { tx_id: txId, sql, params: params ?? [] },
     "tx.sql",
   );
 }
 
-function _endTransaction(txId, commit) {
+function _endTransaction(invocationId, txId, commit) {
   return _transactionRequest(
+    invocationId,
     commit ? "sql_commit" : "sql_rollback",
     { tx_id: txId },
     commit ? "ctx.transaction commit" : "ctx.transaction rollback",
@@ -330,7 +336,7 @@ async function _runTransaction(callback, invocation) {
   let queue = Promise.resolve();
 
   try {
-    txId = await _beginTransaction();
+    txId = await _beginTransaction(invocation.id);
     transactionOpen = true;
 
     const tx = Object.freeze({
@@ -341,7 +347,7 @@ async function _runTransaction(callback, invocation) {
         const operation = queue.then(async () => {
           if (firstSqlError) throw firstSqlError;
           try {
-            return await _transactionSql(txId, sql, params);
+            return await _transactionSql(invocation.id, txId, sql, params);
           } catch (error) {
             firstSqlError = error;
             throw error;
@@ -359,14 +365,14 @@ async function _runTransaction(callback, invocation) {
     if (firstSqlError) throw firstSqlError;
 
     transactionOpen = false;
-    await _endTransaction(txId, true);
+    await _endTransaction(invocation.id, txId, true);
     return result;
   } catch (error) {
     closed = true;
     await queue;
     if (transactionOpen) {
       try {
-        await _endTransaction(txId, false);
+        await _endTransaction(invocation.id, txId, false);
       } catch (rollbackError) {
         log.error(`ctx.transaction rollback failed: ${_err(rollbackError)}`);
       }
@@ -397,8 +403,8 @@ function _selfAction(action, params) {
 // RLS identity from this worker's sole in-flight unit of work. During onStart
 // (no active unit) ctx.sql denies (no identity) and ctx.collection runs
 // BYPASSRLS on the self-schema.
-function _makeCtx() {
-  const invocation = { transactionActive: false };
+function _makeCtx(invocationId = null) {
+  const invocation = { id: invocationId, transactionActive: false };
   const outsideTransaction = (capability, run) => {
     if (invocation.transactionActive) {
       return Promise.reject(new Error(
@@ -423,7 +429,9 @@ function _makeCtx() {
     downloadFile: (...args) => outsideTransaction("ctx.downloadFile", () => _downloadFile(...args)),
     openFile: (...args) => outsideTransaction("ctx.openFile", () => _openFile(...args)),
     enqueueJob: (payload) => outsideTransaction("ctx.enqueueJob", () => _enqueueJob(payload)),
-    sql: (sql, params = []) => outsideTransaction("ctx.sql", () => _sqlQuery(sql, params)),
+    sql: (sql, params = []) => outsideTransaction(
+      "ctx.sql", () => _sqlQuery(invocation.id, sql, params),
+    ),
     transaction: (callback) => _runTransaction(callback, invocation),
     selfAction: (action, params = {}) => outsideTransaction(
       "ctx.selfAction", () => _selfAction(action, params),
@@ -444,17 +452,17 @@ function _makeCtx() {
     collection(entity) {
       return {
         insert: (data) => outsideTransaction(
-          "ctx.collection", () => _collectionOp("insert", entity, data),
+          "ctx.collection", () => _collectionOp(invocation.id, "insert", entity, data),
         ),
         update: (data) => outsideTransaction(
-          "ctx.collection", () => _collectionOp("update", entity, data),
+          "ctx.collection", () => _collectionOp(invocation.id, "update", entity, data),
         ),
         // Read ops use `where` as the equality map ({col: value}). Empty {} = full scan.
         find: (where = {}) => outsideTransaction(
-          "ctx.collection", () => _collectionOp("find", entity, where),
+          "ctx.collection", () => _collectionOp(invocation.id, "find", entity, where),
         ),
         findOne: (where = {}) => outsideTransaction(
-          "ctx.collection", () => _collectionOp("findOne", entity, where),
+          "ctx.collection", () => _collectionOp(invocation.id, "findOne", entity, where),
         ),
       };
     },
@@ -616,7 +624,7 @@ function _dispatch(msg) {
         _transport.send({ type: "rpc_response", id: msg.id, error: `unknown method: ${msg.method}` });
         return;
       }
-      _resolve(fn, [msg.params, msg.caller ?? null, _makeCtx()],
+      _resolve(fn, [msg.params, msg.caller ?? null, _makeCtx(msg.invocation_id)],
         (r) => _transport.send({ type: "rpc_response", id: msg.id, result: r }),
         (e) => _transport.send({ type: "rpc_response", id: msg.id, error: _err(e) }),
       );
@@ -632,7 +640,7 @@ function _dispatch(msg) {
         return;
       }
       _jobChain = _jobChain.then(() => new Promise((done) => {
-        _resolve(fn, [msg.payload, msg.caller ?? null, _makeCtx()],
+        _resolve(fn, [msg.payload, msg.caller ?? null, _makeCtx(msg.invocation_id)],
           (r) => { _transport.send({ type: "job_result", id: msg.id, result: r ?? { ok: true } }); done(); },
           (e) => { _transport.send({ type: "job_result", id: msg.id, error: _err(e) }); done(); },
         );

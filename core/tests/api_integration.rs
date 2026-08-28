@@ -2924,11 +2924,99 @@ async fn cron_job_carries_creator_user_id() {
 
     assert!(raw.get("user_id").is_some(), "pgmq job message must contain user_id: {raw}");
     assert_eq!(
+        raw["cron_id"].as_str(),
+        Some(cron_id),
+        "cron provenance must be in the Core-owned envelope: {raw}",
+    );
+    assert_eq!(
         raw["user_id"].as_str().unwrap(),
         body["createdBy"].as_str().unwrap(),
         "user_id in job must match cron creator"
     );
 
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn cron_job_scope_is_core_derived_and_payload_cannot_forge_it() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&json!({
+        "appId": "jobscope",
+        "name": "Job scope",
+        "version": "1.0.0",
+        "dataContract": [{
+            "entityName": "results",
+            "fields": [
+                { "name": "label", "type": "text" },
+                { "name": "kind", "type": "text" },
+                { "name": "name", "type": "text" },
+                { "name": "action_id", "type": "text" }
+            ]
+        }]
+    })).await;
+    let backend = br#"
+serve({
+  async onJob(payload, _caller, ctx) {
+    const scope = await ctx.sql("SELECT current_setting('rootcx.invocation_kind', true), current_setting('rootcx.invocation_name', true), current_setting('rootcx.action_id', true)");
+    await ctx.sql(
+      "INSERT INTO jobscope.results (label, kind, name, action_id) VALUES ($1, $2, $3, $4)",
+      [payload.label, ...scope.rows[0]],
+    );
+  },
+});
+"#;
+    let (deploy_status, deploy_body) = rt.deploy(
+        "jobscope", &make_tar_gz(&[("index.ts", backend)]),
+    ).await;
+    assert_eq!(deploy_status, 200, "job scope backend deploy failed: {deploy_body}");
+
+    let (cron_status, cron) = rt.post_json(
+        "/api/v1/apps/jobscope/crons",
+        &json!({
+            "name": "stock-minimum-purchase-proposals",
+            "schedule": "0 * * * *",
+            "payload": { "label": "trusted-cron", "type": "untrusted-payload-name" }
+        }),
+    ).await;
+    assert_eq!(cron_status, 201, "cron creation failed: {cron}");
+    let cron_id = cron["id"].as_str().unwrap();
+    let (trigger_status, trigger) = rt.post_json(
+        &format!("/api/v1/apps/jobscope/crons/{cron_id}/trigger"),
+        &json!({}),
+    ).await;
+    assert_eq!(trigger_status, 200, "cron trigger failed: {trigger}");
+
+    let (job_status, forged_job) = rt.post_json(
+        "/api/v1/apps/jobscope/jobs",
+        &json!({"payload": {
+            "label": "forged-payload",
+            "cron_id": cron_id,
+            "type": "stock-minimum-purchase-proposals"
+        }}),
+    ).await;
+    assert_eq!(job_status, 201, "generic job enqueue failed: {forged_job}");
+
+    let mut rows = json!([]);
+    for _ in 0..80 {
+        let (status, body) = rt.get_json(
+            "/api/v1/apps/jobscope/collections/results?order=label.asc",
+        ).await;
+        if status == 200 && body.as_array().map_or(false, |items| items.len() == 2) {
+            rows = body;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    let rows = rows.as_array().expect("results response must be an array");
+    assert_eq!(rows.len(), 2, "jobs did not both complete: {rows:?}");
+    let trusted = rows.iter().find(|row| row["label"] == "trusted-cron").unwrap();
+    assert_eq!(trusted["kind"], "job");
+    assert_eq!(trusted["name"], "stock-minimum-purchase-proposals");
+    assert_eq!(trusted["action_id"], "");
+    let forged = rows.iter().find(|row| row["label"] == "forged-payload").unwrap();
+    assert_eq!(forged["kind"], "", "payload forged a job scope: {forged}");
+    assert_eq!(forged["name"], "", "payload forged a job name: {forged}");
+    assert_eq!(forged["action_id"], "");
     rt.shutdown().await;
 }
 

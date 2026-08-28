@@ -335,7 +335,10 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, tool_registry: Arc<
                     }
 
                     // Cron-triggered invocations
-                    let is_cron = job_msg.payload.get("cron_id").is_some();
+                    // Legacy payload cron_id remains routing-compatible, but
+                    // only Core-owned envelope provenance may grant job scope.
+                    let is_cron = job_msg.cron_id.is_some()
+                        || job_msg.payload.get("cron_id").is_some();
                     let cron_workflow_id = job_msg.payload.get("workflow_id").and_then(|v| v.as_str());
 
                     if let (true, Some(wf_id)) = (is_cron, cron_workflow_id) {
@@ -377,8 +380,25 @@ pub fn spawn_scheduler(pool: PgPool, wm: Arc<WorkerManager>, tool_registry: Arc<
                         let _ = jobs::fail(&pool, msg_id).await;
                         continue;
                     };
+                    let cron_name = match job_msg.cron_id {
+                        Some(cron_id) => sqlx::query_scalar::<_, String>(
+                            "SELECT name FROM rootcx_system.cron_schedules WHERE id = $1 AND app_id = $2",
+                        )
+                        .bind(cron_id)
+                        .bind(&job_msg.app_id)
+                        .fetch_optional(&pool)
+                        .await
+                        .unwrap_or(None),
+                        None => None,
+                    };
                     let caller = crate::principal::resolve_caller(&pool, uid).await;
-                    if let Err(e) = wm.dispatch_job(&job_msg.app_id, msg_id.to_string(), job_msg.payload, caller).await {
+                    if let Err(e) = wm.dispatch_job(
+                        &job_msg.app_id,
+                        msg_id.to_string(),
+                        job_msg.payload,
+                        caller,
+                        cron_name.as_deref(),
+                    ).await {
                         warn!(msg_id, "dispatch failed: {e}");
                         let _ = jobs::fail(&pool, msg_id).await;
                     }

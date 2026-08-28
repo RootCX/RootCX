@@ -42,6 +42,43 @@ pub struct ContextState {
     pub audit_delegator_id: Option<Uuid>,
 }
 
+/// Workflow authority attached by Core to an execution boundary. Unlike the
+/// user identity, this value is never accepted from application SQL or IPC.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum InvocationContext {
+    #[default]
+    None,
+    Action(String),
+    Job(String),
+}
+
+impl InvocationContext {
+    pub fn action(action_id: &str) -> Self {
+        Self::Action(action_id.into())
+    }
+
+    pub fn job(job_name: &str) -> Self {
+        Self::Job(job_name.into())
+    }
+
+    pub fn is_workflow(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    pub fn key(&self) -> String {
+        let (kind, name, _) = self.guc_values();
+        format!("{kind}:{name}")
+    }
+
+    fn guc_values(&self) -> (&str, &str, &str) {
+        match self {
+            Self::None => ("", "", ""),
+            Self::Action(action_id) => ("action", action_id, action_id),
+            Self::Job(job_name) => ("job", job_name, ""),
+        }
+    }
+}
+
 impl ContextState {
     /// Build from an IPC caller: a delegated caller carries `effective_perms`.
     pub fn from_caller(caller: Option<&crate::ipc::RpcCaller>) -> Self {
@@ -82,6 +119,24 @@ pub async fn set_rls_context(
     Ok(())
 }
 
+async fn set_invocation_context(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    invocation: &InvocationContext,
+) -> Result<(), sqlx::Error> {
+    let (kind, name, action_id) = invocation.guc_values();
+    sqlx::query(
+        "SELECT set_config('rootcx.invocation_kind', $1, true), \
+                set_config('rootcx.invocation_name', $2, true), \
+                set_config('rootcx.action_id', $3, true)",
+    )
+    .bind(kind)
+    .bind(name)
+    .bind(action_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 /// Open a transaction primed for RLS-governed app access: scoped search_path,
 /// the RLS identity GUCs, the audit attribution GUCs, statement_timeout,
 /// idle_in_transaction_session_timeout, then a drop to the non-superuser
@@ -97,6 +152,29 @@ pub async fn begin_app_tx<'a>(
     trigger_ref: &str,
     timeout_ms: u32,
 ) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, sqlx::Error> {
+    begin_app_tx_with_invocation(
+        pool,
+        app_schema,
+        state,
+        &InvocationContext::default(),
+        audit_actor,
+        audit_delegator,
+        trigger_ref,
+        timeout_ms,
+    )
+    .await
+}
+
+pub async fn begin_app_tx_with_invocation<'a>(
+    pool: &'a PgPool,
+    app_schema: &str,
+    state: &ContextState,
+    invocation: &InvocationContext,
+    audit_actor: Option<Uuid>,
+    audit_delegator: Option<Uuid>,
+    trigger_ref: &str,
+    timeout_ms: u32,
+) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query(&format!("SET LOCAL search_path TO {}, public", quote_ident(app_schema)))
         .execute(&mut *tx).await?;
@@ -106,6 +184,7 @@ pub async fn begin_app_tx<'a>(
     sqlx::query("SET LOCAL idle_in_transaction_session_timeout = '30000'")
         .execute(&mut *tx).await?;
     set_rls_context(&mut tx, state).await?;
+    set_invocation_context(&mut tx, invocation).await?;
     crate::extensions::audit::set_context(&mut tx, audit_actor, audit_delegator, trigger_ref).await?;
     sqlx::query("SET LOCAL ROLE rootcx_app_executor").execute(&mut *tx).await?;
     Ok(tx)
@@ -294,11 +373,30 @@ pub async fn run_sql(
     sql: &str,
     params: &[JsonValue],
 ) -> Result<SqlOk, String> {
+    run_sql_with_invocation(
+        pool,
+        app_schema,
+        state,
+        &InvocationContext::default(),
+        sql,
+        params,
+    )
+    .await
+}
+
+pub async fn run_sql_with_invocation(
+    pool: &PgPool,
+    app_schema: &str,
+    state: &ContextState,
+    invocation: &InvocationContext,
+    sql: &str,
+    params: &[JsonValue],
+) -> Result<SqlOk, String> {
     validate_sql(sql)?;
 
-    let mut tx = begin_app_tx(
-        pool, app_schema, state, state.audit_actor_id, state.audit_delegator_id,
-        "app_sql", TIMEOUT_INTERACTIVE_MS,
+    let mut tx = begin_app_tx_with_invocation(
+        pool, app_schema, state, invocation, state.audit_actor_id,
+        state.audit_delegator_id, "app_sql", TIMEOUT_INTERACTIVE_MS,
     )
         .await.map_err(|e| e.to_string())?;
 
@@ -423,6 +521,23 @@ impl TxSession {
         state: &ContextState,
         done: mpsc::Sender<String>,
     ) -> Result<Self, String> {
+        Self::begin_with_invocation(
+            pool,
+            app_schema,
+            state,
+            &InvocationContext::default(),
+            done,
+        )
+        .await
+    }
+
+    pub async fn begin_with_invocation(
+        pool: &PgPool,
+        app_schema: &str,
+        state: &ContextState,
+        invocation: &InvocationContext,
+        done: mpsc::Sender<String>,
+    ) -> Result<Self, String> {
         // Fail fast when all TX slots are taken — never queue (would hold the
         // caller hostage) and never exceed the pool budget. The permit is moved
         // into the task and released only when the task exits.
@@ -434,6 +549,7 @@ impl TxSession {
         let pool = pool.clone();
         let app_schema = app_schema.to_string();
         let state = state.clone();
+        let invocation = invocation.clone();
         let tx_id = uuid::Uuid::new_v4().to_string();
         let task_tx_id = tx_id.clone();
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<TxCmd>(8);
@@ -449,9 +565,9 @@ impl TxSession {
             {
                 let mut pg_tx = match tokio::time::timeout_at(
                     deadline,
-                    begin_app_tx(
-                        &pool, &app_schema, &state, state.audit_actor_id, state.audit_delegator_id,
-                        "app_tx", TIMEOUT_INTERACTIVE_MS,
+                    begin_app_tx_with_invocation(
+                        &pool, &app_schema, &state, &invocation, state.audit_actor_id,
+                        state.audit_delegator_id, "app_tx", TIMEOUT_INTERACTIVE_MS,
                     ),
                 ).await {
                     Ok(Ok(t)) => { let _ = ready_tx.send(Ok(())); t }

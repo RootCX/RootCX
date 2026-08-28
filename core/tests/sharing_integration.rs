@@ -21,6 +21,20 @@ async fn install_sharing_app(rt: &TestRuntime) {
                 { "key": "public.share", "description": "create public share links" }
             ]
         },
+        "actions": [
+            {
+                "id": "get_public_board",
+                "name": "Get public board",
+                "description": "Read one shared board",
+                "inputSchema": { "type": "object" }
+            },
+            {
+                "id": "list_public",
+                "name": "List public",
+                "description": "Return public information",
+                "inputSchema": { "type": "object" }
+            }
+        ],
         "public": {
             "rpcs": [
                 { "name": "get_public_board", "scope": ["board_id"] },
@@ -315,6 +329,10 @@ serve({
         async vandalize(params, _caller, ctx) {
             return await ctx.collection("board").update({ id: params.board_id, title: "HACKED" });
         },
+        async list_public(_params, _caller, ctx) {
+            const scope = await ctx.sql("SELECT current_setting('rootcx.invocation_kind', true), current_setting('rootcx.invocation_name', true), current_setting('rootcx.action_id', true)");
+            return { visible: true, scope: scope.rows[0] };
+        },
     },
 });
 "#;
@@ -365,6 +383,35 @@ async fn share_token_rpc_reads_shared_record() {
     // The caller handed to the app must never leak the creator's email to a visitor.
     assert_eq!(body["callerEmail"].as_str().unwrap_or(""), "", "creator email leaked: {body}");
 
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn anonymous_public_rpc_remains_callable_when_also_declared_as_an_action() {
+    let rt = TestRuntime::boot().await;
+    install_sharing_app(&rt).await;
+    deploy_board_backend(&rt).await;
+
+    let mut outcome = None;
+    for _ in 0..40 {
+        let (status, body) = rt.post_unauthed(
+            "/api/v1/apps/sharetest/rpc",
+            &json!({"method": "list_public", "params": {}}),
+        ).await;
+        if status.is_server_error()
+            && body["error"].as_str().unwrap_or("").contains("worker not running")
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            continue;
+        }
+        outcome = Some((status, body));
+        break;
+    }
+
+    let (status, body) = outcome.expect("worker never came up");
+    assert_eq!(status, StatusCode::OK, "anonymous public action failed: {body}");
+    assert_eq!(body["visible"], true);
+    assert_eq!(body["scope"], json!(["", "", ""]), "public RPC gained workflow authority: {body}");
     rt.shutdown().await;
 }
 

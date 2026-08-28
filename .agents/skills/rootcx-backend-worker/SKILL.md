@@ -29,6 +29,27 @@ const client = useRuntimeClient();
 const result = await client.rpc(appId, "method_name", { ...params });
 ```
 
+Authenticated RPCs always require `app:{appId}:invoke`. When `method_name`
+matches an action declared in the app manifest, Core additionally requires
+`app:{appId}:action:{method_name}` before the worker runs. Undeclared internal
+RPCs retain the invoke-only contract. Public share-token and anonymous RPCs are
+authorized by `manifest.public.rpcs` and its scope rules instead of user action
+permissions.
+
+For governed SQL, Core derives immutable invocation metadata and sets it before
+the restricted database role is assumed. Application code cannot set it:
+
+- declared action: `rootcx.invocation_kind = 'action'`, with the action ID in
+  both `rootcx.invocation_name` and `rootcx.action_id`;
+- trusted scheduled job: `rootcx.invocation_kind = 'job'`, with the declared
+  `cron_schedules.name` in `rootcx.invocation_name` and an empty
+  `rootcx.action_id`;
+- internal/public RPC or ordinary queued job: all three values are empty.
+
+Never derive workflow authority from RPC parameters or job payload fields.
+Use these Core-owned settings only in database triggers or policies that need
+to reject generic CRUD bypass; business orchestration remains in TypeScript.
+
 ## Minimal worker template
 
 Core shape:

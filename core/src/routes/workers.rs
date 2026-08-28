@@ -72,19 +72,42 @@ pub async fn rpc_proxy(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let p = pool(&rt);
-    let caller = match &auth {
+    let (caller, action_scope) = match &auth {
         CallerAuth::User(identity) => {
             if !crate::governance::authority::has_permission_db(
                 &p, identity.user_id, &format!("app:{app_id}:invoke"),
             ).await? {
                 return Err(ApiError::Forbidden(format!("permission denied: app:{app_id}:invoke")));
             }
-            Some(RpcCaller {
+            let declared_action: bool = sqlx::query_scalar(
+                "SELECT EXISTS (
+                   SELECT 1
+                     FROM rootcx_system.apps app
+                     CROSS JOIN LATERAL jsonb_array_elements(
+                       COALESCE(app.manifest->'actions', '[]'::jsonb)
+                     ) action
+                    WHERE app.id = $1
+                      AND action->>'id' = $2
+                 )",
+            )
+            .bind(&app_id)
+            .bind(&method)
+            .fetch_one(&p)
+            .await
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
+            if declared_action && !crate::governance::authority::has_permission_db(
+                &p, identity.user_id, &format!("app:{app_id}:action:{method}"),
+            ).await? {
+                return Err(ApiError::Forbidden(format!(
+                    "permission denied: app:{app_id}:action:{method}"
+                )));
+            }
+            (Some(RpcCaller {
                 user_id: identity.user_id.to_string(),
                 email: identity.email.clone(),
                 effective_perms: None,
                 connection_id: None,
-            })
+            }), declared_action.then(|| method.clone()))
         }
         CallerAuth::ShareToken(share) => {
             let (manifest, decl) = find_public_rpc_full(&p, &app_id, &method)
@@ -95,26 +118,30 @@ pub async fn rpc_proxy(
             let read_perms = share_read_perms(
                 &p, &app_id, share.created_by, &manifest.data_contract,
             ).await?;
-            Some(RpcCaller {
+            (Some(RpcCaller {
                 user_id: share.created_by.to_string(),
                 email: String::new(),
                 effective_perms: Some(read_perms),
                 connection_id: None,
-            })
+            }), None)
         }
         CallerAuth::Anonymous => {
             let decl = find_public_rpc(&p, &app_id, &method)
                 .await?
                 .ok_or_else(|| ApiError::Unauthorized("missing or invalid authorization header".into()))?;
             authorize_public_rpc(&decl, &auth, &app_id, &params)?;
-            Some(RpcCaller {
+            (Some(RpcCaller {
                 user_id: String::new(),
                 email: String::new(),
                 effective_perms: None,
                 connection_id: None,
-            })
+            }), None)
         }
     };
 
-    Ok(Json(wm(&rt).rpc(&app_id, id, method, params, caller).await?))
+    let result = match action_scope {
+        Some(action) => wm(&rt).rpc_action(&app_id, id, action, params, caller).await?,
+        None => wm(&rt).rpc(&app_id, id, method, params, caller).await?,
+    };
+    Ok(Json(result))
 }

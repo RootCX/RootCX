@@ -1,7 +1,7 @@
 mod harness;
 
 use reqwest::{Method, StatusCode};
-use serde_json::{json, Value};
+use serde_json::json;
 use uuid::Uuid;
 
 async fn ensure_admin(rt: &harness::TestRuntime) {
@@ -748,6 +748,257 @@ async fn invoke_granted_via_role_allows_access() {
     // Should pass ACL (may fail later because no worker, but NOT 403)
     assert_ne!(status, StatusCode::FORBIDDEN,
         "user with app:{{id}}:invoke should pass invocation ACL");
+}
+
+#[tokio::test]
+async fn declared_rpc_actions_require_their_action_permission() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+    let app_id = "rpcactiongate";
+    rt.install_manifest(&json!({
+        "appId": app_id,
+        "name": "RPC action gate",
+        "version": "1.0.0",
+        "dataContract": [],
+        "actions": [{
+            "id": "approve",
+            "name": "Approve",
+            "description": "Approve a record",
+            "inputSchema": { "type": "object" }
+        }]
+    })).await;
+
+    let invoke = format!("app:{app_id}:invoke");
+    let action = format!("app:{app_id}:action:approve");
+    let invoke_only = create_user_with_perms(
+        &rt,
+        "rpc-action-invoke-only@test.local",
+        &[&invoke],
+    ).await;
+    let action_allowed = create_user_with_perms(
+        &rt,
+        "rpc-action-allowed@test.local",
+        &[&invoke, &action],
+    ).await;
+
+    let (denied, body) = rt.request_as(
+        Method::POST,
+        &format!("/api/v1/apps/{app_id}/rpc"),
+        &invoke_only,
+        Some(&json!({"method": "approve", "params": {}})),
+    ).await;
+    assert_eq!(denied, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body["error"].as_str(),
+        Some("permission denied: app:rpcactiongate:action:approve"),
+    );
+
+    let (internal, _) = rt.request_as(
+        Method::POST,
+        &format!("/api/v1/apps/{app_id}/rpc"),
+        &invoke_only,
+        Some(&json!({"method": "ping", "params": {}})),
+    ).await;
+    assert_ne!(internal, StatusCode::FORBIDDEN,
+        "an undeclared internal RPC must retain the invoke-only contract");
+
+    let (allowed, _) = rt.request_as(
+        Method::POST,
+        &format!("/api/v1/apps/{app_id}/rpc"),
+        &action_allowed,
+        Some(&json!({"method": "approve", "params": {}})),
+    ).await;
+    assert_ne!(allowed, StatusCode::FORBIDDEN,
+        "the declared action permission must pass the RPC action gate");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn action_workers_isolate_scope_and_reject_replayed_invocations() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+    let app_id = "rpcscopegate";
+    rt.install_manifest(&json!({
+        "appId": app_id,
+        "name": "RPC scope gate",
+        "version": "1.0.0",
+        "dataContract": [],
+        "actions": [
+            { "id": "approve", "name": "Approve", "inputSchema": { "type": "object" } },
+            { "id": "reject", "name": "Reject", "inputSchema": { "type": "object" } }
+        ]
+    })).await;
+
+    let backend = br#"
+let leakedContext;
+
+async function readScope(ctx) {
+  return ctx.transaction(async (tx) => {
+    const sql = "SELECT current_setting('rootcx.invocation_kind', true), current_setting('rootcx.invocation_name', true), current_setting('rootcx.action_id', true)";
+    const first = await tx.sql(sql);
+    const second = await tx.sql(sql);
+    return [first.rows[0], second.rows[0]];
+  });
+}
+
+serve({ rpc: {
+  approve: async (params, _caller, ctx) => {
+    if (params.leak) { leakedContext = ctx; return { leaked: true }; }
+    if (params.replay) return leakedContext.sql("SELECT current_setting('rootcx.action_id', true)");
+    return readScope(ctx);
+  },
+  reject: async (_params, _caller, ctx) => readScope(ctx),
+  ping: async (_params, _caller, ctx) => {
+    const result = await ctx.sql("SELECT current_setting('rootcx.invocation_kind', true), current_setting('rootcx.invocation_name', true), current_setting('rootcx.action_id', true)");
+    return result.rows[0];
+  },
+} });
+"#;
+    let (deploy_status, deploy_body) = rt.deploy(
+        app_id,
+        &harness::make_tar_gz(&[("index.ts", backend)]),
+    ).await;
+    assert_eq!(deploy_status, StatusCode::OK, "scope backend deploy failed: {deploy_body}");
+
+    let invoke = format!("app:{app_id}:invoke");
+    let approve = format!("app:{app_id}:action:approve");
+    let reject = format!("app:{app_id}:action:reject");
+    let token = create_user_with_perms(
+        &rt,
+        "rpc-scope@test.local",
+        &[&invoke, &approve, &reject],
+    ).await;
+    let path = format!("/api/v1/apps/{app_id}/rpc");
+
+    let approve_request = json!({"method": "approve", "params": {}});
+    let reject_request = json!({"method": "reject", "params": {}});
+    let approve_call = rt.request_as(
+        Method::POST, &path, &token,
+        Some(&approve_request),
+    );
+    let reject_call = rt.request_as(
+        Method::POST, &path, &token,
+        Some(&reject_request),
+    );
+    let ((approve_status, approve_body), (reject_status, reject_body)) =
+        tokio::join!(approve_call, reject_call);
+    assert_eq!(approve_status, StatusCode::OK, "approve failed: {approve_body}");
+    assert_eq!(reject_status, StatusCode::OK, "reject failed: {reject_body}");
+    assert_eq!(approve_body, json!([["action", "approve", "approve"], ["action", "approve", "approve"]]));
+    assert_eq!(reject_body, json!([["action", "reject", "reject"], ["action", "reject", "reject"]]));
+
+    let (internal_status, internal_body) = rt.request_as(
+        Method::POST, &path, &token,
+        Some(&json!({"method": "ping", "params": {}})),
+    ).await;
+    assert_eq!(internal_status, StatusCode::OK, "internal RPC failed: {internal_body}");
+    assert_eq!(internal_body, json!(["", "", ""]));
+
+    let (leak_status, leak_body) = rt.request_as(
+        Method::POST, &path, &token,
+        Some(&json!({"method": "approve", "params": {"leak": true}})),
+    ).await;
+    assert_eq!(leak_status, StatusCode::OK, "failed to establish replay case: {leak_body}");
+    let (replay_status, replay_body) = rt.request_as(
+        Method::POST, &path, &token,
+        Some(&json!({"method": "approve", "params": {"replay": true}})),
+    ).await;
+    assert_eq!(replay_status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        replay_body["error"].as_str().unwrap_or("").contains("expired workflow invocation"),
+        "old invocation capability must be rejected: {replay_body}",
+    );
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn raw_ipc_cannot_claim_a_workflow_invocation() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+    let app_id = "rawscopegate";
+    rt.install_manifest(&json!({
+        "appId": app_id,
+        "name": "Raw scope gate",
+        "version": "1.0.0",
+        "dataContract": [],
+        "actions": [{ "id": "probe", "name": "Probe", "inputSchema": { "type": "object" } }]
+    })).await;
+    let backend = br#"
+import { createInterface } from "node:readline";
+const rl = createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+let rpcId = null;
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.type === "discover") {
+    send({ type: "discover", protocol: 4, methods: ["probe"] });
+  } else if (message.type === "rpc") {
+    rpcId = message.id;
+    send({
+      type: "sql_query", id: "forged-query", invocation_id: "attacker-chosen",
+      sql: "SELECT current_setting('rootcx.action_id', true)", params: [],
+    });
+  } else if (message.type === "sql_query_result") {
+    send({ type: "rpc_response", id: rpcId, result: { capabilityError: message.error } });
+  }
+});
+"#;
+    let (deploy_status, deploy_body) = rt.deploy(
+        app_id,
+        &harness::make_tar_gz(&[("index.ts", backend)]),
+    ).await;
+    assert_eq!(deploy_status, StatusCode::OK, "raw backend deploy failed: {deploy_body}");
+
+    let (status, body) = rt.post_json(
+        &format!("/api/v1/apps/{app_id}/rpc"),
+        &json!({"method": "probe", "params": {}}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "raw probe failed before assertion: {body}");
+    assert!(
+        body["capabilityError"].as_str().unwrap_or("").contains("unknown or expired"),
+        "attacker-chosen IPC invocation was accepted: {body}",
+    );
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn workflow_scope_rejects_legacy_worker_protocols() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+    let app_id = "legacyscopegate";
+    rt.install_manifest(&json!({
+        "appId": app_id,
+        "name": "Legacy scope gate",
+        "version": "1.0.0",
+        "dataContract": [],
+        "actions": [{ "id": "probe", "name": "Probe", "inputSchema": { "type": "object" } }]
+    })).await;
+    let backend = br#"
+import { createInterface } from "node:readline";
+const rl = createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+rl.on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.type === "discover") send({ type: "discover", protocol: 3, methods: ["probe"] });
+  if (message.type === "rpc") send({ type: "rpc_response", id: message.id, result: "must-not-run" });
+});
+"#;
+    let (deploy_status, deploy_body) = rt.deploy(
+        app_id,
+        &harness::make_tar_gz(&[("index.ts", backend)]),
+    ).await;
+    assert_eq!(deploy_status, StatusCode::OK, "legacy backend deploy failed: {deploy_body}");
+
+    let (status, body) = rt.post_json(
+        &format!("/api/v1/apps/{app_id}/rpc"),
+        &json!({"method": "probe", "params": {}}),
+    ).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("announced v3"),
+        "legacy worker was allowed to execute workflow scope: {body}",
+    );
+    rt.shutdown().await;
 }
 
 // ═══════════════════════════════════════════════════════════════════

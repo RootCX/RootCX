@@ -16,6 +16,7 @@ use crate::ipc::{AgentBootConfig, AgentInvokePayload, LlmModelRef, RpcCaller};
 use crate::secrets::SecretManager;
 use crate::tools::{ActionCaller, AgentDispatcher, IntegrationCaller, ToolRegistry};
 use crate::worker::{self, AgentEvent, FleetEvent, SupervisorHandle, WorkerConfig, WorkerStatus};
+use crate::governance::enforcement::InvocationContext;
 
 const BACKEND_PRELUDE: &str = include_str!("backend_prelude.js");
 
@@ -24,6 +25,17 @@ const BACKEND_PRELUDE: &str = include_str!("backend_prelude.js");
 /// user (cross-user confused deputy is structurally impossible) and there is no
 /// token to forge. See docs/security-context-token-confusion.md.
 type WorkerKey = (String, String);
+
+fn worker_key(
+    app_id: &str,
+    principal: &Principal,
+    invocation: &InvocationContext,
+) -> WorkerKey {
+    (
+        app_id.to_string(),
+        format!("{}|scope={}", principal.key(), invocation.key()),
+    )
+}
 
 fn worker_key_belongs_to_principal(key: &WorkerKey, user_id: uuid::Uuid) -> bool {
     if crate::extensions::agents::agent_user_id(&key.0) == user_id {
@@ -170,7 +182,7 @@ impl WorkerManager {
     /// principal gets `run_onstart` (BYPASSRLS self-schema for onStart).
     async fn spawn_for(
         &self, pool: &PgPool, secrets: &SecretManager, app_id: &str,
-        principal: &Principal,
+        principal: &Principal, invocation: &InvocationContext,
     ) -> Result<SupervisorHandle, RuntimeError> {
         let app_dir = self.apps_dir.join(app_id);
         let entry_point = resolve_entry_point(&app_dir)?;
@@ -195,6 +207,7 @@ impl WorkerManager {
         let config = WorkerConfig {
             app_id: app_id.to_string(),
             identity,
+            invocation: invocation.clone(),
             run_onstart: principal.run_onstart(),
             entry_point,
             working_dir: app_dir,
@@ -214,6 +227,12 @@ impl WorkerManager {
         };
         let handle = worker::spawn_supervisor(config);
         handle.start().await?;
+        if invocation.is_workflow() {
+            if let Err(error) = handle.require_protocol(4).await {
+                let _ = handle.stop().await;
+                return Err(error);
+            }
+        }
         Ok(handle)
     }
 
@@ -222,9 +241,9 @@ impl WorkerManager {
     /// taken from a worker message — so a worker can only ever act as the one
     /// principal it was spawned for.
     async fn get_or_spawn(
-        &self, app_id: &str, principal: Principal,
+        &self, app_id: &str, principal: Principal, invocation: InvocationContext,
     ) -> Result<SupervisorHandle, RuntimeError> {
-        let key = (app_id.to_string(), principal.key());
+        let key = worker_key(app_id, &principal, &invocation);
         // The read guard must drop at this semicolon: an `if let` scrutinee
         // temporary lives through the then-block, so reading inline would hold
         // the read lock across the write().await below — a self-deadlock that
@@ -236,7 +255,9 @@ impl WorkerManager {
             let _ = h.stop().await;
             self.workers.write().await.remove(&key);
         }
-        let handle = self.spawn_for(&self.pool, &self.secret_manager, app_id, &principal).await?;
+        let handle = self
+            .spawn_for(&self.pool, &self.secret_manager, app_id, &principal, &invocation)
+            .await?;
         // Lost-race guard: another task may have spawned the same key meanwhile.
         let mut w = self.workers.write().await;
         if let Some(existing) = w.get(&key).cloned() {
@@ -253,7 +274,7 @@ impl WorkerManager {
     /// agent workers spawn lazily on first request. Shares the single per-identity
     /// spawn path; `pool`/`secrets` are vestigial (the manager holds its own).
     pub async fn start_app(&self, _pool: &PgPool, _secrets: &SecretManager, app_id: &str) -> Result<(), RuntimeError> {
-        self.get_or_spawn(app_id, Principal::System).await.map(|_| ())
+        self.get_or_spawn(app_id, Principal::System, InvocationContext::default()).await.map(|_| ())
     }
 
     pub async fn stop_app(&self, app_id: &str) -> Result<(), RuntimeError> {
@@ -341,7 +362,20 @@ impl WorkerManager {
         &self, app_id: &str, id: String, method: String, params: JsonValue, caller: Option<RpcCaller>,
     ) -> Result<JsonValue, RuntimeError> {
         let principal = Principal::from_request(crate::governance::enforcement::ContextState::from_caller(caller.as_ref()));
-        self.get_or_spawn(app_id, principal).await?.rpc(id, method, params, caller).await
+        self.get_or_spawn(app_id, principal, InvocationContext::default()).await?
+            .rpc(id, method, params, caller).await
+    }
+
+    pub async fn rpc_action(
+        &self, app_id: &str, id: String, action: String, params: JsonValue,
+        caller: Option<RpcCaller>,
+    ) -> Result<JsonValue, RuntimeError> {
+        let principal = Principal::from_request(
+            crate::governance::enforcement::ContextState::from_caller(caller.as_ref()),
+        );
+        let invocation = InvocationContext::action(&action);
+        self.get_or_spawn(app_id, principal, invocation).await?
+            .rpc(id, action, params, caller).await
     }
 
     /// Invoke an app's agent. `parent_perms` is the invoking parent agent's
@@ -366,7 +400,9 @@ impl WorkerManager {
         };
         // An agent invoke is always a delegated principal, never anonymous.
         let session_id = payload.session_id.clone();
-        let mut inner_rx = self.get_or_spawn(app_id, Principal::User(identity)).await?.agent_invoke(payload).await?;
+        let mut inner_rx = self.get_or_spawn(
+            app_id, Principal::User(identity), InvocationContext::default(),
+        ).await?.agent_invoke(payload).await?;
 
         // Fan out events to fleet broadcast for real-time monitoring
         let (outer_tx, outer_rx) = mpsc::channel(64);
@@ -390,9 +426,16 @@ impl WorkerManager {
         self.fleet_tx.subscribe()
     }
 
-    pub async fn dispatch_job(&self, app_id: &str, job_id: String, payload: JsonValue, caller: Option<RpcCaller>) -> Result<(), RuntimeError> {
+    pub async fn dispatch_job(
+        &self, app_id: &str, job_id: String, payload: JsonValue,
+        caller: Option<RpcCaller>, cron_name: Option<&str>,
+    ) -> Result<(), RuntimeError> {
         let principal = Principal::from_request(crate::governance::enforcement::ContextState::from_caller(caller.as_ref()));
-        self.get_or_spawn(app_id, principal).await?.dispatch_job(job_id, payload, caller).await
+        let invocation = cron_name
+            .map(InvocationContext::job)
+            .unwrap_or_default();
+        self.get_or_spawn(app_id, principal, invocation).await?
+            .dispatch_job(job_id, payload, caller).await
     }
 
     /// Aggregate status for an app across all its identity workers (Running if
@@ -413,7 +456,7 @@ impl WorkerManager {
     pub async fn subscribe_logs(&self, app_id: &str) -> Result<broadcast::Receiver<LogEntry>, RuntimeError> {
         // Logs stream from the lifecycle worker. Per-identity worker log fan-in
         // is a known follow-up (see token-confusion fix notes).
-        self.get_or_spawn(app_id, Principal::System).await.map(|h| h.subscribe())
+        self.get_or_spawn(app_id, Principal::System, InvocationContext::default()).await.map(|h| h.subscribe())
     }
 
     /// Aggregate per-app status across identity workers (Running wins).
@@ -562,7 +605,7 @@ impl ActionCaller for AppActionCallImpl {
             effective_perms,
             connection_id: None,
         });
-        self.wm.rpc(
+        self.wm.rpc_action(
             app_id,
             uuid::Uuid::new_v4().to_string(),
             action_id.to_string(),
@@ -635,8 +678,8 @@ fn resolve_entry_point(app_dir: &Path) -> Result<PathBuf, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Principal, worker_key_belongs_to_principal};
-    use crate::governance::enforcement::ContextState;
+    use super::{Principal, worker_key, worker_key_belongs_to_principal};
+    use crate::governance::enforcement::{ContextState, InvocationContext};
     use uuid::Uuid;
 
     fn user(uid: Option<Uuid>, delegated: bool, perms: &[&str]) -> Principal {
@@ -661,6 +704,26 @@ mod tests {
             user(Some(u), true, &["c", "b", "a"]).key(),
             "permission order must not change the worker key",
         );
+    }
+
+    #[test]
+    fn workflow_scopes_never_share_a_worker() {
+        let principal = user(Some(Uuid::new_v4()), false, &[]);
+        let scopes = [
+            InvocationContext::default(),
+            InvocationContext::action("approve"),
+            InvocationContext::action("reject"),
+            InvocationContext::job("stock-minimum-purchase-proposals"),
+        ];
+        for i in 0..scopes.len() {
+            for j in (i + 1)..scopes.len() {
+                assert_ne!(
+                    worker_key("purchases", &principal, &scopes[i]),
+                    worker_key("purchases", &principal, &scopes[j]),
+                    "distinct Core execution scopes shared a worker",
+                );
+            }
+        }
     }
 
     #[test]

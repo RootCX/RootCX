@@ -30,6 +30,7 @@ const BACKOFF_BASE: Duration = Duration::from_secs(2);
 const IPC_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 const TRANSACTION_PROTOCOL_VERSION: u32 = 3;
+const INVOCATION_PROTOCOL_VERSION: u32 = 4;
 const MAX_OPEN_TRANSACTIONS_PER_WORKER: usize = 4;
 
 fn dead() -> RuntimeError {
@@ -126,6 +127,53 @@ fn cancel_job_leases(job_leases: &mut HashMap<i64, CancellationToken>) {
     }
 }
 
+fn close_workflow_invocation(
+    invocation_id: &str,
+    active_invocations: &mut std::collections::HashSet<String>,
+    tx_invocations: &mut HashMap<String, String>,
+    open_txs: &mut HashMap<String, TxSession>,
+) {
+    active_invocations.remove(invocation_id);
+    let owned_transactions: Vec<String> = tx_invocations
+        .iter()
+        .filter(|(_, owner)| owner.as_str() == invocation_id)
+        .map(|(tx_id, _)| tx_id.clone())
+        .collect();
+    for tx_id in owned_transactions {
+        open_txs.remove(&tx_id);
+        tx_invocations.remove(&tx_id);
+    }
+}
+
+fn capability_context(
+    config: &WorkerConfig,
+    worker_protocol: u32,
+    active_invocations: &std::collections::HashSet<String>,
+    invocation_id: Option<&str>,
+) -> Result<crate::governance::enforcement::InvocationContext, String> {
+    if !config.invocation.is_workflow() {
+        return Ok(crate::governance::enforcement::InvocationContext::default());
+    }
+    if worker_protocol < INVOCATION_PROTOCOL_VERSION {
+        return Err("workflow capability requires worker protocol v4".into());
+    }
+    let invocation_id = invocation_id.ok_or("missing workflow invocation id")?;
+    if !active_invocations.contains(invocation_id) {
+        return Err("unknown or expired workflow invocation id".into());
+    }
+    Ok(config.invocation.clone())
+}
+
+fn require_protocol_version(protocol: u32, minimum: u32) -> Result<(), String> {
+    if protocol >= minimum {
+        Ok(())
+    } else {
+        Err(format!(
+            "workflow execution requires worker protocol v{minimum}; worker announced v{protocol}"
+        ))
+    }
+}
+
 /// Fleet-wide event envelope for SSE fan-out.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FleetEvent {
@@ -210,6 +258,10 @@ pub enum SupervisorCommand {
     GetStatus {
         reply: oneshot::Sender<WorkerStatus>,
     },
+    RequireProtocol {
+        minimum: u32,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 pub struct WorkerConfig {
@@ -221,6 +273,9 @@ pub struct WorkerConfig {
     /// nested same-identity calls are safe and cross-user confusion is
     /// structurally impossible. See docs/security-context-token-confusion.md.
     pub identity: crate::governance::enforcement::ContextState,
+    /// Core-derived workflow scope fixed for this process. It is part of the
+    /// worker routing key and never read from app-controlled IPC.
+    pub invocation: crate::governance::enforcement::InvocationContext,
     /// Only the per-app System (lifecycle) worker runs onStart with BYPASSRLS
     /// self-schema access. Anonymous and User workers never run onStart and never
     /// bypass — even though Anonymous, like System, carries the default (no-user)
@@ -256,6 +311,19 @@ impl SupervisorHandle {
 
     pub async fn start(&self) -> Result<(), RuntimeError> {
         self.send(SupervisorCommand::Start).await
+    }
+
+    pub async fn require_protocol(&self, minimum: u32) -> Result<(), RuntimeError> {
+        let (reply, receive) = oneshot::channel();
+        self.send(SupervisorCommand::RequireProtocol { minimum, reply }).await?;
+        match tokio::time::timeout(Duration::from_secs(10), receive).await {
+            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Err(error))) => Err(RuntimeError::Worker(error)),
+            Ok(Err(_)) => Err(dead()),
+            Err(_) => Err(RuntimeError::Worker(format!(
+                "worker protocol handshake timed out (requires v{minimum})"
+            ))),
+        }
     }
 
     pub async fn stop(&self) -> Result<(), RuntimeError> {
@@ -344,6 +412,9 @@ async fn supervisor_loop(
     let mut task_scopes: HashMap<String, Option<Vec<String>>> = HashMap::new();
     let mut job_leases: HashMap<i64, CancellationToken> = HashMap::new();
     let mut job_payloads: HashMap<i64, JsonValue> = HashMap::new();
+    let mut active_invocations = std::collections::HashSet::<String>::new();
+    let mut rpc_invocations = HashMap::<String, String>::new();
+    let mut job_invocations = HashMap::<i64, String>::new();
     // Per-worker SQL-proxy rate limiter (best-effort DoS guard).
     let mut sql_query_times: Vec<Instant> = Vec::new();
     // Governed transactions keyed by core-generated IDs. Per-worker and global
@@ -354,7 +425,10 @@ async fn supervisor_loop(
     // wall-time deadline, crash) — the single source of truth for clearing the
     // slot, so the supervisor never has to remember to do it on each path.
     let mut open_txs: HashMap<String, TxSession> = HashMap::new();
+    let mut tx_invocations = HashMap::<String, String>::new();
     let (tx_done_tx, mut tx_done_rx) = mpsc::channel::<String>(4);
+    let (invocation_expiry_tx, mut invocation_expiry_rx) =
+        mpsc::channel::<(String, String)>(16);
     // Marks the end of the onStart phase (first Rpc/Job/AgentInvoke dispatched).
     // Only the lifecycle worker (config.run_onstart) bypasses RLS for self-schema
     // access, and only before this flips. After it, collection ops run under the
@@ -372,6 +446,8 @@ async fn supervisor_loop(
     // differences. See `ipc::LATEST_PROTOCOL_VERSION` for the contract.
     #[allow(unused_assignments)]
     let mut worker_protocol: u32 = 1;
+    let mut protocol_discovered = false;
+    let mut protocol_waiters = Vec::<(u32, oneshot::Sender<Result<(), String>>)>::new();
 
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundMessage>(64);
 
@@ -389,6 +465,19 @@ async fn supervisor_loop(
             // Clear the slot iff it's still the active session.
             Some(done_id) = tx_done_rx.recv() => {
                 open_txs.remove(&done_id);
+                tx_invocations.remove(&done_id);
+            }
+
+            Some((request_id, invocation_id)) = invocation_expiry_rx.recv() => {
+                if rpc_invocations.get(&request_id) == Some(&invocation_id) {
+                    rpc_invocations.remove(&request_id);
+                    close_workflow_invocation(
+                        &invocation_id,
+                        &mut active_invocations,
+                        &mut tx_invocations,
+                        &mut open_txs,
+                    );
+                }
             }
 
             Some(cmd) = cmd_rx.recv() => {
@@ -408,6 +497,8 @@ async fn supervisor_loop(
                                 ipc_reader = Some(reader);
                                 output_handles.push(spawn_output_reader(stderr, "stderr", log_tx.clone()));
                                 status = WorkerStatus::Running;
+                                worker_protocol = 1;
+                                protocol_discovered = false;
                                 restart_count = 0;
                                 // Fresh process: onStart may BYPASSRLS again.
                                 onstart_done = false;
@@ -437,9 +528,13 @@ async fn supervisor_loop(
                         effective_permissions.clear(); task_scopes.clear();
                         cancel_job_leases(&mut job_leases);
                         job_payloads.clear();
+                        active_invocations.clear();
+                        rpc_invocations.clear();
+                        job_invocations.clear();
                         // Drop any open TX handle → its task rolls back and frees
                         // the connection + slot at once (the deadline is the backstop).
                         open_txs.clear();
+                        tx_invocations.clear();
                         status = WorkerStatus::Stopped;
                         crash_times.clear();
                         info!(app_id = %app_id, "worker stopped");
@@ -453,16 +548,46 @@ async fn supervisor_loop(
                             continue;
                         }
                         onstart_done = true;
+                        if config.invocation.is_workflow()
+                            && (!protocol_discovered
+                                || worker_protocol < INVOCATION_PROTOCOL_VERSION)
+                        {
+                            let _ = reply.send(Err(
+                                "workflow execution requires worker protocol v4".into(),
+                            ));
+                            continue;
+                        }
+                        let invocation_id = uuid::Uuid::new_v4().to_string();
+                        active_invocations.insert(invocation_id.clone());
+                        rpc_invocations.insert(id.clone(), invocation_id.clone());
+                        let expiry_tx = invocation_expiry_tx.clone();
+                        let expiry_request = id.clone();
+                        let expiry_invocation = invocation_id.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(30)).await;
+                            let _ = expiry_tx.send((expiry_request, expiry_invocation)).await;
+                        });
                         let rx = pending_rpcs.register(id.clone());
                         if let Some(ref mut w) = ipc_writer {
                             // Bounded send: a worker that stopped reading stdin
                             // (full pipe) must fail this RPC, not freeze the
                             // supervisor loop — nothing upstream would time out.
-                            let msg = OutboundMessage::Rpc { id: id.clone(), method, params, caller };
+                            let msg = OutboundMessage::Rpc {
+                                id: id.clone(), invocation_id: invocation_id.clone(),
+                                method, params, caller,
+                            };
                             match tokio::time::timeout(IPC_SEND_TIMEOUT, w.send(&msg)).await {
                                 Ok(Ok(())) => {}
-                                Ok(Err(e)) => pending_rpcs.resolve(&id, Err(e.to_string())),
-                                Err(_) => pending_rpcs.resolve(&id, Err("worker unresponsive (ipc send timeout)".into())),
+                                Ok(Err(e)) => {
+                                    active_invocations.remove(&invocation_id);
+                                    rpc_invocations.remove(&id);
+                                    pending_rpcs.resolve(&id, Err(e.to_string()));
+                                }
+                                Err(_) => {
+                                    active_invocations.remove(&invocation_id);
+                                    rpc_invocations.remove(&id);
+                                    pending_rpcs.resolve(&id, Err("worker unresponsive (ipc send timeout)".into()));
+                                }
                             }
                         }
                         tokio::spawn(async move {
@@ -481,11 +606,28 @@ async fn supervisor_loop(
                             continue;
                         }
                         onstart_done = true;
+                        if config.invocation.is_workflow()
+                            && (!protocol_discovered
+                                || worker_protocol < INVOCATION_PROTOCOL_VERSION)
+                        {
+                            warn!(app_id = %app_id, job_id = %id,
+                                "workflow job requires worker protocol v4");
+                            if let Ok(msg_id) = id.parse::<i64>() {
+                                let _ = crate::jobs::fail(&config.pool, msg_id).await;
+                            }
+                            continue;
+                        }
+                        let invocation_id = uuid::Uuid::new_v4().to_string();
+                        active_invocations.insert(invocation_id.clone());
                         if let Some(ref mut w) = ipc_writer {
                             let job_payload = payload.clone();
-                            if let Err(e) = w.send(&OutboundMessage::Job { id: id.clone(), payload, caller }).await {
+                            if let Err(e) = w.send(&OutboundMessage::Job {
+                                id: id.clone(), invocation_id: invocation_id.clone(), payload, caller,
+                            }).await {
+                                active_invocations.remove(&invocation_id);
                                 error!(app_id = %app_id, job_id = %id, "send failed: {e}");
                             } else if let Ok(msg_id) = id.parse::<i64>() {
+                                job_invocations.insert(msg_id, invocation_id);
                                 let token = CancellationToken::new();
                                 let heartbeat = token.clone();
                                 let pool = config.pool.clone();
@@ -552,6 +694,14 @@ async fn supervisor_loop(
                     SupervisorCommand::GetStatus { reply } => {
                         let _ = reply.send(status.clone());
                     }
+
+                    SupervisorCommand::RequireProtocol { minimum, reply } => {
+                        if protocol_discovered {
+                            let _ = reply.send(require_protocol_version(worker_protocol, minimum));
+                        } else {
+                            protocol_waiters.push((minimum, reply));
+                        }
+                    }
                 }
             }
 
@@ -569,6 +719,10 @@ async fn supervisor_loop(
                             // that depend on worker capabilities should
                             // gate on `worker_protocol`.
                             worker_protocol = protocol;
+                            protocol_discovered = true;
+                            for (minimum, reply) in protocol_waiters.drain(..) {
+                                let _ = reply.send(require_protocol_version(worker_protocol, minimum));
+                            }
                             if worker_protocol > crate::ipc::LATEST_PROTOCOL_VERSION {
                                 warn!(
                                     app_id = %app_id,
@@ -581,6 +735,14 @@ async fn supervisor_loop(
                             }
                         }
                         InboundMessage::RpcResponse { id, result, error } => {
+                            if let Some(invocation_id) = rpc_invocations.remove(&id) {
+                                close_workflow_invocation(
+                                    &invocation_id,
+                                    &mut active_invocations,
+                                    &mut tx_invocations,
+                                    &mut open_txs,
+                                );
+                            }
                             pending_rpcs.resolve(&id, match error {
                                 Some(e) => Err(e),
                                 None => Ok(result.unwrap_or(JsonValue::Null)),
@@ -588,6 +750,14 @@ async fn supervisor_loop(
                         }
                         InboundMessage::JobResult { id, error } => {
                             if let Ok(msg_id) = id.parse::<i64>() {
+                                if let Some(invocation_id) = job_invocations.remove(&msg_id) {
+                                    close_workflow_invocation(
+                                        &invocation_id,
+                                        &mut active_invocations,
+                                        &mut tx_invocations,
+                                        &mut open_txs,
+                                    );
+                                }
                                 if let Some(token) = job_leases.remove(&msg_id) {
                                     token.cancel();
                                 }
@@ -753,7 +923,7 @@ async fn supervisor_loop(
                             }
                             info!(app_id = %app_id, "agent session compacted");
                         }
-                        InboundMessage::CollectionOp { id, op, entity, data } => {
+                        InboundMessage::CollectionOp { id, invocation_id, op, entity, data } => {
                             let pool = config.pool.clone();
                             let aid = config.app_id.clone();
                             let tx = outbound_tx.clone();
@@ -763,15 +933,25 @@ async fn supervisor_loop(
                             // under RLS as their fixed identity. Fail-closed.
                             let allow_bypass = config.run_onstart && !onstart_done;
                             let state = if allow_bypass { None } else { Some(config.identity.clone()) };
+                            let invocation = capability_context(
+                                &config, worker_protocol, &active_invocations,
+                                invocation_id.as_deref(),
+                            );
                             tokio::spawn(async move {
-                                let (result, error) = match collection_op(&pool, &aid, &op, &entity, data, state, allow_bypass).await {
+                                let (result, error) = match invocation {
+                                    Err(error) => (None, Some(error)),
+                                    Ok(invocation) => match collection_op(
+                                        &pool, &aid, &op, &entity, data, state,
+                                        &invocation, allow_bypass,
+                                    ).await {
                                     Ok(v) => (Some(v), None),
                                     Err(e) => (None, Some(e)),
+                                    },
                                 };
                                 let _ = tx.send(OutboundMessage::CollectionOpResult { id, result, error }).await;
                             });
                         }
-                        InboundMessage::SqlQuery { id, sql, params } => {
+                        InboundMessage::SqlQuery { id, invocation_id, sql, params } => {
                             if !rate_admit(&mut sql_query_times, 100) {
                                 let _ = outbound_tx.send(OutboundMessage::SqlQueryResult {
                                     id, columns: None, rows: None, row_count: None,
@@ -786,8 +966,18 @@ async fn supervisor_loop(
                             let pool = config.pool.clone();
                             let aid = config.app_id.clone();
                             let tx = outbound_tx.clone();
+                            let invocation = capability_context(
+                                &config, worker_protocol, &active_invocations,
+                                invocation_id.as_deref(),
+                            );
                             tokio::spawn(async move {
-                                let msg = match crate::governance::enforcement::run_sql(&pool, &aid, &state, &sql, &params).await {
+                                let result = match invocation {
+                                    Ok(invocation) => crate::governance::enforcement::run_sql_with_invocation(
+                                        &pool, &aid, &state, &invocation, &sql, &params,
+                                    ).await,
+                                    Err(error) => Err(error),
+                                };
+                                let msg = match result {
                                     Ok(ok) => OutboundMessage::SqlQueryResult {
                                         id, columns: Some(ok.columns), rows: Some(ok.rows),
                                         row_count: Some(ok.row_count), error: None,
@@ -799,7 +989,7 @@ async fn supervisor_loop(
                                 let _ = tx.send(msg).await;
                             });
                         }
-                        InboundMessage::SqlBegin { id } => {
+                        InboundMessage::SqlBegin { id, invocation_id } => {
                             if worker_protocol < TRANSACTION_PROTOCOL_VERSION {
                                 let _ = outbound_tx.send(OutboundMessage::SqlBeginResult {
                                     id, tx_id: None, error: Some("transactions require worker protocol v3".into()),
@@ -825,19 +1015,32 @@ async fn supervisor_loop(
                                 }).await;
                                 continue;
                             }
-                            let msg = match TxSession::begin(
-                                &config.pool, &config.app_id, &config.identity, tx_done_tx.clone(),
-                            ).await {
+                            let invocation = capability_context(
+                                &config, worker_protocol, &active_invocations,
+                                invocation_id.as_deref(),
+                            );
+                            let msg = match invocation {
+                                Err(error) => OutboundMessage::SqlBeginResult {
+                                    id, tx_id: None, error: Some(error),
+                                },
+                                Ok(invocation) => match TxSession::begin_with_invocation(
+                                    &config.pool, &config.app_id, &config.identity,
+                                    &invocation, tx_done_tx.clone(),
+                                ).await {
                                 Ok(session) => {
                                     let tid = session.tx_id.clone();
                                     open_txs.insert(tid.clone(), session);
+                                    if let Some(owner) = invocation_id.clone() {
+                                        tx_invocations.insert(tid.clone(), owner);
+                                    }
                                     OutboundMessage::SqlBeginResult { id, tx_id: Some(tid), error: None }
                                 }
                                 Err(e) => OutboundMessage::SqlBeginResult { id, tx_id: None, error: Some(e) },
+                                },
                             };
                             let _ = outbound_tx.send(msg).await;
                         }
-                        InboundMessage::SqlExec { id, tx_id, sql, params } => {
+                        InboundMessage::SqlExec { id, invocation_id, tx_id, sql, params } => {
                             if worker_protocol < TRANSACTION_PROTOCOL_VERSION {
                                 let _ = outbound_tx
                                     .send(sql_exec_result(
@@ -845,6 +1048,28 @@ async fn supervisor_loop(
                                         Err("transactions require worker protocol v3".into()),
                                     ))
                                     .await;
+                                continue;
+                            }
+                            if config.invocation.is_workflow()
+                                && (invocation_id.as_ref() != tx_invocations.get(&tx_id)
+                                    || capability_context(
+                                        &config, worker_protocol, &active_invocations,
+                                        invocation_id.as_deref(),
+                                    ).is_err())
+                            {
+                                if let Some(session) = open_txs.remove(&tx_id) {
+                                    tx_invocations.remove(&tx_id);
+                                    abort_tx(
+                                        session, id,
+                                        "transaction invocation is unknown, expired, or mismatched".into(),
+                                        outbound_tx.clone(),
+                                    );
+                                } else {
+                                    let _ = outbound_tx.send(sql_exec_result(
+                                        id,
+                                        Err("unknown transaction id".into()),
+                                    )).await;
+                                }
                                 continue;
                             }
                             let session = match match_session(&open_txs, &tx_id) {
@@ -877,6 +1102,7 @@ async fn supervisor_loop(
                                     }
                                     Err(enqueue_error) => {
                                         let session = open_txs.remove(&tx_id).unwrap();
+                                        tx_invocations.remove(&tx_id);
                                         abort_tx(
                                             session,
                                             id,
@@ -902,6 +1128,7 @@ async fn supervisor_loop(
                                 }
                                 Err(enqueue_error) => {
                                     let session = open_txs.remove(&tx_id).unwrap();
+                                    tx_invocations.remove(&tx_id);
                                     abort_tx(
                                         session,
                                         id,
@@ -913,27 +1140,59 @@ async fn supervisor_loop(
                                 }
                             }
                         }
-                        InboundMessage::SqlCommit { id, tx_id } => {
+                        InboundMessage::SqlCommit { id, invocation_id, tx_id } => {
                             if worker_protocol < TRANSACTION_PROTOCOL_VERSION {
                                 let _ = outbound_tx.send(OutboundMessage::SqlEndResult {
                                     id, error: Some("transactions require worker protocol v3".into()),
                                 }).await;
                                 continue;
                             }
+                            if config.invocation.is_workflow()
+                                && (invocation_id.as_ref() != tx_invocations.get(&tx_id)
+                                    || capability_context(
+                                        &config, worker_protocol, &active_invocations,
+                                        invocation_id.as_deref(),
+                                    ).is_err())
+                            {
+                                if let Some(session) = open_txs.remove(&tx_id) {
+                                    tx_invocations.remove(&tx_id);
+                                    abort_tx(session, id, "transaction invocation expired or mismatched".into(), outbound_tx.clone());
+                                } else {
+                                    let _ = outbound_tx.send(OutboundMessage::SqlEndResult { id, error: Some("unknown transaction id".into()) }).await;
+                                }
+                                continue;
+                            }
                             match match_session(&open_txs, &tx_id).err() {
-                                None => finish_tx(open_txs.remove(&tx_id).unwrap(), true, id, outbound_tx.clone()),
+                                None => {
+                                    tx_invocations.remove(&tx_id);
+                                    finish_tx(open_txs.remove(&tx_id).unwrap(), true, id, outbound_tx.clone())
+                                },
                                 Some(e) => { let _ = outbound_tx.send(OutboundMessage::SqlEndResult { id, error: Some(e.into()) }).await; }
                             }
                         }
-                        InboundMessage::SqlRollback { id, tx_id } => {
+                        InboundMessage::SqlRollback { id, invocation_id, tx_id } => {
                             if worker_protocol < TRANSACTION_PROTOCOL_VERSION {
                                 let _ = outbound_tx.send(OutboundMessage::SqlEndResult {
                                     id, error: Some("transactions require worker protocol v3".into()),
                                 }).await;
                                 continue;
                             }
+                            if config.invocation.is_workflow()
+                                && invocation_id.as_ref() != tx_invocations.get(&tx_id)
+                            {
+                                if let Some(session) = open_txs.remove(&tx_id) {
+                                    tx_invocations.remove(&tx_id);
+                                    abort_tx(session, id, "transaction invocation mismatched".into(), outbound_tx.clone());
+                                } else {
+                                    let _ = outbound_tx.send(OutboundMessage::SqlEndResult { id, error: Some("unknown transaction id".into()) }).await;
+                                }
+                                continue;
+                            }
                             match match_session(&open_txs, &tx_id).err() {
-                                None => finish_tx(open_txs.remove(&tx_id).unwrap(), false, id, outbound_tx.clone()),
+                                None => {
+                                    tx_invocations.remove(&tx_id);
+                                    finish_tx(open_txs.remove(&tx_id).unwrap(), false, id, outbound_tx.clone())
+                                },
                                 Some(e) => { let _ = outbound_tx.send(OutboundMessage::SqlEndResult { id, error: Some(e.into()) }).await; }
                             }
                         }
@@ -1089,10 +1348,21 @@ async fn supervisor_loop(
                         effective_permissions.clear(); task_scopes.clear();
                         cancel_job_leases(&mut job_leases);
                         job_payloads.clear();
+                        active_invocations.clear();
+                        rpc_invocations.clear();
+                        job_invocations.clear();
                         onstart_done = false;
+                        worker_protocol = 1;
+                        protocol_discovered = false;
+                        for (minimum, reply) in protocol_waiters.drain(..) {
+                            let _ = reply.send(Err(format!(
+                                "worker exited before protocol v{minimum} handshake"
+                            )));
+                        }
                         // Drop the stale TX handle so the respawned process can
                         // open a fresh one (its task rolls back + frees the slot).
                         open_txs.clear();
+                        tx_invocations.clear();
 
                         let now = Instant::now();
                         crash_times.retain(|t| now.duration_since(*t) < CRASH_WINDOW);
@@ -1142,6 +1412,8 @@ async fn supervisor_loop(
                                 ipc_reader = Some(reader);
                                 output_handles.push(spawn_output_reader(stderr, "stderr", log_tx.clone()));
                                 status = WorkerStatus::Running;
+                                worker_protocol = 1;
+                                protocol_discovered = false;
                                 emit_log(&log_tx, "system", "worker restarted");
                             }
                             Err(e) => {
@@ -1313,6 +1585,7 @@ async fn collection_op(
     entity: &str,
     data: JsonValue,
     state: Option<crate::governance::enforcement::ContextState>,
+    invocation: &crate::governance::enforcement::InvocationContext,
     allow_bypass: bool,
 ) -> Result<JsonValue, String> {
     use crate::manifest::field_type_map;
@@ -1328,10 +1601,11 @@ async fn collection_op(
         // a failed COMMIT surfaces as an error instead of silently dropping the
         // write or leaking an open transaction back to the pool.
         Some(st) => {
-            let mut tx = crate::governance::enforcement::begin_app_tx(
+            let mut tx = crate::governance::enforcement::begin_app_tx_with_invocation(
                 pool,
                 app_id,
                 &st,
+                invocation,
                 st.user_id,
                 None,
                 "collection",
@@ -1491,7 +1765,11 @@ pub async fn collection_op_test(
     state: Option<crate::governance::enforcement::ContextState>,
     allow_bypass: bool,
 ) -> Result<serde_json::Value, String> {
-    collection_op(pool, app_id, op, entity, data, state, allow_bypass).await
+    collection_op(
+        pool, app_id, op, entity, data, state,
+        &crate::governance::enforcement::InvocationContext::default(),
+        allow_bypass,
+    ).await
 }
 
 #[cfg(test)]
