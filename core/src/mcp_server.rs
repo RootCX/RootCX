@@ -58,6 +58,11 @@ pub struct CreateRecordsInput {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolOutput {
+    // schemars describes a bare `serde_json::Value` as the boolean schema
+    // `true`. That is valid JSON Schema, but strict clients (Claude Code,
+    // Claude Cowork) reject a boolean where a subschema object is expected and
+    // then drop every tool. Every tool result is a JSON object, so say so.
+    #[schemars(with = "serde_json::Map<String, JsonValue>")]
     pub result: JsonValue,
 }
 
