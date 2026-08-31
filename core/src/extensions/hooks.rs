@@ -68,6 +68,86 @@ impl RuntimeExtension for HooksExtension {
         )
         .await?;
 
+        // "Is this row the registrant's?", answered for a payload rather than for a
+        // policy. The read path answers it in SQL that Postgres evaluates as the
+        // caller; a trigger has no caller to lean on, so it asks about a principal
+        // explicitly — and must reach the same verdict as `rbac::owner_predicate`,
+        // by the same route.
+        //
+        // Delegated ownership is crossed through the resolver that predicate
+        // installs, never re-walked here: two implementations of "mine" would
+        // eventually disagree, and the disagreeing one is a leak. The resolver reads
+        // the principal from `rootcx.user_id`, so the GUC is swapped to the
+        // registrant for the call and put back — this runs inside the *actor's*
+        // transaction, and leaving the actor's identity rewritten would hand the
+        // rest of that transaction someone else's RLS scope. `rootcx.app_id` is
+        // posed for the same call because the resolver refuses a caller claiming
+        // another app; the value is `TG_TABLE_SCHEMA`, the schema the trigger is
+        // attached to, so nothing app-controlled decides which resolver is reached.
+        //
+        // Everything unanswerable is false: no principal, no owner column, a column
+        // the projection still names but the table no longer has, a link pointing
+        // nowhere. And the resolver call is wrapped, because a *missing* resolver
+        // raises `undefined_function` — inside the actor's write. Failing the hook
+        // is a missed notification; failing the transaction breaks an unrelated
+        // user's INSERT for a hook they never registered.
+        exec(
+            pool,
+            r#"
+            CREATE OR REPLACE FUNCTION rootcx_system.hook_row_owned(
+                p_schema TEXT, p_row JSONB, p_owner_field TEXT, p_owner_parent TEXT, p_principal UUID
+            ) RETURNS BOOLEAN AS $$
+            DECLARE
+                link TEXT;
+                prev_user TEXT;
+                prev_app TEXT;
+                owned BOOLEAN := false;
+            BEGIN
+                IF p_principal IS NULL OR p_row IS NULL OR p_owner_field IS NULL THEN
+                    RETURN false;
+                END IF;
+
+                -- A dropped column reads as absent and an unset one as null; both
+                -- yield NULL, which is nobody's.
+                link := p_row ->> p_owner_field;
+                IF link IS NULL THEN RETURN false; END IF;
+
+                -- Directly owned: one comparison, and in text because the row
+                -- arrives as jsonb. `uuid` renders canonically, so this agrees with
+                -- the policy's typed comparison on both a uuid and a text column.
+                IF p_owner_parent IS NULL THEN
+                    RETURN link = p_principal::text;
+                END IF;
+
+                prev_user := current_setting('rootcx.user_id', true);
+                prev_app := current_setting('rootcx.app_id', true);
+                BEGIN
+                    PERFORM set_config('rootcx.user_id', p_principal::text, true);
+                    PERFORM set_config('rootcx.app_id', p_schema, true);
+                    EXECUTE format(
+                        'SELECT EXISTS (SELECT 1 FROM rootcx_system.%I() AS pk WHERE pk::text = $1)',
+                        'rootcx_own.' || p_schema || '.' || p_owner_parent
+                    ) INTO owned USING link;
+                EXCEPTION WHEN OTHERS THEN
+                    owned := false;
+                END;
+                PERFORM set_config('rootcx.user_id', COALESCE(prev_user, ''), true);
+                PERFORM set_config('rootcx.app_id', COALESCE(prev_app, ''), true);
+
+                RETURN COALESCE(owned, false);
+            END;
+            $$ LANGUAGE plpgsql VOLATILE SECURITY DEFINER SET search_path = pg_catalog, rootcx_system"#,
+        )
+        .await?;
+
+        // It answers "which rows are whose" for an arbitrary principal, which is
+        // exactly what an app must not be able to ask.
+        exec(
+            pool,
+            "REVOKE ALL ON FUNCTION rootcx_system.hook_row_owned(TEXT, JSONB, TEXT, TEXT, UUID) FROM PUBLIC",
+        )
+        .await?;
+
         // Trigger function -- checks entity_hooks config, enqueues to pgmq if match
         exec(
             pool,
@@ -77,13 +157,21 @@ impl RuntimeExtension for HooksExtension {
             DECLARE
                 hook RECORD;
                 rec_id TEXT;
+                full_new JSONB;
+                full_old JSONB;
                 record_data JSONB;
                 old_data JSONB;
                 v_msg JSONB;
                 sensitive TEXT[];
+                own_field TEXT;
+                own_parent TEXT;
+                perms TEXT[];
+                read_key TEXT;
+                allowed BOOLEAN;
                 built BOOLEAN := false;
             BEGIN
                 rec_id := CASE WHEN TG_OP = 'DELETE' THEN OLD.id::TEXT ELSE NEW.id::TEXT END;
+                read_key := 'app:' || TG_TABLE_SCHEMA || ':' || TG_TABLE_NAME || '.read';
 
                 FOR hook IN
                     SELECT id, action_type, action_config, created_by
@@ -102,16 +190,55 @@ impl RuntimeExtension for HooksExtension {
                     -- the read paths' projection, and its payload fans out into
                     -- jobs, LLM prompts and workflow node params. Stripping once
                     -- here beats stripping at each consumer.
+                    --
+                    -- Ownership is read from the same row of the same projection:
+                    -- an entity that declares no owner adds no lookup at all, and
+                    -- one that does adds none either.
                     IF NOT built THEN
-                        SELECT COALESCE(fields, ARRAY[]::text[]) INTO sensitive
-                        FROM rootcx_system.sensitive_fields
-                        WHERE app_id = TG_TABLE_SCHEMA AND entity = TG_TABLE_NAME;
+                        SELECT COALESCE(s.fields, ARRAY[]::text[]), s.owner_field, s.owner_parent
+                        INTO sensitive, own_field, own_parent
+                        FROM rootcx_system.sensitive_fields s
+                        WHERE s.app_id = TG_TABLE_SCHEMA AND s.entity = TG_TABLE_NAME;
                         sensitive := COALESCE(sensitive, ARRAY[]::text[]);
 
-                        record_data := CASE WHEN TG_OP IN ('INSERT', 'UPDATE') THEN to_jsonb(NEW) - sensitive END;
-                        old_data := CASE WHEN TG_OP IN ('UPDATE', 'DELETE') THEN to_jsonb(OLD) - sensitive END;
+                        -- Unstripped, for the ownership test only: the owning column
+                        -- may itself be sensitive, and a stripped payload would then
+                        -- read as ownerless — denying every hook on that entity.
+                        full_new := CASE WHEN TG_OP IN ('INSERT', 'UPDATE') THEN to_jsonb(NEW) END;
+                        full_old := CASE WHEN TG_OP IN ('UPDATE', 'DELETE') THEN to_jsonb(OLD) END;
+                        record_data := full_new - sensitive;
+                        old_data := full_old - sensitive;
                         built := true;
                     END IF;
+
+                    -- A hook's payload is a read of the watched table performed on
+                    -- the registrant's behalf, so it is gated on the very keys RLS
+                    -- gates a SELECT on. Resolved from the registrant's roles rather
+                    -- than from `check_access`: the identity GUCs describe the actor
+                    -- who wrote the row, and the actor is not who receives it.
+                    --
+                    -- Re-resolved at every fire, so a registrant stripped of the
+                    -- grant stops receiving rows without anyone having to hunt down
+                    -- the hooks they left behind. An ownerless hook (`created_by`
+                    -- cleared when its owner was deleted) resolves to no permission
+                    -- and so is skipped — it was already refused at dispatch.
+                    perms := rootcx_system.resolve_permissions(hook.created_by);
+                    allowed := rootcx_system.match_permission(perms, read_key);
+                    IF NOT allowed AND rootcx_system.match_permission(perms, read_key || '.own') THEN
+                        -- Both sides of an UPDATE must be the registrant's: the
+                        -- payload carries `old_record` too, so owning only the row
+                        -- as it lands would still disclose the row as it was.
+                        allowed :=
+                            (full_new IS NULL OR rootcx_system.hook_row_owned(
+                                TG_TABLE_SCHEMA, full_new, own_field, own_parent, hook.created_by))
+                            AND (full_old IS NULL OR rootcx_system.hook_row_owned(
+                                TG_TABLE_SCHEMA, full_old, own_field, own_parent, hook.created_by));
+                    END IF;
+                    -- Nothing enqueued rather than a payload emptied of its record:
+                    -- the envelope alone would still disclose that a row of this id
+                    -- changed, and when — which is the existence of data the
+                    -- registrant may not read.
+                    IF NOT allowed THEN CONTINUE; END IF;
 
                     v_msg := jsonb_build_object(
                         'app_id', TG_TABLE_SCHEMA,
