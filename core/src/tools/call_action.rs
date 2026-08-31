@@ -3,6 +3,7 @@ use serde_json::{json, Value as JsonValue};
 use rootcx_types::ToolDescriptor;
 
 use super::{Tool, ToolContext, str_arg, check_permission};
+use crate::governance::authority::has_permission;
 
 pub struct CallActionTool;
 
@@ -29,7 +30,12 @@ impl Tool for CallActionTool {
         let action = str_arg(&ctx.args, "action")?;
         let input = ctx.args.get("input").cloned().unwrap_or(json!({}));
 
-        check_permission(&ctx.permissions, &format!("app:{app}:action:{action}"))?;
+        // Same two grains as the HTTP RPC route. Checking only the fine key here
+        // would deny a delegated agent whose principal holds the coarse one, so
+        // the tool and the route would disagree about the same grant.
+        if !has_permission(&ctx.permissions, &format!("app:{app}:invoke")) {
+            check_permission(&ctx.permissions, &format!("app:{app}:action:{action}"))?;
+        }
 
         let actions: Option<(JsonValue,)> = sqlx::query_as(
             "SELECT COALESCE(manifest->'actions', '[]'::jsonb) FROM rootcx_system.apps WHERE id = $1 AND status = 'installed'",

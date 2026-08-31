@@ -269,6 +269,54 @@ async fn t7_2_user_with_invoke_can_call_rpc() {
 }
 
 #[tokio::test]
+async fn t7_3_invoke_is_the_coarse_grain_of_the_per_action_keys() {
+    // `invoke` and `action:{id}` are two grains of one right, and the coarse
+    // implies the fine. Requiring BOTH would make `invoke` mean nothing alone and
+    // retroactively revoke every grant issued before per-action keys existed —
+    // for an app declaring 58 actions, that is every caller losing every method.
+    // Restriction is expressed by granting the narrow keys INSTEAD of `invoke`.
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install_manifest(&json!({
+        "appId": "acts", "name": "acts", "version": "1.0.0",
+        "dataContract": [{ "entityName": "things", "fields": [
+            { "name": "label", "type": "text", "required": true }] }],
+        "actions": [
+            { "id": "ping", "name": "Ping", "description": "p" },
+            { "id": "pong", "name": "Pong", "description": "p" },
+        ],
+    })).await;
+
+    let call = |tok: String, method: &'static str| {
+        let rt = &rt;
+        async move {
+            rt.request_as(Method::POST, "/api/v1/apps/acts/rpc", &tok,
+                Some(&json!({"method": method, "params": {}}))).await.0
+        }
+    };
+
+    // Coarse: holds only `invoke`, reaches a declared action. This is the case
+    // every existing tenant is in.
+    let (broad, _) = user_with(&rt, "broad@t.local", &["app:acts:invoke"]).await;
+    assert_ne!(call(broad, "ping").await, StatusCode::FORBIDDEN,
+        "`invoke` alone must still reach a declared action");
+
+    // Fine: holds one action key and no `invoke`. Reaches that method only.
+    let (narrow, _) = user_with(&rt, "narrow@t.local", &["app:acts:action:ping"]).await;
+    assert_ne!(call(narrow.clone(), "ping").await, StatusCode::FORBIDDEN,
+        "a per-action key must authorise its own method without `invoke`");
+    assert_eq!(call(narrow, "pong").await, StatusCode::FORBIDDEN,
+        "a per-action key must not authorise a different method");
+
+    // Neither key: denied, as before.
+    let (none, _) = user_with(&rt, "none@t.local", &["app:acts:things.read"]).await;
+    assert_eq!(call(none, "ping").await, StatusCode::FORBIDDEN,
+        "holding neither grain must stay denied");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
 async fn t7_4_admin_can_invoke_any_app() {
     let rt = harness::TestRuntime::boot().await;
     admin(&rt).await;

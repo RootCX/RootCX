@@ -6,7 +6,7 @@ use serde_json::{Value as JsonValue, json};
 use super::{SharedRuntime, pool, pool_and_secrets, wm};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::governance::authority::{require_admin, share_read_perms};
+use crate::governance::authority::{has_permission_db, require_admin, share_read_perms};
 use crate::extensions::sharing::guard::{CallerAuth, authorize_public_rpc, find_public_rpc, find_public_rpc_full};
 use crate::ipc::RpcCaller;
 
@@ -74,11 +74,6 @@ pub async fn rpc_proxy(
     let p = pool(&rt);
     let (caller, action_scope) = match &auth {
         CallerAuth::User(identity) => {
-            if !crate::governance::authority::has_permission_db(
-                &p, identity.user_id, &format!("app:{app_id}:invoke"),
-            ).await? {
-                return Err(ApiError::Forbidden(format!("permission denied: app:{app_id}:invoke")));
-            }
             let declared_action: bool = sqlx::query_scalar(
                 "SELECT EXISTS (
                    SELECT 1
@@ -95,12 +90,24 @@ pub async fn rpc_proxy(
             .fetch_one(&p)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
-            if declared_action && !crate::governance::authority::has_permission_db(
-                &p, identity.user_id, &format!("app:{app_id}:action:{method}"),
-            ).await? {
-                return Err(ApiError::Forbidden(format!(
-                    "permission denied: app:{app_id}:action:{method}"
-                )));
+            // Two grains of one right, the coarse implying the fine: `invoke` is
+            // the whole app, `action:{method}` is that method alone. Same idiom as
+            // `app:{id}:*` implying everything beneath it. Requiring BOTH would
+            // make `invoke` meaningless alone and revoke every grant issued before
+            // the fine keys existed; a role is narrowed by holding the fine keys
+            // INSTEAD of `invoke`.
+            let invoke_key = format!("app:{app_id}:invoke");
+            let action_key = format!("app:{app_id}:action:{method}");
+            let allowed = has_permission_db(&p, identity.user_id, &invoke_key).await?
+                || (declared_action
+                    && has_permission_db(&p, identity.user_id, &action_key).await?);
+            if !allowed {
+                let needed = if declared_action {
+                    format!("{invoke_key} or {action_key}")
+                } else {
+                    invoke_key
+                };
+                return Err(ApiError::Forbidden(format!("permission denied: {needed}")));
             }
             (Some(RpcCaller {
                 user_id: identity.user_id.to_string(),
