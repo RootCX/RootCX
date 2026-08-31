@@ -1648,27 +1648,28 @@ fn t4_7_discover_wire_carries_no_database_url() {
 }
 
 // ── Category 5 supplementary: SQL proxy validate_sql layer ───────────
-// These test the early-rejection layer (not the security boundary, but
-// a defense-in-depth filter that gives clear errors for obvious attacks).
+// `validate_sql` IS a security boundary, not just an early-rejection nicety:
+// `SET` and `RESET` are not function calls, so revoking `set_config` from the
+// executor role does not cover them, and nothing else in the stack stops a
+// statement from undoing `SET LOCAL ROLE` or re-posing an identity GUC. The
+// statement classifier is tested at unit level in `sql_proxy::tests`; what the
+// tests here add is the other half — that the PG role denies what it should
+// even if a statement ever got through.
 
 #[tokio::test]
 async fn t5_supplementary_validate_sql_blocks_grant_revoke_early() {
-    // GRANT/REVOKE are blocked by the validate_sql layer BEFORE reaching
-    // Postgres. The PG role may or may not deny them depending on ownership
-    // semantics, but the SQL proxy never lets them through. This test
-    // verifies the validate_sql prefix check (unit-level, already tested in
-    // sql_proxy::tests::rejects_ddl_prefixes, but duplicated here for the
-    // contract suite completeness).
-    //
-    // At the integration level we verify the HTTP endpoint rejects them:
+    // GRANT/REVOKE never reach Postgres: `validate_sql` allows only DML, so they
+    // fail the classifier first. What this test adds is the layer underneath —
+    // that the executor role would deny them anyway. Both matter, because the
+    // classifier is what a refactor can silently remove and the role grant is
+    // what a migration can silently widen.
     let rt = harness::TestRuntime::boot().await;
     admin(&rt).await;
     rt.install("crm", "contacts").await;
 
-    // The validate_sql function is private (not callable from integration
-    // tests). Its correctness is verified by the unit tests in
-    // sql_proxy::tests::rejects_ddl_prefixes. Here we verify the role-level
-    // denial for privileges the executor definitely cannot have.
+    // Driven as the executor role rather than through `run_sql`, deliberately:
+    // this asserts the role's own privileges, so it must bypass the classifier
+    // that `sql_proxy::tests` already covers.
     let pool = rt.pool();
 
     // The executor cannot grant itself membership in the owner role.
@@ -2194,6 +2195,100 @@ async fn tx_exec_still_blocks_ddl() {
     assert!(err.contains("ALTER"), "DDL inside a TX must be rejected: {err}");
     session.rollback().await.unwrap();
 
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn tx_exec_rejects_privileged_statements_hidden_behind_comments() {
+    // The unit tests pin the classifier; this pins that the classifier is still
+    // ON the exec path. A refactor dropping the validate_sql call from TxCmd::Exec
+    // would leave every unit test green and reopen a full sandbox escape, because
+    // a held-open TX is the one place a privileged statement pays off: `RESET ROLE`
+    // undoes `SET LOCAL ROLE rootcx_app_executor` and returns the session to the
+    // pool's login role, which bootstrap asserts is SUPERUSER or BYPASSRLS, and a
+    // later statement in the SAME transaction then reads every app unfiltered.
+    // Leading comments are the shape that matters: they are what a prefix
+    // blocklist could never see.
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let (_, uid) = user_with(&rt, "txesc@t.local", &["app:crm:contacts.read"]).await;
+
+    // One session per attack: any error poisons the TX, so a loop inside a single
+    // session would report "transaction is aborted" from the second case onward
+    // and stop testing the classifier.
+    for attack in [
+        "/*x*/RESET ROLE",
+        "/*x*/SET ROLE postgres",
+        "--\nRESET ROLE",
+        "/*a/*b*/c*/RESET ROLE",
+        "/*x*/SET rootcx.user_id = '00000000-0000-0000-0000-000000000000'",
+    ] {
+        let (done, _done_rx) = tokio::sync::mpsc::channel::<String>(4);
+        let session = TxSession::begin(rt.pool(), "crm", &writer_state(uid), done).await.unwrap();
+        let err = session.executor().exec(attack.into(), vec![]).await.unwrap_err();
+        assert!(
+            err.contains("statement not allowed"),
+            "a held-open TX must reject `{attack}`, got: {err}",
+        );
+        session.rollback().await.unwrap();
+    }
+
+    // The escape never happened: a fresh session is still the confined role
+    // acting as the caller, not the pool's privileged login role.
+    let (done, _done_rx) = tokio::sync::mpsc::channel::<String>(4);
+    let session = TxSession::begin(rt.pool(), "crm", &writer_state(uid), done).await.unwrap();
+    let who = session.executor().exec(
+        "SELECT current_user::text, current_setting('rootcx.user_id', true)".into(), vec![],
+    ).await.unwrap();
+    assert_eq!(
+        who.rows,
+        vec![vec![json!("rootcx_app_executor"), json!(uid.to_string())]],
+        "the app must still be the restricted role posing the caller's identity",
+    );
+    session.rollback().await.unwrap();
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_app_transaction_is_read_committed_whatever_the_server_default() {
+    // Row-scoped RLS revocation is only immediate under READ COMMITTED. A
+    // REPEATABLE READ transaction holds its first snapshot, so a caller whose
+    // ownership link was just deleted keeps reading the rows for the whole
+    // transaction. begin_app_tx therefore pins the level instead of inheriting
+    // `default_transaction_isolation`, which a deployment (or a managed-Postgres
+    // template) is free to set. Asserting against a server that already defaults
+    // to READ COMMITTED would pass with the pin removed, so the fixture changes
+    // the default first.
+    let rt = harness::TestRuntime::boot().await;
+    admin(&rt).await;
+    rt.install("crm", "contacts").await;
+    let (_, uid) = user_with(&rt, "txiso@t.local", &["app:crm:contacts.read"]).await;
+
+    sqlx::query("ALTER DATABASE rootcx SET default_transaction_isolation = 'repeatable read'")
+        .execute(rt.pool()).await.unwrap();
+    // A database-level default only reaches sessions opened after it is set, so
+    // the existing pool's connections would still report the old value.
+    let fresh = sqlx::postgres::PgPoolOptions::new()
+        .connect_with((*rt.pool().connect_options()).clone()).await.unwrap();
+    let inherited: String = sqlx::query_scalar("SHOW transaction_isolation")
+        .fetch_one(&fresh).await.unwrap();
+    assert_eq!(inherited, "repeatable read", "fixture failed to move the server default");
+
+    let out = rootcx_core::governance::enforcement::run_sql(
+        &fresh, "crm", &writer_state(uid),
+        "SELECT current_setting('transaction_isolation')", &[],
+    ).await.unwrap();
+    assert_eq!(
+        out.rows, vec![vec![json!("read committed")]],
+        "an app transaction must pin READ COMMITTED, or a revoked grant keeps \
+         applying until the transaction ends",
+    );
+
+    fresh.close().await;
+    sqlx::query("ALTER DATABASE rootcx RESET default_transaction_isolation")
+        .execute(rt.pool()).await.unwrap();
     rt.shutdown().await;
 }
 

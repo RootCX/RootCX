@@ -8,7 +8,7 @@
 
 use serde_json::Value as JsonValue;
 use sqlx::postgres::PgColumn;
-use sqlx::{Column, PgPool, Row as _};
+use sqlx::{Column, Executor as _, PgPool, Row as _};
 use uuid::Uuid;
 
 use crate::manifest::quote_ident;
@@ -145,9 +145,9 @@ async fn set_invocation_context(
     Ok(())
 }
 
-/// Open a transaction primed for RLS-governed app access: scoped search_path,
-/// the RLS identity GUCs, the audit attribution GUCs, statement_timeout,
-/// idle_in_transaction_session_timeout, then a drop to the non-superuser
+/// Open a transaction primed for RLS-governed app access: read committed
+/// isolation, scoped search_path, the RLS identity GUCs, the audit attribution
+/// GUCs, statement_timeout, idle_in_transaction_session_timeout, then a drop to the non-superuser
 /// executor role. Every SET LOCAL runs while still superuser (the executor has
 /// set_config revoked). Callers run their statements on the returned tx and
 /// commit.
@@ -184,13 +184,22 @@ pub async fn begin_app_tx_with_invocation<'a>(
     timeout_ms: u32,
 ) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    sqlx::query(&format!("SET LOCAL search_path TO {}, public", quote_ident(app_schema)))
-        .execute(&mut *tx).await?;
-    // Timeout + zombie tx protection. SET LOCAL scopes to this tx only.
-    sqlx::query(&format!("SET LOCAL statement_timeout = '{timeout_ms}'"))
-        .execute(&mut *tx).await?;
-    sqlx::query("SET LOCAL idle_in_transaction_session_timeout = '30000'")
-        .execute(&mut *tx).await?;
+    // One round-trip; SET LOCAL scopes every value to this tx only.
+    // `transaction_isolation` leads because PostgreSQL refuses it once the tx has
+    // run a query — and `set_rls_context` below is a `SELECT`. Pinning it to read
+    // committed is a governance requirement, not a perf choice: under repeatable
+    // read the tx holds one frozen snapshot, so revoking access mid-transaction
+    // (deleting an ownership row) would stay invisible for the tx's whole life.
+    // Read committed takes a fresh snapshot per statement, so revocation lands on
+    // the next statement.
+    let batch = format!(
+        "SET LOCAL transaction_isolation = 'read committed'; \
+         SET LOCAL search_path TO {}, public; \
+         SET LOCAL statement_timeout = '{timeout_ms}'; \
+         SET LOCAL idle_in_transaction_session_timeout = '30000'",
+        quote_ident(app_schema)
+    );
+    tx.execute(sqlx::raw_sql(&batch)).await?;
     set_rls_context(&mut tx, app_schema, state).await?;
     set_invocation_context(&mut tx, invocation).await?;
     crate::extensions::audit::set_context(&mut tx, audit_actor, audit_delegator, trigger_ref).await?;
@@ -198,27 +207,102 @@ pub async fn begin_app_tx_with_invocation<'a>(
     Ok(tx)
 }
 
-/// Best-effort, early rejection of obvious DDL / privileged statements so apps
-/// get a clear error instead of a raw permission failure. This is NOT the
-/// security boundary: multi-statement is blocked structurally by sqlx's extended
-/// query protocol, and the `rootcx_app_executor` role has no DDL, no `DO`, and
-/// no `set_config`. A real query never starts with these keywords, so there are
-/// no false positives.
-const BLOCKED_PREFIXES: &[&str] =
-    &["CREATE", "DROP", "ALTER", "TRUNCATE", "GRANT", "REVOKE", "REINDEX", "VACUUM", "COPY", "SET", "RESET", "DO"];
+/// Statements an app may send. Anything else is refused.
+///
+/// A leading `(` is also accepted: `(SELECT ...) UNION (SELECT ...)` is legal SQL.
+const ALLOWED_PREFIXES: &[&str] =
+    &["SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "VALUES", "TABLE"];
 
+/// THIS IS A SECURITY BOUNDARY for privileged *utility* statements. Nothing else
+/// in the stack stops them, because `SET` / `RESET` are not privilege-checked
+/// operations — they need no grant, so role-level revocation cannot cover them.
+/// Two attack shapes are refused here and nowhere else:
+///
+/// 1. **Role escape.** `RESET ROLE` / `SET ROLE <login role>` undoes the
+///    `SET LOCAL ROLE rootcx_app_executor` in `begin_app_tx`, returning the
+///    session to the pool's login role, which bootstrap requires to be SUPERUSER
+///    or BYPASSRLS. Every app's RLS plus `rootcx_system` (secrets, RBAC,
+///    credentials) is then readable.
+/// 2. **Identity forgery.** `SET rootcx.user_id = '<victim>'` rewrites the GUC
+///    that RLS reads as the caller identity. This needs no superuser at all:
+///    the policies consult nothing but those GUCs. The `set_config()` route is
+///    already closed (the function is revoked from `rootcx_app_executor`), but
+///    bare `SET` is not a function call and is not revocable.
+///
+/// Both survive inside a held-open transaction (`TxSession`): statement 1 escapes,
+/// statement 2 reads with the escaped privileges, because they share one session
+/// and one `SET LOCAL` scope. Prefix *blocklisting* cannot express this — SQL
+/// comments precede the keyword and `trim_start()` does not remove them, so
+/// `/*x*/RESET ROLE` slips a blocklist. Hence: strip comments, then allowlist.
+///
+/// What the other layers do cover: sqlx's extended query protocol prevents a
+/// second statement being smuggled into one `Exec` (so this need only classify a
+/// single statement), and `rootcx_app_executor` lacks DDL, `DO`, and `set_config`.
+/// What they do NOT cover: the two shapes above, and any future utility statement.
+///
+/// `EXPLAIN` is deliberately absent. `EXPLAIN (ANALYZE)` reports
+/// `Rows Removed by Filter` — an exact count of rows RLS hid from the caller —
+/// and planner estimates for tables the caller cannot read. It is an oracle over
+/// invisible data, so it stays rejected.
 pub fn validate_sql(sql: &str) -> Result<(), String> {
-    let head = sql.trim_start().to_ascii_uppercase();
-    for kw in BLOCKED_PREFIXES {
-        if head.starts_with(kw) {
-            let rest = &head[kw.len()..];
-            // Match keyword alone or followed by whitespace/dollar (DO$$...)
-            if rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace()) || rest.starts_with('$') {
-                return Err(format!("statement not allowed: {kw}"));
-            }
+    let head = strip_leading_noise(sql)?;
+    if head.starts_with('(') {
+        return Ok(());
+    }
+    let upper = head.to_ascii_uppercase();
+    let allowed = ALLOWED_PREFIXES.iter().any(|kw| {
+        upper.strip_prefix(*kw).is_some_and(|rest| {
+            rest.is_empty() || !rest.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '$')
+        })
+    });
+    if allowed {
+        return Ok(());
+    }
+    // Name the offending token so the app author sees what was refused, capped
+    // because the rest of the statement is theirs and may be long.
+    let shown: String = head.split_whitespace().next().unwrap_or("(empty)").chars().take(16).collect();
+    Err(format!("statement not allowed: {shown}; apps may only send {}", ALLOWED_PREFIXES.join(", ")))
+}
+
+/// Skip leading whitespace and SQL comments until a real token starts. Block
+/// comments nest in PostgreSQL, so `/*a/*b*/c*/` is one comment. An unterminated
+/// comment is an error, not a scan past the end.
+fn strip_leading_noise(sql: &str) -> Result<&str, String> {
+    let mut rest = sql.trim_start();
+    loop {
+        if let Some(after) = rest.strip_prefix("--") {
+            // Ends on CR *or* LF, as PostgreSQL's scanner does. Taking only LF
+            // would let `--\rRESET ROLE\nSELECT 1` read as `SELECT 1` here while
+            // the server reads `RESET ROLE` — harmless today only because that is
+            // then two statements and Parse refuses those, which is not a property
+            // this classifier should depend on. Unterminated runs to end of input.
+            rest = after.find(['\n', '\r']).map_or("", |i| &after[i + 1..]).trim_start();
+        } else if rest.starts_with("/*") {
+            rest = skip_block_comment(rest)?.trim_start();
+        } else {
+            return Ok(rest);
         }
     }
-    Ok(())
+}
+
+fn skip_block_comment(s: &str) -> Result<&str, String> {
+    let bytes = s.as_bytes();
+    let mut i = 2;
+    let mut depth = 1usize;
+    while i + 1 < bytes.len() {
+        match (bytes[i], bytes[i + 1]) {
+            (b'/', b'*') => { depth += 1; i += 2; }
+            (b'*', b'/') => {
+                depth -= 1;
+                i += 2;
+                if depth == 0 {
+                    return Ok(&s[i..]);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    Err("statement not allowed: unterminated block comment".into())
 }
 
 #[derive(Debug)]
@@ -702,10 +786,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rejects_privileged_statements_hidden_behind_comments() {
+        // Comments precede the keyword, so a prefix blocklist never saw these.
+        for bad in [
+            "/*x*/RESET ROLE",
+            "/*x*/SET rootcx.user_id='x'",
+            "--\nRESET ROLE",
+            "-- harmless\n\tSET ROLE core_super",
+            "/**/SET ROLE core_super",
+            "/*a/*b*/c*/RESET ROLE",
+            "/*a*/ /*b*/ -- c\n RESET ALL",
+            "  /* leading */ COPY t FROM '/etc/passwd'",
+            // PostgreSQL ends a line comment on CR as well as LF. Scanning only
+            // for LF would swallow the privileged statement into the comment and
+            // classify the *next* line, accepting these as `SELECT 1`. The block
+            // comment carrying the LF is what makes them ONE statement to the
+            // server, so the extended protocol's refusal of multi-statement does
+            // not cover this — the classifier is the only guard. Verified against
+            // PostgreSQL 16: the first payload executes `SET ROLE` and the session
+            // returns to the pool's superuser login role.
+            "--\rRESET ROLE\nSELECT 1",
+            "--\rSET ROLE core_super /*\n SELECT 1 */",
+            "--\rSET rootcx.user_id = /*\n SELECT */ 'victim-uuid'",
+            "-- x\rRESET ROLE /*\n SELECT 1 */",
+            "--\r\nRESET ROLE",
+        ] {
+            assert!(validate_sql(bad).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn rejects_unterminated_block_comment_without_hanging() {
+        for bad in ["/* SELECT 1", "/*", "/*a/*b*/ SELECT 1", "/*/"] {
+            assert!(validate_sql(bad).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
+    fn rejects_statements_outside_the_allowlist() {
+        // EXPLAIN stays out: EXPLAIN (ANALYZE) leaks exact counts of RLS-hidden
+        // rows via "Rows Removed by Filter".
+        for bad in [
+            "EXPLAIN SELECT * FROM contacts",
+            "EXPLAIN (ANALYZE) SELECT * FROM contacts",
+            "MERGE INTO t USING s ON true",
+            "CALL some_proc()",
+            "PREPARE p AS SELECT 1",
+            "BEGIN",
+            "COMMIT",
+            "LOCK TABLE contacts",
+            "ANALYZE contacts",
+            "SHOW ALL",
+            "LISTEN c",
+            "",
+            "   ",
+        ] {
+            assert!(validate_sql(bad).is_err(), "should reject: {bad}");
+        }
+    }
+
+    #[test]
     fn rejects_ddl_prefixes() {
         // Multi-statement is NOT checked here — sqlx's extended protocol blocks
-        // it structurally. validate_sql only catches obvious DDL/privileged
-        // statements early for a clearer error.
+        // it structurally.
         for bad in [
             "CREATE TABLE x(id int)",
             "drop table contacts",
@@ -734,6 +877,19 @@ mod tests {
             "SELECT ';' AS x FROM t",                  // and never a false positive
             "SELECT * FROM settings WHERE key = $1",   // "SET" prefix in table name
             "SELECT * FROM resets",                     // "RESET" prefix in table name
+            "SELECT * FROM offset_table",               // body word starting with "set"-like text
+            "UPDATE t SET x = 1",                       // "SET" in the body, not the head
+            "select 1",                                 // lowercase
+            "\n\t  SELECT 1",                           // leading whitespace
+            "/* app: crm */ SELECT * FROM contacts",     // leading block comment
+            "-- daily report\nSELECT count(*) FROM t",   // leading line comment
+            "/*a/*b*/c*/ SELECT 1",                     // nested leading comment
+            "(SELECT 1) UNION (SELECT 2)",              // parenthesised SELECT
+            "  ( SELECT 1 )",
+            "WITH c AS (UPDATE t SET x = 1 RETURNING *) SELECT * FROM c",
+            "VALUES (1), (2)",
+            "TABLE contacts",
+            "SELECT(1)",                                // no space after keyword
         ] {
             assert!(validate_sql(ok).is_ok(), "should allow: {ok}");
         }
