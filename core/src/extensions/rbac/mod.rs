@@ -119,7 +119,7 @@ impl RuntimeExtension for RbacExtension {
             self.migrate_permission_keys(pool).await?;
         }
 
-        self.warn_on_reserved_own_keys(pool).await?;
+        self.warn_on_reserved_scope_keys(pool).await?;
 
         info!("RBAC extension ready");
         Ok(())
@@ -148,9 +148,12 @@ impl RuntimeExtension for RbacExtension {
         // Row-scoped twins, only where a row can be owned. Described distinctly
         // from the unscoped key: the role picker lists them adjacently, so two
         // rows both reading "read contacts" would be a coin toss for the operator.
+        // `OWN_SCOPE` rather than a literal: the suffix is reserved at the
+        // declaration door from the same constant, so the key an app cannot declare
+        // and the key the core mints can never drift apart.
         for entity in manifest.data_contract.iter().filter(|e| crate::manifest::owner_field(e).is_some()) {
             for action in ENTITY_ACTIONS {
-                keys.push(format!("app:{app_id}:{}.{action}.own", entity.entity_name));
+                keys.push(format!("app:{app_id}:{}.{action}.{}", entity.entity_name, crate::manifest::OWN_SCOPE));
                 descs.push(format!("{action} only their own {}", entity.entity_name));
             }
         }
@@ -294,7 +297,8 @@ pub(crate) async fn apply_table_rls(
         // grant bit-identical. RESTRICTIVE would AND instead, and lock every app
         // already in production out of its own data.
         let scoped = mine.as_ref().map(|mine| {
-            format!("{} AND {mine}", gate(&format!("app:{schema}:{table}.{action}.own")))
+            let own_key = format!("app:{schema}:{table}.{action}.{}", crate::manifest::OWN_SCOPE);
+            format!("{} AND {mine}", gate(&own_key))
         });
         set_policy(
             pool, &qt, &format!("{policy}_own"), command, clauses, scoped.as_deref(),
@@ -356,6 +360,18 @@ pub(crate) type OwnerMap = std::collections::HashMap<String, (String, Option<Str
 pub(crate) fn owner_resolver_name(schema: &str, entity: &str) -> String {
     format!("rootcx_own.{schema}.{entity}")
 }
+
+/// Whether PostgreSQL would store an identifier whole rather than truncate it at
+/// `NAMEDATALEN - 1`. Counted in BYTES, which is what Postgres truncates on — the
+/// boot pass reads names from the catalog, not from `validate_ident`, so a
+/// multi-byte name is not structurally impossible here.
+///
+/// Load-bearing for resolver names specifically: two entities truncated to the same
+/// name collapse into one function, and one entity's rows then answer with the
+/// other's owners. That is a silent widening, not a fail-closed one, so it is
+/// refused at install (`manifest::validate_owner_chains`, a clear deploy error) and
+/// again where the name is actually created (`owner_predicate`, which fails closed).
+pub(crate) fn fits_ident_limit(name: &str) -> bool { name.len() <= 63 }
 
 /// "This row is mine", as SQL — or `None` when it cannot be answered.
 ///
@@ -445,6 +461,10 @@ async fn owner_predicate(
             return Ok(None);
         };
         let resolver = owner_resolver_name(schema, parent);
+        if !fits_ident_limit(&resolver) {
+            tracing::warn!(%schema, %parent, %resolver, "the ownership resolver's name exceeds PostgreSQL's 63-byte identifier limit and would be truncated onto another entity's; row-scoped policies not created");
+            return Ok(None);
+        }
         declare_owner_resolver(pool, schema, parent, &resolver, &pk, &pk_type, &mine).await?;
         mine = format!(
             "{} = ANY (ARRAY(SELECT rootcx_system.{}()))",
@@ -492,6 +512,11 @@ async fn declare_owner_resolver(
     use crate::manifest::{quote_ident, quote_literal};
     let signature = format!("rootcx_system.{}()", quote_ident(resolver));
     let own_app = quote_literal(schema);
+    // STABLE, never IMMUTABLE: the answer depends on the caller's GUCs and on the
+    // table, so an IMMUTABLE marking would let the planner constant-fold one
+    // caller's reachable set into a cached plan and serve it to every other user —
+    // a permanent cross-user leak. `resolvers_are_stable_secdef_and_not_public`
+    // (tests/row_ownership_test.rs) asserts the volatility in the catalog.
     exec(pool, &format!(
         "CREATE OR REPLACE FUNCTION {signature} RETURNS SETOF {pk_type} \
          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $rootcx$ \

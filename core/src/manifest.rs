@@ -556,7 +556,7 @@ fn validate_owner_chains(manifest: &AppManifest) -> Result<(), String> {
             // 63-byte limit would collide two entities into one resolver, silently
             // handing one entity's rows the other's owners, so refuse the name here.
             let resolver = crate::extensions::rbac::owner_resolver_name(&manifest.app_id, parent);
-            if resolver.len() > 63 {
+            if !crate::extensions::rbac::fits_ident_limit(&resolver) {
                 return Err(format!(
                     "entity '{parent}' of app '{}' needs an ownership resolver named \
                      '{resolver}', which exceeds PostgreSQL's 63-byte identifier limit; \
@@ -622,8 +622,24 @@ fn validate_owner_field(entity: &EntityContract) -> Result<(), String> {
     Ok(())
 }
 
-/// Validate a key an *app* wants to declare. Stricter than `validate_perm_key`:
-/// it also refuses the `.own` suffix, which the core mints for row-scoped keys.
+/// The only row scope the core mints and builds policies for.
+pub(crate) const OWN_SCOPE: &str = "own";
+
+/// The suffixes a permission key's action segment may not end on, because the core
+/// owns their meaning. The single source of truth for the three sites that care:
+/// `validate_declared_perm_key` (refuses them at declaration),
+/// `RbacExtension::warn_on_reserved_scope_keys` (reports pre-existing ones), and
+/// the minting site in `rbac::on_app_installed` (creates the `own` twins).
+///
+/// Only `own` is minted and only `own` has policies. The others are reserved
+/// *ahead* of use and mean nothing yet: turning a suffix into a core scope after an
+/// app could declare it, and an admin grant it, would retroactively widen every
+/// role already holding that key — a silent over-grant with no migration path. The
+/// window is only free before the first release that allows it.
+pub(crate) const RESERVED_SCOPE_SUFFIXES: [&str; 2] = [OWN_SCOPE, "shared"];
+
+/// Validate a key an *app* wants to declare. Stricter than `validate_perm_key`: it
+/// also refuses the [`RESERVED_SCOPE_SUFFIXES`], which the core owns.
 ///
 /// The two are separate because they guard opposite directions. `.own` must be
 /// *grantable* — a role holding `contacts.read.own` is the whole point — but not
@@ -634,11 +650,18 @@ fn validate_owner_field(entity: &EntityContract) -> Result<(), String> {
 /// keeps the relation a fact about provenance while leaving the grant API open.
 pub fn validate_declared_perm_key(key: &str) -> Result<(), String> {
     validate_perm_key(key)?;
-    // Action segment only, so an app named `own_data` stays legal.
+    // Action segment only, so an app named `own_data` stays legal, and whole
+    // segments only, so `read.shared_inbox` is not a scope key.
     let action = key.rsplit(':').next().unwrap_or(key);
-    if action == "own" || action.ends_with(".own") {
+    if let Some(suffix) = RESERVED_SCOPE_SUFFIXES.iter()
+        .find(|s| action == **s || action.ends_with(&format!(".{s}")))
+    {
         return Err(format!(
-            "permission key '{key}': the '.own' suffix is reserved for core row-scoped keys"
+            "permission key '{key}': the '.{suffix}' suffix is reserved for the core's \
+             row-scoped keys, which the core mints itself from a field marked \
+             \"owner\": true. The permission lattice reads it as weaker than the same \
+             key without it, so an app meaning something else by it would make a \
+             delegated agent narrow to the wrong capability — rename the action"
         ));
     }
     Ok(())
@@ -784,6 +807,49 @@ mod tests {
 
     fn entity(name: &str, fields: Vec<FieldContract>) -> EntityContract {
         EntityContract { entity_name: name.to_string(), fields, identity_kind: None, identity_key: None, indexes: vec![], checks: vec![] }
+    }
+
+    /// Every reserved suffix is refused on the action segment, whole, and nowhere
+    /// else. `own` is minted today; the rest are held for a future row scope, and
+    /// reserving one only works before an app can declare it — a suffix that
+    /// becomes a core scope after roles already hold it widens all of them at once.
+    ///
+    /// Over-matching would be its own bug: `read.shared_inbox` and `sharedstuff`
+    /// are ordinary capabilities, and refusing them at install would break apps for
+    /// a substring.
+    #[test]
+    fn every_reserved_scope_suffix_is_refused_whole_and_only_on_the_action() {
+        for suffix in RESERVED_SCOPE_SUFFIXES {
+            for key in [format!("app:crm:contacts.read.{suffix}"), format!("billing.{suffix}"), suffix.to_string()] {
+                let error = validate_declared_perm_key(&key).expect_err(&format!("must reject '{key}'"));
+                assert!(error.contains("reserved"), "expected a reservation error for '{key}', got: {error}");
+                // The developer has to be able to act on it: which suffix, and why.
+                assert!(error.contains(suffix) && error.contains("owner"), "{key}: unhelpful message: {error}");
+            }
+            for key in [
+                format!("app:crm:contacts.read.{suffix}_inbox"),
+                format!("app:crm:{suffix}stuff"),
+                format!("app:{suffix}:contacts.read"),
+            ] {
+                assert!(
+                    validate_declared_perm_key(&key).is_ok(),
+                    "'{key}' is not a scope key and must stay valid: {:?}",
+                    validate_declared_perm_key(&key),
+                );
+            }
+        }
+    }
+
+    /// And the refusal is on the install path, not merely in the validator: a
+    /// manifest declaring a reserved key never reaches any DDL.
+    #[test]
+    fn a_manifest_declaring_a_reserved_scope_key_is_refused_at_install() {
+        let mut manifest = owned_chain(&["profile"]);
+        manifest.permissions = Some(serde_json::from_value(
+            json!({"permissions": [{"key": "contacts.read.shared", "description": "shared inbox"}]}),
+        ).unwrap());
+        let error = validate_manifest(&manifest).expect_err("a reserved suffix must not install");
+        assert!(format!("{error:?}").contains("reserved"), "{error:?}");
     }
 
     /// `.own` marks a row-scoped key that `intersect_permissions` treats as

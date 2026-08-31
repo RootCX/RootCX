@@ -109,25 +109,33 @@ impl RbacExtension {
         Ok(())
     }
 
-    /// Flag keys that predate the `.own` reservation.
+    /// Flag stored keys ending on a suffix the core reserves for row scopes.
     ///
-    /// The permission lattice reads `.own` as "weaker than the base key" and
+    /// The permission lattice reads such a suffix as "weaker than the base key" and
     /// narrows a delegated agent's authority along it, so an app that means
-    /// something unrelated by the suffix would have that narrowing resolve to the
-    /// wrong capability. `validate_perm_key` refuses it at every ingestion door
-    /// from now on; this only reports keys already stored. A warning, not an
-    /// error: refusing to boot would strand a tenant over a key that its next
-    /// deploy rejects anyway.
-    pub(super) async fn warn_on_reserved_own_keys(&self, pool: &PgPool) -> Result<(), RuntimeError> {
+    /// something unrelated by it would have that narrowing resolve to the wrong
+    /// capability. `validate_declared_perm_key` refuses every reserved suffix at
+    /// each ingestion door from now on; this only reports keys already stored. A
+    /// warning, not an error: refusing to boot would strand a tenant over a key
+    /// that its next deploy rejects anyway.
+    ///
+    /// Matches the same shapes as the validator, off the same constant: the whole
+    /// action segment, or its last dot-separated part. A key merely *containing* the
+    /// word (`read.shared_inbox`) is not a scope key and must not be reported.
+    pub(super) async fn warn_on_reserved_scope_keys(&self, pool: &PgPool) -> Result<(), RuntimeError> {
+        let patterns: Vec<String> = crate::manifest::RESERVED_SCOPE_SUFFIXES.iter()
+            .flat_map(|suffix| [suffix.to_string(), format!("%.{suffix}")])
+            .collect();
         let reserved: Vec<String> = sqlx::query_scalar(
-            "SELECT key FROM rootcx_system.rbac_permissions WHERE split_part(key, ':', 3) LIKE '%.own'",
-        ).fetch_all(pool).await.map_err(RuntimeError::Schema)?;
+            "SELECT key FROM rootcx_system.rbac_permissions WHERE split_part(key, ':', 3) LIKE ANY($1)",
+        ).bind(&patterns).fetch_all(pool).await.map_err(RuntimeError::Schema)?;
 
         if !reserved.is_empty() {
             tracing::warn!(
-                keys = ?reserved,
-                "permission keys use the reserved '.own' suffix; rename them before declaring \
-                 row ownership on their entity, or delegated agents will narrow to the wrong key"
+                keys = ?reserved, reserved = ?crate::manifest::RESERVED_SCOPE_SUFFIXES,
+                "permission keys end on a suffix the core reserves for row-scoped keys; rename \
+                 them before declaring row ownership on their entity, or delegated agents will \
+                 narrow to the wrong key"
             );
         }
         Ok(())

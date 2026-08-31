@@ -635,6 +635,40 @@ async fn resolvers_track_the_declaration() {
     rt.shutdown().await;
 }
 
+/// The three catalog properties every resolver's safety rests on, asserted where
+/// they are actually recorded rather than where they are written.
+///
+/// `STABLE` is the load-bearing one, and the easiest to "optimise" away: the answer
+/// depends on the caller's GUCs, so an `IMMUTABLE` marking would let the planner
+/// constant-fold one caller's reachable set into a cached plan and hand it to every
+/// other user — a permanent cross-user leak, invisible until two users share a
+/// backend. `SECURITY DEFINER` is what makes ownership a fact about the data instead
+/// of about the caller's grants on the tables the chain crosses. And a function is
+/// executable by PUBLIC unless revoked, while this one names a specific user's rows.
+#[tokio::test]
+async fn resolvers_are_stable_secdef_and_not_public() {
+    let rt = harness::TestRuntime::boot().await;
+    install_chained(&rt).await;
+
+    // grantee 0 is PUBLIC; a NULL acl means the default, which *is* PUBLIC EXECUTE.
+    let resolvers: Vec<(String, String, bool, bool)> = sqlx::query_as(
+        "SELECT p.proname, p.provolatile::text, p.prosecdef, \
+                p.proacl IS NULL OR EXISTS (SELECT 1 FROM aclexplode(p.proacl) a \
+                    WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE') \
+           FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace \
+          WHERE n.nspname = 'rootcx_system' AND p.proname LIKE 'rootcx\\_own.%' ORDER BY 1",
+    ).fetch_all(rt.pool()).await.unwrap();
+
+    assert_eq!(resolvers.len(), 2, "the fixture must have produced resolvers to assert on: {resolvers:?}");
+    for (name, volatility, secdef, public_execute) in resolvers {
+        assert_eq!(volatility, "s", "{name} must be STABLE, never IMMUTABLE: a cached plan would leak one caller's rows to another");
+        assert!(secdef, "{name} must be SECURITY DEFINER, or ownership would depend on the caller's grants");
+        assert!(!public_execute, "{name} enumerates a user's rows and must not be executable by PUBLIC");
+    }
+
+    rt.shutdown().await;
+}
+
 /// A resolver bypasses RLS by design, and RLS predicates run as the *invoking*
 /// role, so `rootcx_app_executor` must hold EXECUTE on it — and every app's
 /// `ctx.sql` runs as that same role. Apps being mutually untrusted, an app must not
