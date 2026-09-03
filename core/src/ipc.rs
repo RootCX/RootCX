@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use tokio::io::{AsyncRead, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::process::ChildStdin;
 use tokio::sync::oneshot;
 use tokio_util::codec::{FramedRead, LinesCodec};
@@ -393,23 +393,31 @@ pub enum IpcEvent {
     Output(String),
 }
 
+/// Symmetric with `IpcReader`: boxed at construction rather than generic on the
+/// struct, so a scripted transport (`tokio::io::duplex`) can stand in for a real
+/// child's stdin. This is what lets the supervisor loop's dispatch decisions be
+/// driven by a test without a Bun process — see `worker::tests` for the harness.
 pub struct IpcWriter {
-    stdin: ChildStdin,
+    sink: Box<dyn AsyncWrite + Unpin + Send>,
 }
 
 impl IpcWriter {
     pub fn new(stdin: ChildStdin) -> Self {
-        Self { stdin }
+        Self { sink: Box::new(stdin) }
+    }
+
+    pub fn from_sink(sink: impl AsyncWrite + Unpin + Send + 'static) -> Self {
+        Self { sink: Box::new(sink) }
     }
 
     pub async fn send(&mut self, msg: &OutboundMessage) -> Result<(), RuntimeError> {
         let mut line = serde_json::to_string(msg).map_err(ipc_err)?;
         line.push('\n');
-        self.stdin
+        self.sink
             .write_all(line.as_bytes())
             .await
             .map_err(ipc_err)?;
-        self.stdin.flush().await.map_err(ipc_err)
+        self.sink.flush().await.map_err(ipc_err)
     }
 }
 

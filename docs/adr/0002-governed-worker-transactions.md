@@ -41,7 +41,14 @@ identifier, or manual lifecycle control.
 
 - Business orchestration can live in TypeScript without sacrificing atomicity.
 - Database constraints, RLS and relational invariants remain in PostgreSQL.
-- Existing v1/v2 workers remain compatible; only v3 may send transaction messages.
+- Existing v1/v2 workers remain compatible: they never send transaction
+  messages, so they are simply never offered `ctx.transaction`. A worker that
+  announces no version, or a version below v3, keeps every capability it had
+  before this ADR — an announced version unlocks a capability, it never gates
+  one a worker already had. (A 2026-08-28 change briefly refused transaction
+  and declared-action messages from any worker below the relevant version
+  instead of degrading, which took every write and every declared action down
+  on every worker predating the version field; corrected the same release.)
 - Applications cannot recover and commit after any statement error. Retrying
   requires a new callback transaction.
 - Collections, integrations, storage, events and jobs are deliberately not

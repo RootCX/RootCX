@@ -914,6 +914,15 @@ async fn supervisor_loop(
                             info!(app_id = %app_id, "agent session compacted");
                         }
                         InboundMessage::CollectionOp { id, invocation_id, op, entity, data } => {
+                            // Same budget as SqlQuery: a collection op opens the same
+                            // governed transaction (`begin_app_tx_with_invocation`),
+                            // so it must share the guard rather than bypass it.
+                            if !rate_admit(&mut sql_query_times, 100) {
+                                let _ = outbound_tx.send(OutboundMessage::CollectionOpResult {
+                                    id, result: None, error: Some("rate limited (100 queries/s)".into()),
+                                }).await;
+                                continue;
+                            }
                             let pool = config.pool.clone();
                             let aid = config.app_id.clone();
                             let tx = outbound_tx.clone();
@@ -1155,6 +1164,18 @@ async fn supervisor_loop(
                             }
                         }
                         InboundMessage::SelfAction { id, action, params } => {
+                            // Same budget as SqlQuery/CollectionOp: this reaches
+                            // integrations and can enqueue work, so an unlimited
+                            // rate here would let a worker spend the Core's shared
+                            // resources through the one data-plane message that
+                            // carries no invocation id to scope it by. (Adding one
+                            // would be a wire-protocol change; out of scope here.)
+                            if !rate_admit(&mut sql_query_times, 100) {
+                                let _ = outbound_tx.send(OutboundMessage::SelfActionResult {
+                                    id, result: None, error: Some("rate limited (100 queries/s)".into()),
+                                }).await;
+                                continue;
+                            }
                             let pool = config.pool.clone();
                             let aid = config.app_id.clone();
                             let tx = outbound_tx.clone();
