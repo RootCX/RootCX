@@ -101,8 +101,30 @@ impl Principal {
     }
 }
 
+/// How long a worker may sit unused before it is eligible for reaping. Generous
+/// on purpose: respawning costs a process start, and the point is to bound an
+/// unbounded set, not to churn.
+const WORKER_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// How often the reaper sweeps.
+const REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// A live worker and when it was last handed a unit of work.
+///
+/// The map is keyed by `(app, principal|scope)` and the principal embeds the
+/// caller's permission set, so it grows with every distinct identity AND with
+/// every role edit — a set that only ever grew, pruned solely by deploy or by a
+/// later request for the same key noticing the handle had died. On a shared core
+/// that is a host-wide OOM reached by ordinary use, and the OOM killer does not
+/// stop at the tenant that grew.
+#[derive(Clone)]
+struct WorkerEntry {
+    handle: SupervisorHandle,
+    last_used: std::time::Instant,
+}
+
 pub struct WorkerManager {
-    workers: Arc<RwLock<HashMap<WorkerKey, SupervisorHandle>>>,
+    workers: Arc<RwLock<HashMap<WorkerKey, WorkerEntry>>>,
     pool: PgPool,
     dispatch: OnceLock<Arc<dyn AgentDispatcher>>,
     integration_call: OnceLock<Arc<dyn IntegrationCaller>>,
@@ -138,6 +160,48 @@ impl WorkerManager {
             apps_dir, prelude_path, runtime_url, bun_bin,
             tool_registry, pending_approvals, secret_manager, upload_nonces,
         }
+    }
+
+    /// Reap workers idle past `WORKER_IDLE_TTL`. Spawned once, alongside
+    /// `init_self_ref`, and lives as long as the manager.
+    ///
+    /// Idleness is asked of the supervisor rather than inferred from `last_used`,
+    /// because the manager only knows when work was DISPATCHED. A job running
+    /// longer than the TTL, or an open transaction, would otherwise be killed
+    /// mid-flight — turning a memory fix into data loss. A worker that does not
+    /// answer counts as busy and is left alone.
+    pub fn spawn_reaper(self: &Arc<Self>) {
+        let wm = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(REAP_INTERVAL).await;
+                let now = std::time::Instant::now();
+                let stale: Vec<(WorkerKey, SupervisorHandle)> = wm.workers.read().await.iter()
+                    .filter(|(_, e)| now.duration_since(e.last_used) > WORKER_IDLE_TTL)
+                    .map(|(k, e)| (k.clone(), e.handle.clone()))
+                    .collect();
+
+                for (key, handle) in stale {
+                    if !handle.is_idle().await {
+                        continue;
+                    }
+                    // Re-check under the write lock: a request may have arrived
+                    // between the idle probe and here, and it would have refreshed
+                    // `last_used`. Dropping the entry then would strand a worker
+                    // the map no longer knows about.
+                    let mut w = wm.workers.write().await;
+                    let still_stale = w.get(&key)
+                        .is_some_and(|e| now.duration_since(e.last_used) > WORKER_IDLE_TTL);
+                    if !still_stale {
+                        continue;
+                    }
+                    w.remove(&key);
+                    drop(w);
+                    let _ = handle.stop().await;
+                    info!(app_id = %key.0, "reaped idle worker");
+                }
+            }
+        });
     }
 
     /// Must be called after wrapping in Arc to enable sub-agent dispatch and integration calling.
@@ -250,9 +314,16 @@ impl WorkerManager {
         // wedges every later caller (tokio's RwLock queues readers behind a
         // waiting writer).
         let cached = self.workers.read().await.get(&key).cloned();
-        if let Some(h) = cached {
-            if h.status().await? == WorkerStatus::Running { return Ok(h); }
-            let _ = h.stop().await;
+        if let Some(entry) = cached {
+            if entry.handle.status().await? == WorkerStatus::Running {
+                // Touch on every dispatch: the reaper's clock must measure time
+                // since last USE, not since spawn.
+                if let Some(e) = self.workers.write().await.get_mut(&key) {
+                    e.last_used = std::time::Instant::now();
+                }
+                return Ok(entry.handle);
+            }
+            let _ = entry.handle.stop().await;
             self.workers.write().await.remove(&key);
         }
         let handle = self
@@ -263,9 +334,9 @@ impl WorkerManager {
         if let Some(existing) = w.get(&key).cloned() {
             drop(w);
             let _ = handle.stop().await;
-            return Ok(existing);
+            return Ok(existing.handle);
         }
-        w.insert(key, handle.clone());
+        w.insert(key, WorkerEntry { handle: handle.clone(), last_used: std::time::Instant::now() });
         info!(app_id, "worker started");
         Ok(handle)
     }
@@ -279,7 +350,7 @@ impl WorkerManager {
 
     pub async fn stop_app(&self, app_id: &str) -> Result<(), RuntimeError> {
         let handles: Vec<(WorkerKey, SupervisorHandle)> = self.workers.read().await
-            .iter().filter(|((a, _), _)| a == app_id).map(|(k, h)| (k.clone(), h.clone())).collect();
+            .iter().filter(|((a, _), _)| a == app_id).map(|(k, e)| (k.clone(), e.handle.clone())).collect();
         if handles.is_empty() { warn!(app_id, "no worker to stop"); return Ok(()); }
         for (key, h) in handles {
             let _ = h.stop().await;
@@ -323,7 +394,7 @@ impl WorkerManager {
 
     pub async fn stop_all(&self) {
         let handles: Vec<(WorkerKey, SupervisorHandle)> =
-            self.workers.read().await.iter().map(|(k, h)| (k.clone(), h.clone())).collect();
+            self.workers.read().await.iter().map(|(k, e)| (k.clone(), e.handle.clone())).collect();
         let futs = handles.into_iter().map(|(key, h)| {
             let workers = Arc::clone(&self.workers);
             async move { let _ = h.stop().await; workers.write().await.remove(&key); }
@@ -334,7 +405,7 @@ impl WorkerManager {
     pub async fn invalidate_for_principal(&self, user_id: uuid::Uuid) {
         let affected: Vec<(WorkerKey, SupervisorHandle)> = self.workers.read().await.iter()
             .filter(|(key, _)| worker_key_belongs_to_principal(key, user_id))
-            .map(|(key, handle)| (key.clone(), handle.clone()))
+            .map(|(key, e)| (key.clone(), e.handle.clone()))
             .collect();
 
         for (key, handle) in affected {
@@ -442,7 +513,7 @@ impl WorkerManager {
     /// any worker is running).
     pub async fn worker_status(&self, app_id: &str) -> Result<WorkerStatus, RuntimeError> {
         let handles: Vec<SupervisorHandle> = self.workers.read().await
-            .iter().filter(|((a, _), _)| a == app_id).map(|(_, h)| h.clone()).collect();
+            .iter().filter(|((a, _), _)| a == app_id).map(|(_, e)| e.handle.clone()).collect();
         if handles.is_empty() { return Err(RuntimeError::Worker(format!("no worker for app '{app_id}'"))); }
         // Running wins; poll all identity workers concurrently.
         let mut agg = WorkerStatus::Stopped;
@@ -462,7 +533,7 @@ impl WorkerManager {
     /// Aggregate per-app status across identity workers (Running wins).
     pub async fn all_statuses(&self) -> HashMap<String, WorkerStatus> {
         let handles: Vec<(String, SupervisorHandle)> =
-            self.workers.read().await.iter().map(|((a, _), h)| (a.clone(), h.clone())).collect();
+            self.workers.read().await.iter().map(|((a, _), e)| (a.clone(), e.handle.clone())).collect();
         // Poll all workers concurrently, then fold per app (Running wins).
         let results = join_all(handles.into_iter().map(|(app, h)| async move { (app, h.status().await.ok()) })).await;
         let mut out: HashMap<String, WorkerStatus> = HashMap::new();

@@ -223,6 +223,24 @@ fn echoes_invocation(
     invocation.is_scoped() && worker_protocol >= INVOCATION_PROTOCOL_VERSION
 }
 
+/// Has this worker nothing left in flight? Asked before reaping it for idleness.
+///
+/// Every shape of outstanding work counts. The manager only knows when work was
+/// DISPATCHED, so inferring idleness from that clock would kill a job still
+/// running past the TTL, or a transaction still open — turning a memory fix into
+/// data loss. Named rather than inlined so the predicate is the test surface.
+fn worker_has_no_work_in_flight(
+    active_invocations: &std::collections::HashSet<String>,
+    open_txs: &HashMap<String, TxSession>,
+    job_leases: &HashMap<i64, CancellationToken>,
+    agent_streams: &HashMap<String, mpsc::Sender<AgentEvent>>,
+) -> bool {
+    active_invocations.is_empty()
+        && open_txs.is_empty()
+        && job_leases.is_empty()
+        && agent_streams.is_empty()
+}
+
 /// May a message against an already-open transaction proceed? It must quote the
 /// invocation that opened the transaction, and that invocation must still be live.
 ///
@@ -332,6 +350,12 @@ pub enum SupervisorCommand {
     GetStatus {
         reply: oneshot::Sender<WorkerStatus>,
     },
+    /// Is there any work in flight? Asked before reaping an idle worker, because
+    /// a long-running job or an open transaction is invisible from the outside:
+    /// the manager only knows when work was DISPATCHED, not when it finished.
+    IsIdle {
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 pub struct WorkerConfig {
@@ -427,6 +451,19 @@ impl SupervisorHandle {
         let (reply, rx) = oneshot::channel();
         self.send(SupervisorCommand::GetStatus { reply }).await?;
         rx.await.map_err(|_| dead())
+    }
+
+    /// True when nothing is in flight. A worker that never answers is treated as
+    /// busy, so a wedged supervisor is left alone rather than reaped.
+    pub async fn is_idle(&self) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.send(SupervisorCommand::IsIdle { reply }).await.is_err() {
+            return false;
+        }
+        matches!(
+            tokio::time::timeout(Duration::from_secs(2), rx).await,
+            Ok(Ok(true))
+        )
     }
 
     pub async fn agent_invoke(
@@ -735,6 +772,14 @@ async fn supervisor_loop(
 
                     SupervisorCommand::GetStatus { reply } => {
                         let _ = reply.send(status.clone());
+                    }
+
+                    SupervisorCommand::IsIdle { reply } => {
+                        // Every shape of outstanding work, so reaping can never
+                        // interrupt an RPC, a job, an agent stream or a transaction.
+                        let _ = reply.send(worker_has_no_work_in_flight(
+                            &active_invocations, &open_txs, &job_leases, &pending_agent_streams,
+                        ));
                     }
 
                 }
@@ -1961,6 +2006,49 @@ mod tests {
         assert!(
             buckets.admit(RateClass::SelfAction),
             "a saturated sql budget must not spend the self-action budget",
+        );
+    }
+
+    /// The reaper asks the supervisor whether it is idle rather than inferring it
+    /// from when work was last dispatched, because the manager cannot see a job
+    /// still running or a transaction still open. Every shape of outstanding work
+    /// must count, or reaping a "stale" worker silently kills live work — a memory
+    /// fix turning into data loss. Dropping any one term makes that case reapable.
+    #[test]
+    fn a_worker_is_idle_only_when_every_kind_of_work_is_done() {
+        let none_inv = std::collections::HashSet::new();
+        let none_tx: HashMap<String, TxSession> = HashMap::new();
+        let none_lease: HashMap<i64, CancellationToken> = HashMap::new();
+        let none_stream: HashMap<String, mpsc::Sender<AgentEvent>> = HashMap::new();
+
+        assert!(
+            worker_has_no_work_in_flight(&none_inv, &none_tx, &none_lease, &none_stream),
+            "nothing outstanding is idle",
+        );
+
+        let one_inv = std::collections::HashSet::from(["inv-1".to_string()]);
+        assert!(
+            !worker_has_no_work_in_flight(&one_inv, &none_tx, &none_lease, &none_stream),
+            "an in-flight rpc or job must keep the worker off the reaper",
+        );
+
+        let one_tx = HashMap::from([("tx-1".to_string(), TxSession::dummy("tx-1"))]);
+        assert!(
+            !worker_has_no_work_in_flight(&none_inv, &one_tx, &none_lease, &none_stream),
+            "an open transaction must keep the worker off the reaper",
+        );
+
+        let one_lease = HashMap::from([(1i64, CancellationToken::new())]);
+        assert!(
+            !worker_has_no_work_in_flight(&none_inv, &none_tx, &one_lease, &none_stream),
+            "a held job lease must keep the worker off the reaper",
+        );
+
+        let (tx, _rx) = mpsc::channel::<AgentEvent>(1);
+        let one_stream = HashMap::from([("invoke-1".to_string(), tx)]);
+        assert!(
+            !worker_has_no_work_in_flight(&none_inv, &none_tx, &none_lease, &one_stream),
+            "a live agent stream must keep the worker off the reaper",
         );
     }
 

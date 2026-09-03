@@ -781,17 +781,20 @@ async fn declared_rpc_actions_require_their_action_permission() {
         &[&invoke, &action],
     ).await;
 
-    let (denied, body) = rt.request_as(
+    // `invoke` and `action:{id}` are two grains of one right, and the coarse
+    // implies the fine. This test used to assert the opposite — that `invoke`
+    // alone was FORBIDDEN — which is the semantics that silently revoked every
+    // declared action from every role not holding a wildcard the moment a tenant
+    // upgraded. Restriction is expressed by granting the narrow keys INSTEAD of
+    // `invoke`, not by requiring both.
+    let (coarse, body) = rt.request_as(
         Method::POST,
         &format!("/api/v1/apps/{app_id}/rpc"),
         &invoke_only,
         Some(&json!({"method": "approve", "params": {}})),
     ).await;
-    assert_eq!(denied, StatusCode::FORBIDDEN);
-    assert_eq!(
-        body["error"].as_str(),
-        Some("permission denied: app:rpcactiongate:action:approve"),
-    );
+    assert_ne!(coarse, StatusCode::FORBIDDEN,
+        "`invoke` alone must still reach a declared action: {body}");
 
     let (internal, _) = rt.request_as(
         Method::POST,
@@ -905,7 +908,12 @@ serve({ rpc: {
     ).await;
     assert_eq!(replay_status, StatusCode::INTERNAL_SERVER_ERROR);
     assert!(
-        replay_body["error"].as_str().unwrap_or("").contains("expired workflow invocation"),
+        // "workflow" was dropped from the wording: `InvocationContext` has no
+        // Workflow variant, and that false name is what made a refusal aimed at
+        // workflows read as safe while it in fact covered every action and cron.
+        // The property asserted here is unchanged — a replayed invocation is still
+        // refused; only the message stopped naming a concept that does not exist.
+        replay_body["error"].as_str().unwrap_or("").contains("expired invocation id"),
         "old invocation capability must be rejected: {replay_body}",
     );
     rt.shutdown().await;
@@ -962,7 +970,7 @@ rl.on("line", (line) => {
 }
 
 #[tokio::test]
-async fn workflow_scope_rejects_legacy_worker_protocols() {
+async fn a_legacy_worker_protocol_still_serves_a_declared_action() {
     let rt = harness::TestRuntime::boot().await;
     ensure_admin(&rt).await;
     let app_id = "legacyscopegate";
@@ -993,11 +1001,16 @@ rl.on("line", (line) => {
         &format!("/api/v1/apps/{app_id}/rpc"),
         &json!({"method": "probe", "params": {}}),
     ).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    assert!(
-        body["error"].as_str().unwrap_or("").contains("announced v3"),
-        "legacy worker was allowed to execute workflow scope: {body}",
-    );
+    // This test asserted the reverse — that a v3 worker calling a declared action
+    // must be refused with "announced v3". That refusal is the outage: a declared
+    // action carries an invocation scope, `is_workflow()` was true for any scope,
+    // and so every declared action and every cron died on every worker written
+    // before the version field existed. An announced version unlocks the
+    // invocation echo; it never gates behaviour a worker already had.
+    assert_ne!(status, StatusCode::INTERNAL_SERVER_ERROR,
+        "a pre-v4 worker must still serve its declared actions: {body}");
+    assert_eq!(body, json!("must-not-run"),
+        "and must actually run the handler, not merely pass the gate: {body}");
     rt.shutdown().await;
 }
 

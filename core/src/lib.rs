@@ -145,6 +145,7 @@ impl Runtime {
             Arc::clone(&secret_manager), Arc::clone(&upload_nonces),
         ));
         wm.init_self_ref();
+        wm.spawn_reaper();
 
         seed::seed_assistant(&pool, &self.data_dir, &self.bun_bin, &wm, &secret_manager).await?;
         let workflow_events = extensions::workflows::events::WorkflowEvents::default();
