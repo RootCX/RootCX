@@ -49,9 +49,50 @@ fn match_session<'a>(
     }
 }
 
+/// Per-class sliding-window budgets for the data-plane messages that spend the
+/// Core's shared database and integration resources.
+///
+/// One bucket **per class**, not one shared bucket. Sharing would have been
+/// simpler, but `CollectionOp` and `SelfAction` were previously unlimited: folding
+/// them into `SqlQuery`'s window silently shrinks the budget of every app already
+/// mixing `ctx.sql` with `ctx.collection()`, which is a retroactive restriction of
+/// exactly the kind this file has already shipped once. Each class keeps the
+/// budget it had; the classes that had none are bounded without taking any away.
+#[derive(Default)]
+struct RateBuckets {
+    sql: Vec<Instant>,
+    collection: Vec<Instant>,
+    self_action: Vec<Instant>,
+}
+
+/// The data-plane classes that carry a budget. Naming them makes "which arm draws
+/// on which budget" a value the tests can assert, instead of a choice of local
+/// variable at five call sites.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RateClass {
+    /// `SqlQuery`, `SqlBegin`, `SqlExec` — one governed transaction each.
+    Sql,
+    /// `CollectionOp` — same transaction machinery, previously unbounded.
+    Collection,
+    /// `SelfAction` — reaches integrations, previously unbounded.
+    SelfAction,
+}
+
+const RATE_PER_SECOND: usize = 100;
+
+impl RateBuckets {
+    fn admit(&mut self, class: RateClass) -> bool {
+        let times = match class {
+            RateClass::Sql => &mut self.sql,
+            RateClass::Collection => &mut self.collection,
+            RateClass::SelfAction => &mut self.self_action,
+        };
+        rate_admit(times, RATE_PER_SECOND)
+    }
+}
+
 /// Sliding-window rate limit (best-effort DoS guard). Trims entries older than
-/// 1s, then admits iff under `max` in the window. Shared by SqlBegin, SqlQuery
-/// and SqlExec.
+/// 1s, then admits iff under `max` in the window.
 fn rate_admit(times: &mut Vec<Instant>, max: usize) -> bool {
     let now = Instant::now();
     times.retain(|t| now.duration_since(*t) < Duration::from_secs(1));
@@ -432,8 +473,8 @@ async fn supervisor_loop(
     let mut active_invocations = std::collections::HashSet::<String>::new();
     let mut rpc_invocations = HashMap::<String, String>::new();
     let mut job_invocations = HashMap::<i64, String>::new();
-    // Per-worker SQL-proxy rate limiter (best-effort DoS guard).
-    let mut sql_query_times: Vec<Instant> = Vec::new();
+    // Per-worker, per-class rate limiter (best-effort DoS guard).
+    let mut rate_buckets = RateBuckets::default();
     // Governed transactions keyed by core-generated IDs. Per-worker and global
     // caps prevent one app process from monopolizing the shared pool while still
     // allowing concurrent RPC handlers for the same principal.
@@ -917,7 +958,7 @@ async fn supervisor_loop(
                             // Same budget as SqlQuery: a collection op opens the same
                             // governed transaction (`begin_app_tx_with_invocation`),
                             // so it must share the guard rather than bypass it.
-                            if !rate_admit(&mut sql_query_times, 100) {
+                            if !rate_buckets.admit(RateClass::Collection) {
                                 let _ = outbound_tx.send(OutboundMessage::CollectionOpResult {
                                     id, result: None, error: Some("rate limited (100 queries/s)".into()),
                                 }).await;
@@ -951,7 +992,7 @@ async fn supervisor_loop(
                             });
                         }
                         InboundMessage::SqlQuery { id, invocation_id, sql, params } => {
-                            if !rate_admit(&mut sql_query_times, 100) {
+                            if !rate_buckets.admit(RateClass::Sql) {
                                 let _ = outbound_tx.send(OutboundMessage::SqlQueryResult {
                                     id, columns: None, rows: None, row_count: None,
                                     error: Some("rate limited (100 queries/s)".into()),
@@ -1001,7 +1042,7 @@ async fn supervisor_loop(
                             // Begin acquires a pooled connection, so include it
                             // in the SQL operation rate limit. Concurrency caps
                             // alone do not bound begin/rollback churn.
-                            if !rate_admit(&mut sql_query_times, 100) {
+                            if !rate_buckets.admit(RateClass::Sql) {
                                 let _ = outbound_tx.send(OutboundMessage::SqlBeginResult {
                                     id, tx_id: None,
                                     error: Some("rate limited (100 SQL operations/s)".into()),
@@ -1063,7 +1104,7 @@ async fn supervisor_loop(
                                 }
                             };
                             // Same per-worker rate limit as single-statement SqlQuery.
-                            if !rate_admit(&mut sql_query_times, 100) {
+                            if !rate_buckets.admit(RateClass::Sql) {
                                 let error = "rate limited (100 queries/s)".to_string();
                                 let poisoned = session.executor().enqueue_poison(error.clone());
                                 let out = outbound_tx.clone();
@@ -1170,7 +1211,7 @@ async fn supervisor_loop(
                             // resources through the one data-plane message that
                             // carries no invocation id to scope it by. (Adding one
                             // would be a wire-protocol change; out of scope here.)
-                            if !rate_admit(&mut sql_query_times, 100) {
+                            if !rate_buckets.admit(RateClass::SelfAction) {
                                 let _ = outbound_tx.send(OutboundMessage::SelfActionResult {
                                     id, result: None, error: Some("rate limited (100 queries/s)".into()),
                                 }).await;
@@ -1891,6 +1932,35 @@ mod tests {
         assert!(
             tx_message_admitted(&InvocationContext::default(), 4, &dead, &owned, "tx-1", None),
             "an unscoped call has no invocation to belong to",
+        );
+    }
+
+    /// Budgets are per class, and exhausting one must not spend another's.
+    ///
+    /// The tempting shape is one shared window for everything that touches the
+    /// database. It is also a silent, retroactive restriction: `CollectionOp` and
+    /// `SelfAction` carried no budget at all, so folding them into `SqlQuery`'s
+    /// would shrink what every app already mixing `ctx.sql` with
+    /// `ctx.collection()` is allowed to do — the same shape of breakage as the
+    /// protocol floors this file just recovered from. Collapsing the buckets back
+    /// into one must fail here.
+    #[test]
+    fn a_rate_budget_is_per_class_and_not_shared() {
+        let mut buckets = RateBuckets::default();
+        for i in 0..RATE_PER_SECOND {
+            assert!(buckets.admit(RateClass::Sql), "sql call {i} is within its own budget");
+        }
+        assert!(!buckets.admit(RateClass::Sql), "sql is exhausted at its own limit");
+
+        // The classes that previously had no limit must still have their full
+        // budget after another class has spent all of its own.
+        assert!(
+            buckets.admit(RateClass::Collection),
+            "a saturated sql budget must not spend the collection budget",
+        );
+        assert!(
+            buckets.admit(RateClass::SelfAction),
+            "a saturated sql budget must not spend the self-action budget",
         );
     }
 

@@ -335,6 +335,77 @@ async fn secrets_missing_fields() {
 }
 
 #[tokio::test]
+async fn a_v1_worker_still_receives_dispatched_crons() {
+    // The Job arm was the highest-consequence of the six protocol floors: it did
+    // not merely refuse a version-less worker, it called `jobs::fail` on the pgmq
+    // message, so the job was silently DISCARDED rather than retried.
+    //
+    // It must be a CRON, not a plain enqueued job. `dispatch_job` only attaches an
+    // invocation scope when a cron name is present
+    // (`cron_name.map(InvocationContext::job).unwrap_or_default()`), and the floor
+    // keyed on that scope — so a plain job never went through it and a test using
+    // one is vacuous. Confirmed by mutation: reintroducing the floor leaves a
+    // plain-job test green.
+    //
+    // The worker writes a row from its job handler, so this asserts the cron was
+    // delivered AND executed, not merely that the queue drained.
+    let rt = TestRuntime::boot().await;
+    rt.install("v1job", "items").await;
+
+    let backend = br#"
+        const send = (m) => process.stdout.write(JSON.stringify(m) + "\n");
+        let buffer = "";
+        process.stdin.on("data", (chunk) => {
+          buffer += chunk.toString();
+          let nl;
+          while ((nl = buffer.indexOf("\n")) >= 0) {
+            const line = buffer.slice(0, nl).trim();
+            buffer = buffer.slice(nl + 1);
+            if (!line) continue;
+            const m = JSON.parse(line);
+            if (m.type === "discover") {
+              send({ type: "discover", methods: [] });   // no `protocol` field
+            } else if (m.type === "job") {
+              send({ type: "sql_query", id: "w",
+                     sql: "INSERT INTO items (first_name, last_name) VALUES ($1, $2)",
+                     params: ["Job", "Ran"] });
+              send({ type: "job_result", id: m.id });
+            } else if (m.type === "shutdown") process.exit(0);
+          }
+        });
+    "#;
+    let (status, _) = rt.deploy("v1job", &make_tar_gz(&[("index.ts", backend)])).await;
+    assert_eq!(status, 200);
+
+    let (s, cron) = rt.post_json("/api/v1/apps/v1job/crons", &json!({
+        "name": "probe", "schedule": "0 0 1 1 *", "payload": {"task": "probe"},
+    })).await;
+    assert_eq!(s, 201, "create cron: {cron}");
+    let cron_id = cron["id"].as_str().expect("cron id");
+
+    // Triggering enqueues with the cron's provenance, which is what gives the job
+    // its invocation scope — the schedule itself never has to fire.
+    let (s, body) = rt.post_json(&format!("/api/v1/apps/v1job/crons/{cron_id}/trigger"), &json!({})).await;
+    assert!(s.is_success(), "trigger cron: {s} {body}");
+
+    // Scheduler polls every 500ms; allow for worker spawn on first dispatch.
+    let mut rows = json!(null);
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let (_, got) = rt.get_json("/api/v1/apps/v1job/collections/items").await;
+        if got.as_array().map(|a| !a.is_empty()).unwrap_or(false) {
+            rows = got;
+            break;
+        }
+    }
+    assert_eq!(
+        rows.as_array().map(Vec::len), Some(1),
+        "a version-less worker must still receive and run a dispatched cron: {rows}",
+    );
+    rt.shutdown().await;
+}
+
+#[tokio::test]
 async fn jobs_enqueue_and_list() {
     let rt = TestRuntime::boot().await;
     rt.install("job", "items").await;
