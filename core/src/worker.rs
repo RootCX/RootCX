@@ -182,6 +182,31 @@ fn echoes_invocation(
     invocation.is_scoped() && worker_protocol >= INVOCATION_PROTOCOL_VERSION
 }
 
+/// May a message against an already-open transaction proceed? It must quote the
+/// invocation that opened the transaction, and that invocation must still be live.
+///
+/// ADR 0002 point 6 requires this continuity of every transaction message. It was
+/// hand-written at three arms instead, and `SqlRollback` checked only the first half
+/// — so a rollback was accepted under a dead invocation while an exec or a commit
+/// was not. Naming `echoes_invocation` did not prevent that divergence, because a
+/// name is not a choke point. One function is: the three arms now share the whole
+/// rule rather than each remembering both halves of it.
+fn tx_message_admitted(
+    invocation: &crate::governance::enforcement::InvocationContext,
+    worker_protocol: u32,
+    active_invocations: &std::collections::HashSet<String>,
+    tx_invocations: &HashMap<String, String>,
+    tx_id: &str,
+    invocation_id: Option<&str>,
+) -> bool {
+    if !echoes_invocation(invocation, worker_protocol) {
+        return true;
+    }
+    invocation_id == tx_invocations.get(tx_id).map(String::as_str)
+        && capability_context(invocation, worker_protocol, active_invocations, invocation_id)
+            .is_ok()
+}
+
 /// Fleet-wide event envelope for SSE fan-out.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct FleetEvent {
@@ -1000,13 +1025,10 @@ async fn supervisor_loop(
                             let _ = outbound_tx.send(msg).await;
                         }
                         InboundMessage::SqlExec { id, invocation_id, tx_id, sql, params } => {
-                            if echoes_invocation(&config.invocation, worker_protocol)
-                                && (invocation_id.as_ref() != tx_invocations.get(&tx_id)
-                                    || capability_context(
-                                        &config.invocation, worker_protocol, &active_invocations,
-                                        invocation_id.as_deref(),
-                                    ).is_err())
-                            {
+                            if !tx_message_admitted(
+                                &config.invocation, worker_protocol, &active_invocations,
+                                &tx_invocations, &tx_id, invocation_id.as_deref(),
+                            ) {
                                 if let Some(session) = open_txs.remove(&tx_id) {
                                     tx_invocations.remove(&tx_id);
                                     abort_tx(
@@ -1091,13 +1113,10 @@ async fn supervisor_loop(
                             }
                         }
                         InboundMessage::SqlCommit { id, invocation_id, tx_id } => {
-                            if echoes_invocation(&config.invocation, worker_protocol)
-                                && (invocation_id.as_ref() != tx_invocations.get(&tx_id)
-                                    || capability_context(
-                                        &config.invocation, worker_protocol, &active_invocations,
-                                        invocation_id.as_deref(),
-                                    ).is_err())
-                            {
+                            if !tx_message_admitted(
+                                &config.invocation, worker_protocol, &active_invocations,
+                                &tx_invocations, &tx_id, invocation_id.as_deref(),
+                            ) {
                                 if let Some(session) = open_txs.remove(&tx_id) {
                                     tx_invocations.remove(&tx_id);
                                     abort_tx(session, id, "transaction invocation expired or mismatched".into(), outbound_tx.clone());
@@ -1115,9 +1134,10 @@ async fn supervisor_loop(
                             }
                         }
                         InboundMessage::SqlRollback { id, invocation_id, tx_id } => {
-                            if echoes_invocation(&config.invocation, worker_protocol)
-                                && invocation_id.as_ref() != tx_invocations.get(&tx_id)
-                            {
+                            if !tx_message_admitted(
+                                &config.invocation, worker_protocol, &active_invocations,
+                                &tx_invocations, &tx_id, invocation_id.as_deref(),
+                            ) {
                                 if let Some(session) = open_txs.remove(&tx_id) {
                                     tx_invocations.remove(&tx_id);
                                     abort_tx(session, id, "transaction invocation mismatched".into(), outbound_tx.clone());
@@ -1811,6 +1831,46 @@ mod tests {
         let bare = InvocationContext::default();
         assert!(!echoes_invocation(&bare, 4));
         assert_eq!(capability_context(&bare, 4, &live, None).unwrap(), bare);
+    }
+
+    /// ADR 0002 point 6 asks that every transaction message still belong to the live
+    /// invocation that opened it. Three arms hand-wrote that, and `SqlRollback`
+    /// checked only that the ids matched, never that the invocation was still alive
+    /// — so a rollback went through under a dead invocation where an exec or a commit
+    /// was refused. Both halves are asserted here, because dropping either one
+    /// reproduces a shipped divergence.
+    #[test]
+    fn a_transaction_message_needs_a_matching_and_live_invocation() {
+        use crate::governance::enforcement::InvocationContext;
+        let scope = InvocationContext::action("declared_write");
+        let live = std::collections::HashSet::from(["inv-1".to_string()]);
+        let owned = HashMap::from([("tx-1".to_string(), "inv-1".to_string())]);
+        let admitted = |inv_id, protocol| {
+            tx_message_admitted(&scope, protocol, &live, &owned, "tx-1", inv_id)
+        };
+
+        assert!(admitted(Some("inv-1"), 4), "the opening invocation, still live");
+        assert!(
+            !admitted(Some("inv-other"), 4),
+            "quoting another invocation must be refused: that is taking over a tx",
+        );
+        assert!(!admitted(None, 4), "a v4 worker omitting the id must be refused");
+
+        // The half `SqlRollback` was missing: the ids agree, but the invocation is
+        // gone. `close_workflow_invocation` empties `active_invocations` while the
+        // tx map may still name it, so this is reachable, not theoretical.
+        let dead = std::collections::HashSet::new();
+        assert!(
+            !tx_message_admitted(&scope, 4, &dead, &owned, "tx-1", Some("inv-1")),
+            "a matching id under an expired invocation must be refused",
+        );
+
+        // A worker that cannot echo is held to none of it, as everywhere else.
+        assert!(admitted(None, 1), "a pre-v4 worker keeps its transactions");
+        assert!(
+            tx_message_admitted(&InvocationContext::default(), 4, &dead, &owned, "tx-1", None),
+            "an unscoped call has no invocation to belong to",
+        );
     }
 
     #[test]
