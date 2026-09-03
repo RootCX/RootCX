@@ -1339,15 +1339,54 @@ async fn call_action_rejects_unknown_action() {
 
 #[tokio::test]
 async fn call_action_rbac_blocks_unauthorized() {
+    // Two distinct gates sit between a caller and an action: the outer
+    // `tool:call_action` permission (any tool caller needs it, checked once in
+    // `tools::dispatch`), and the app-level `app:{app}:invoke` /
+    // `app:{app}:action:{id}` pair checked inside `CallActionTool::execute`
+    // (ee253be — the coarse key implies the fine one, so a caller who has
+    // `invoke` is admitted without a per-action grant).
+    //
+    // This test isolates the SECOND gate: the caller holds `tool:call_action`
+    // (so it passes the outer gate) but neither app-level key, so it must still
+    // be refused. Holding only the outer gate must never be enough to reach an
+    // app's data.
     let rt = TestRuntime::boot().await;
     rt.install_manifest(&manifest_with_actions()).await;
-    let restricted_token = rt.register_and_login("restricted@test.local").await;
+
+    rt.post_unauthed("/api/v1/auth/register", &json!({
+        "email": "restricted@test.local", "password": "Str0ngPass1",
+    })).await;
+    let (_, login) = rt.post_unauthed("/api/v1/auth/login", &json!({
+        "email": "restricted@test.local", "password": "Str0ngPass1",
+    })).await;
+    let restricted_token = login["accessToken"].as_str().unwrap().to_string();
+
+    let (_, users) = rt.get_json("/api/v1/users").await;
+    let user_id = users.as_array().unwrap().iter()
+        .find(|u| u["email"] == "restricted@test.local").unwrap()["id"].as_str().unwrap().to_string();
+
+    rt.post_json("/api/v1/roles", &json!({
+        "name": "tool-caller-only", "permissions": ["tool:call_action"],
+    })).await;
+    let (s, body) = rt.post_json("/api/v1/roles/assign", &json!({
+        "userId": user_id, "role": "tool-caller-only",
+    })).await;
+    assert_eq!(s, 200, "role assignment: {body}");
+
     let (s, body) = rt.request_as(
         Method::POST, "/api/v1/tools/call_action/execute", &restricted_token,
         Some(&json!({ "appId": "actapp", "args": { "app": "actapp", "action": "greet", "input": { "name": "test" } } })),
     ).await;
-    assert_eq!(s, 500);
-    assert!(body["error"].as_str().unwrap().contains("permission denied"));
+    // `check_permission`'s Err bubbles through `execute()` as `ExecutionFailed`,
+    // which the route maps to 500 — a tool's own internal denial is
+    // indistinguishable from a crash on this path today. That contract predates
+    // this test and is unrelated to what it verifies; pinned as-is rather than
+    // silently reshaped here.
+    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "tool:call_action alone must not reach the app: {body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("app:actapp"),
+        "denial must name the missing app-level key: {body}",
+    );
     rt.shutdown().await;
 }
 
@@ -2725,6 +2764,85 @@ async fn ipc_v1_legacy_worker_with_new_prelude() {
     rt.shutdown().await;
 }
 
+#[tokio::test]
+async fn a_v1_worker_serves_declared_actions_and_transactions() {
+    // The sibling test above calls an UNDECLARED method, and that is why it stayed
+    // green through a real outage: an undeclared method carries no invocation scope,
+    // so the protocol floors never fired on it. A DECLARED action does carry one, and
+    // floors at spawn, on Rpc dispatch and on the four transaction messages took
+    // every declared action and every transaction down on any worker that announces
+    // no version, which is every worker written before the field existed. The unit
+    // tests in `worker::tests` pin the decision function; only this pins that the
+    // dispatch path honours it.
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&json!({
+        "appId": "ipcv1decl", "name": "ipcv1decl", "version": "1.0.0",
+        "dataContract": [{ "entityName": "items", "fields": [
+            { "name": "first_name", "type": "text", "required": true },
+            { "name": "last_name", "type": "text", "required": true }] }],
+        "actions": [{ "id": "declared_write", "name": "Declared write", "description": "d" }],
+    })).await;
+
+    // Announces no `protocol`, exactly as a pre-August worker does, then drives a
+    // full transaction so the write path is exercised and not just the handshake.
+    let backend = br#"
+        const send = (m) => process.stdout.write(JSON.stringify(m) + "\n");
+        let buffer = "", rpcId = null, txId = null;
+        process.stdin.on("data", (chunk) => {
+          buffer += chunk.toString();
+          let nl;
+          while ((nl = buffer.indexOf("\n")) >= 0) {
+            const line = buffer.slice(0, nl).trim();
+            buffer = buffer.slice(nl + 1);
+            if (!line) continue;
+            const m = JSON.parse(line);
+            if (m.type === "discover") {
+              send({ type: "discover", methods: ["declared_write"] });
+            } else if (m.type === "rpc") {
+              rpcId = m.id;
+              send({ type: "sql_begin", id: "b" });
+            } else if (m.type === "sql_begin_result") {
+              if (m.error) { send({ type: "rpc_response", id: rpcId, error: m.error }); continue; }
+              txId = m.tx_id;
+              send({ type: "sql_exec", id: "w", tx_id: txId,
+                     sql: "INSERT INTO items (first_name, last_name) VALUES ($1, $2)",
+                     params: ["Ada", "Lovelace"] });
+            } else if (m.type === "sql_exec_result") {
+              if (m.error) { send({ type: "rpc_response", id: rpcId, error: m.error }); continue; }
+              // sql_exec_result carries no tx_id; only sql_begin_result does.
+              send({ type: "sql_commit", id: "c", tx_id: txId });
+            } else if (m.type === "sql_end_result") {
+              if (m.error) { send({ type: "rpc_response", id: rpcId, error: m.error }); continue; }
+              send({ type: "rpc_response", id: rpcId, result: { committed: true } });
+            } else if (m.type === "shutdown") process.exit(0);
+          }
+        });
+    "#;
+    let (status, _) = rt.deploy("ipcv1decl", &make_tar_gz(&[("index.ts", backend)])).await;
+    assert_eq!(status, 200);
+
+    let mut result = json!(null);
+    for _ in 0..25 {
+        let (status, body) = rt.post_json("/api/v1/apps/ipcv1decl/rpc", &json!({
+            "method": "declared_write", "params": {}
+        })).await;
+        if status == StatusCode::OK {
+            result = body;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert_eq!(
+        result["committed"], true,
+        "a declared action on a version-less worker must reach it and commit: {result}",
+    );
+
+    let (status, rows) = rt.get_json("/api/v1/apps/ipcv1decl/collections/items").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rows.as_array().map(Vec::len), Some(1), "the committed row must be there: {rows}");
+    rt.shutdown().await;
+}
+
 // ── Cron schedule tests ─────────────────────────────────────────────
 
 #[tokio::test]
@@ -3225,7 +3343,7 @@ async fn on_delete_cascade_and_restrict() {
                 { "name": "name", "type": "text", "required": true }
             ]},
             { "entityName": "list_items", "fields": [
-                { "name": "list_id", "type": "entity_link", "required": true, "onDelete": "cascade",
+                { "name": "list_id", "type": "entity_link", "required": true, "on_delete": "cascade",
                   "references": { "entity": "lists", "field": "id" } },
                 { "name": "label", "type": "text" }
             ]},
@@ -3310,7 +3428,7 @@ async fn schema_sync_updates_fk_delete_rule() {
                 { "name": "name", "type": "text", "required": true }
             ]},
             { "entityName": "items", "fields": [
-                { "name": "list_id", "type": "entity_link", "required": true, "onDelete": "cascade",
+                { "name": "list_id", "type": "entity_link", "required": true, "on_delete": "cascade",
                   "references": { "entity": "lists", "field": "id" } },
                 { "name": "label", "type": "text" }
             ]}
@@ -3444,7 +3562,7 @@ async fn schema_sync_handles_core_users_fk_change() {
         "appId": "coreref", "name": "Core Ref", "version": "1.0.1",
         "dataContract": [{
             "entityName": "assignments", "fields": [
-                { "name": "user_id", "type": "entity_link", "required": true, "onDelete": "cascade",
+                { "name": "user_id", "type": "entity_link", "required": true, "on_delete": "cascade",
                   "references": { "entity": "core:users", "field": "id" } },
                 { "name": "role", "type": "text" }
             ]
@@ -3804,7 +3922,7 @@ async fn query_pagination_no_duplicates() {
         ids.insert(v["id"].as_str().unwrap().to_string());
     }
     // Force identical created_at to trigger unstable ORDER BY
-    sqlx::query("UPDATE app_pagtest.contacts SET created_at = '2026-01-01 00:00:00+00'")
+    sqlx::query("UPDATE pagtest.contacts SET created_at = '2026-01-01 00:00:00+00'")
         .execute(rt.pool()).await.unwrap();
 
     // Paginate in pages of 5
