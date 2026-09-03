@@ -42,8 +42,15 @@ pub struct ContextState {
     pub audit_delegator_id: Option<Uuid>,
 }
 
-/// Workflow authority attached by Core to an execution boundary. Unlike the
-/// user identity, this value is never accepted from application SQL or IPC.
+/// The unit of work a statement belongs to, attached by Core at an execution
+/// boundary. Unlike the user identity, this value is never accepted from
+/// application SQL or IPC.
+///
+/// There is no `Workflow` variant and there never was: a scope is an action or a
+/// job. An earlier `is_workflow()` spelling of [`Self::is_scoped`] implied a rare
+/// new execution path and was used to refuse workers that could not carry an
+/// invocation id, which in fact refused every declared action and every cron on
+/// every worker written before the id existed. Name it for what it is.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum InvocationContext {
     #[default]
@@ -61,7 +68,9 @@ impl InvocationContext {
         Self::Job(job_name.into())
     }
 
-    pub fn is_workflow(&self) -> bool {
+    /// Whether this unit of work carries a scope at all, i.e. is an action or a
+    /// job rather than a bare call.
+    pub fn is_scoped(&self) -> bool {
         !matches!(self, Self::None)
     }
 

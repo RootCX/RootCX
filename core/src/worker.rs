@@ -29,7 +29,6 @@ const CRASH_WINDOW: Duration = Duration::from_secs(60);
 const BACKOFF_BASE: Duration = Duration::from_secs(2);
 const IPC_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
-const TRANSACTION_PROTOCOL_VERSION: u32 = 3;
 const INVOCATION_PROTOCOL_VERSION: u32 = 4;
 const MAX_OPEN_TRANSACTIONS_PER_WORKER: usize = 4;
 
@@ -145,33 +144,42 @@ fn close_workflow_invocation(
     }
 }
 
+/// The scope a data message runs under, and the one place that decides whether the
+/// worker owes an invocation id back.
+///
+/// Echoing the id proves a statement belongs to an invocation that is still open.
+/// That proof needs the worker's cooperation, so it is a **capability the worker
+/// opts into by announcing v4, never a precondition**. A worker predating the field
+/// keeps exactly the attribution it always had: the Core still poses the invocation
+/// GUCs itself (`set_invocation_context`), it simply does not ask for the proof
+/// back. Refusing instead is what took every declared action and every cron down on
+/// every pre-v4 worker, because a version a worker announces must unlock behaviour,
+/// never gate behaviour it already had.
 fn capability_context(
-    config: &WorkerConfig,
+    invocation: &crate::governance::enforcement::InvocationContext,
     worker_protocol: u32,
     active_invocations: &std::collections::HashSet<String>,
     invocation_id: Option<&str>,
 ) -> Result<crate::governance::enforcement::InvocationContext, String> {
-    if !config.invocation.is_workflow() {
+    if !invocation.is_scoped() {
         return Ok(crate::governance::enforcement::InvocationContext::default());
     }
     if worker_protocol < INVOCATION_PROTOCOL_VERSION {
-        return Err("workflow capability requires worker protocol v4".into());
+        return Ok(invocation.clone());
     }
-    let invocation_id = invocation_id.ok_or("missing workflow invocation id")?;
+    let invocation_id = invocation_id.ok_or("missing invocation id")?;
     if !active_invocations.contains(invocation_id) {
-        return Err("unknown or expired workflow invocation id".into());
+        return Err("unknown or expired invocation id".into());
     }
-    Ok(config.invocation.clone())
+    Ok(invocation.clone())
 }
 
-fn require_protocol_version(protocol: u32, minimum: u32) -> Result<(), String> {
-    if protocol >= minimum {
-        Ok(())
-    } else {
-        Err(format!(
-            "workflow execution requires worker protocol v{minimum}; worker announced v{protocol}"
-        ))
-    }
+/// Whether the Core holds this worker to the invocation echo. Read it rather than
+/// re-deriving the comparison, so a new call site cannot reintroduce a refusal.
+fn echoes_invocation(
+    invocation: &crate::governance::enforcement::InvocationContext, worker_protocol: u32,
+) -> bool {
+    invocation.is_scoped() && worker_protocol >= INVOCATION_PROTOCOL_VERSION
 }
 
 /// Fleet-wide event envelope for SSE fan-out.
@@ -258,10 +266,6 @@ pub enum SupervisorCommand {
     GetStatus {
         reply: oneshot::Sender<WorkerStatus>,
     },
-    RequireProtocol {
-        minimum: u32,
-        reply: oneshot::Sender<Result<(), String>>,
-    },
 }
 
 pub struct WorkerConfig {
@@ -313,18 +317,6 @@ impl SupervisorHandle {
         self.send(SupervisorCommand::Start).await
     }
 
-    pub async fn require_protocol(&self, minimum: u32) -> Result<(), RuntimeError> {
-        let (reply, receive) = oneshot::channel();
-        self.send(SupervisorCommand::RequireProtocol { minimum, reply }).await?;
-        match tokio::time::timeout(Duration::from_secs(10), receive).await {
-            Ok(Ok(Ok(()))) => Ok(()),
-            Ok(Ok(Err(error))) => Err(RuntimeError::Worker(error)),
-            Ok(Err(_)) => Err(dead()),
-            Err(_) => Err(RuntimeError::Worker(format!(
-                "worker protocol handshake timed out (requires v{minimum})"
-            ))),
-        }
-    }
 
     pub async fn stop(&self) -> Result<(), RuntimeError> {
         let (reply, rx) = oneshot::channel();
@@ -446,8 +438,6 @@ async fn supervisor_loop(
     // differences. See `ipc::LATEST_PROTOCOL_VERSION` for the contract.
     #[allow(unused_assignments)]
     let mut worker_protocol: u32 = 1;
-    let mut protocol_discovered = false;
-    let mut protocol_waiters = Vec::<(u32, oneshot::Sender<Result<(), String>>)>::new();
 
     let (outbound_tx, mut outbound_rx) = mpsc::channel::<OutboundMessage>(64);
 
@@ -498,7 +488,6 @@ async fn supervisor_loop(
                                 output_handles.push(spawn_output_reader(stderr, "stderr", log_tx.clone()));
                                 status = WorkerStatus::Running;
                                 worker_protocol = 1;
-                                protocol_discovered = false;
                                 restart_count = 0;
                                 // Fresh process: onStart may BYPASSRLS again.
                                 onstart_done = false;
@@ -548,15 +537,10 @@ async fn supervisor_loop(
                             continue;
                         }
                         onstart_done = true;
-                        if config.invocation.is_workflow()
-                            && (!protocol_discovered
-                                || worker_protocol < INVOCATION_PROTOCOL_VERSION)
-                        {
-                            let _ = reply.send(Err(
-                                "workflow execution requires worker protocol v4".into(),
-                            ));
-                            continue;
-                        }
+                        // The invocation is minted and tracked whatever the worker
+                        // announces: a v4 worker echoes it and gets the open-invocation
+                        // proof, an older one ignores it and keeps the attribution the
+                        // Core poses on its behalf. Neither is refused.
                         let invocation_id = uuid::Uuid::new_v4().to_string();
                         active_invocations.insert(invocation_id.clone());
                         rpc_invocations.insert(id.clone(), invocation_id.clone());
@@ -606,17 +590,9 @@ async fn supervisor_loop(
                             continue;
                         }
                         onstart_done = true;
-                        if config.invocation.is_workflow()
-                            && (!protocol_discovered
-                                || worker_protocol < INVOCATION_PROTOCOL_VERSION)
-                        {
-                            warn!(app_id = %app_id, job_id = %id,
-                                "workflow job requires worker protocol v4");
-                            if let Ok(msg_id) = id.parse::<i64>() {
-                                let _ = crate::jobs::fail(&config.pool, msg_id).await;
-                            }
-                            continue;
-                        }
+                        // Same rule as Rpc, and the stakes were higher here: this arm
+                        // used to `jobs::fail` the pgmq message, so every cron on a
+                        // pre-v4 worker was not merely refused but discarded.
                         let invocation_id = uuid::Uuid::new_v4().to_string();
                         active_invocations.insert(invocation_id.clone());
                         if let Some(ref mut w) = ipc_writer {
@@ -695,13 +671,6 @@ async fn supervisor_loop(
                         let _ = reply.send(status.clone());
                     }
 
-                    SupervisorCommand::RequireProtocol { minimum, reply } => {
-                        if protocol_discovered {
-                            let _ = reply.send(require_protocol_version(worker_protocol, minimum));
-                        } else {
-                            protocol_waiters.push((minimum, reply));
-                        }
-                    }
                 }
             }
 
@@ -719,10 +688,6 @@ async fn supervisor_loop(
                             // that depend on worker capabilities should
                             // gate on `worker_protocol`.
                             worker_protocol = protocol;
-                            protocol_discovered = true;
-                            for (minimum, reply) in protocol_waiters.drain(..) {
-                                let _ = reply.send(require_protocol_version(worker_protocol, minimum));
-                            }
                             if worker_protocol > crate::ipc::LATEST_PROTOCOL_VERSION {
                                 warn!(
                                     app_id = %app_id,
@@ -934,7 +899,7 @@ async fn supervisor_loop(
                             let allow_bypass = config.run_onstart && !onstart_done;
                             let state = if allow_bypass { None } else { Some(config.identity.clone()) };
                             let invocation = capability_context(
-                                &config, worker_protocol, &active_invocations,
+                                &config.invocation, worker_protocol, &active_invocations,
                                 invocation_id.as_deref(),
                             );
                             tokio::spawn(async move {
@@ -967,7 +932,7 @@ async fn supervisor_loop(
                             let aid = config.app_id.clone();
                             let tx = outbound_tx.clone();
                             let invocation = capability_context(
-                                &config, worker_protocol, &active_invocations,
+                                &config.invocation, worker_protocol, &active_invocations,
                                 invocation_id.as_deref(),
                             );
                             tokio::spawn(async move {
@@ -990,12 +955,6 @@ async fn supervisor_loop(
                             });
                         }
                         InboundMessage::SqlBegin { id, invocation_id } => {
-                            if worker_protocol < TRANSACTION_PROTOCOL_VERSION {
-                                let _ = outbound_tx.send(OutboundMessage::SqlBeginResult {
-                                    id, tx_id: None, error: Some("transactions require worker protocol v3".into()),
-                                }).await;
-                                continue;
-                            }
                             if open_txs.len() >= MAX_OPEN_TRANSACTIONS_PER_WORKER {
                                 let _ = outbound_tx.send(OutboundMessage::SqlBeginResult {
                                     id, tx_id: None,
@@ -1016,7 +975,7 @@ async fn supervisor_loop(
                                 continue;
                             }
                             let invocation = capability_context(
-                                &config, worker_protocol, &active_invocations,
+                                &config.invocation, worker_protocol, &active_invocations,
                                 invocation_id.as_deref(),
                             );
                             let msg = match invocation {
@@ -1041,19 +1000,10 @@ async fn supervisor_loop(
                             let _ = outbound_tx.send(msg).await;
                         }
                         InboundMessage::SqlExec { id, invocation_id, tx_id, sql, params } => {
-                            if worker_protocol < TRANSACTION_PROTOCOL_VERSION {
-                                let _ = outbound_tx
-                                    .send(sql_exec_result(
-                                        id,
-                                        Err("transactions require worker protocol v3".into()),
-                                    ))
-                                    .await;
-                                continue;
-                            }
-                            if config.invocation.is_workflow()
+                            if echoes_invocation(&config.invocation, worker_protocol)
                                 && (invocation_id.as_ref() != tx_invocations.get(&tx_id)
                                     || capability_context(
-                                        &config, worker_protocol, &active_invocations,
+                                        &config.invocation, worker_protocol, &active_invocations,
                                         invocation_id.as_deref(),
                                     ).is_err())
                             {
@@ -1141,16 +1091,10 @@ async fn supervisor_loop(
                             }
                         }
                         InboundMessage::SqlCommit { id, invocation_id, tx_id } => {
-                            if worker_protocol < TRANSACTION_PROTOCOL_VERSION {
-                                let _ = outbound_tx.send(OutboundMessage::SqlEndResult {
-                                    id, error: Some("transactions require worker protocol v3".into()),
-                                }).await;
-                                continue;
-                            }
-                            if config.invocation.is_workflow()
+                            if echoes_invocation(&config.invocation, worker_protocol)
                                 && (invocation_id.as_ref() != tx_invocations.get(&tx_id)
                                     || capability_context(
-                                        &config, worker_protocol, &active_invocations,
+                                        &config.invocation, worker_protocol, &active_invocations,
                                         invocation_id.as_deref(),
                                     ).is_err())
                             {
@@ -1171,13 +1115,7 @@ async fn supervisor_loop(
                             }
                         }
                         InboundMessage::SqlRollback { id, invocation_id, tx_id } => {
-                            if worker_protocol < TRANSACTION_PROTOCOL_VERSION {
-                                let _ = outbound_tx.send(OutboundMessage::SqlEndResult {
-                                    id, error: Some("transactions require worker protocol v3".into()),
-                                }).await;
-                                continue;
-                            }
-                            if config.invocation.is_workflow()
+                            if echoes_invocation(&config.invocation, worker_protocol)
                                 && invocation_id.as_ref() != tx_invocations.get(&tx_id)
                             {
                                 if let Some(session) = open_txs.remove(&tx_id) {
@@ -1353,12 +1291,6 @@ async fn supervisor_loop(
                         job_invocations.clear();
                         onstart_done = false;
                         worker_protocol = 1;
-                        protocol_discovered = false;
-                        for (minimum, reply) in protocol_waiters.drain(..) {
-                            let _ = reply.send(Err(format!(
-                                "worker exited before protocol v{minimum} handshake"
-                            )));
-                        }
                         // Drop the stale TX handle so the respawned process can
                         // open a fresh one (its task rolls back + frees the slot).
                         open_txs.clear();
@@ -1413,7 +1345,6 @@ async fn supervisor_loop(
                                 output_handles.push(spawn_output_reader(stderr, "stderr", log_tx.clone()));
                                 status = WorkerStatus::Running;
                                 worker_protocol = 1;
-                                protocol_discovered = false;
                                 emit_log(&log_tx, "system", "worker restarted");
                             }
                             Err(e) => {
@@ -1816,6 +1747,70 @@ mod tests {
             "stale entries must be trimmed, then admit"
         );
         assert_eq!(times.len(), 1, "only the fresh push remains");
+    }
+
+    /// A worker that announces no protocol version keeps every capability it had
+    /// before the version field existed. This is the invariant three separate
+    /// refusals broke at once: a v4 floor at spawn, on Rpc and on Job dispatch took
+    /// down every declared action and every cron, and a v3 floor on the four
+    /// transaction messages took down every write. Both floors shipped the same day
+    /// with no migration, and both were invisible on a scaffolded app because the
+    /// prelude announces the latest version.
+    ///
+    /// Parameterised over the scopes so a fourth kind cannot be added without
+    /// deciding here what a version-less worker may do with it.
+    #[test]
+    fn a_worker_announcing_no_version_keeps_every_prior_capability() {
+        use crate::governance::enforcement::InvocationContext;
+        let none = std::collections::HashSet::new();
+
+        for scope in [
+            InvocationContext::default(),
+            InvocationContext::action("create_person"),
+            InvocationContext::job("nightly-sync"),
+        ] {
+            // v1 is what `default_protocol_version()` reads from an absent field.
+            let resolved = capability_context(&scope, 1, &none, None)
+                .unwrap_or_else(|e| panic!("v1 worker refused for scope {scope:?}: {e}"));
+            assert_eq!(
+                resolved, scope,
+                "a v1 worker must still be attributed to its scope, not stripped",
+            );
+            assert!(
+                !echoes_invocation(&scope, 1),
+                "a v1 worker cannot echo an invocation id, so it must not be held to one",
+            );
+        }
+    }
+
+    /// The other half: announcing v4 buys the proof, and the proof is enforced.
+    /// Without this, "degrade for old workers" could be implemented as "never
+    /// enforce", which would silently drop the guarantee for everyone.
+    #[test]
+    fn announcing_v4_is_held_to_the_invocation_echo() {
+        use crate::governance::enforcement::InvocationContext;
+        let scope = InvocationContext::action("create_person");
+        let live = std::collections::HashSet::from(["inv-1".to_string()]);
+
+        assert_eq!(
+            capability_context(&scope, 4, &live, Some("inv-1")).unwrap(),
+            scope,
+            "a live invocation id is accepted",
+        );
+        assert!(
+            capability_context(&scope, 4, &live, None).is_err(),
+            "a v4 worker omitting the id must be refused, not degraded",
+        );
+        assert!(
+            capability_context(&scope, 4, &live, Some("inv-gone")).is_err(),
+            "an expired or unknown invocation id must be refused",
+        );
+        assert!(echoes_invocation(&scope, 4), "v4 is held to the echo");
+
+        // An unscoped call has no invocation to echo at any version.
+        let bare = InvocationContext::default();
+        assert!(!echoes_invocation(&bare, 4));
+        assert_eq!(capability_context(&bare, 4, &live, None).unwrap(), bare);
     }
 
     #[test]

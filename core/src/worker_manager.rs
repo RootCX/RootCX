@@ -225,14 +225,14 @@ impl WorkerManager {
             supervision,
             upload_nonces: Arc::clone(&self.upload_nonces),
         };
+        // No protocol floor here. A scoped unit of work (an action, a job) is not a
+        // new execution path a worker has to be certified for — it is how the
+        // product has always dispatched. Refusing a worker that announces no
+        // version took down every declared action and every cron on every worker
+        // written before the version field existed. What v4 buys is the invocation
+        // echo, and `worker::capability_context` decides that per message.
         let handle = worker::spawn_supervisor(config);
         handle.start().await?;
-        if invocation.is_workflow() {
-            if let Err(error) = handle.require_protocol(4).await {
-                let _ = handle.stop().await;
-                return Err(error);
-            }
-        }
         Ok(handle)
     }
 
