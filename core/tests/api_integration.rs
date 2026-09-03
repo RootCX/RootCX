@@ -84,6 +84,36 @@ async fn health_check() {
 }
 
 #[tokio::test]
+async fn readiness_and_liveness_answer_different_questions() {
+    // These back a Kubernetes readinessProbe and livenessProbe on every tenant
+    // pod. The distinction is load-bearing: readiness failing removes the pod
+    // from the Service, liveness failing RESTARTS it. A dependency outage must
+    // move the first and never the second, or a database blip becomes a
+    // platform-wide restart loop.
+    //
+    // Probes read the status code, so `/ready` must express itself there — a
+    // `"degraded"` string inside a 200 is invisible to Kubernetes. Both are
+    // asserted healthy here; what this pins is that they are separate routes
+    // with separate contracts, so collapsing them back into one fails.
+    let rt = TestRuntime::boot().await;
+
+    let (s, body) = rt.get_json("/ready").await;
+    assert_eq!(s, 200, "a booted runtime with a live database is ready: {body}");
+    assert_eq!(body["ready"], true);
+    assert_eq!(body["database"]["reachable"], true);
+
+    // `status` must be derived from the checks, not a constant. It used to read
+    // "ok" in the same object that reported `reachable: false`.
+    let (s, body) = rt.get_json("/health?full=1").await;
+    assert_eq!(s, 200, "liveness stays green while the process is usable: {body}");
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["database"]["reachable"], true);
+    assert!(body["workers"].is_object(), "worker states must be visible to an operator: {body}");
+
+    rt.shutdown().await;
+}
+
+#[tokio::test]
 async fn status_returns_online() {
     let rt = TestRuntime::boot().await;
     let (_, body) = rt.get_json("/api/v1/status").await;

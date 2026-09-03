@@ -43,24 +43,59 @@ fn parse_uuid(id: &str) -> Result<sqlx::types::Uuid, ApiError> {
     id.parse::<sqlx::types::Uuid>().map_err(|_| ApiError::BadRequest(format!("invalid UUID: '{id}'")))
 }
 
+/// Liveness. Answers "is this process worth keeping" — a Kubernetes
+/// `livenessProbe` RESTARTS the pod when this fails, so it must only fail for
+/// conditions a restart actually fixes. A database outage is not one of them:
+/// failing here during a blip would restart every tenant's pod in a loop and
+/// make the outage worse. Readiness is the probe that must react to that, and it
+/// is `/ready`.
+///
+/// `status` is derived, not hardcoded. It previously read `"ok"` unconditionally,
+/// even in the `?full` branch that had just computed `database.reachable: false`,
+/// so an operator reading the body was told the opposite of what it measured.
 pub async fn health(
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Json<JsonValue> {
     if params.get("full").is_some() {
-        let memory = read_cgroup_memory();
-        let cpu = read_cgroup_cpu();
-        let disk = read_disk_usage(rt.data_dir());
         let db_reachable = db_ping(rt.pool()).await;
+        let workers = wm(&rt).all_statuses().await;
         return Json(json!({
-            "status": "ok",
-            "memory": memory,
-            "cpu": cpu,
-            "disk": disk,
-            "database": { "reachable": db_reachable }
+            "status": if db_reachable { "ok" } else { "degraded" },
+            "memory": read_cgroup_memory(),
+            "cpu": read_cgroup_cpu(),
+            "disk": read_disk_usage(rt.data_dir()),
+            "database": { "reachable": db_reachable },
+            // Surfaced because an all-workers-down tenant is exactly the outage
+            // shape that reached a customer before it reached us.
+            "workers": workers.iter()
+                .map(|(app, s)| (app.clone(), json!(format!("{s:?}"))))
+                .collect::<serde_json::Map<_, _>>(),
         }));
     }
     Json(json!({ "status": "ok" }))
+}
+
+/// Readiness. Answers "should this pod receive traffic" — failing takes the pod
+/// out of the Service's endpoints without restarting it, and it returns on its
+/// own once the dependency recovers. This is where a database outage belongs.
+///
+/// Probes read the STATUS CODE, not the body, which is why this returns 503
+/// rather than a JSON field: a `"status": "degraded"` inside a 200 is invisible
+/// to Kubernetes.
+pub async fn ready(
+    axum::extract::State(rt): axum::extract::State<SharedRuntime>,
+) -> (axum::http::StatusCode, Json<JsonValue>) {
+    let db_reachable = db_ping(rt.pool()).await;
+    let code = if db_reachable {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    (code, Json(json!({
+        "ready": db_reachable,
+        "database": { "reachable": db_reachable },
+    })))
 }
 
 fn read_cgroup_memory() -> JsonValue {

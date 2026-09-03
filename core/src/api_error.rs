@@ -24,6 +24,15 @@ impl IntoResponse for ApiError {
             Self::NotReady => (StatusCode::SERVICE_UNAVAILABLE, "runtime not ready".into()),
             Self::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
         };
+        // Every 5xx is logged HERE rather than at its ~100 construction sites.
+        // The `From<sqlx::Error>` and `From<RuntimeError>` arms used to log while
+        // hand-built `ApiError::Internal(format!(...))` did not, so the only copy
+        // of most failures was the response body the caller then discarded — the
+        // reason an every-action outage had to be reported by the customer.
+        // One choke point cannot be forgotten by a new call site.
+        if status.is_server_error() {
+            tracing::error!(status = status.as_u16(), error = %message, "request failed");
+        }
         (status, axum::Json(json!({ "error": message }))).into_response()
     }
 }

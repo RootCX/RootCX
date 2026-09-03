@@ -10,6 +10,7 @@ const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Error> {
     let mut router = Router::new()
         .route("/health", get(routes::health))
+        .route("/ready", get(routes::ready))
         .route("/api/v1/status", get(routes::get_status))
         .route("/api/v1/apps", get(routes::list_apps).post(routes::install_app))
         .route("/api/v1/apps/schema/verify", post(routes::verify_schema))
