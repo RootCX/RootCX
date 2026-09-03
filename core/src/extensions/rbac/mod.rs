@@ -254,6 +254,53 @@ impl RuntimeExtension for RbacExtension {
     }
 }
 
+/// Apply RLS to every table that physically exists in an app schema, not just the
+/// ones the manifest declares.
+///
+/// Two call sites, and they need the same rule for opposite reasons. Boot replays
+/// it across all apps so tables predating a refactor become governed. Deploy runs
+/// it for one app right after `app_migrations`, because a migration is the
+/// documented way to create what the manifest cannot express — and
+/// `apply_table_rls`'s GRANT is schema-wide with `ALTER DEFAULT PRIVILEGES`, so
+/// such a table arrives with full CRUD for the sandboxed executor role and no RLS.
+/// Authorization is only RLS, so that table would be readable and writable by
+/// every user of the app until the next restart happened to sweep it up.
+///
+/// Ownership comes from the projection rather than the stored manifest, which is
+/// never revalidated after install. Grouped per schema first: resolving a
+/// delegated entity needs the entities it defers to, not only its own row.
+pub(crate) async fn govern_schema_tables(
+    pool: &PgPool,
+    only: Option<&str>,
+) -> Result<(), RuntimeError> {
+    let tables: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT t.schemaname, t.tablename, s.owner_field, s.owner_parent
+           FROM pg_tables t
+           LEFT JOIN rootcx_system.sensitive_fields s
+             ON s.app_id = t.schemaname AND s.entity = t.tablename
+          WHERE t.schemaname IN (SELECT id FROM rootcx_system.apps WHERE id <> 'core')
+            AND ($1::text IS NULL OR t.schemaname = $1)",
+    )
+    .bind(only)
+    .fetch_all(pool)
+    .await
+    .map_err(RuntimeError::Schema)?;
+
+    let mut owners: std::collections::HashMap<&str, OwnerMap> = std::collections::HashMap::new();
+    for (schema, table, owner, parent) in &tables {
+        if let Some(owner) = owner {
+            owners.entry(schema)
+                .or_default()
+                .insert(table.clone(), (owner.clone(), parent.clone()));
+        }
+    }
+    let empty = OwnerMap::new();
+    for (schema, table, _, _) in &tables {
+        apply_table_rls(pool, schema, table, owners.get(schema.as_str()).unwrap_or(&empty)).await?;
+    }
+    Ok(())
+}
+
 /// Enable + FORCE RLS on an app table, grant the restricted executor CRUD on it,
 /// and (re)create its permission-gated policies. Idempotent: safe to call on every
 /// install and on the retroactive boot pass. `schema`/`table` are validated

@@ -351,32 +351,10 @@ impl RbacExtension {
             exec(pool, &format!("REVOKE EXECUTE ON FUNCTION {sig} FROM PUBLIC")).await?;
         }
 
-        // Retroactive RLS over tables that predate this refactor. Ownership is read
-        // from the projection synced at deploy rather than re-parsed from
-        // `apps.manifest`: the stored manifest is never revalidated after install,
-        // so a table is the trustworthy source here, and it is one indexed lookup.
-        // Grouped per schema first, because resolving a delegated entity needs the
-        // entities it defers to, not just its own row.
-        let tables: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
-            "SELECT t.schemaname, t.tablename, s.owner_field, s.owner_parent
-               FROM pg_tables t
-               LEFT JOIN rootcx_system.sensitive_fields s
-                 ON s.app_id = t.schemaname AND s.entity = t.tablename
-              WHERE t.schemaname IN (SELECT id FROM rootcx_system.apps WHERE id <> 'core')",
-        ).fetch_all(pool).await.map_err(RuntimeError::Schema)?;
-
-        let mut owners: HashMap<&str, OwnerMap> = HashMap::new();
-        for (schema, table, owner, parent) in &tables {
-            if let Some(owner) = owner {
-                owners.entry(schema)
-                    .or_default()
-                    .insert(table.clone(), (owner.clone(), parent.clone()));
-            }
-        }
-        let empty = OwnerMap::new();
-        for (schema, table, _, _) in &tables {
-            apply_table_rls(pool, schema, table, owners.get(schema.as_str()).unwrap_or(&empty)).await?;
-        }
+        // Retroactive RLS across every app, so tables predating a refactor — and
+        // any created by a deploy-time migration since the last boot — become
+        // governed. Same rule the deploy path runs for one app; one implementation.
+        super::govern_schema_tables(pool, None).await?;
 
         info!("governance ready");
         Ok(())

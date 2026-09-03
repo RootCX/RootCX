@@ -436,6 +436,44 @@ async fn a_v1_worker_still_receives_dispatched_crons() {
 }
 
 #[tokio::test]
+async fn a_table_created_by_a_migration_is_governed_like_any_other() {
+    // `apply_table_rls` iterates `manifest.data_contract` only, but its GRANT is
+    // schema-wide and `ALTER DEFAULT PRIVILEGES` covers tables created later.
+    // Migrations are the documented way to create what the manifest cannot
+    // express, and they run as the DB owner — so a table created there inherits
+    // full CRUD for the sandboxed executor role and gets no RLS at all.
+    //
+    // Since authorization is enforced only by RLS, such a table is ungoverned:
+    // every user of the app reads and writes every row through `ctx.sql`,
+    // regardless of role. Worse, the boot pass retro-applies RLS across all of
+    // `pg_tables`, so the same table silently flips to deny-all at the next
+    // unrelated restart. Both states are wrong; this pins the first.
+    let rt = TestRuntime::boot().await;
+    rt.install("migtbl", "items").await;
+
+    let migration = b"CREATE TABLE IF NOT EXISTS audit_trail (id serial primary key, note text);";
+    let backend = b"process.stdin.on('data', () => {});";
+    let (s, _) = rt.deploy("migtbl", &make_tar_gz(&[
+        ("index.ts", backend as &[u8]),
+        ("migrations/001_audit.sql", migration as &[u8]),
+    ])).await;
+    assert_eq!(s, 200, "deploy with a migration");
+
+    let governed: Option<bool> = sqlx::query_scalar(
+        "SELECT relrowsecurity FROM pg_class c
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'migtbl' AND c.relname = 'audit_trail'",
+    ).fetch_optional(rt.pool()).await.unwrap();
+
+    assert_eq!(
+        governed, Some(true),
+        "a migration-created table must carry RLS like any manifest table; \
+         without it the executor role's schema-wide grant leaves it fully open",
+    );
+    rt.shutdown().await;
+}
+
+#[tokio::test]
 async fn jobs_enqueue_and_list() {
     let rt = TestRuntime::boot().await;
     rt.install("job", "items").await;

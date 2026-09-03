@@ -85,6 +85,14 @@ pub async fn deploy_backend(
         info!(app_id = %app_id, count = applied.len(), "applied deploy-time migrations");
     }
 
+    // Govern whatever the migrations just created. `apply_table_rls` only ran for
+    // manifest entities, but its GRANT is schema-wide, so a migration-created
+    // table would otherwise sit with full CRUD for the executor role and no RLS
+    // until an unrelated restart swept it up.
+    crate::extensions::rbac::govern_schema_tables(&pool, Some(&app_id))
+        .await
+        .map_err(|e| ApiError::Internal(format!("governing migrated tables: {e}")))?;
+
     let _ = wm.stop_app(&app_id).await;
     wm.start_app(&pool, &secrets, &app_id).await?;
 
