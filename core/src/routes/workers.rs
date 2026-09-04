@@ -74,22 +74,25 @@ pub async fn rpc_proxy(
     let p = pool(&rt);
     let (caller, action_scope) = match &auth {
         CallerAuth::User(identity) => {
-            let declared_action: bool = sqlx::query_scalar(
-                "SELECT EXISTS (
-                   SELECT 1
-                     FROM rootcx_system.apps app
-                     CROSS JOIN LATERAL jsonb_array_elements(
-                       COALESCE(app.manifest->'actions', '[]'::jsonb)
-                     ) action
-                    WHERE app.id = $1
-                      AND action->>'id' = $2
-                 )",
+            // `None` when the method is not a declared action; `Some(isolated)`
+            // when it is. Two different questions, one lookup: declaration
+            // decides which permission may authorize the call, isolation decides
+            // whether Core poses an invocation identity in SQL for it.
+            let declaration: Option<bool> = sqlx::query_scalar(
+                "SELECT COALESCE((action->>'isolatedScope')::boolean, false)
+                   FROM rootcx_system.apps app
+                   CROSS JOIN LATERAL jsonb_array_elements(
+                     COALESCE(app.manifest->'actions', '[]'::jsonb)
+                   ) action
+                  WHERE app.id = $1
+                    AND action->>'id' = $2",
             )
             .bind(&app_id)
             .bind(&method)
-            .fetch_one(&p)
+            .fetch_optional(&p)
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
+            let declared_action = declaration.is_some();
             // Two grains of one right, the coarse implying the fine: `invoke` is
             // the whole app, `action:{method}` is that method alone. Same idiom as
             // `app:{id}:*` implying everything beneath it. Requiring BOTH would
@@ -114,7 +117,12 @@ pub async fn rpc_proxy(
                 email: identity.email.clone(),
                 effective_perms: None,
                 connection_id: None,
-            }), declared_action.then(|| method.clone()))
+            // A scope means a dedicated process for the life of the call, so it
+            // is posed only for an action that asked for one. Every other
+            // declared action shares its caller's worker and reaches SQL with
+            // the invocation settings empty — nothing to borrow, and a policy
+            // written against them denies rather than trusting a neighbour.
+            }), (declaration == Some(true)).then(|| method.clone()))
         }
         CallerAuth::ShareToken(share) => {
             let (manifest, decl) = find_public_rpc_full(&p, &app_id, &method)

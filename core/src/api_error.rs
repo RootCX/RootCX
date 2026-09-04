@@ -10,6 +10,9 @@ pub enum ApiError {
     Forbidden(String),
     Conflict(String),
     NotReady,
+    /// A transient inability to serve, with a reason. Distinct from `NotReady`,
+    /// which is boot state, and from `Internal`, which is a fault.
+    Unavailable(String),
     Internal(String),
 }
 
@@ -22,6 +25,7 @@ impl IntoResponse for ApiError {
             Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg),
             Self::Conflict(msg) => (StatusCode::CONFLICT, msg),
             Self::NotReady => (StatusCode::SERVICE_UNAVAILABLE, "runtime not ready".into()),
+            Self::Unavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
             Self::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
         };
         // Every 5xx is logged HERE rather than at its ~100 construction sites.
@@ -64,6 +68,7 @@ impl From<crate::RuntimeError> for ApiError {
             crate::RuntimeError::Cron(_) | crate::RuntimeError::Invalid(_) => {
                 Self::BadRequest(e.to_string())
             }
+            crate::RuntimeError::Capacity(_) => Self::Unavailable(e.to_string()),
             crate::RuntimeError::Worker(_) | crate::RuntimeError::Job(_) | crate::RuntimeError::Ipc(_) => {
                 Self::Internal(e.to_string())
             }
@@ -89,6 +94,23 @@ mod tests {
     /// turned into `500 internal error` — the validator's message was written,
     /// then discarded before the response. The pairing with a genuine database
     /// failure is the point: that one must stay opaque.
+    /// Being at capacity is transient, not a fault. As a 500 it tells an operator
+    /// to hunt a bug and tells a client never to retry; the caller's own next
+    /// attempt, seconds later, is very likely to succeed. The pairing matters:
+    /// a genuine worker failure must stay a 500.
+    #[test]
+    fn running_out_of_worker_slots_is_retryable_not_a_fault() {
+        assert_eq!(
+            status_of(crate::RuntimeError::Capacity("worker capacity reached".into())),
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+        assert_eq!(
+            status_of(crate::RuntimeError::Worker("spawn failed".into())),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a real worker failure is still a fault",
+        );
+    }
+
     #[test]
     fn a_rejected_manifest_is_a_bad_request_not_an_internal_error() {
         assert_eq!(

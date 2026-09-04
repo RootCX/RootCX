@@ -254,6 +254,10 @@ export interface ActionDefinition {
   description: string;
   inputSchema?: Record<string, unknown>;
   outputSchema?: Record<string, unknown>;
+  /** Run this action in its own worker process so Core can expose an
+   *  unforgeable `rootcx.invocation_*` identity to the app's SQL. Off by
+   *  default: it costs one process per action per caller. */
+  isolatedScope?: boolean;
 }
 
 export interface IntegrationBinding {

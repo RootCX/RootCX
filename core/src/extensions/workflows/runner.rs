@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use serde_json::{Value as JsonValue, json};
 use sqlx::PgPool;
-use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::tools::ToolRegistry;
@@ -25,39 +25,6 @@ use rootcx_types::{
 
 use super::events::{WorkflowEvent, WorkflowEvents};
 use super::executor;
-
-const LEASE_VT_SECS: i32 = 120;
-
-/// Keeps the pgmq lease alive while a node runs longer than the visibility timeout.
-pub struct Heartbeat {
-    pool: PgPool,
-    msg_id: i64,
-}
-
-impl Heartbeat {
-    pub fn lease(pool: PgPool, msg_id: i64) -> Self { Self { pool, msg_id } }
-
-    fn spawn(&self) -> JoinHandle<()> {
-        let (pool, msg_id) = (self.pool.clone(), self.msg_id);
-        tokio::spawn(async move {
-            let period = Duration::from_secs(LEASE_VT_SECS as u64 / 2);
-            // Keep trying through transient errors: a single failed `set_vt` must not
-            // surrender the lease while the run is still alive (it would let the
-            // message redeliver and a second runner start concurrently).
-            loop {
-                tokio::time::sleep(period).await;
-                if let Err(e) = crate::jobs::extend_lease(&pool, msg_id, LEASE_VT_SECS).await {
-                    tracing::warn!(msg_id, "workflow lease heartbeat failed (will retry): {e}");
-                }
-            }
-        })
-    }
-}
-
-struct AbortOnDrop(JoinHandle<()>);
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) { self.0.abort(); }
-}
 
 struct RetryPolicy {
     max_attempts: u32,
@@ -132,7 +99,7 @@ pub async fn run(
     exec_id: Uuid,
     user_id: Uuid,
     perms: &[String],
-    hb: Heartbeat,
+    lease_msg_id: i64,
     events: &WorkflowEvents,
 ) -> Result<WorkflowExecutionStatus, String> {
     let (app_id, workflow_id, graph_json): (String, Uuid, Option<JsonValue>) = sqlx::query_as(
@@ -147,7 +114,15 @@ pub async fn run(
         return Err(format!("graph validation failed: {}", issues.join("; ")));
     }
 
-    let _ticker = AbortOnDrop(hb.spawn());
+    // Keep the pgmq lease alive while a node runs longer than the visibility
+    // timeout, and drop it the moment this function returns by any path. Renewal
+    // is bounded inside `lease_heartbeat`: a run that outlives the ceiling is
+    // hung, and renewing forever would hide it forever.
+    let lease = CancellationToken::new();
+    let _ticker = lease.clone().drop_guard();
+    tokio::spawn(crate::jobs::lease_heartbeat(
+        pool.clone(), lease_msg_id, lease, crate::jobs::MAX_LEASE_LIFETIME,
+    ));
 
     sqlx::query(
         "UPDATE rootcx_system.workflow_executions

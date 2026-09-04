@@ -64,9 +64,20 @@ pub struct Runtime {
     resources_dir: PathBuf,
     data_dir: PathBuf,
     bun_bin: PathBuf,
+    /// Overrides the cap derived from the pod's memory limit. Set by tests and
+    /// by `ROOTCX_MAX_WORKERS`; `None` means derive it.
+    max_workers: Option<usize>,
 }
 
 impl Runtime {
+    /// Cap the worker pool explicitly instead of deriving it from the pod's
+    /// memory limit. Exists so the cap's behaviour at the limit is testable
+    /// without a 512 MiB container.
+    pub fn with_max_workers(mut self, max: usize) -> Self {
+        self.max_workers = Some(max);
+        self
+    }
+
     pub fn new(database_url: String, data_dir: PathBuf, resources_dir: PathBuf, bun_bin: PathBuf) -> Self {
         let auth_config = AuthConfig::load(&data_dir).expect("failed to load auth config");
 
@@ -96,6 +107,7 @@ impl Runtime {
             resources_dir,
             data_dir,
             bun_bin,
+            max_workers: None,
         }
     }
 
@@ -143,6 +155,7 @@ impl Runtime {
             apps_dir, runtime_url.clone(), self.bun_bin.clone(), pool.clone(),
             Arc::clone(&self.tool_registry), self.pending_approvals.clone(),
             Arc::clone(&secret_manager), Arc::clone(&upload_nonces),
+            self.max_workers,
         ));
         wm.init_self_ref();
         wm.spawn_reaper();
@@ -197,12 +210,22 @@ pub struct ReadyRuntime {
     bun_bin: PathBuf,
 }
 
+/// How long in-flight work may take to finish during shutdown. Sized under
+/// Kubernetes' default 30s `terminationGracePeriodSeconds`, so the drain
+/// completes before the kubelet escalates to SIGKILL.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
+
 impl ReadyRuntime {
+    /// Ordered so nothing new starts while what is running finishes: the
+    /// scheduler stops taking messages off the queue FIRST, then workers are
+    /// given a grace period to complete and archive what they already hold, and
+    /// only then does the pool close under them. Stopping workers first (the old
+    /// order) killed jobs the scheduler was still handing out.
     pub async fn shutdown(&self) {
         info!("runtime shutting down");
-        self.mcp_manager.stop_all().await;
-        self.worker_manager.stop_all().await;
         self.scheduler.cancel.cancel();
+        self.mcp_manager.stop_all().await;
+        self.worker_manager.stop_all(SHUTDOWN_GRACE).await;
         self.pool.close().await;
         info!("runtime shutdown complete");
     }
@@ -234,6 +257,19 @@ impl ReadyRuntime {
     pub fn mcp_manager(&self) -> &Arc<McpManager> { &self.mcp_manager }
     pub fn pending_approvals(&self) -> &PendingApprovals { &self.pending_approvals }
     pub fn scheduler_wake(&self) -> &Arc<tokio::sync::Notify> { &self.scheduler.wake }
+
+    /// `(seconds_stalled, restart_count, free_dispatch_slots)` for the job
+    /// scheduler. A stalled scheduler means no job, cron or workflow is running,
+    /// which is invisible from every other signal the pod emits.
+    pub fn scheduler_health(&self) -> (Option<u64>, u64, usize) {
+        (self.scheduler.stalled_for(), self.scheduler.restarts(), self.scheduler.free_slots())
+    }
+
+    /// `(live_workers, cap)` for the worker pool.
+    pub async fn worker_pool_usage(&self) -> (usize, usize) {
+        self.worker_manager.pool_usage().await
+    }
+
     pub fn bun_bin(&self) -> &std::path::Path { &self.bun_bin }
     pub fn resources_dir(&self) -> &std::path::Path { &self.resources_dir }
     pub fn data_dir(&self) -> &std::path::Path { &self.data_dir }

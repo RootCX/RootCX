@@ -60,12 +60,20 @@ pub async fn health(
     if params.get("full").is_some() {
         let db_reachable = db_ping(rt.pool()).await;
         let workers = wm(&rt).all_statuses().await;
+        let (stalled_secs, restarts, free_slots) = rt.scheduler_health();
+        let (workers_live, workers_cap) = rt.worker_pool_usage().await;
         return Json(json!({
-            "status": if db_reachable { "ok" } else { "degraded" },
+            "status": if db_reachable && stalled_secs.is_none() { "ok" } else { "degraded" },
             "memory": read_cgroup_memory(),
             "cpu": read_cgroup_cpu(),
             "disk": read_disk_usage(rt.data_dir()),
             "database": { "reachable": db_reachable },
+            // A wedged scheduler leaves the API perfectly healthy while every
+            // job, cron and workflow silently stops. Nothing else reports it.
+            "scheduler": { "stalled_secs": stalled_secs, "restarts": restarts, "free_slots": free_slots },
+            // At the cap, callers needing a new identity are refused. It is the
+            // only warning before that, and the signal that the plan is too small.
+            "worker_pool": { "live": workers_live, "cap": workers_cap },
             // Surfaced because an all-workers-down tenant is exactly the outage
             // shape that reached a customer before it reached us.
             "workers": workers.iter()

@@ -22,6 +22,16 @@ pub struct TestRuntime {
 
 impl TestRuntime {
     pub async fn boot() -> Self {
+        Self::boot_with(None).await
+    }
+
+    /// Boot with an explicit worker-pool cap, to exercise behaviour at the limit
+    /// without provisioning a memory-constrained container.
+    pub async fn boot_capped(max_workers: usize) -> Self {
+        Self::boot_with(Some(max_workers)).await
+    }
+
+    async fn boot_with(max_workers: Option<usize>) -> Self {
         let resources = rootcx_platform::dirs::resources_dir(env!("CARGO_MANIFEST_DIR"))
             .expect("resources dir not found");
         let bun_bin = rootcx_platform::bin::binary_path(&resources, "bun");
@@ -48,8 +58,12 @@ impl TestRuntime {
         let resources_dir = data_dir.join("resources");
         std::fs::create_dir_all(&resources_dir).unwrap();
         let runtime = Arc::new(
-            Runtime::new(db_url, data_dir, resources_dir, bun_bin)
-                .boot(api_port).await.expect("boot failed")
+            match max_workers {
+                Some(max) => Runtime::new(db_url, data_dir, resources_dir, bun_bin)
+                    .with_max_workers(max),
+                None => Runtime::new(db_url, data_dir, resources_dir, bun_bin),
+            }
+            .boot(api_port).await.expect("boot failed")
         );
         let rt = Arc::clone(&runtime);
         tokio::spawn(async move { server::serve(rt, api_port).await.ok(); });

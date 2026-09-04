@@ -827,8 +827,8 @@ async fn action_workers_isolate_scope_and_reject_replayed_invocations() {
         "version": "1.0.0",
         "dataContract": [],
         "actions": [
-            { "id": "approve", "name": "Approve", "inputSchema": { "type": "object" } },
-            { "id": "reject", "name": "Reject", "inputSchema": { "type": "object" } }
+            { "id": "approve", "name": "Approve", "isolatedScope": true, "inputSchema": { "type": "object" } },
+            { "id": "reject", "name": "Reject", "isolatedScope": true, "inputSchema": { "type": "object" } }
         ]
     })).await;
 
@@ -919,6 +919,262 @@ serve({ rpc: {
     rt.shutdown().await;
 }
 
+/// The default an app gets when it declares nothing.
+///
+/// A dedicated process per action cost 36 MB each and a customer app declares 58
+/// of them, so the isolation is opt-in. The rule that makes the default safe is
+/// that the invocation settings are then EMPTY rather than borrowed: a policy or
+/// trigger written against them denies the write instead of trusting a value a
+/// neighbouring action of the same user could have supplied. Reading a populated
+/// scope here would mean the app got an identity nobody paid for and nobody can
+/// vouch for.
+#[tokio::test]
+async fn an_action_that_declares_no_isolation_reaches_sql_with_no_scope() {
+    let rt = harness::TestRuntime::boot().await;
+    ensure_admin(&rt).await;
+    let app_id = "openscope";
+    rt.install_manifest(&json!({
+        "appId": app_id,
+        "name": "Open scope",
+        "version": "1.0.0",
+        "dataContract": [],
+        "actions": [
+            { "id": "cheap", "name": "Cheap", "inputSchema": { "type": "object" } },
+            { "id": "guarded", "name": "Guarded", "isolatedScope": true, "inputSchema": { "type": "object" } }
+        ]
+    })).await;
+    let backend = br#"
+const readScope = async (ctx) => {
+  const r = await ctx.sql("SELECT current_setting('rootcx.invocation_kind', true), current_setting('rootcx.invocation_name', true), current_setting('rootcx.action_id', true)");
+  return { scope: r.rows[0], pid: process.pid };
+};
+serve({ rpc: {
+  cheap: async (_p, _c, ctx) => readScope(ctx),
+  guarded: async (_p, _c, ctx) => readScope(ctx),
+  plain: async (_p, _c, ctx) => readScope(ctx),
+} });
+"#;
+    let (deploy_status, deploy_body) = rt.deploy(
+        app_id, &harness::make_tar_gz(&[("index.ts", backend)]),
+    ).await;
+    assert_eq!(deploy_status, StatusCode::OK, "deploy failed: {deploy_body}");
+
+    let call = |method: &'static str| {
+        let rt = &rt;
+        async move {
+            let (status, body) = rt.post_json(
+                &format!("/api/v1/apps/{app_id}/rpc"),
+                &json!({"method": method, "params": {}}),
+            ).await;
+            assert_eq!(status, StatusCode::OK, "{method} failed: {body}");
+            body
+        }
+    };
+
+    let cheap = call("cheap").await;
+    assert_eq!(
+        cheap["scope"], json!(["", "", ""]),
+        "an action that declared no isolation must reach SQL with the invocation \
+         settings empty, so an invariant written against them fails closed: {cheap}",
+    );
+
+    let plain = call("plain").await;
+    assert_eq!(
+        cheap["pid"], plain["pid"],
+        "an un-isolated action must share the caller's worker; a process per \
+         action is what put a tenant fifteen times over its memory limit",
+    );
+
+    let guarded = call("guarded").await;
+    assert_eq!(
+        guarded["scope"], json!(["action", "guarded", "guarded"]),
+        "declaring isolatedScope must still deliver the Core-derived scope: {guarded}",
+    );
+    assert_ne!(
+        guarded["pid"], plain["pid"],
+        "an isolated action must NOT share a process, or its scope is borrowable",
+    );
+    rt.shutdown().await;
+}
+
+/// The pool used to have no size limit at all. Every new identity added a Bun
+/// process and nothing but a fifteen-minute idle sweep ever removed one, so
+/// ordinary use grew the pod until the OOM killer took the whole tenant down —
+/// every app, and every unit of work in flight with them.
+///
+/// Under a cap, the correct behaviour is to make room rather than to refuse: an
+/// idle worker is evicted so the new caller is served. Only when nothing can be
+/// freed does a caller get an answer instead of a dead pod.
+#[tokio::test]
+async fn the_worker_pool_stays_within_its_cap_by_evicting_idle_workers() {
+    // Two slots: the app's lifecycle worker takes one, so every user call must
+    // contend for the other.
+    let rt = harness::TestRuntime::boot_capped(2).await;
+    ensure_admin(&rt).await;
+    let app_id = "capped";
+    rt.install_manifest(&json!({
+        "appId": app_id, "name": "Capped", "version": "1.0.0",
+        "dataContract": [], "actions": []
+    })).await;
+    let backend = br#"serve({ rpc: { ping: async () => ({ pid: process.pid }) } });"#;
+    let (deploy_status, deploy_body) = rt.deploy(
+        app_id, &harness::make_tar_gz(&[("index.ts", backend)]),
+    ).await;
+    assert_eq!(deploy_status, StatusCode::OK, "deploy failed: {deploy_body}");
+
+    let invoke = format!("app:{app_id}:invoke");
+    let mut pids = Vec::new();
+    for i in 0..4 {
+        let token = create_user_with_perms(
+            &rt, &format!("capped{i}@test.local"), &[invoke.as_str()],
+        ).await;
+        let (status, body) = rt.request_as(
+            Method::POST, &format!("/api/v1/apps/{app_id}/rpc"), &token,
+            Some(&json!({"method": "ping", "params": {}})),
+        ).await;
+        assert_eq!(
+            status, StatusCode::OK,
+            "caller {i} was refused although an idle worker could have been evicted: {body}",
+        );
+        pids.push(body["pid"].clone());
+
+        let (live, cap) = rt.runtime.worker_pool_usage().await;
+        assert_eq!(cap, 2, "the configured cap must be the one enforced");
+        assert!(
+            live <= cap,
+            "the pool exceeded its cap after caller {i} ({live} > {cap}); \
+             an uncapped pool is what OOM-killed the tenant",
+        );
+    }
+
+    // Four distinct identities needed four processes; only two slots existed, so
+    // they cannot all have been alive at once. (That distinct identities never
+    // share a process is `distinct_principals_never_share_a_worker`, not this.)
+    assert!(
+        pids.iter().any(|p| p != &pids[0]),
+        "every call reused one process, so no new worker was ever admitted: {pids:?}",
+    );
+    rt.shutdown().await;
+}
+
+/// A slot is held by the pool entry itself, so every way a worker leaves the
+/// map returns it. Counting slots by hand instead is how a cap drifts shut: each
+/// missed release costs a slot permanently, and the runtime ends up refusing
+/// callers while hosting nothing.
+#[tokio::test]
+async fn a_worker_leaving_the_pool_returns_its_slot() {
+    let rt = harness::TestRuntime::boot_capped(4).await;
+    ensure_admin(&rt).await;
+    let app_id = "slotback";
+    rt.install_manifest(&json!({
+        "appId": app_id, "name": "Slot back", "version": "1.0.0",
+        "dataContract": [], "actions": []
+    })).await;
+    let (deploy_status, deploy_body) = rt.deploy(
+        app_id,
+        &harness::make_tar_gz(&[("index.ts", br#"serve({ rpc: { ping: async () => ({ ok: true }) } });"#)]),
+    ).await;
+    assert_eq!(deploy_status, StatusCode::OK, "deploy failed: {deploy_body}");
+
+    let token = create_user_with_perms(
+        &rt, "slotback@test.local", &[format!("app:{app_id}:invoke").as_str()],
+    ).await;
+    let (status, body) = rt.request_as(
+        Method::POST, &format!("/api/v1/apps/{app_id}/rpc"), &token,
+        Some(&json!({"method": "ping", "params": {}})),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "rpc failed: {body}");
+
+    // `cap` is live workers plus free slots. A slot that is not returned when its
+    // worker leaves shows up here and nowhere else: the map shrinks either way,
+    // so counting live workers would pass even with every slot leaked.
+    let (occupied, cap) = rt.runtime.worker_pool_usage().await;
+    assert_eq!(cap, 4, "the configured cap must be the one enforced");
+    assert!(occupied > 0, "the app should be holding slots after a call");
+
+    assert_eq!(rt.delete(&format!("/api/v1/apps/{app_id}")).await, 200);
+
+    let (after, cap_after) = rt.runtime.worker_pool_usage().await;
+    assert!(after < occupied, "uninstall must remove the app's workers");
+    assert_eq!(
+        cap_after, 4,
+        "uninstalling consumed {} slot(s) permanently; a cap that only ever \
+         shrinks ends up refusing callers while hosting nothing",
+        4 - cap_after,
+    );
+    rt.shutdown().await;
+}
+
+/// The sad path of the cap, and the one that decides whether it is a safety
+/// net or a lie: every worker busy, nothing to evict.
+///
+/// The wrong answers are spawning anyway (the cap becomes decorative and the pod
+/// is OOM-killed, taking every app and every job in flight with it) and waiting
+/// forever (the caller's request hangs). The right answer is a prompt, retryable
+/// refusal naming the reason.
+#[tokio::test]
+async fn a_full_pool_of_busy_workers_refuses_rather_than_overcommitting() {
+    let rt = std::sync::Arc::new(harness::TestRuntime::boot_capped(2).await);
+    ensure_admin(&rt).await;
+    let app_id = "fullpool";
+    rt.install_manifest(&json!({
+        "appId": app_id, "name": "Full pool", "version": "1.0.0",
+        "dataContract": [], "actions": []
+    })).await;
+    let backend = br#"
+serve({ rpc: {
+  slow: async () => { await new Promise((r) => setTimeout(r, 6000)); return { ok: true }; },
+  quick: async () => ({ ok: true }),
+} });
+"#;
+    let (deploy_status, deploy_body) = rt.deploy(
+        app_id, &harness::make_tar_gz(&[("index.ts", backend)]),
+    ).await;
+    assert_eq!(deploy_status, StatusCode::OK, "deploy failed: {deploy_body}");
+
+    let invoke = format!("app:{app_id}:invoke");
+    let mut holders = Vec::new();
+    for i in 0..2 {
+        let token = create_user_with_perms(
+            &rt, &format!("busy{i}@test.local"), &[invoke.as_str()],
+        ).await;
+        let rt = std::sync::Arc::clone(&rt);
+        holders.push(tokio::spawn(async move {
+            rt.request_as(
+                Method::POST, &format!("/api/v1/apps/{app_id}/rpc"), &token,
+                Some(&json!({"method": "slow", "params": {}})),
+            ).await
+        }));
+    }
+
+    // Let both occupy their slots. The app's lifecycle worker held one of the two
+    // and is idle, so the second caller evicts it; after that nothing is free.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let (live, cap) = rt.runtime.worker_pool_usage().await;
+    assert_eq!((live, cap), (2, 2), "the pool should be full and busy before the probe");
+
+    let third = create_user_with_perms(&rt, "third@test.local", &[invoke.as_str()]).await;
+    let (status, body) = rt.request_as(
+        Method::POST, &format!("/api/v1/apps/{app_id}/rpc"), &third,
+        Some(&json!({"method": "quick", "params": {}})),
+    ).await;
+
+    assert_eq!(
+        status, StatusCode::SERVICE_UNAVAILABLE,
+        "a caller that cannot be admitted must be refused, and refused as retryable: {body}",
+    );
+    assert!(
+        body["error"].as_str().unwrap_or("").contains("capacity"),
+        "the refusal must say why, or an operator cannot tell it from a crash: {body}",
+    );
+
+    for h in holders {
+        let (status, body) = h.await.unwrap();
+        assert_eq!(status, StatusCode::OK, "a refused newcomer must not disturb work in flight: {body}");
+    }
+    std::sync::Arc::into_inner(rt).expect("no task still holds the runtime").shutdown().await;
+}
+
 #[tokio::test]
 async fn raw_ipc_cannot_claim_a_workflow_invocation() {
     let rt = harness::TestRuntime::boot().await;
@@ -929,7 +1185,7 @@ async fn raw_ipc_cannot_claim_a_workflow_invocation() {
         "name": "Raw scope gate",
         "version": "1.0.0",
         "dataContract": [],
-        "actions": [{ "id": "probe", "name": "Probe", "inputSchema": { "type": "object" } }]
+        "actions": [{ "id": "probe", "name": "Probe", "isolatedScope": true, "inputSchema": { "type": "object" } }]
     })).await;
     let backend = br#"
 import { createInterface } from "node:readline";

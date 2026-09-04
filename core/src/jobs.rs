@@ -10,6 +10,16 @@ pub const VISIBILITY_TIMEOUT_SECS: i32 = 120;
 pub const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 pub const MAX_DELIVERIES: i32 = 5;
 
+/// Ceiling on how long one delivery may hold its lease alive by heartbeat.
+///
+/// The heartbeat used to renew forever, so a handler that hung — a worker that
+/// never answered, a node stuck on a request with no timeout — pinned its
+/// message in `running` for the life of the process: never redelivered, never
+/// dead-lettered, never visible. Renewal stops here so the ordinary
+/// redelivery-then-DLQ path can do its job. Deliberately far past any real job:
+/// crossing it is evidence of a hang, not of slow work.
+pub const MAX_LEASE_LIFETIME: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
 pub fn delivery_exhausted(read_count: i32) -> bool {
     read_count > MAX_DELIVERIES
 }
@@ -115,6 +125,38 @@ pub async fn extend_lease(pool: &PgPool, msg_id: i64, vt_secs: i32) -> Result<()
     Ok(())
 }
 
+/// Keep one leased message alive while its handler runs, until the handler
+/// finishes (`cancel`), the queue rejects a renewal, or `lifetime` elapses.
+///
+/// One implementation for both callers (app jobs and workflow runs): they had
+/// the same loop twice, and only one of them was ever fixed at a time.
+pub async fn lease_heartbeat(
+    pool: PgPool,
+    msg_id: i64,
+    cancel: tokio_util::sync::CancellationToken,
+    lifetime: std::time::Duration,
+) {
+    let deadline = tokio::time::Instant::now() + lifetime;
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep_until(deadline) => {
+                tracing::error!(msg_id, "lease held past the maximum lifetime; releasing it \
+                    to redelivery (the handler is presumed hung)");
+                return;
+            }
+            _ = tokio::time::sleep(HEARTBEAT_INTERVAL) => {
+                // Transient renewal failures are retried: surrendering the lease
+                // under a live handler would redeliver the message and start a
+                // second concurrent run.
+                if let Err(e) = extend_lease(&pool, msg_id, VISIBILITY_TIMEOUT_SECS).await {
+                    tracing::warn!(msg_id, "lease heartbeat failed: {e}");
+                }
+            }
+        }
+    }
+}
+
 /// Move a poison message off the main queue: copy it to the dead-letter queue
 /// (with the failure reason) and archive the original. Terminal — never retried.
 pub async fn dead_letter(pool: &PgPool, msg_id: i64, message: &JsonValue, reason: &str) -> Result<(), RuntimeError> {
@@ -160,6 +202,39 @@ mod tests {
     fn delivery_limit_allows_last_attempt_then_exhausts() {
         assert!(!delivery_exhausted(MAX_DELIVERIES));
         assert!(delivery_exhausted(MAX_DELIVERIES + 1));
+    }
+
+    // Renewal used to be unbounded, so a handler that hung pinned its message
+    // forever: never redelivered, never dead-lettered, never visible. The
+    // ceiling is what hands a hung unit of work back to the redelivery path.
+    #[tokio::test(start_paused = true)]
+    async fn lease_renewal_stops_at_the_ceiling() {
+        // Unreachable on purpose: the heartbeat must survive failing renewals
+        // (surrendering a live lease would start a second concurrent run), so
+        // only the ceiling can end this loop.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://127.0.0.1:1/nonexistent").unwrap();
+        let lifetime = std::time::Duration::from_secs(600);
+
+        tokio::time::timeout(
+            lifetime * 3,
+            super::lease_heartbeat(pool, 1, tokio_util::sync::CancellationToken::new(), lifetime),
+        ).await.expect("an unbounded heartbeat hides a hung handler forever");
+    }
+
+    // The ordinary path: a handler that finishes cancels its own heartbeat, and
+    // must not be kept alive until the ceiling.
+    #[tokio::test(start_paused = true)]
+    async fn a_finished_handler_ends_its_heartbeat_at_once() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://127.0.0.1:1/nonexistent").unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+
+        tokio::time::timeout(
+            super::HEARTBEAT_INTERVAL,
+            super::lease_heartbeat(pool, 1, cancel, super::MAX_LEASE_LIFETIME),
+        ).await.expect("cancellation must end the heartbeat without waiting");
     }
 
     #[test]

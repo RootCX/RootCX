@@ -67,6 +67,16 @@ pub struct ActionDefinition {
     pub input_schema: Option<JsonValue>,
     #[serde(default)]
     pub output_schema: Option<JsonValue>,
+    /// Opt in to a dedicated worker process for this action, so Core can expose
+    /// an unforgeable `rootcx.invocation_*` identity to the app's SQL (ADR 0003).
+    ///
+    /// Off by default because it costs one process per declared action per
+    /// caller: an app with 58 actions reached fifteen times its pod's memory
+    /// limit. With it off the invocation settings are empty rather than
+    /// borrowable, so a policy written against them denies instead of trusting a
+    /// value another action could have supplied.
+    #[serde(default)]
+    pub isolated_scope: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +173,10 @@ pub struct CronDefinition {
     pub payload: Option<JsonValue>,
     #[serde(default = "default_overlap_policy")]
     pub overlap_policy: String,
+    /// As [`ActionDefinition::isolated_scope`]: a dedicated worker process, so
+    /// this schedule's name reaches SQL as an unforgeable invocation identity.
+    #[serde(default)]
+    pub isolated_scope: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

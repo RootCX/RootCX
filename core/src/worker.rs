@@ -223,6 +223,22 @@ fn echoes_invocation(
     invocation.is_scoped() && worker_protocol >= INVOCATION_PROTOCOL_VERSION
 }
 
+/// Whether this pgmq message is already being handled by this worker.
+///
+/// Now that lease renewal is bounded, a hung job's message redelivers. Without
+/// this the redelivery would start a SECOND concurrent run of the same job in
+/// the same process. Refusing it lets `read_ct` climb until the scheduler
+/// dead-letters the message, which is the right outcome for a hang.
+///
+/// A non-numeric id has no pgmq lease (it is not a queue message) and can never
+/// collide, so it is always admitted.
+fn job_already_in_flight(
+    id: &str,
+    job_leases: &HashMap<i64, CancellationToken>,
+) -> bool {
+    id.parse::<i64>().is_ok_and(|msg_id| job_leases.contains_key(&msg_id))
+}
+
 /// Has this worker nothing left in flight? Asked before reaping it for idleness.
 ///
 /// Every shape of outstanding work counts. The manager only knows when work was
@@ -399,6 +415,26 @@ pub struct SupervisorHandle {
 }
 
 impl SupervisorHandle {
+    /// A handle backed by a responder that always reports `idle`, with no child
+    /// process. Lets shutdown draining be exercised on its own timing rather
+    /// than against a real Bun start.
+    #[cfg(test)]
+    pub(crate) fn stub(idle: bool) -> Self {
+        let (tx, mut rx) = mpsc::channel(8);
+        let (log_tx, _) = broadcast::channel(1);
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    SupervisorCommand::IsIdle { reply } => { let _ = reply.send(idle); }
+                    SupervisorCommand::GetStatus { reply } => { let _ = reply.send(WorkerStatus::Running); }
+                    SupervisorCommand::Stop { reply } => { let _ = reply.send(()); }
+                    _ => {}
+                }
+            }
+        });
+        Self { tx, log_tx }
+    }
+
     async fn send(&self, cmd: SupervisorCommand) -> Result<(), RuntimeError> {
         self.tx.send(cmd).await.map_err(|_| dead())
     }
@@ -693,6 +729,17 @@ async fn supervisor_loop(
                             continue;
                         }
                         onstart_done = true;
+                        // Single-flight per pgmq message. Once the lease heartbeat is
+                        // bounded, a hung job's message redelivers; without this guard
+                        // the redelivery would start a SECOND concurrent run of the
+                        // same job in the same process. Refusing it instead lets
+                        // `read_ct` climb until the scheduler dead-letters it, which
+                        // is the outcome we want for a hang.
+                        if job_already_in_flight(&id, &job_leases) {
+                            warn!(app_id = %app_id, job_id = %id,
+                                "job redelivered while still in flight; refusing duplicate run");
+                            continue;
+                        }
                         // Same rule as Rpc, and the stakes were higher here: this arm
                         // used to `jobs::fail` the pgmq message, so every cron on a
                         // pre-v4 worker was not merely refused but discarded.
@@ -709,24 +756,10 @@ async fn supervisor_loop(
                                 job_invocations.insert(msg_id, invocation_id);
                                 let token = CancellationToken::new();
                                 let heartbeat = token.clone();
-                                let pool = config.pool.clone();
-                                tokio::spawn(async move {
-                                    loop {
-                                        tokio::select! {
-                                            _ = heartbeat.cancelled() => break,
-                                            _ = tokio::time::sleep(crate::jobs::HEARTBEAT_INTERVAL) => {
-                                                if let Err(e) = crate::jobs::extend_lease(
-                                                    &pool,
-                                                    msg_id,
-                                                    crate::jobs::VISIBILITY_TIMEOUT_SECS,
-                                                ).await {
-                                                    warn!(msg_id, "job lease heartbeat failed: {e}");
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                });
+                                tokio::spawn(crate::jobs::lease_heartbeat(
+                                    config.pool.clone(), msg_id, heartbeat,
+                                    crate::jobs::MAX_LEASE_LIFETIME,
+                                ));
                                 job_leases.insert(msg_id, token);
                                 job_payloads.insert(msg_id, job_payload);
                             }
@@ -2049,6 +2082,31 @@ mod tests {
         assert!(
             !worker_has_no_work_in_flight(&none_inv, &none_tx, &none_lease, &one_stream),
             "a live agent stream must keep the worker off the reaper",
+        );
+    }
+
+    /// Bounded lease renewal means a hung job's message eventually redelivers.
+    /// Without single-flight the redelivery starts a SECOND concurrent run of
+    /// the same job in the same process — turning a hang into a double-write.
+    #[test]
+    fn a_redelivered_job_never_starts_a_second_concurrent_run() {
+        let leases = HashMap::from([(42i64, CancellationToken::new())]);
+
+        assert!(
+            job_already_in_flight("42", &leases),
+            "a message whose lease this worker still holds must be refused",
+        );
+        assert!(
+            !job_already_in_flight("43", &leases),
+            "a different message must still be admitted",
+        );
+        assert!(
+            !job_already_in_flight("42", &HashMap::new()),
+            "a completed job must not block its own message forever",
+        );
+        assert!(
+            !job_already_in_flight("not-a-msg-id", &leases),
+            "an id with no pgmq lease can never collide and must be admitted",
         );
     }
 

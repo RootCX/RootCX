@@ -443,6 +443,7 @@ fn api_error_message(error: ApiError) -> String {
         | ApiError::Unauthorized(message)
         | ApiError::Forbidden(message)
         | ApiError::Conflict(message)
+        | ApiError::Unavailable(message)
         | ApiError::Internal(message) => message,
         ApiError::NotReady => "runtime not ready".into(),
     }

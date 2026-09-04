@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{RwLock, Semaphore, broadcast, mpsc};
 use tracing::{error, info, warn};
 
 use crate::RuntimeError;
@@ -109,6 +109,76 @@ const WORKER_IDLE_TTL: std::time::Duration = std::time::Duration::from_secs(15 *
 /// How often the reaper sweeps.
 const REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Memory budgeted per worker process. Measured at 36 MB marginal / 70 MB RSS
+/// for a real customer app; the higher figure is the one to plan against, since
+/// the OOM killer counts RSS.
+const WORKER_MEMORY_BUDGET: u64 = 70 * 1024 * 1024;
+
+/// Held back for the core process itself, its connection pool and page cache.
+const CORE_MEMORY_RESERVE: u64 = 160 * 1024 * 1024;
+
+/// Floor and ceiling on the derived cap. The floor keeps a very small pod usable
+/// (one lifecycle worker plus one caller); the ceiling stops a large pod from
+/// deriving a number so high the limit stops meaning anything.
+const MIN_WORKERS: usize = 2;
+const MAX_WORKERS: usize = 256;
+
+/// Used when the cgroup limit is unreadable, which in practice means a
+/// developer machine rather than a tenant pod.
+const DEFAULT_WORKER_CAP: usize = 16;
+
+/// How many workers admission may probe for idleness before giving up. Each
+/// probe of a WEDGED worker costs the 2s `is_idle` timeout, and a caller waiting
+/// on a full sweep of them is a worse outcome than a prompt refusal.
+const MAX_EVICTION_PROBES: usize = 4;
+
+/// How many worker processes this pod may host at once.
+///
+/// Derived from the cgroup memory limit rather than hardcoded, because the same
+/// binary runs on a 512 MiB tenant and a 32 GiB one. `ROOTCX_MAX_WORKERS`
+/// overrides it for operators; an unreadable limit (dev machines, non-cgroup
+/// hosts) falls back to `default_cap`.
+fn worker_cap(limit_bytes: Option<u64>, override_env: Option<&str>, default_cap: usize) -> usize {
+    if let Some(n) = override_env.and_then(|v| v.trim().parse::<usize>().ok()) {
+        return n.clamp(MIN_WORKERS, MAX_WORKERS);
+    }
+    let Some(limit) = limit_bytes else { return default_cap };
+    let budgeted = limit.saturating_sub(CORE_MEMORY_RESERVE) / WORKER_MEMORY_BUDGET;
+    (budgeted as usize).clamp(MIN_WORKERS, MAX_WORKERS)
+}
+
+/// The pod's memory ceiling, or `None` off cgroup v2.
+fn cgroup_memory_limit() -> Option<u64> {
+    std::fs::read_to_string("/sys/fs/cgroup/memory.max")
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+/// How often a draining worker is asked whether it has finished.
+const DRAIN_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Grace for a credential-rotation restart. Shorter than shutdown's: the process
+/// is not going away, so a worker that overruns is simply replaced.
+const RESTART_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Wait until `handle` reports nothing in flight, or `deadline` passes.
+///
+/// A worker that never answers counts as busy (`is_idle` has its own timeout),
+/// so a wedged one costs the full grace rather than being killed at once. That
+/// is the right trade at shutdown: the alternative is killing work that was
+/// about to commit.
+async fn drain_until_idle(handle: &SupervisorHandle, deadline: tokio::time::Instant) {
+    while tokio::time::Instant::now() < deadline {
+        if handle.is_idle().await {
+            return;
+        }
+        tokio::time::sleep(DRAIN_POLL).await;
+    }
+    warn!("worker still busy at the end of the shutdown grace; stopping it anyway");
+}
+
 /// A live worker and when it was last handed a unit of work.
 ///
 /// The map is keyed by `(app, principal|scope)` and the principal embeds the
@@ -121,10 +191,20 @@ const REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 struct WorkerEntry {
     handle: SupervisorHandle,
     last_used: std::time::Instant,
+    /// The pod slot this process occupies. Held by the entry so that EVERY way a
+    /// worker leaves the map returns its slot, including ones added later: the
+    /// reaper, `stop_app`, permission invalidation, and replacing a dead handle.
+    /// Counting by hand instead is how a cap silently drifts shut.
+    _slot: Arc<tokio::sync::OwnedSemaphorePermit>,
 }
 
 pub struct WorkerManager {
     workers: Arc<RwLock<HashMap<WorkerKey, WorkerEntry>>>,
+    /// One permit per hostable worker process. The pool used to be unbounded,
+    /// so ordinary use grew it until the pod was OOM-killed, which takes down
+    /// every app of the tenant and every unit of work in flight. Refusing one
+    /// caller is the better failure.
+    slots: Arc<Semaphore>,
     pool: PgPool,
     dispatch: OnceLock<Arc<dyn AgentDispatcher>>,
     integration_call: OnceLock<Arc<dyn IntegrationCaller>>,
@@ -146,12 +226,22 @@ impl WorkerManager {
         tool_registry: Arc<ToolRegistry>, pending_approvals: PendingApprovals,
         secret_manager: Arc<SecretManager>,
         upload_nonces: Arc<std::sync::Mutex<crate::extensions::storage::nonce::NonceStore>>,
+        max_workers: Option<usize>,
     ) -> Self {
         let prelude_path = apps_dir.join(".prelude.js");
         std::fs::write(&prelude_path, BACKEND_PRELUDE).expect("write backend prelude");
         let (fleet_tx, _) = broadcast::channel(512);
+        let cap = max_workers.unwrap_or_else(|| {
+            worker_cap(
+                cgroup_memory_limit(),
+                std::env::var("ROOTCX_MAX_WORKERS").ok().as_deref(),
+                DEFAULT_WORKER_CAP,
+            )
+        });
+        info!(cap, "worker pool sized");
         Self {
             workers: Arc::new(RwLock::new(HashMap::new())),
+            slots: Arc::new(Semaphore::new(cap)),
             pool,
             dispatch: OnceLock::new(),
             action_call: OnceLock::new(),
@@ -300,6 +390,46 @@ impl WorkerManager {
         Ok(handle)
     }
 
+    /// Take a pod slot for a new worker, evicting to make room if need be.
+    ///
+    /// The reaper alone is not enough: it only runs every minute and only
+    /// removes workers idle for fifteen, so a burst of new identities reaches
+    /// the cap with nothing yet stale. Admission therefore evicts on demand, in
+    /// least-recently-used order, and only workers the supervisor confirms are
+    /// idle — evicting a busy one would kill live work to satisfy a memory
+    /// limit, which is the trade this whole change exists to avoid making.
+    async fn take_slot(&self) -> Result<tokio::sync::OwnedSemaphorePermit, RuntimeError> {
+        if let Ok(slot) = Arc::clone(&self.slots).try_acquire_owned() {
+            return Ok(slot);
+        }
+        let mut candidates: Vec<(WorkerKey, SupervisorHandle, std::time::Instant)> =
+            self.workers.read().await.iter()
+                .map(|(key, e)| (key.clone(), e.handle.clone(), e.last_used))
+                .collect();
+        candidates.sort_by_key(|(_, _, last_used)| *last_used);
+
+        for (key, handle, _) in candidates.into_iter().take(MAX_EVICTION_PROBES) {
+            if !handle.is_idle().await {
+                continue;
+            }
+            // Dropping the entry is what returns its slot; claim the freed one
+            // before another caller can. A worker re-used since the probe is no
+            // longer under this key, and keeps its slot.
+            let Some(entry) = self.workers.write().await.remove(&key) else { continue };
+            drop(entry);
+            let _ = handle.stop().await;
+            if let Ok(slot) = Arc::clone(&self.slots).try_acquire_owned() {
+                info!(app_id = %key.0, "evicted idle worker to admit a new one");
+                return Ok(slot);
+            }
+        }
+
+        let (_, cap) = self.pool_usage().await;
+        Err(RuntimeError::Capacity(format!(
+            "worker capacity reached ({cap} processes, all busy); retry shortly"
+        )))
+    }
+
     /// Route a unit of work to the worker bound to `(app_id, principal)`,
     /// spawning it on first use. The principal is set by the core here — never
     /// taken from a worker message — so a worker can only ever act as the one
@@ -326,6 +456,9 @@ impl WorkerManager {
             let _ = entry.handle.stop().await;
             self.workers.write().await.remove(&key);
         }
+        // Admission before spawn: a process that cannot be accounted for must
+        // never be started, or the cap is decorative.
+        let slot = Arc::new(self.take_slot().await?);
         let handle = self
             .spawn_for(&self.pool, &self.secret_manager, app_id, &principal, &invocation)
             .await?;
@@ -336,7 +469,7 @@ impl WorkerManager {
             let _ = handle.stop().await;
             return Ok(existing.handle);
         }
-        w.insert(key, WorkerEntry { handle: handle.clone(), last_used: std::time::Instant::now() });
+        w.insert(key, WorkerEntry { handle: handle.clone(), last_used: std::time::Instant::now(), _slot: slot });
         info!(app_id, "worker started");
         Ok(handle)
     }
@@ -384,7 +517,7 @@ impl WorkerManager {
         let count = apps.len();
         // Drop every worker (lifecycle + user + agent); user workers respawn
         // lazily with fresh creds, lifecycle workers are restarted here.
-        self.stop_all().await;
+        self.stop_all(RESTART_GRACE).await;
         for app_id in &apps {
             if let Err(e) = self.start_app(pool, secrets, app_id).await { error!(app_id = %app_id, "restart start: {e}"); }
         }
@@ -392,12 +525,27 @@ impl WorkerManager {
         count
     }
 
-    pub async fn stop_all(&self) {
+    /// Stop every worker, giving work already in flight `grace` to finish first.
+    ///
+    /// Stopping is a SIGKILL of the child, so without this a pod shutdown kills
+    /// jobs mid-write: their pgmq lease lapses, the message redelivers, and the
+    /// automation runs a second time. Every ordinary deploy did that. Waiting for
+    /// the supervisor to report itself idle lets the work commit and archive its
+    /// message, so there is nothing left to redeliver.
+    ///
+    /// Draining is polled from here rather than inside the supervisor because the
+    /// supervisor must keep running to observe the completion it is waiting for.
+    pub async fn stop_all(&self, grace: std::time::Duration) {
         let handles: Vec<(WorkerKey, SupervisorHandle)> =
             self.workers.read().await.iter().map(|(k, e)| (k.clone(), e.handle.clone())).collect();
+        let deadline = tokio::time::Instant::now() + grace;
         let futs = handles.into_iter().map(|(key, h)| {
             let workers = Arc::clone(&self.workers);
-            async move { let _ = h.stop().await; workers.write().await.remove(&key); }
+            async move {
+                drain_until_idle(&h, deadline).await;
+                let _ = h.stop().await;
+                workers.write().await.remove(&key);
+            }
         });
         join_all(futs).await;
     }
@@ -528,6 +676,14 @@ impl WorkerManager {
         // Logs stream from the lifecycle worker. Per-identity worker log fan-in
         // is a known follow-up (see token-confusion fix notes).
         self.get_or_spawn(app_id, Principal::System, InvocationContext::default()).await.map(|h| h.subscribe())
+    }
+
+    /// Live worker processes and the pod's ceiling. Surfaced in `/health?full`
+    /// because approaching the cap is the signal that a tenant needs a larger
+    /// plan, and it is the only warning before callers start being refused.
+    pub async fn pool_usage(&self) -> (usize, usize) {
+        let live = self.workers.read().await.len();
+        (live, live + self.slots.available_permits())
     }
 
     /// Aggregate per-app status across identity workers (Running wins).
@@ -749,7 +905,11 @@ fn resolve_entry_point(app_dir: &Path) -> Result<PathBuf, RuntimeError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Principal, worker_key, worker_key_belongs_to_principal};
+    use super::{
+        DRAIN_POLL, SupervisorHandle, drain_until_idle,
+        DEFAULT_WORKER_CAP, MAX_WORKERS, MIN_WORKERS, Principal, worker_cap, worker_key,
+        worker_key_belongs_to_principal,
+    };
     use crate::governance::enforcement::{ContextState, InvocationContext};
     use uuid::Uuid;
 
@@ -777,8 +937,11 @@ mod tests {
         );
     }
 
+    /// Isolation is opt-in per action now, but when an action asks for it the
+    /// separation must be total: the scope is unforgeable only because no two
+    /// scopes share a process.
     #[test]
-    fn workflow_scopes_never_share_a_worker() {
+    fn isolated_scopes_never_share_a_worker() {
         let principal = user(Some(Uuid::new_v4()), false, &[]);
         let scopes = [
             InvocationContext::default(),
@@ -895,5 +1058,86 @@ mod tests {
             Principal::from_request(ContextState { user_id: None, is_delegated: true, effective_perms: vec![], connection_id: None, audit_actor_id: None, audit_delegator_id: None }),
             Principal::User(_)
         ));
+    }
+
+    /// The cap has to come from the pod, not from a constant: the same binary
+    /// serves a 512 MiB tenant and a 32 GiB one. Sized wrong in either direction
+    /// it is useless — too high and the pod still OOMs, too low and ordinary use
+    /// is refused.
+    /// Draining must yield the moment a worker reports idle, and must not wait
+    /// forever on one that never will. Both halves matter: returning early on a
+    /// busy worker kills work mid-write (the duplicate-automation bug), and
+    /// never returning wedges the pod past the kubelet's grace into a SIGKILL,
+    /// which is the same bug with extra steps.
+    #[tokio::test(start_paused = true)]
+    async fn draining_waits_for_a_busy_worker_but_not_past_the_deadline() {
+        let grace = std::time::Duration::from_secs(20);
+
+        let idle = SupervisorHandle::stub(true);
+        let started = tokio::time::Instant::now();
+        drain_until_idle(&idle, started + grace).await;
+        assert!(
+            started.elapsed() < DRAIN_POLL,
+            "an idle worker must be stopped at once, not held for the whole grace",
+        );
+
+        let busy = SupervisorHandle::stub(false);
+        let started = tokio::time::Instant::now();
+        // Bounded, so a drain that never gives up fails the test instead of
+        // hanging it: a hung test reports as a CI timeout with no explanation.
+        tokio::time::timeout(grace * 2, drain_until_idle(&busy, started + grace))
+            .await
+            .expect("draining must end at the deadline, not wait on a worker that never finishes");
+        assert!(
+            started.elapsed() >= grace,
+            "a busy worker must be given the whole grace before it is killed",
+        );
+    }
+
+    #[test]
+    fn the_cap_follows_the_pod_and_never_leaves_its_bounds() {
+        let mib = 1024 * 1024;
+
+        // The default tenant plan. Small on purpose: this is the pod that a
+        // single user exercising a dozen actions used to kill.
+        let micro = worker_cap(Some(512 * mib), None, DEFAULT_WORKER_CAP);
+        assert!(
+            (MIN_WORKERS..=8).contains(&micro),
+            "512 MiB must yield a handful of workers, got {micro}",
+        );
+        assert!(
+            worker_cap(Some(8192 * mib), None, DEFAULT_WORKER_CAP) > micro,
+            "a larger pod must host more workers",
+        );
+
+        assert_eq!(
+            worker_cap(Some(64 * mib), None, DEFAULT_WORKER_CAP),
+            MIN_WORKERS,
+            "a pod too small to budget for must still host a lifecycle worker and a caller",
+        );
+        assert_eq!(
+            worker_cap(Some(u64::MAX), None, DEFAULT_WORKER_CAP),
+            MAX_WORKERS,
+            "an unbounded cgroup must not produce an unbounded cap",
+        );
+        assert_eq!(
+            worker_cap(None, None, DEFAULT_WORKER_CAP),
+            DEFAULT_WORKER_CAP,
+            "off cgroup (a developer machine) falls back rather than guessing",
+        );
+    }
+
+    #[test]
+    fn an_operator_override_wins_but_is_still_clamped() {
+        assert_eq!(worker_cap(Some(512 * 1024 * 1024), Some("40"), DEFAULT_WORKER_CAP), 40);
+        assert_eq!(worker_cap(None, Some(" 40 "), DEFAULT_WORKER_CAP), 40);
+        assert_eq!(
+            worker_cap(None, Some("0"), DEFAULT_WORKER_CAP), MIN_WORKERS,
+            "zero would wedge the runtime shut; clamp rather than obey",
+        );
+        assert_eq!(
+            worker_cap(None, Some("nonsense"), DEFAULT_WORKER_CAP), DEFAULT_WORKER_CAP,
+            "an unparseable override must not silently disable the cap",
+        );
     }
 }

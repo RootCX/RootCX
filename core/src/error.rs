@@ -18,6 +18,12 @@ pub enum RuntimeError {
     #[error("worker error: {0}")]
     Worker(String),
 
+    /// The pod cannot host another worker process right now. A transient
+    /// condition the caller should retry, not a fault: mapping it to 500 would
+    /// tell an operator to look for a bug and a client never to try again.
+    #[error("{0}")]
+    Capacity(String),
+
     #[error("job engine error: {0}")]
     Job(String),
 

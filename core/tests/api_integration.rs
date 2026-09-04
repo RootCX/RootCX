@@ -3209,6 +3209,13 @@ async fn cron_job_scope_is_core_derived_and_payload_cannot_forge_it() {
                 { "name": "name", "type": "text" },
                 { "name": "action_id", "type": "text" }
             ]
+        }],
+        // The scope is what this test is about, so the schedule declares it.
+        "crons": [{
+            "name": "stock-minimum-purchase-proposals",
+            "schedule": "0 * * * *",
+            "isolatedScope": true,
+            "payload": { "label": "trusted-cron", "type": "untrusted-payload-name" }
         }]
     })).await;
     let backend = br#"
@@ -3227,16 +3234,13 @@ serve({
     ).await;
     assert_eq!(deploy_status, 200, "job scope backend deploy failed: {deploy_body}");
 
-    let (cron_status, cron) = rt.post_json(
-        "/api/v1/apps/jobscope/crons",
-        &json!({
-            "name": "stock-minimum-purchase-proposals",
-            "schedule": "0 * * * *",
-            "payload": { "label": "trusted-cron", "type": "untrusted-payload-name" }
-        }),
-    ).await;
-    assert_eq!(cron_status, 201, "cron creation failed: {cron}");
-    let cron_id = cron["id"].as_str().unwrap();
+    let (cron_status, crons) = rt.get_json("/api/v1/apps/jobscope/crons").await;
+    assert_eq!(cron_status, 200, "cron list failed: {crons}");
+    let cron_id = crons.as_array().and_then(|c| c.first())
+        .and_then(|c| c["id"].as_str())
+        .unwrap_or_else(|| panic!("manifest cron was not synced: {crons}"))
+        .to_string();
+    let cron_id = cron_id.as_str();
     let (trigger_status, trigger) = rt.post_json(
         &format!("/api/v1/apps/jobscope/crons/{cron_id}/trigger"),
         &json!({}),
@@ -3253,19 +3257,39 @@ serve({
     ).await;
     assert_eq!(job_status, 201, "generic job enqueue failed: {forged_job}");
 
+    // A schedule created through the API carries the same name as the manifest
+    // one, but authority to pose an invocation identity comes from the DEPLOYED
+    // MANIFEST, never from a runtime call. Otherwise anyone who may create a
+    // cron could mint the identity an app's database rules trust.
+    let (api_cron_status, api_cron) = rt.post_json(
+        "/api/v1/apps/jobscope/crons",
+        &json!({
+            "name": "runtime-created",
+            "schedule": "0 * * * *",
+            "payload": { "label": "api-created-cron" }
+        }),
+    ).await;
+    assert_eq!(api_cron_status, 201, "api cron creation failed: {api_cron}");
+    let api_cron_id = api_cron["id"].as_str().unwrap();
+    let (trigger_status, trigger) = rt.post_json(
+        &format!("/api/v1/apps/jobscope/crons/{api_cron_id}/trigger"),
+        &json!({}),
+    ).await;
+    assert_eq!(trigger_status, 200, "api cron trigger failed: {trigger}");
+
     let mut rows = json!([]);
     for _ in 0..80 {
         let (status, body) = rt.get_json(
             "/api/v1/apps/jobscope/collections/results?order=label.asc",
         ).await;
-        if status == 200 && body.as_array().map_or(false, |items| items.len() == 2) {
+        if status == 200 && body.as_array().map_or(false, |items| items.len() == 3) {
             rows = body;
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
     let rows = rows.as_array().expect("results response must be an array");
-    assert_eq!(rows.len(), 2, "jobs did not both complete: {rows:?}");
+    assert_eq!(rows.len(), 3, "jobs did not all complete: {rows:?}");
     let trusted = rows.iter().find(|row| row["label"] == "trusted-cron").unwrap();
     assert_eq!(trusted["kind"], "job");
     assert_eq!(trusted["name"], "stock-minimum-purchase-proposals");
@@ -3274,6 +3298,10 @@ serve({
     assert_eq!(forged["kind"], "", "payload forged a job scope: {forged}");
     assert_eq!(forged["name"], "", "payload forged a job name: {forged}");
     assert_eq!(forged["action_id"], "");
+    let api_made = rows.iter().find(|row| row["label"] == "api-created-cron").unwrap();
+    assert_eq!(api_made["kind"], "", "an API-created cron minted a scope: {api_made}");
+    assert_eq!(api_made["name"], "", "an API-created cron minted a name: {api_made}");
+    assert_eq!(api_made["action_id"], "");
     rt.shutdown().await;
 }
 

@@ -96,3 +96,41 @@ attacker-chosen raw IPC IDs, SQL and collection propagation, whole-transaction
 pinning, Core-derived jobs versus forged payload provenance, public/internal
 calls, legacy protocol behavior, and attempts to call `set_config` from app
 SQL.
+
+## Amendment (2026-09-04): the structural scope is opt-in per action
+
+Partitioning the worker by action was correct and remains the only way to make
+the invocation identity unforgeable. What the original decision did not price is
+that the partition is a Bun process.
+
+Measured: one worker of a customer app costs 36 MB marginal (70 MB RSS), and the
+default tenant pod is limited to 512 MiB. That app declares 58 actions. The key
+is `(app, identity, scope)`, so twenty users touching ten distinct actions inside
+the reaper's idle window is 221 processes, about fifteen times the pod limit. A
+single user exercising a dozen actions is enough to OOM the tenant. The guarantee
+was therefore paid for by every app, while no app used it: no policy, trigger or
+Core query reads `rootcx.invocation_kind`, `rootcx.invocation_name` or
+`rootcx.action_id` outside the test suite.
+
+An action, or a manifest cron, now declares `isolatedScope: true` to receive it.
+
+- Declared: unchanged from point 2 above. A dedicated process, the invocation
+  settings populated, action A's process unable to claim action B.
+- Not declared (the default): the call shares its caller's identity worker and
+  the invocation settings are **empty**, not borrowed. A policy or trigger
+  written against them denies the write instead of trusting a value a
+  neighbouring action could have supplied. The failure is closed and immediate.
+
+A cron created through the HTTP API is never isolated: authority to pose an
+invocation identity comes from the deployed manifest, not from a runtime call.
+
+Rejected alternative: keep one shared process and carry the scope on each IPC
+message. Point 3 above already rules it out and remains right. The echoed ID is
+app-controlled, so with two scopes live in one process either could claim the
+other. Serialising distinct scopes would close that hole but deadlocks on
+`ctx.action` re-entry, which dispatches a second scope and waits for it.
+
+Unchanged: the route still requires `app:{app}:action:{id}` for every declared
+action. That check lives in the route, before dispatch, and does not depend on
+the worker key. Only the database-level invariant is opt-in.
+

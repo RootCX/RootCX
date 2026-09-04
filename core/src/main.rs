@@ -8,6 +8,34 @@ use rootcx_core::{Runtime, server};
 use rootcx_platform::service::ServiceConfig;
 use tracing_subscriber::EnvFilter;
 
+/// Resolve when the supervisor asks this process to stop.
+///
+/// Kubernetes ends a pod with SIGTERM, which only ctrl_c was listened for. With
+/// no handler the default disposition killed the core instantly: no HTTP drain,
+/// and every job in flight lost its lease and was redelivered, so a routine
+/// deploy re-ran the tenant's automations. SIGINT stays for an interactive run.
+#[cfg(unix)]
+async fn termination_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut term = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("cannot listen for SIGTERM, shutdown will not be graceful: {e}");
+            tokio::signal::ctrl_c().await.ok();
+            return;
+        }
+    };
+    tokio::select! {
+        _ = term.recv() => tracing::info!("SIGTERM received"),
+        _ = tokio::signal::ctrl_c() => tracing::info!("interrupt received"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn termination_signal() {
+    tokio::signal::ctrl_c().await.ok();
+}
+
 fn api_port() -> u16 {
     std::env::var("ROOTCX_PORT")
         .ok()
@@ -111,7 +139,7 @@ async fn main() {
 
     let (rt2, pf2) = (Arc::clone(&rt), pid_file.clone());
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
+        termination_signal().await;
         if daemon { let _ = std::fs::remove_file(&pf2); }
         rt2.shutdown().await;
         std::process::exit(0);
