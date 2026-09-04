@@ -371,6 +371,24 @@ fn coerce_f64_vec(value: &JsonValue) -> Vec<f64> {
     }
 }
 
+/// The boolean expression for a field's enum CHECK, or `None` if it has no enum.
+///
+/// Lives here because it is a fact about the field's TYPE. Table creation and
+/// schema sync both need it, and when each carried its own copy only one of them
+/// learned that an array column takes `<@` (every element in the set) where a
+/// scalar takes `IN`. The other emitted `IN` on an array, which PostgreSQL reads
+/// as an array literal and refuses.
+pub(crate) fn enum_check_expr(field: &FieldContract) -> Option<String> {
+    let vals = field.enum_values.as_ref().filter(|v| !v.is_empty())?;
+    let col = crate::manifest::quote_ident(&field.name);
+    let list = vals.iter().map(|v| format!("'{}'", v.replace('\'', "''"))).collect::<Vec<_>>().join(", ");
+    let field_type = FieldType::from_field(field).ok()?;
+    Some(match field_type {
+        FieldType::TextArray => format!("{col} <@ ARRAY[{list}]::TEXT[]"),
+        _ => format!("{col} IN ({list})"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,5 +546,43 @@ mod tests {
                 "type={field_type}: {error}"
             );
         }
+    }
+
+
+    /// Both call sites depend on the exact shape, and one of them was written
+    /// without the array form: `IN` on an array makes PostgreSQL read the first
+    /// value as an array literal and refuse the table.
+    #[test]
+    fn enum_check_expr_scalar_and_array() {
+        let named = |name: &str, ty: &str| {
+            let mut f = field(ty, None, None);
+            f.name = name.into();
+            f
+        };
+        let with = |name: &str, ty: &str, vals: &[&str]| {
+            let mut f = named(name, ty);
+            f.enum_values = Some(vals.iter().map(|v| v.to_string()).collect());
+            f
+        };
+
+        assert_eq!(
+            enum_check_expr(&with("color", "text", &["red", "blue"])).unwrap(),
+            r#""color" IN ('red', 'blue')"#,
+        );
+        assert_eq!(
+            enum_check_expr(&with("tags", "[text]", &["a", "b"])).unwrap(),
+            r#""tags" <@ ARRAY['a', 'b']::TEXT[]"#,
+        );
+        // Single quotes are doubled: broken-SQL and injection guard.
+        assert_eq!(
+            enum_check_expr(&with("note", "text", &["a'b"])).unwrap(),
+            r#""note" IN ('a''b')"#,
+        );
+
+        assert!(enum_check_expr(&named("plain", "text")).is_none(), "no enum, no check");
+        assert!(
+            enum_check_expr(&with("e", "text", &[])).is_none(),
+            "an empty list must not emit the invalid `col IN ()`",
+        );
     }
 }

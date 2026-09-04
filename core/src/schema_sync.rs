@@ -655,19 +655,6 @@ fn check_spec_hash(expr: &str) -> String {
     fnv1a_hex(&expr.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
-/// The boolean expression for a field's enum CHECK, or None if it has no enum.
-/// Array columns (TEXT[]) use `<@` (every element in the set); scalars use `IN`.
-fn enum_check_expr(field: &FieldContract) -> Option<String> {
-    let vals = field.enum_values.as_ref().filter(|v| !v.is_empty())?;
-    let col = quote_ident(&field.name);
-    let list = vals.iter().map(|v| format!("'{}'", v.replace('\'', "''"))).collect::<Vec<_>>().join(", ");
-    let field_type = FieldType::from_field(field).ok()?;
-    Some(match field_type {
-        FieldType::TextArray => format!("{col} <@ ARRAY[{list}]::TEXT[]"),
-        _ => format!("{col} IN ({list})"),
-    })
-}
-
 /// Resolved name → expression for every CHECK the core owns on an entity:
 /// enum-derived (`chk_<entity>_<field>`) + declarative (`entity.checks`, explicit
 /// name or `chk_<entity>_<hash>`). Rejects duplicate names. Hashes are derived on
@@ -675,7 +662,7 @@ fn enum_check_expr(field: &FieldContract) -> Option<String> {
 fn desired_checks(entity: &EntityContract) -> Result<HashMap<String, String>, String> {
     let mut by_name: HashMap<String, String> = HashMap::new();
     for f in &entity.fields {
-        if let Some(expr) = enum_check_expr(f) {
+        if let Some(expr) = crate::data_types::enum_check_expr(f) {
             let name = format!("chk_{}_{}", entity.entity_name, f.name);
             if by_name.insert(name.clone(), expr).is_some() {
                 return Err(format!("duplicate check name '{name}' on '{}'", entity.entity_name));
@@ -1183,28 +1170,6 @@ mod tests {
     }
 
     // ── declarative CHECK reconcile (pure logic) ─────────────────────
-
-    #[test]
-    fn enum_check_expr_scalar_and_array() {
-        let mut scalar = mfield("color", "text");
-        scalar.enum_values = Some(vec!["red".into(), "blue".into()]);
-        assert_eq!(enum_check_expr(&scalar).unwrap(), r#""color" IN ('red', 'blue')"#);
-
-        let mut arr = mfield("tags", "[text]");
-        arr.enum_values = Some(vec!["a".into(), "b".into()]);
-        assert_eq!(enum_check_expr(&arr).unwrap(), r#""tags" <@ ARRAY['a', 'b']::TEXT[]"#);
-
-        // single quotes in values are doubled — broken-SQL / injection guard
-        let mut quoted = mfield("note", "text");
-        quoted.enum_values = Some(vec!["a'b".into()]);
-        assert_eq!(enum_check_expr(&quoted).unwrap(), r#""note" IN ('a''b')"#);
-
-        assert!(enum_check_expr(&mfield("plain", "text")).is_none(), "no enum → no check");
-        // empty list → no check (guards against invalid `col IN ()`)
-        let mut empty = mfield("e", "text");
-        empty.enum_values = Some(vec![]);
-        assert!(enum_check_expr(&empty).is_none(), "empty enum_values → no check");
-    }
 
     #[test]
     fn desired_checks_merges_enum_and_explicit() {

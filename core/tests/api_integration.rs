@@ -473,6 +473,44 @@ async fn a_table_created_by_a_migration_is_governed_like_any_other() {
     rt.shutdown().await;
 }
 
+/// An array column whose values are constrained by `enum_values`.
+///
+/// Two code paths build that CHECK: table creation and schema sync. Only the
+/// sync copy learned that an array needs `<@` rather than `IN`, so creating the
+/// table failed on `malformed array literal` while altering one succeeded. A
+/// customer app carrying such a field could no longer be installed at all.
+#[tokio::test]
+async fn an_array_field_constrained_by_enum_values_can_be_created() {
+    let rt = TestRuntime::boot().await;
+    let (status, body) = rt.post_json("/api/v1/apps", &json!({
+        "appId": "arrenum", "name": "Array enum", "version": "1.0.0",
+        "dataContract": [{
+            "entityName": "volunteer_profile",
+            "fields": [
+                { "name": "label", "type": "text" },
+                { "name": "expertise", "type": "[text]",
+                  "enum_values": ["mentor", "coach", "expert"] }
+            ]
+        }]
+    })).await;
+    assert_eq!(status, 200, "array field with enum_values failed to install: {body}");
+
+    let ok = rt.create("arrenum", "volunteer_profile",
+        &json!({"label": "a", "expertise": ["mentor", "coach"]})).await;
+    assert!(ok["id"].is_string(), "a permitted set must be accepted: {ok}");
+
+    let (status, denied) = rt.post_json(
+        "/api/v1/apps/arrenum/collections/volunteer_profile",
+        &json!({"label": "b", "expertise": ["mentor", "not-a-listed-value"]}),
+    ).await;
+    assert_ne!(
+        status, 201,
+        "the CHECK must still reject a value outside the set, or creating the \
+         table silently dropped the constraint: {denied}",
+    );
+    rt.shutdown().await;
+}
+
 #[tokio::test]
 async fn jobs_enqueue_and_list() {
     let rt = TestRuntime::boot().await;

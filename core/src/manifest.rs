@@ -280,13 +280,14 @@ fn field_to_column(field: &rootcx_types::FieldContract, pk_types: &HashMap<Strin
 
     let col_def = parts.join(" ");
 
-    if let Some(ref enum_values) = field.enum_values
-        && !enum_values.is_empty() {
-            let values_list: Vec<String> = enum_values.iter().map(|v| format!("'{}'", v.replace('\'', "''"))).collect();
-            return format!("{col_def} CHECK ({col_name} IN ({}))", values_list.join(", "));
-        }
-
-    col_def
+    // The same rule as the sync path, from the same function. Written twice, only
+    // the sync copy learned that an array column needs `<@` rather than `IN`, so
+    // creating a table with an array enum field failed on `malformed array
+    // literal` while altering one succeeded.
+    match crate::data_types::enum_check_expr(field) {
+        Some(expr) => format!("{col_def} CHECK ({expr})"),
+        None => col_def,
+    }
 }
 
 async fn load_entity(
@@ -1082,15 +1083,22 @@ mod tests {
         assert!(col.contains("DEFAULT 'N/A'"), "expected DEFAULT 'N/A' in: {col}");
     }
 
+    /// The CHECK a column carries must follow the column's type. The exact
+    /// expressions are `data_types::enum_check_expr_scalar_and_array`; what is
+    /// verified here is that creation DELEGATES to it. It did not, and emitted
+    /// the scalar form on an array, which PostgreSQL refuses outright.
     #[test]
-    fn field_to_column_with_enum() {
+    fn a_created_column_takes_the_enum_check_for_its_own_type() {
         let pk_types = HashMap::new();
-        let mut f = field("color", "text");
-        f.enum_values = Some(vec!["red".to_string(), "blue".to_string()]);
-        let col = field_to_column(&f, &pk_types);
-        assert!(col.contains("CHECK"), "expected CHECK in: {col}");
-        assert!(col.contains("'red'"), "expected 'red' in: {col}");
-        assert!(col.contains("'blue'"), "expected 'blue' in: {col}");
+        for (ty, expected) in [("text", "IN ("), ("[text]", "<@")] {
+            let mut f = field("color", ty);
+            f.enum_values = Some(vec!["red".to_string(), "blue".to_string()]);
+            let col = field_to_column(&f, &pk_types);
+            assert!(
+                col.contains("CHECK") && col.contains(expected),
+                "{ty}: expected a CHECK using `{expected}` in: {col}",
+            );
+        }
     }
 
     #[test]
