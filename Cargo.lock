@@ -6237,7 +6237,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-cli"
-version = "0.17.2"
+version = "0.17.3"
 dependencies = [
  "anyhow",
  "clap",
