@@ -153,16 +153,26 @@ async fn try_auto_sync_connect(
     let user_id: uuid::Uuid = pending.user_id.parse().ok()?;
     let caller = Some(crate::principal::resolve_caller_pinned(pool, user_id, conn_id.to_string()).await?);
 
-    let (config, user_credentials, effective_uid, resolved_conn) = super::connections::resolve_by_connection_id(
+    let (config, user_credentials, effective_uid, resolved_conn) = match super::connections::resolve_by_connection_id(
         secrets, pool, &pending.integration_id, conn_id, &pending.user_id,
-    ).await;
+    ).await {
+        Ok(r) => r,
+        // Dead-flagging happened inside the renewal; surface the cause to the page.
+        Err(e) => return Some(("unauthorized".into(), e.message().to_string())),
+    };
 
     match wm.rpc(
         &pending.integration_id, Uuid::new_v4().to_string(), "__integration".into(),
-        json!({ "action": "sync_connect", "input": {}, "config": config, "userCredentials": user_credentials, "userId": effective_uid, "connectionId": resolved_conn }),
+        json!({ "action": "sync_connect", "input": {}, "config": config, "userCredentials": user_credentials, "userId": effective_uid, "connectionId": resolved_conn.clone() }),
         caller,
     ).await {
         Ok(res) if res.get("ok").and_then(|v| v.as_bool()) == Some(false) => {
+            // The one send path that skipped the post-call funnel. It is also the
+            // first call a new connection ever makes, so a credential rejected here
+            // was reported as connected until the next action happened to fail.
+            super::connections::flag_if_auth_failed(
+                pool, &pending.integration_id, resolved_conn.as_deref(), &res,
+            ).await;
             let err = res.get("error");
             let code = err.and_then(|e| e.get("code")).and_then(|v| v.as_str()).unwrap_or("UNKNOWN");
             let msg = err.and_then(|e| e.get("message")).and_then(|v| v.as_str()).unwrap_or("");

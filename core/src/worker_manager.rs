@@ -860,11 +860,11 @@ impl IntegrationCaller for IntegrationCallImpl {
         // inherited from a parent call), resolve against that connection directly
         // instead of the ORDER BY created_at fallback that picks the oldest.
         let pinned = caller.as_ref().and_then(|c| c.connection_id.as_deref());
-        let (config, user_credentials, effective_uid, conn_id) = if let Some(cid) = pinned {
+        let resolved = if let Some(cid) = pinned {
             let resolved = crate::extensions::integrations::connections::resolve_by_connection_id(
                 &self.secrets, pool, integration_id, cid, &user_id.to_string(),
             ).await;
-            if resolved.3.is_none() {
+            if matches!(&resolved, Ok(r) if r.3.is_none()) {
                 tracing::warn!(integration_id, connection_id = cid, "pinned connection vanished or has no credentials");
             }
             resolved
@@ -872,6 +872,14 @@ impl IntegrationCaller for IntegrationCallImpl {
             crate::extensions::integrations::connections::resolve_credentials(
                 &self.secrets, pool, integration_id, &user_id.to_string(), app_id,
             ).await
+        };
+        // A renewal that reached the provider and could not be stored must not be
+        // papered over: report it as the credential failure it is. Dead-flagging
+        // already happened inside the renewal, which is the only layer that knows
+        // whether the provider's answer was terminal.
+        let (config, user_credentials, effective_uid, conn_id) = match resolved {
+            Ok(r) => r,
+            Err(e) => return Ok(e.envelope()),
         };
 
         // `caller` is the RLS identity the sub-worker runs under; `effective_uid`

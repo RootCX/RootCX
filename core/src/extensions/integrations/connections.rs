@@ -8,7 +8,6 @@ use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::routes::{self, SharedRuntime};
 
-const CONN_PREFIX: &str = "_conn";
 /// Binding-scope sentinel in app_integrations.user_id: '' = app-wide default.
 pub(crate) const APP_WIDE: &str = "";
 const SCOPE_USER: &str = "user";
@@ -268,22 +267,33 @@ pub(crate) async fn flag_if_auth_failed(
     }
 }
 
-/// The integration worker's `INSUFFICIENT_PERMISSIONS` (which Gmail returns for
-/// `invalid_grant`) signals dead credentials; return its message, else None.
-fn auth_failure_message(result: &JsonValue) -> Option<String> {
+/// Error codes that mean "the provider rejected these credentials".
+///
+/// A closed set owned here, never read from a manifest: this list is what an
+/// untrusted worker can say to kill its own connection, so it grows only
+/// deliberately.
+///
+/// `forbidden` is absent because a 403 is usually a missing scope on one endpoint
+/// rather than a dead credential. That is not a guarantee the Core can make alone:
+/// the bundled Google integrations already map their own 403s onto
+/// INSUFFICIENT_PERMISSIONS (`google_calendar/lib/errors.ts:78`), so for those the
+/// decision sits in the integration and not here.
+const AUTH_FAILURE_CODES: [&str; 2] = ["INSUFFICIENT_PERMISSIONS", "unauthorized"];
+
+/// A worker's credential-rejection envelope; return its message, else None.
+pub(super) fn auth_failure_message(result: &JsonValue) -> Option<String> {
     if result.get("ok").and_then(|v| v.as_bool()) != Some(false) {
         return None;
     }
     let err = result.get("error")?;
-    if err.get("code").and_then(|v| v.as_str()) == Some("INSUFFICIENT_PERMISSIONS") {
-        Some(err.get("message").and_then(|v| v.as_str()).unwrap_or_default().to_string())
-    } else {
-        None
-    }
+    let code = err.get("code").and_then(|v| v.as_str())?;
+    AUTH_FAILURE_CODES.contains(&code).then(|| {
+        err.get("message").and_then(|v| v.as_str()).unwrap_or_default().to_string()
+    })
 }
 
 pub(crate) fn credential_key(connection_id: &str) -> String {
-    format!("{CONN_PREFIX}.{connection_id}")
+    format!("{}{connection_id}", crate::secrets::CONN_KEY_PREFIX)
 }
 
 /// Find user's first live direct (non-delegation) connection for an integration.
@@ -339,7 +349,7 @@ pub(crate) fn manage_perm(integration_id: &str) -> String {
 pub(crate) async fn resolve_credentials(
     secrets: &crate::secrets::SecretManager, pool: &sqlx::PgPool,
     integration_id: &str, user_id: &str, app_id: Option<&str>,
-) -> (JsonValue, JsonValue, String, Option<String>) {
+) -> Result<Resolved, super::oauth::RenewError> {
     // 1. Explicit app binding — the user's own (app × user) row wins over the
     //    app-wide ('') default. This is what lets the same user route app A
     //    through one mailbox and app B through another.
@@ -396,13 +406,22 @@ pub(crate) async fn resolve_credentials(
 
     let config = super::routes::resolve_config_scoped(pool, secrets, integration_id, None)
         .await.unwrap_or(JsonValue::Null);
-    (config, JsonValue::Null, user_id.to_string(), None)
+    Ok((config, JsonValue::Null, user_id.to_string(), None))
 }
 
+/// `(config, credentials, effective_user_id, connection_id)`.
+pub(crate) type Resolved = (JsonValue, JsonValue, String, Option<String>);
+
+/// Resolve a connection's config and credentials, renewing the access token first
+/// when the Core manages this connection's OAuth.
+///
+/// Fallible only because of renewal: a renewal that reached the provider and then
+/// failed to persist must fail the call, since the refresh token it consumed is
+/// gone and serving the access token anyway would hide that until the next call.
 pub(crate) async fn resolve_by_connection_id(
     secrets: &crate::secrets::SecretManager, pool: &sqlx::PgPool,
     integration_id: &str, connection_id: &str, fallback_user: &str,
-) -> (JsonValue, JsonValue, String, Option<String>) {
+) -> Result<Resolved, super::oauth::RenewError> {
     let conn_key = credential_key(connection_id);
     // The connection's config_id pins which OAuth client refreshes its token.
     let row: Option<(String, Option<String>)> = sqlx::query_as(
@@ -417,9 +436,12 @@ pub(crate) async fn resolve_by_connection_id(
     match secrets.get(pool, integration_id, &conn_key).await {
         Ok(Some(raw)) => {
             let creds: JsonValue = serde_json::from_str(&raw).unwrap_or(JsonValue::Null);
-            (config, creds, effective_user, Some(connection_id.to_string()))
+            let creds = super::oauth::credentials_for_worker(
+                pool, secrets, integration_id, connection_id, &config, creds,
+            ).await?;
+            Ok((config, creds, effective_user, Some(connection_id.to_string())))
         }
-        _ => (config, JsonValue::Null, fallback_user.to_string(), None),
+        _ => Ok((config, JsonValue::Null, fallback_user.to_string(), None)),
     }
 }
 
@@ -669,6 +691,10 @@ mod tests {
                 json!({ "data": {} }), None),
             ("a non-auth error is not a credential failure",
                 json!({ "ok": false, "error": { "code": "TEMPORARY_ERROR", "message": "rate limited" } }), None),
+            ("a provider's own rejection code flags dead, not just Gmail's spelling",
+                json!({ "ok": false, "error": { "code": "unauthorized", "message": "invalid_grant" } }), Some("invalid_grant")),
+            ("forbidden is a missing scope on one endpoint, never a dead credential",
+                json!({ "ok": false, "error": { "code": "forbidden", "message": "insufficient scope" } }), None),
             ("failure without an error object is not classified",
                 json!({ "ok": false }), None),
             ("INSUFFICIENT_PERMISSIONS flags dead and carries its message",

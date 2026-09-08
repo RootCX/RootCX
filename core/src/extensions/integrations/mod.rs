@@ -1,6 +1,7 @@
 pub(crate) mod auth;
 mod catalog;
 pub(crate) mod connections;
+pub(crate) mod oauth;
 pub(crate) mod routes;
 
 use async_trait::async_trait;

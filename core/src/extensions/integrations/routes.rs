@@ -18,9 +18,22 @@ pub(super) fn platform_secret_map(manifest: &JsonValue) -> Vec<(String, String)>
     let Some(props) = manifest.pointer("/configSchema/properties").and_then(|v| v.as_object()) else {
         return vec![];
     };
-    props.iter().filter_map(|(field, def)| {
+    let mapped: Vec<(String, String)> = props.iter().filter_map(|(field, def)| {
         def.get("platformSecret").and_then(|v| v.as_str()).map(|key| (field.clone(), key.to_string()))
-    }).collect()
+    }).collect();
+
+    // Two fields sharing one secret key are aliases: a value written through the
+    // innocuous one is read back under the other. That turns any field the Core
+    // itself acts on into something app code can set, so an ambiguous mapping is
+    // dropped whole rather than resolved to one side.
+    let mut seen = std::collections::HashMap::<&str, usize>::new();
+    for (_, key) in &mapped {
+        *seen.entry(key.as_str()).or_default() += 1;
+    }
+    mapped.iter()
+        .filter(|(_, key)| seen[key.as_str()] == 1)
+        .cloned()
+        .collect()
 }
 
 pub(crate) async fn query_installed_integrations(pool: &sqlx::PgPool) -> Result<Vec<JsonValue>, sqlx::Error> {
@@ -84,6 +97,14 @@ pub async fn save_platform_config(
         json!({ "config": full_config }), None,
     ).await {
         if let Some(merge) = result.get("mergeConfig").and_then(|v| v.as_object()) {
+            // `__bind` lets a worker report values it discovered (an API base, a
+            // tenant id). It must not reach the fields the Core itself acts on: a
+            // worker that could set `tokenUrl` would choose where the Core posts
+            // that connection's refresh token and this client's secret.
+            let merge: serde_json::Map<_, _> = merge.iter()
+                .filter(|(k, _)| !super::oauth::CORE_OWNED_CONFIG.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             save_config_secrets_at(&pool, &secrets, PLATFORM_SCOPE, &secret_map, &json!(merge)).await?;
         }
     }
@@ -130,7 +151,11 @@ pub async fn execute_action(
     // config + creds resolve together: the chosen connection pins its OAuth client.
     let (config, user_credentials, effective_uid, conn_id) = super::connections::resolve_credentials(
         &secrets, &pool, &integration_id, &target_user, caller_app,
-    ).await;
+    // A rejected grant is the caller's to fix by reconnecting, not our failure.
+    ).await.map_err(|e| match e {
+        super::oauth::RenewError::Rejected(m) => ApiError::Forbidden(m),
+        super::oauth::RenewError::Transient(m) => ApiError::Internal(m),
+    })?;
 
     // Resolving to a connection owned by someone else (via an app-wide shared
     // binding) means sending AS that user — gated by the manage permission, not
@@ -521,4 +546,46 @@ async fn fetch_config_at(
         }
     }
     if config.is_empty() { Ok(JsonValue::Null) } else { Ok(JsonValue::Object(config)) }
+}
+
+#[cfg(test)]
+mod config_map_tests {
+    use super::platform_secret_map;
+    use serde_json::json;
+
+    /// The mapping decides which stored secret each config field reads and writes, so
+    /// an ambiguity here is what lets a value written through an innocuous field be
+    /// read back under a field the Core acts on, such as the OAuth token endpoint.
+    #[test]
+    fn a_field_maps_to_a_secret_key_only_when_that_mapping_is_unambiguous() {
+        // (case, configSchema properties, expected field -> key pairs)
+        let cases: &[(&str, serde_json::Value, &[(&str, &str)])] = &[
+            ("a distinct key maps normally",
+                json!({ "clientId": { "platformSecret": "A" } }),
+                &[("clientId", "A")]),
+            ("two fields sharing one key are dropped whole, so the Core fails closed",
+                json!({
+                    "tokenUrl": { "platformSecret": "SHARED" },
+                    "apiBase":  { "platformSecret": "SHARED" },
+                    "clientId": { "platformSecret": "OWN" },
+                }),
+                &[("clientId", "OWN")]),
+            ("a field without a platformSecret is not config at all",
+                json!({ "label": { "type": "string" } }),
+                &[]),
+            ("no configSchema means nothing to map",
+                json!({}),
+                &[]),
+        ];
+
+        for (case, props, expected) in cases {
+            let manifest = json!({ "configSchema": { "properties": props } });
+            let mut mapped = platform_secret_map(&manifest);
+            mapped.sort();
+            let mut want: Vec<(String, String)> =
+                expected.iter().map(|(f, k)| (f.to_string(), k.to_string())).collect();
+            want.sort();
+            assert_eq!(mapped, want, "case: {case}");
+        }
+    }
 }

@@ -12,6 +12,11 @@ use crate::RuntimeError;
 const NONCE_LEN: usize = 12;
 const KEY_LEN: usize = 32;
 
+/// Key namespace for per-connection credentials. Declared here, next to the
+/// store that must hold them back from the process environment, so the rule and
+/// the name it depends on cannot drift apart.
+pub(crate) const CONN_KEY_PREFIX: &str = "_conn.";
+
 fn secret_err(msg: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::Secret(msg.to_string())
 }
@@ -22,7 +27,7 @@ pub struct SecretManager {
 
 #[cfg(test)]
 impl SecretManager {
-    fn with_key(key: &[u8; 32]) -> Self {
+    pub(crate) fn with_key(key: &[u8; 32]) -> Self {
         Self { cipher: Aes256Gcm::new_from_slice(key).unwrap() }
     }
 }
@@ -126,9 +131,17 @@ impl SecretManager {
         Ok(r.rows_affected() > 0)
     }
 
+    /// The app's secrets as process environment, minus per-connection credentials.
+    ///
+    /// A connection's credential belongs to whoever owns that connection, and a
+    /// worker is entitled to exactly the one it is currently acting on, which the
+    /// core hands it per call. Passing the whole namespace as environment gives
+    /// every worker every user's credential for the life of the process, which is
+    /// both wider than the work requires and impossible to narrow afterwards.
     pub async fn get_env_for_app(&self, pool: &PgPool, app_id: &str) -> Result<HashMap<String, String>, RuntimeError> {
         let mut env: HashMap<String, String> = self.get_all_for_app(pool, "_platform").await?.into_iter().collect();
         for (k, v) in self.get_all_for_app(pool, app_id).await? {
+            if k.starts_with(CONN_KEY_PREFIX) { continue }
             env.insert(k, v);
         }
         Ok(env)

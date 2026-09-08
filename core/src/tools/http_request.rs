@@ -232,7 +232,7 @@ async fn send_with_redirects(
     Err("redirect loop terminated unexpectedly".into())
 }
 
-fn build_client(
+pub(crate) fn build_client(
     timeout_ms: u64,
     url: &Url,
     resolved_addrs: &[SocketAddr],
@@ -373,7 +373,7 @@ fn apply_query(url: &mut Url, value: Option<&JsonValue>) -> Result<(), String> {
     Ok(())
 }
 
-async fn resolve_allowed_url(url: &Url) -> Result<Vec<SocketAddr>, String> {
+pub(crate) async fn resolve_allowed_url(url: &Url) -> Result<Vec<SocketAddr>, String> {
     if !matches!(url.scheme(), "http" | "https") {
         return Err("only http and https URLs are allowed".into());
     }

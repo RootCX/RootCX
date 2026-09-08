@@ -294,3 +294,31 @@ async fn bind_rejects_connection_not_owned_by_caller() {
 
     rt.shutdown().await;
 }
+
+/// A worker's process environment must never carry connection credentials.
+///
+/// `get_env_for_app` returns every key under the app id, and an integration's
+/// connection credentials are stored under that same id. Left unfiltered, one
+/// integration worker holds every user's credential for the life of the process,
+/// long after the call that needed one has ended.
+#[tokio::test]
+async fn connection_credentials_stay_out_of_worker_environment() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+    let conn = create_connection(&rt, &rt.token, "test_integ", "Account A").await;
+
+    let secrets = rt.runtime.secret_manager();
+    secrets.set(rt.pool(), "test_integ", "PLAIN_KEY", "visible").await.unwrap();
+
+    let env = secrets.get_env_for_app(rt.pool(), "test_integ").await.unwrap();
+
+    let leaked: Vec<_> = env.keys().filter(|k| k.starts_with("_conn.")).collect();
+    assert!(leaked.is_empty(), "connection credentials reached the worker environment: {leaked:?}");
+    assert!(env.contains_key("PLAIN_KEY"), "ordinary app secrets must still reach the worker");
+
+    // Withholding must not mean discarding: the core still resolves it per call.
+    let stored = secrets.get(rt.pool(), "test_integ", &format!("_conn.{conn}")).await.unwrap();
+    assert!(stored.is_some(), "the credential must remain stored for the core to resolve");
+
+    rt.shutdown().await;
+}
