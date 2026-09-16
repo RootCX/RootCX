@@ -12,18 +12,26 @@ impl Tool for CallActionTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "call_action".into(),
-            description: "Execute an action exposed by an app. Use list_actions to discover available actions and their input schemas.".into(),
+            description: concat!(
+                "Execute a declared app action and return its raw result. Use list_actions to discover actions and input schemas. ",
+                "Requires tool:call_action and effective app:<app>:invoke OR app:<app>:action:<action> permission. ",
+                "Collection grants do not authorize this call; the target retains the caller's delegated permission ceiling. ",
+                "Requires agent execution context. Not offered in the workflow palette or generic HTTP tool list; ",
+                "workflow saves and generic HTTP execution reject this tool. Collection grants cannot enable it there."
+            ).into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "app": { "type": "string", "description": "The app ID that exposes the action" },
-                    "action": { "type": "string", "description": "The action ID to execute" },
+                    "app": { "type": "string", "description": "Installed target app ID (argument name is app, not invoke_agent's app_id)" },
+                    "action": { "type": "string", "description": "Action ID declared in the target app's manifest; discover with list_actions" },
                     "input": { "type": "object", "description": "Action input matching the action's inputSchema", "default": {} }
                 },
                 "required": ["app", "action"]
             }),
         }
     }
+
+    fn requires_agent_context(&self) -> bool { true }
 
     async fn execute(&self, ctx: &ToolContext) -> Result<JsonValue, String> {
         let app = str_arg(&ctx.args, "app")?;

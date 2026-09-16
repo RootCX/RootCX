@@ -167,6 +167,10 @@ impl Drop for InFlightGuard {
 /// Resolve the responsible human's permissions, or drop the message (terminal —
 /// perms won't change on redelivery).
 async fn perms_or_fail(pool: &PgPool, msg_id: i64, uid: uuid::Uuid) -> Option<Vec<String>> {
+    if crate::principal::resolve_caller(pool, uid).await.is_none() {
+        let _ = jobs::fail(pool, msg_id).await;
+        return None;
+    }
     match crate::governance::authority::resolve_permissions(pool, uid).await {
         Ok((_, perms)) => Some(perms),
         Err(e) => {
@@ -298,7 +302,19 @@ async fn dispatch_manual_workflow(
     read_ct: i32,
     exec_id: uuid::Uuid,
     user_id: Option<uuid::Uuid>,
+    app_id: &str,
 ) {
+    // Check the complete Core binding before any status mutation, including DLQ.
+    let bound = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.workflow_executions
+         WHERE id = $1 AND app_id = $2 AND run_as_user_id = $3 AND lease_msg_id = $4)",
+    ).bind(exec_id).bind(app_id).bind(user_id).bind(msg_id)
+        .fetch_one(pool).await.unwrap_or(false);
+    if !bound {
+        let _ = jobs::dead_letter(pool, msg_id, &serde_json::json!({"app_id": app_id}),
+            "workflow execution binding denied").await;
+        return;
+    }
     if read_ct > MAX_DELIVERIES {
         warn!(msg_id, read_ct, %exec_id, "manual workflow exceeded max deliveries → dead-letter");
         let raw = serde_json::json!({"manual": true, "execution_id": exec_id});
@@ -339,14 +355,19 @@ impl Dispatcher {
     /// archived, deleted, dead-lettered, or deliberately left to redeliver.
     async fn handle(&self, msg_id: i64, read_ct: i32, job_msg: jobs::JobMessage) {
         let Dispatcher { pool, wm, tool_registry, events, in_flight } = self;
-        let is_hook = job_msg.payload.get("_hook").and_then(|v| v.as_bool()) == Some(true);
+        if job_msg.kind.is_none() {
+            let raw = serde_json::to_value(&job_msg).unwrap_or_default();
+            let _ = jobs::dead_letter(pool, msg_id, &raw, "legacy job has no trusted provenance; re-enqueue through Core").await;
+            return;
+        }
+        let is_hook = matches!(job_msg.kind, Some(jobs::JobKind::Hook));
         let is_agent = job_msg.payload.get("action_type").and_then(|v| v.as_str()) == Some("agent");
         let is_workflow = job_msg.payload.get("action_type").and_then(|v| v.as_str()) == Some("workflow");
 
         // Manual run: execution already created by the HTTP handler.
-        if is_workflow && job_msg.payload.get("manual").and_then(|v| v.as_bool()) == Some(true) {
+        if matches!(job_msg.kind, Some(jobs::JobKind::WorkflowManual)) {
             match job_msg.payload.get("execution_id").and_then(|v| v.as_str()).and_then(|s| s.parse().ok()) {
-                Some(exec_id) => dispatch_manual_workflow(pool, tool_registry, events, in_flight, msg_id, read_ct, exec_id, job_msg.user_id).await,
+                Some(exec_id) => dispatch_manual_workflow(pool, tool_registry, events, in_flight, msg_id, read_ct, exec_id, job_msg.user_id, &job_msg.app_id).await,
                 None => {
                     warn!(msg_id, "manual workflow: missing execution_id");
                     let _ = jobs::fail(pool, msg_id).await;
@@ -387,9 +408,7 @@ impl Dispatcher {
         }
 
         // Cron-triggered invocations.
-        // Legacy payload cron_id remains routing-compatible, but only Core-owned
-        // envelope provenance may grant job scope.
-        let is_cron = job_msg.cron_id.is_some() || job_msg.payload.get("cron_id").is_some();
+        let is_cron = matches!(job_msg.kind, Some(jobs::JobKind::Cron));
         let cron_workflow_id = job_msg.payload.get("workflow_id").and_then(|v| v.as_str());
 
         if let (true, Some(wf_id)) = (is_cron, cron_workflow_id) {
@@ -459,12 +478,44 @@ impl Dispatcher {
             .unwrap_or(None),
             None => None,
         };
-        let caller = crate::principal::resolve_caller(pool, uid).await;
-        if let Err(e) = wm.dispatch_job(
+        let Some(mut caller) = crate::principal::resolve_caller(pool, uid).await else {
+            let _ = jobs::fail(pool, msg_id).await;
+            return;
+        };
+        let mut identity = crate::governance::enforcement::ContextState::from_caller(Some(&caller));
+        if let Some(authority) = job_msg.authority {
+            let Ok((_, current)) = crate::governance::authority::resolve_permissions(pool, uid).await else {
+                let _ = jobs::fail(pool, msg_id).await;
+                return;
+            };
+            identity.is_delegated = authority.is_delegated;
+            identity.effective_perms = crate::governance::authority::intersect_permissions(
+                &authority.effective_perms, &current,
+            );
+            if let Some(actor) = authority.principal_id {
+                if crate::principal::resolve_caller(pool, actor).await.is_none()
+                    || (authority.requires_delegation
+                        && !crate::governance::delegation::is_valid(pool, uid, actor).await.unwrap_or(false))
+                {
+                    let _ = jobs::fail(pool, msg_id).await;
+                    return;
+                }
+                identity.effective_perms = crate::governance::authority::delegated_effective(
+                    pool, actor, Some(uid), Some(&identity.effective_perms),
+                ).await;
+            }
+            identity.connection_id = authority.connection_id;
+            identity.audit_actor_id = authority.audit_actor_id;
+            identity.audit_delegator_id = authority.audit_delegator_id;
+            caller.effective_perms = identity.is_delegated.then(|| identity.effective_perms.clone());
+            caller.connection_id = identity.connection_id.clone();
+        }
+        if let Err(e) = wm.dispatch_job_with_identity(
             &job_msg.app_id,
             msg_id.to_string(),
             job_msg.payload,
             caller,
+            identity,
             cron_name.as_deref(),
         ).await {
             warn!(msg_id, "dispatch failed: {e}");

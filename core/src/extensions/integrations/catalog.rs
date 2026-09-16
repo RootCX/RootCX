@@ -157,7 +157,7 @@ pub async fn undeploy(
     .execute(&pool)
     .await?;
 
-    crate::manifest::uninstall_app(&pool, &id).await
+    crate::manifest::uninstall_app(&pool, &id, Some(identity.user_id)).await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     if app_dir.exists() {

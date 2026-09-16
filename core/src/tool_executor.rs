@@ -28,7 +28,7 @@ pub(crate) async fn execute(
     call_id: String,
 ) {
     let ctx = ToolContext {
-        pool, app_id, user_id, invoker_user_id, permissions, task_scope, args,
+        pool, core_bound_app_id: Some(app_id.clone()), app_id, user_id, invoker_user_id, permissions, task_scope, args,
         agent_dispatch, integration_caller, action_caller, stream_tx: stream_tx.clone(),
         idempotency_key: None,
     };

@@ -56,6 +56,10 @@ pub trait ActionCaller: Send + Sync {
 
 pub struct ToolContext {
     pub pool: PgPool,
+    /// Core-bound application identity for governed app-to-app capabilities.
+    /// `None` means the context came from the generic human HTTP tool route;
+    /// request payloads must never be promoted to an application source.
+    pub core_bound_app_id: Option<String>,
     pub app_id: String,
     pub user_id: Uuid,
     pub invoker_user_id: Option<Uuid>,
@@ -70,6 +74,16 @@ pub struct ToolContext {
     /// Tools that cause side effects use it to make a retry / crash-resume a no-op
     /// instead of a duplicate. `None` outside durable workflow runs.
     pub idempotency_key: Option<String>,
+}
+
+impl ToolContext {
+    /// Human HTTP calls use their authenticated user. A bound agent still needs
+    /// its responsible human; missing delegation must not become actor authority.
+    pub fn data_user_id(&self) -> Option<Uuid> {
+        self.invoker_user_id.or_else(|| {
+            self.core_bound_app_id.is_none().then_some(self.user_id)
+        })
+    }
 }
 
 pub fn check_permission(permissions: &[String], required: &str) -> Result<(), String> {
@@ -121,6 +135,8 @@ impl BatchMode {
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;
+    /// Needs callbacks supplied by agent execution, unavailable to HTTP tools and workflows.
+    fn requires_agent_context(&self) -> bool { false }
     fn enriches_with_schema(&self) -> bool { false }
     fn batch_mode(&self) -> BatchMode { BatchMode::PerItem }
     async fn execute(&self, ctx: &ToolContext) -> Result<JsonValue, String>;
@@ -252,7 +268,7 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://localhost/test").unwrap();
         ToolContext {
-            pool, app_id: "app".into(), user_id: Uuid::nil(), invoker_user_id: None,
+            pool, core_bound_app_id: None, app_id: "app".into(), user_id: Uuid::nil(), invoker_user_id: None,
             permissions: perms, task_scope: None, args: json!({}),
             agent_dispatch: None, integration_caller: None, action_caller: None, stream_tx: None,
             idempotency_key: None,

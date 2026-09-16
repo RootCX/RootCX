@@ -67,9 +67,17 @@ pub struct Runtime {
     /// Overrides the cap derived from the pod's memory limit. Set by tests and
     /// by `ROOTCX_MAX_WORKERS`; `None` means derive it.
     max_workers: Option<usize>,
+    assistant_dir: Option<PathBuf>,
 }
 
 impl Runtime {
+    /// Use a local assistant bundle instead of downloading the release at boot.
+    /// Also allows integration tests to use a deterministic, offline worker.
+    pub fn with_assistant_dir(mut self, path: PathBuf) -> Self {
+        self.assistant_dir = Some(path);
+        self
+    }
+
     /// Cap the worker pool explicitly instead of deriving it from the pod's
     /// memory limit. Exists so the cap's behaviour at the limit is testable
     /// without a 512 MiB container.
@@ -108,6 +116,7 @@ impl Runtime {
             data_dir,
             bun_bin,
             max_workers: None,
+            assistant_dir: None,
         }
     }
 
@@ -131,6 +140,11 @@ impl Runtime {
         // but is UB in edition 2024 (not thread-safe with tokio running).
 
         schema::bootstrap(&pool).await?;
+
+        // Migrations can add foreign keys to the auth table, but the auth
+        // extension must still run after migrations so legacy username-based
+        // schemas can be transformed by their versioned migration first.
+        crate::extensions::auth::bootstrap_users_table(&pool).await?;
         sqlx::migrate!("./migrations").run(&pool).await.map_err(|e| RuntimeError::Schema(e.into()))?;
 
         let secret_manager = Arc::new(SecretManager::new(&self.data_dir)?);
@@ -160,7 +174,10 @@ impl Runtime {
         wm.init_self_ref();
         wm.spawn_reaper();
 
-        seed::seed_assistant(&pool, &self.data_dir, &self.bun_bin, &wm, &secret_manager).await?;
+        seed::seed_assistant(
+            &pool, &self.data_dir, &self.bun_bin, &wm, &secret_manager,
+            self.assistant_dir.as_deref(),
+        ).await?;
         let workflow_events = extensions::workflows::events::WorkflowEvents::default();
         let scheduler = scheduler::spawn_scheduler(pool.clone(), Arc::clone(&wm), Arc::clone(&self.tool_registry), workflow_events.clone());
         extensions::storage::spawn_upload_cleanup(pool.clone(), scheduler.cancel.clone());

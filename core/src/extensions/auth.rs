@@ -15,6 +15,30 @@ pub struct AuthExtension {
     pub config: Arc<AuthConfig>,
 }
 
+/// Create the smallest auth schema required by versioned core migrations.
+///
+/// This intentionally does not perform the auth extension's data migration.
+/// Legacy installations may still have `username` instead of `email`, and
+/// `20260321000000_replace_username_with_email.sql` must run before the full
+/// extension bootstrap touches those rows.
+pub(crate) async fn bootstrap_users_table(pool: &PgPool) -> Result<(), RuntimeError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rootcx_system.users (
+            id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            email          TEXT NOT NULL UNIQUE,
+            display_name   TEXT,
+            password_hash  TEXT,
+            is_system      BOOLEAN NOT NULL DEFAULT false,
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+        )",
+    )
+    .execute(pool)
+    .await
+    .map_err(RuntimeError::Schema)?;
+    Ok(())
+}
+
 #[async_trait]
 impl RuntimeExtension for AuthExtension {
     fn name(&self) -> &str {
@@ -22,16 +46,8 @@ impl RuntimeExtension for AuthExtension {
     }
 
     async fn bootstrap(&self, pool: &PgPool) -> Result<(), RuntimeError> {
+        bootstrap_users_table(pool).await?;
         for ddl in [
-            "CREATE TABLE IF NOT EXISTS rootcx_system.users (
-                id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                email          TEXT NOT NULL UNIQUE,
-                display_name   TEXT,
-                password_hash  TEXT,
-                is_system      BOOLEAN NOT NULL DEFAULT false,
-                created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-                updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
-            )",
             "CREATE TABLE IF NOT EXISTS rootcx_system.sessions (
                 id          UUID PRIMARY KEY,
                 user_id     UUID NOT NULL REFERENCES rootcx_system.users(id) ON DELETE CASCADE,

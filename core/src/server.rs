@@ -71,6 +71,7 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
             router = router.merge(ext_router);
         }
     }
+    router = router.merge(crate::governance::cross_app::routes());
     let auth_config = runtime.auth_config().clone();
 
     let cors = CorsLayer::new()

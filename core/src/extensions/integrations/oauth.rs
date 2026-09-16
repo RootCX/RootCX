@@ -530,15 +530,11 @@ mod tests {
         use super::super::super::connections;
         use super::super::stub;
         use super::*;
+        use crate::extensions::test_db::pool;
         use std::sync::atomic::Ordering;
 
         const APP: &str = "_oauth_test";
         const OWNER: &str = "00000000-0000-0000-0000-000000000001";
-
-        /// Bootstrapped once per test binary. Running it per test made several
-        /// bootstraps race on the same catalog rows ("tuple concurrently updated"),
-        /// which is a harness problem, not a product one.
-        static SCHEMA: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
         /// A connection as the Core finds one: a live row, a stored credential, and
         /// the provider config that decides whether the Core renews at all.
@@ -551,14 +547,7 @@ mod tests {
 
         impl Connected {
             async fn with(config: JsonValue, credential: JsonValue) -> Self {
-                let url = std::env::var("TEST_DATABASE_URL")
-                    .unwrap_or_else(|_| "postgres://rootcx:rootcx@localhost:5480/rootcx".into());
-                let pool = PgPool::connect(&url).await.expect("connect to test DB");
-                SCHEMA.get_or_init(|| async {
-                    sqlx::query("CREATE SCHEMA IF NOT EXISTS rootcx_system").execute(&pool).await.unwrap();
-                    crate::secrets::bootstrap_secrets_schema(&pool).await.unwrap();
-                    connections::bootstrap(&pool).await.unwrap();
-                }).await;
+                let pool = pool().await;
 
                 let secrets = SecretManager::with_key(&[0x5A; 32]);
                 let id = uuid::Uuid::new_v4().to_string();

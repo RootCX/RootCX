@@ -83,7 +83,10 @@ impl Principal {
                 let uid = s.user_id.map(|u| u.to_string()).unwrap_or_default();
                 let mut perms = s.effective_perms.clone();
                 perms.sort();
-                format!("{uid}|{}|{}", s.is_delegated as u8, perms.join(","))
+                // A queue continuation must not reuse a worker whose pinned
+                // credential or audit attribution belongs to another chain.
+                format!("{uid}|{}|{}|{:?}|{:?}|{:?}", s.is_delegated as u8,
+                    perms.join(","), s.connection_id, s.audit_actor_id, s.audit_delegator_id)
             }
         }
     }
@@ -657,6 +660,19 @@ impl WorkerManager {
             .dispatch_job(job_id, payload, caller).await
     }
 
+    /// Queue authority has already been revalidated by Core, including its
+    /// frozen delegated ceiling and original audit attribution.
+    pub(crate) async fn dispatch_job_with_identity(
+        &self, app_id: &str, job_id: String, payload: JsonValue,
+        caller: RpcCaller, identity: crate::governance::enforcement::ContextState,
+        cron_name: Option<&str>,
+    ) -> Result<(), RuntimeError> {
+        let principal = Principal::from_request(identity);
+        let invocation = cron_name.map(InvocationContext::job).unwrap_or_default();
+        self.get_or_spawn(app_id, principal, invocation).await?
+            .dispatch_job(job_id, payload, Some(caller)).await
+    }
+
     /// Aggregate status for an app across all its identity workers (Running if
     /// any worker is running).
     pub async fn worker_status(&self, app_id: &str) -> Result<WorkerStatus, RuntimeError> {
@@ -1032,6 +1048,24 @@ mod tests {
                     "'{}' and '{}' must not share a worker", principals[i].0, principals[j].0,
                 );
             }
+        }
+    }
+
+    #[test]
+    fn queued_credential_and_audit_chains_do_not_share_workers() {
+        let uid = Uuid::new_v4();
+        let base = ContextState {
+            user_id: Some(uid), is_delegated: true, effective_perms: vec!["app:x:*".into()],
+            connection_id: None, audit_actor_id: Some(uid), audit_delegator_id: Some(uid),
+        };
+        for field in ["connection", "actor", "delegator"] {
+            let mut different = base.clone();
+            match field {
+                "connection" => different.connection_id = Some("other-mailbox".into()),
+                "actor" => different.audit_actor_id = Some(Uuid::new_v4()),
+                _ => different.audit_delegator_id = Some(Uuid::new_v4()),
+            }
+            assert_ne!(Principal::User(base.clone()).key(), Principal::User(different).key(), "{field}");
         }
     }
 

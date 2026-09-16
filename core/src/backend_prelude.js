@@ -47,7 +47,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 //       ctx.uploadFile(content, filename, contentType),
 //       ctx.downloadFile(appId, fileId), ctx.openFile(appId, fileId),
 //       ctx.enqueueJob(payload),
-//       ctx.collection(entity).insert(data) / .update / .find / .findOne,
+//       ctx.collection(entity).find / .findPage / .findOne / .create / .insert / .update / .delete,
+//       ctx.remote(providerApp).collection(entity) — same methods, explicit provider,
 //
 //     A v2 worker MUST announce its version in the `discover` reply:
 //
@@ -63,6 +64,10 @@ import { AsyncLocalStorage } from "node:async_hooks";
 //     lifetime. The invocation ID is routing metadata, never action authority;
 //     Core fixes workflow authority outside this process.
 //
+//   v5 — adds Core-governed cross-application collections. JavaScript find
+//     returns the full equality result; findPage explicitly requests a page.
+//     Remote find uses wire findAll; legacy raw remote find remains paged.
+//
 // ──────────────── Evolution rules ────────────────
 //
 //   * Adding an OPTIONAL field to an existing outbound message → no bump.
@@ -75,7 +80,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 //   to send based on the negotiated version (see `worker_protocol` in
 //   `worker.rs`).
 
-const PROTOCOL_VERSION = 4;
+const PROTOCOL_VERSION = 5;
 
 // ─── Transport layer ─────────────────────────────────────────────────────────
 // Encapsulates the wire format and I/O channel. The rest of the prelude
@@ -266,6 +271,46 @@ function _collectionOp(invocationId, op, entity, data) {
   });
 }
 
+function _remoteCollectionOp(invocationId, providerApp, op, entity, data) {
+  const id = `rcop_${++_opSeq}`;
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (_pendingOps.has(id)) {
+        _pendingOps.delete(id);
+        reject(new Error(`ctx.remote collection ${op} on ${providerApp}.${entity}: timeout (30s)`));
+      }
+    }, 30_000);
+    _pendingOps.set(id, { resolve, reject, timer });
+    _transport.send({
+      type: "remote_collection_op", id, invocation_id: invocationId,
+      provider_app: providerApp, op, entity, data,
+    });
+  });
+}
+
+// One public collection contract; only the wire operation/payload differs.
+// Core owns query validation, permissions, and result projection.
+function _makeCollection(request, remote = false) {
+  function create(data) {
+    return request(remote ? "create" : "insert", data);
+  }
+  return {
+    find: (where = {}) => request(remote ? "findAll" : "find", where),
+    findPage: (options = {}) => request("findPage", options),
+    findOne: (where = {}) => request("findOne", where),
+    create,
+    insert: create,
+    update(idOrData, data) {
+      let id = idOrData;
+      if (arguments.length === 1 && idOrData !== null && typeof idOrData === "object") {
+        ({ id, ...data } = idOrData);
+      }
+      return request("update", remote ? { id, data } : { ...data, id });
+    },
+    delete: (id) => request("delete", { id }),
+  };
+}
+
 // SQL proxy: app SQL is executed by the core under the caller's RLS identity.
 // The app never holds a DB connection. Returns { columns, rows, rowCount }.
 // No identity travels on the message: the core binds it to this worker's sole
@@ -450,20 +495,20 @@ function _makeCtx(invocationId = null) {
       () => _selfAction("call_integration", { integrationId, action, input, asUser }),
     ),
     collection(entity) {
+      return _makeCollection((op, data) => outsideTransaction(
+        "ctx.collection", () => _collectionOp(invocation.id, op, entity, data),
+      ));
+    },
+    remote(providerApp) {
+      if (typeof providerApp !== "string" || providerApp.length === 0) {
+        throw new TypeError("ctx.remote requires a provider app id");
+      }
       return {
-        insert: (data) => outsideTransaction(
-          "ctx.collection", () => _collectionOp(invocation.id, "insert", entity, data),
-        ),
-        update: (data) => outsideTransaction(
-          "ctx.collection", () => _collectionOp(invocation.id, "update", entity, data),
-        ),
-        // Read ops use `where` as the equality map ({col: value}). Empty {} = full scan.
-        find: (where = {}) => outsideTransaction(
-          "ctx.collection", () => _collectionOp(invocation.id, "find", entity, where),
-        ),
-        findOne: (where = {}) => outsideTransaction(
-          "ctx.collection", () => _collectionOp(invocation.id, "findOne", entity, where),
-        ),
+        collection(entity) {
+          return _makeCollection((op, data) => outsideTransaction(
+            "ctx.remote", () => _remoteCollectionOp(invocation.id, providerApp, op, entity, data),
+          ), true);
+        },
       };
     },
   };

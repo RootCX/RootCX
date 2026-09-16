@@ -225,10 +225,14 @@ pub enum OutboundMessage {
 ///   Workflow-scoped workers must include `invocation_id` on collection and SQL
 ///   messages. Older workers remain valid only for non-workflow scopes.
 ///
+/// * **v5** — adds the Core-governed CRUD `remote_collection_op` message.
+///   It is accepted only from workers that negotiated v5 or newer; older workers
+///   keep their complete v1-v4 behavior and cannot opt into the new capability.
+///
 /// Adding a new version = add a const, bump the scaffold template, teach
 /// the supervisor which messages are safe to send based on the negotiated
 /// version. Never remove a version without an explicit migration plan.
-pub const LATEST_PROTOCOL_VERSION: u32 = 4;
+pub const LATEST_PROTOCOL_VERSION: u32 = 5;
 
 fn default_protocol_version() -> u32 {
     1
@@ -296,6 +300,19 @@ pub enum InboundMessage {
         id: String,
         #[serde(default)]
         invocation_id: Option<String>,
+        op: String,
+        entity: String,
+        #[serde(default)]
+        data: JsonValue,
+    },
+    /// Governed collection access to another installed application.  The
+    /// consumer app is always derived from the worker config by Core; the
+    /// message carries only the provider target and declarative lookup data.
+    RemoteCollectionOp {
+        id: String,
+        #[serde(default)]
+        invocation_id: Option<String>,
+        provider_app: String,
         op: String,
         entity: String,
         #[serde(default)]
@@ -728,6 +745,29 @@ mod tests {
         assert_eq!(op, "insert");
         assert_eq!(entity, "docs");
         assert_eq!(data, json!({"title": "test"}));
+    }
+
+    #[test]
+    fn inbound_remote_collection_op_carries_no_identity() {
+        let msg: InboundMessage = serde_json::from_str(
+            r#"{"type":"remote_collection_op","id":"c1","provider_app":"catalog","op":"find","entity":"docs","data":{"where":{"status":"published"},"limit":10}}"#
+        ).unwrap();
+        let InboundMessage::RemoteCollectionOp {
+            id,
+            provider_app,
+            op,
+            entity,
+            data,
+            ..
+        } = msg
+        else {
+            panic!("expected RemoteCollectionOp")
+        };
+        assert_eq!(id, "c1");
+        assert_eq!(provider_app, "catalog");
+        assert_eq!(op, "find");
+        assert_eq!(entity, "docs");
+        assert_eq!(data, json!({"where": {"status": "published"}, "limit": 10}));
     }
 
     #[test]

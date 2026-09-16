@@ -35,6 +35,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 pub async fn seed_assistant(
     pool: &PgPool, data_dir: &Path, bun_bin: &Path,
     wm: &WorkerManager, secrets: &SecretManager,
+    local_dir: Option<&Path>,
 ) -> Result<(), RuntimeError> {
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM rootcx_system.apps WHERE id = $1)",
@@ -44,11 +45,11 @@ pub async fn seed_assistant(
     let app_dir = data_dir.join("apps").join(APP_ID);
     std::fs::create_dir_all(&app_dir).map_err(w)?;
 
-    if let Ok(local_dir) = std::env::var(LOCAL_OVERRIDE_ENV) {
-        info!("seeding assistant from local override: {local_dir}");
-        let src = Path::new(&local_dir);
+    let env_dir = std::env::var_os(LOCAL_OVERRIDE_ENV).map(std::path::PathBuf::from);
+    if let Some(src) = local_dir.or(env_dir.as_deref()) {
+        info!("seeding assistant from local override: {}", src.display());
         if !src.join("index.ts").exists() {
-            return Err(w(format!("{LOCAL_OVERRIDE_ENV}={local_dir} does not contain index.ts")));
+            return Err(w(format!("assistant directory {} does not contain index.ts", src.display())));
         }
         copy_dir_recursive(src, &app_dir).map_err(w)?;
     } else {
@@ -80,6 +81,8 @@ pub async fn seed_assistant(
     ).bind(APP_ID).bind(serde_json::json!({
         "appId": APP_ID, "name": "Assistant", "version": "0.1.0", "type": "agent",
     })).execute(pool).await.map_err(RuntimeError::Schema)?;
+
+    crate::governance::cross_app::register_installation(pool, APP_ID).await?;
 
     if let Some(def) = agents::config::load_agent_json(&app_dir).await {
         agents::register_agent(pool, APP_ID, &def, None).await?;

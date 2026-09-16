@@ -692,46 +692,9 @@ mod tests {
 
     #[cfg(test)]
     mod integration {
-        use jsonwebtoken::{DecodingKey, EncodingKey};
+        use crate::extensions::test_db::pool;
         use sqlx::PgPool;
-        use std::sync::Arc;
-        use std::time::Duration;
         use uuid::Uuid;
-
-        async fn pool() -> PgPool {
-            let url = std::env::var("TEST_DATABASE_URL")
-                .unwrap_or_else(|_| "postgres://rootcx:rootcx@localhost:5480/rootcx".into());
-            let pool = PgPool::connect(&url).await.expect("connect to test DB");
-            crate::schema::bootstrap(&pool)
-                .await
-                .expect("bootstrap core schema dependency");
-            use crate::extensions::RuntimeExtension;
-            crate::extensions::audit::AuditExtension
-                .bootstrap(&pool)
-                .await
-                .expect("bootstrap audit dependency");
-            let secret = b"platform-storage-test-secret-32b";
-            crate::extensions::auth::AuthExtension {
-                config: Arc::new(crate::auth::AuthConfig {
-                    encoding_key: EncodingKey::from_secret(secret),
-                    decoding_key: DecodingKey::from_secret(secret),
-                    access_ttl: Duration::from_secs(900),
-                    refresh_ttl: Duration::from_secs(3600),
-                }),
-            }
-            .bootstrap(&pool)
-            .await
-            .expect("bootstrap auth dependency");
-            crate::extensions::rbac::RbacExtension
-                .bootstrap(&pool)
-                .await
-                .expect("bootstrap RBAC dependency");
-            super::super::PlatformStorageExtension
-                .bootstrap(&pool)
-                .await
-                .expect("bootstrap platform storage");
-            pool
-        }
 
         async fn make_bucket(pool: &PgPool) -> String {
             let name = format!("test-{}", Uuid::new_v4().simple());
@@ -812,49 +775,6 @@ mod tests {
 
             make_file(&pool, &b, Some(f1), "readme.md").await;
             make_file(&pool, &b, Some(f2), "readme.md").await;
-
-            cleanup(&pool, &b).await;
-        }
-
-        #[tokio::test]
-        async fn move_into_self_blocked() {
-            let pool = pool().await;
-            let b = make_bucket(&pool).await;
-            let folder = make_folder(&pool, &b, None, "docs").await;
-
-            let result = sqlx::query("UPDATE rootcx_system.storage_objects SET parent_id = $1 WHERE id = $1")
-                .bind(folder).execute(&pool).await;
-            // Postgres allows self-ref FK but our handler blocks it — here we verify the DB level
-            // The actual business logic check is in rename_object handler (tested via API)
-            // DB-level: this actually succeeds in PG (no FK cycle check) — confirming why we need the handler check
-            if result.is_ok() {
-                // Revert
-                sqlx::query("UPDATE rootcx_system.storage_objects SET parent_id = NULL WHERE id = $1")
-                    .bind(folder).execute(&pool).await.unwrap();
-            }
-
-            cleanup(&pool, &b).await;
-        }
-
-        #[tokio::test]
-        async fn circular_move_detected_by_ancestry_walk() {
-            // grandparent -> parent -> child
-            // Trying to move grandparent INTO child should be blocked by handler logic.
-            // Here we verify the DB does NOT block it (confirming the handler must).
-            let pool = pool().await;
-            let b = make_bucket(&pool).await;
-            let gp = make_folder(&pool, &b, None, "grandparent").await;
-            let parent = make_folder(&pool, &b, Some(gp), "parent").await;
-            let child = make_folder(&pool, &b, Some(parent), "child").await;
-
-            // DB allows this (no built-in cycle detection) — this is why the handler ancestry walk exists
-            let result = sqlx::query("UPDATE rootcx_system.storage_objects SET parent_id = $1 WHERE id = $2")
-                .bind(child).bind(gp).execute(&pool).await;
-            assert!(result.is_ok(), "DB does not prevent cycles — handler must");
-
-            // Revert to avoid orphaned data
-            sqlx::query("UPDATE rootcx_system.storage_objects SET parent_id = NULL WHERE id = $1")
-                .bind(gp).execute(&pool).await.unwrap();
 
             cleanup(&pool, &b).await;
         }

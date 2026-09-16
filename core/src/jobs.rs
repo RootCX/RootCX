@@ -39,7 +39,32 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobKind {
+    App,
+    Cron,
+    Hook,
+    WorkflowManual,
+}
+
+/// Written only by Core producers, never deserialized from an enqueue payload.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct JobAuthority {
+    pub is_delegated: bool,
+    pub principal_id: Option<uuid::Uuid>,
+    pub requires_delegation: bool,
+    pub effective_perms: Vec<String>,
+    pub connection_id: Option<String>,
+    pub audit_actor_id: Option<uuid::Uuid>,
+    pub audit_delegator_id: Option<uuid::Uuid>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct JobMessage {
+    #[serde(default)]
+    pub kind: Option<JobKind>,
+    #[serde(default)]
+    pub authority: Option<JobAuthority>,
     pub app_id: String,
     pub payload: JsonValue,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,13 +86,83 @@ pub struct Job {
 }
 
 pub async fn enqueue(pool: &PgPool, app_id: &str, payload: JsonValue, user_id: Option<uuid::Uuid>) -> Result<i64, RuntimeError> {
+    enqueue_message(pool, JobMessage {
+        kind: Some(JobKind::App), authority: None,
+        app_id: app_id.into(), payload, user_id, cron_id: None,
+    }).await
+}
+
+pub async fn enqueue_worker(
+    pool: &PgPool, app_id: &str, payload: JsonValue,
+    identity: &crate::governance::enforcement::ContextState,
+) -> Result<i64, RuntimeError> {
+    let Some(user_id) = identity.user_id else {
+        return Err(err("enqueueJob requires an authenticated user"));
+    };
+    // An audit actor can be an app attribution UUID with no authority principal.
+    // Freeze only an actual, distinct principal; never manufacture one from app_id.
+    let principal_id = if identity.is_delegated && identity.audit_actor_id != identity.user_id {
+        sqlx::query_scalar::<_, uuid::Uuid>(
+            "SELECT id FROM rootcx_system.users WHERE id = $1",
+        ).bind(identity.audit_actor_id).fetch_optional(pool).await.map_err(err)?
+    } else { None };
+    let requires_delegation = match principal_id {
+        // Include revoked rows: a continuation enqueued after revocation must
+        // not shed its relationship requirement merely because it is now invalid.
+        Some(actor) => sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM rootcx_system.delegations
+             WHERE delegator_uid = $1 AND delegatee_uid = $2)",
+        ).bind(user_id).bind(actor).fetch_one(pool).await.map_err(err)?,
+        None => false,
+    };
+    enqueue_message(pool, JobMessage {
+        kind: Some(JobKind::App),
+        authority: Some(JobAuthority {
+            is_delegated: identity.is_delegated,
+            principal_id,
+            requires_delegation,
+            effective_perms: identity.effective_perms.clone(),
+            connection_id: identity.connection_id.clone(),
+            audit_actor_id: identity.audit_actor_id,
+            audit_delegator_id: identity.audit_delegator_id,
+        }),
+        app_id: app_id.into(), payload, user_id: Some(user_id), cron_id: None,
+    }).await
+}
+
+pub async fn enqueue_hook(pool: &PgPool, app_id: &str, payload: JsonValue, user_id: Option<uuid::Uuid>) -> Result<i64, RuntimeError> {
+    enqueue_message(pool, JobMessage {
+        kind: Some(JobKind::Hook), authority: None,
+        app_id: app_id.into(), payload, user_id, cron_id: None,
+    }).await
+}
+
+pub async fn enqueue_manual_workflow(
+    pool: &PgPool, app_id: &str, exec_id: uuid::Uuid, user_id: uuid::Uuid,
+) -> Result<i64, RuntimeError> {
     let msg = serde_json::to_value(JobMessage {
-        app_id: app_id.to_string(), payload, user_id, cron_id: None,
+        kind: Some(JobKind::WorkflowManual), authority: None,
+        app_id: app_id.into(), user_id: Some(user_id), cron_id: None,
+        payload: serde_json::json!({"execution_id": exec_id}),
     }).map_err(err)?;
+    let mut tx = pool.begin().await.map_err(err)?;
     let (msg_id,): (i64,) = sqlx::query_as(&format!("SELECT pgmq.send('{QUEUE}', $1)"))
-        .bind(&msg).fetch_one(pool).await.map_err(err)?;
-    info!(msg_id, app_id, "job enqueued");
+        .bind(msg).fetch_one(&mut *tx).await.map_err(err)?;
+    let bound = sqlx::query(
+        "UPDATE rootcx_system.workflow_executions SET lease_msg_id = $1
+         WHERE id = $2 AND app_id = $3 AND run_as_user_id = $4
+           AND status = 'queued' AND lease_msg_id IS NULL",
+    ).bind(msg_id).bind(exec_id).bind(app_id).bind(user_id)
+        .execute(&mut *tx).await.map_err(err)?.rows_affected();
+    if bound != 1 { return Err(err("workflow execution binding denied")); }
+    tx.commit().await.map_err(err)?;
     Ok(msg_id)
+}
+
+async fn enqueue_message(pool: &PgPool, message: JobMessage) -> Result<i64, RuntimeError> {
+    let msg = serde_json::to_value(message).map_err(err)?;
+    sqlx::query_scalar(&format!("SELECT pgmq.send('{QUEUE}', $1)"))
+        .bind(msg).fetch_one(pool).await.map_err(err)
 }
 
 pub async fn enqueue_cron(
@@ -77,14 +172,13 @@ pub async fn enqueue_cron(
     payload: JsonValue,
     user_id: Option<uuid::Uuid>,
 ) -> Result<i64, RuntimeError> {
-    let msg = serde_json::to_value(JobMessage {
+    let msg_id = enqueue_message(pool, JobMessage {
+        kind: Some(JobKind::Cron), authority: None,
         app_id: app_id.to_string(),
         payload,
         user_id,
         cron_id: Some(cron_id),
-    }).map_err(err)?;
-    let (msg_id,): (i64,) = sqlx::query_as(&format!("SELECT pgmq.send('{QUEUE}', $1)"))
-        .bind(&msg).fetch_one(pool).await.map_err(err)?;
+    }).await?;
     info!(msg_id, app_id, %cron_id, "cron job enqueued");
     Ok(msg_id)
 }
@@ -241,6 +335,7 @@ mod tests {
     fn payload_cannot_forge_cron_provenance() {
         let forged = uuid::Uuid::new_v4();
         let message = serde_json::to_value(JobMessage {
+            kind: Some(super::JobKind::App), authority: None,
             app_id: "app".into(),
             payload: json!({"cron_id": forged, "type": "forged"}),
             user_id: None,

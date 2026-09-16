@@ -11,7 +11,12 @@ impl Tool for CallIntegrationTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "call_integration".into(),
-            description: "Execute an action on an installed integration. Use list_integrations first to discover available integrations and their actions/schemas.".into(),
+            description: concat!(
+                "Execute an action on an installed integration. Use list_integrations to discover integrations and action schemas. ",
+                "Requires tool:call_integration, the integration binding, and agent execution context. ",
+                "Not offered in the workflow palette or generic HTTP tool list; workflow saves and generic HTTP execution reject this tool. ",
+                "Worker ctx.callIntegration is a separate API."
+            ).into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -23,6 +28,8 @@ impl Tool for CallIntegrationTool {
             }),
         }
     }
+
+    fn requires_agent_context(&self) -> bool { true }
 
     async fn execute(&self, ctx: &ToolContext) -> Result<JsonValue, String> {
         let integration_id = str_arg(&ctx.args, "integration_id")?;

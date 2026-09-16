@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::tools::{BatchMode, DispatchError, ToolContext, ToolRegistry};
 use rootcx_types::{ControlKind, Item, WorkflowGraph, WorkflowNodeKind, WorkflowNodeRunStatus};
 
-use super::expr;
+use super::{expr, items};
 
 /// Outcome of one node, ready for the runner to persist and route. Pure: no DB
 /// writes, no retry, no should-execute decision — the durable runner owns those.
@@ -57,7 +57,7 @@ pub(crate) async fn execute_node(
 
     NodeExecution {
         status,
-        output_json: items_output_to_json(&output_items),
+        output_json: items::encode(&output_items),
         input_json,
         error,
         halt: matches!(&node.kind, WorkflowNodeKind::Control { control: ControlKind::Stop }),
@@ -75,14 +75,10 @@ fn collect_inputs_by_port(node_id: &str, graph: &WorkflowGraph, run_outputs: &Ha
     let mut ports: Vec<Vec<Item>> = (0..=max_port).map(|_| Vec::new()).collect();
     for edge in inbound {
         if let Some(output_val) = run_outputs.get(&edge.from) {
-            ports[edge.to_input as usize].extend(extract_port_items(output_val, edge.from_output));
+            ports[edge.to_input as usize].extend(items::decode_port(output_val, edge.from_output));
         }
     }
     ports
-}
-
-fn extract_port_items(output: &JsonValue, port: u8) -> Vec<Item> {
-    super::items::decode_port(output, port)
 }
 
 // ── Conversion helpers ──────────────────────────────────────────────
@@ -91,10 +87,6 @@ fn items_to_json(items: &[Item]) -> JsonValue {
     if items.is_empty() { return json!({}); }
     if items.len() == 1 { return items[0].json.clone(); }
     json!(items.iter().map(|i| &i.json).collect::<Vec<_>>())
-}
-
-fn items_output_to_json(output: &[Vec<Item>]) -> JsonValue {
-    super::items::encode(output)
 }
 
 // ── Routing ─────────────────────────────────────────────────────────
@@ -292,6 +284,7 @@ async fn execute_tool_node(
         let args = merge_args(&resolved, &item.json);
         let ctx = ToolContext {
             pool: pool.clone(),
+            core_bound_app_id: Some(app_id.into()),
             app_id: app_id.into(),
             user_id,
             invoker_user_id: Some(user_id),
@@ -313,10 +306,7 @@ async fn execute_tool_node(
                 let new_items = normalize_tool_output(v);
                 output_items.extend(new_items);
             }
-            Err(DispatchError::PermissionDenied(e)) => {
-                return (WorkflowNodeRunStatus::Failed, vec![vec![]], Some(e));
-            }
-            Err(DispatchError::ExecutionFailed(e)) => {
+            Err(DispatchError::PermissionDenied(e) | DispatchError::ExecutionFailed(e)) => {
                 return (WorkflowNodeRunStatus::Failed, vec![vec![]], Some(e));
             }
         }
@@ -377,13 +367,10 @@ pub(crate) fn topo_sort(graph: &WorkflowGraph) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
-    use rootcx_types::{WorkflowGraph, WorkflowNode, WorkflowEdge, WorkflowNodeKind, TriggerKind, ControlKind};
+    use rootcx_types::{WorkflowGraph, WorkflowNode, WorkflowEdge, WorkflowNodeKind, TriggerKind};
 
     fn trigger(id: &str) -> WorkflowNode {
         WorkflowNode { id: id.into(), kind: WorkflowNodeKind::Trigger { trigger: TriggerKind::Manual }, label: None, params: json!({}), position: [0.0, 0.0] }
-    }
-    fn control(id: &str, kind: ControlKind, params: JsonValue) -> WorkflowNode {
-        WorkflowNode { id: id.into(), kind: WorkflowNodeKind::Control { control: kind }, label: None, params, position: [0.0, 0.0] }
     }
     fn edge(from: &str, to: &str) -> WorkflowEdge {
         WorkflowEdge { from: from.into(), to: to.into(), from_output: 0, to_input: 0 }

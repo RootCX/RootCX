@@ -106,6 +106,16 @@ impl RuntimeExtension for RbacExtension {
              ON CONFLICT (key) DO NOTHING",
         ).await?;
 
+        for (key, description) in [
+            ("admin:cross_app.grants.manage", "Create, inspect and revoke cross-app collection grants"),
+            ("admin:cross_app.grants.approve", "Approve cross-app collection grants"),
+        ] {
+            exec(pool, &format!(
+                "INSERT INTO rootcx_system.rbac_permissions (key, description) \
+                 VALUES ('{key}', '{description}') ON CONFLICT (key) DO NOTHING"
+            )).await?;
+        }
+
         self.bootstrap_governance(pool).await?;
 
         // ── Migration: namespace permission keys ───────────────────────
@@ -168,6 +178,12 @@ impl RuntimeExtension for RbacExtension {
         // Always generate the invoke permission so it is grantable per role
         keys.push(format!("app:{app_id}:invoke"));
         descs.push("invoke the app's agent".into());
+
+        // Provider-local approval is separate from platform-wide grant
+        // management.  A provider owner may approve access to its own data
+        // without gaining the ability to create or revoke unrelated grants.
+        keys.push(format!("app:{app_id}:cross_app.approve"));
+        descs.push("approve cross-app collection grants targeting this app".into());
 
         // Reaching another principal's trigger is a separate, elevated grant: a
         // hook or cron receives whatever its owner can reach, so managing your
@@ -333,9 +349,11 @@ pub(crate) async fn apply_table_rls(
     let mine = owner_predicate(pool, schema, table, owners).await?;
 
     for (policy, command, action, clauses) in RLS_POLICIES {
+        let key = format!("app:{schema}:{table}.{action}");
+        let predicate = collection_gate(&key, mine.as_deref());
         set_policy(
             pool, &qt, policy, command, clauses,
-            Some(&gate(&format!("app:{schema}:{table}.{action}"))),
+            Some(&predicate),
         ).await?;
 
         // The row-scoped twin. PERMISSIVE, so Postgres ORs it with the unscoped
@@ -374,6 +392,25 @@ const RLS_POLICIES: [(&str, &str, &str, &[&str]); 4] = [
 /// instead of once per row — mandatory for perf, not cosmetic.
 fn gate(key: &str) -> String {
     format!("(SELECT rootcx_system.check_access({}))", crate::manifest::quote_literal(key))
+}
+
+fn cross_gate(key: &str) -> String {
+    format!(
+        "(SELECT rootcx_system.check_cross_app_access({}))",
+        crate::manifest::quote_literal(key),
+    )
+}
+
+fn collection_gate(key: &str, mine: Option<&str>) -> String {
+    let base = gate(key);
+    let cross = cross_gate(key);
+    match mine {
+        Some(mine) => {
+            let cross_own = cross_gate(&format!("{key}.{}", crate::manifest::OWN_SCOPE));
+            format!("({base} OR (({cross} OR {cross_own}) AND {mine}))")
+        }
+        None => format!("({base} OR {cross})"),
+    }
 }
 
 /// (Re)define one policy, or drop it when there is no predicate. Dropped first
@@ -537,7 +574,9 @@ async fn owner_predicate(
 /// app's resolver and enumerate the caller's row ids there, which apps being
 /// mutually untrusted is exactly what must not happen. The GUC is posed by
 /// `set_rls_context` before the drop to the executor, and `set_config` is revoked
-/// from that role, so an app cannot claim to be another.
+/// from that role, so an app cannot claim to be another. Core's direct human
+/// data requests may resolve ownership across apps for linked/federated reads;
+/// only the trusted HTTP transaction constructor can set that marker.
 ///
 /// `coalesce` makes an unset GUC pass rather than deny. Every path that evaluates
 /// RLS at all goes through `begin_app_tx` — the single `SET LOCAL ROLE
@@ -568,7 +607,8 @@ async fn declare_owner_resolver(
         "CREATE OR REPLACE FUNCTION {signature} RETURNS SETOF {pk_type} \
          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $rootcx$ \
          SELECT {} FROM {}.{} \
-          WHERE coalesce(nullif(current_setting('rootcx.app_id', true), ''), {own_app}) = {own_app} \
+          WHERE (current_setting('rootcx.human_data_request', true) = '1' \
+                 OR coalesce(nullif(current_setting('rootcx.app_id', true), ''), {own_app}) = {own_app}) \
             AND {mine} $rootcx$",
         quote_ident(pk), quote_ident(schema), quote_ident(entity),
     )).await?;
@@ -646,5 +686,22 @@ mod tests {
         minted.sort_unstable();
         gated.sort_unstable();
         assert_eq!(minted, gated);
+    }
+
+    #[test]
+    fn cross_app_actions_are_conjoined_with_ownership_when_present() {
+        for action in ENTITY_ACTIONS {
+            let key = format!("app:hr:profile.{action}");
+            let owned = collection_gate(&key, Some("owner_predicate"));
+            assert!(owned.contains("check_access"), "{action}");
+            assert!(owned.contains("check_cross_app_access"), "{action}");
+            assert!(owned.contains(&format!("{key}.own")), "{action}");
+            assert!(owned.contains("AND owner_predicate"), "{action}");
+
+            let unowned = collection_gate(&key, None);
+            assert!(unowned.contains("check_cross_app_access"), "{action}");
+            assert!(!unowned.contains(".own"), "{action}");
+            assert!(!unowned.contains("AND owner_predicate"), "{action}");
+        }
     }
 }

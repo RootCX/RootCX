@@ -42,20 +42,6 @@ pub(crate) fn node_item_json(output: &JsonValue, port: u8, index: usize) -> Json
         .unwrap_or(JsonValue::Null)
 }
 
-/// All items' json values from a port as an array.
-pub(crate) fn all_items_json(output: &JsonValue, port: u8) -> JsonValue {
-    output.as_array()
-        .and_then(|ports| ports.get(port as usize))
-        .and_then(|port| port.as_array())
-        .map(|items| {
-            let jsons: Vec<JsonValue> = items.iter()
-                .filter_map(|item| item.get("json").cloned())
-                .collect();
-            JsonValue::Array(jsons)
-        })
-        .unwrap_or_else(|| json!([]))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,10 +98,4 @@ mod tests {
         assert_eq!(node_item_json(&output, 0, 5), JsonValue::Null);
     }
 
-    #[test]
-    fn all_items_json_collects_port() {
-        let output = json!([[{"json": {"a": 1}}, {"json": {"a": 2}}]]);
-        assert_eq!(all_items_json(&output, 0), json!([{"a": 1}, {"a": 2}]));
-        assert_eq!(all_items_json(&output, 1), json!([]));
-    }
 }

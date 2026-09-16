@@ -1,7 +1,36 @@
-mod harness;
+use crate::harness;
 use harness::TestRuntime;
-use reqwest::Method;
+use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
+
+/// Grant the workflow's actual backing installation access to the test collection.
+async fn grant_contacts(
+    rt: &TestRuntime,
+    workflow_id: &str,
+    provider: &str,
+    actions: &[&str],
+    fields: &[&str],
+    write_fields: &[&str],
+) -> Result<(), String> {
+    let consumer: String = sqlx::query_scalar(
+        "SELECT app_id FROM rootcx_system.workflows WHERE id = $1::uuid",
+    ).bind(workflow_id).fetch_one(rt.pool()).await.map_err(|e| e.to_string())?;
+    let (status, created) = rt.post_json("/api/v1/cross-app/grants", &json!({
+        "consumerApp": consumer, "providerApp": provider, "entity": "contacts",
+        "actions": actions, "fields": fields, "writeFields": write_fields,
+    })).await;
+    if status != StatusCode::CREATED {
+        return Err(format!("request {provider} grant: {status} {created}"));
+    }
+    let id = created["id"].as_str().ok_or_else(|| format!("grant has no id: {created}"))?;
+    let (status, approved) = rt.post_json(
+        &format!("/api/v1/cross-app/grants/{id}/approve"), &json!({}),
+    ).await;
+    if status != StatusCode::OK || approved["status"] != "active" {
+        return Err(format!("approve {provider} grant: {status} {approved}"));
+    }
+    Ok(())
+}
 
 /// Runs now go through pgmq (async); poll the execution row to a terminal state.
 async fn wait_exec(rt: &TestRuntime, exec_id: &str) -> String {
@@ -84,6 +113,7 @@ async fn workflow_crud_lifecycle() {
 
     let (s, _) = rt.get_json(&format!("/api/v1/workflows/{wf_id}")).await;
     assert_eq!(s, 404);
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -95,6 +125,7 @@ async fn workflow_duplicate_name_rejected() {
 
     let (s, body) = rt.post_json("/api/v1/workflows", &json!({"name": "dup-test"})).await;
     assert_eq!(s, 400, "duplicate name should be rejected: {body}");
+    rt.shutdown().await;
 }
 
 // ── Run ──────────────────────────────────────────────────────────────
@@ -116,6 +147,7 @@ async fn workflow_run_linear_dag() {
         "SELECT count(*) FROM rootcx_system.workflow_node_runs WHERE execution_id = $1::uuid AND status = 'succeeded'",
     ).bind(exec).fetch_one(rt.pool()).await.unwrap();
     assert_eq!(succeeded, 2);
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -127,6 +159,7 @@ async fn workflow_run_disabled_returns_404() {
 
     let (s, _) = rt.post_json(&format!("/api/v1/workflows/{wf_id}/run"), &json!({})).await;
     assert_eq!(s, 404, "disabled workflow should not run");
+    rt.shutdown().await;
 }
 
 // ── Branching + Expressions ──────────────────────────────────────────
@@ -152,6 +185,7 @@ async fn workflow_if_branch_truthy_path() {
     ).bind(exec).fetch_one(rt.pool()).await.unwrap();
     // Items format: [[{"json": {"result": "Hello Test!"}}]]
     assert_eq!(yes_output[0][0]["json"]["result"], "Hello Test!");
+    rt.shutdown().await;
 }
 
 // ── Tool batch mode ──────────────────────────────────────────────────
@@ -177,6 +211,8 @@ async fn workflow_query_data_runs_once_not_per_item() {
 
     let (_, body) = rt.post_json("/api/v1/workflows", &json!({"name": "batch-once", "graph": graph})).await;
     let wf_id = body["id"].as_str().unwrap();
+    grant_contacts(&rt, wf_id, "wfbatch", &["list"], &["first_name", "last_name"], &[])
+        .await.expect("workflow collection grant");
     rt.put_json(&format!("/api/v1/workflows/{wf_id}"), &json!({"enabled": true})).await;
 
     let (s, body) = rt.post_json(&format!("/api/v1/workflows/{wf_id}/run"), &json!({})).await;
@@ -192,6 +228,7 @@ async fn workflow_query_data_runs_once_not_per_item() {
 
     assert_eq!(port0_len("src"), 2, "upstream emits 2 items (precondition)");
     assert_eq!(port0_len("dst"), 2, "downstream read runs once, not per item (would be 4)");
+    rt.shutdown().await;
 }
 
 // ── Durable runner: retry + continue-on-error ────────────────────────
@@ -224,6 +261,7 @@ async fn workflow_node_retry_exhausts_then_fails() {
     let (status, attempts, _) = node_status(&rt, exec, "bad").await.expect("bad node ran");
     assert_eq!(status, "failed");
     assert_eq!(attempts, 2, "retried up to maxAttempts");
+    rt.shutdown().await;
 }
 
 // continueOnError lets a failed node route an error item downstream instead of
@@ -258,6 +296,7 @@ async fn workflow_continue_on_error_proceeds_downstream() {
     // The failed node carries its error even though the run continued.
     let bad = node_status(&rt, exec, "bad").await.expect("bad node recorded");
     assert!(bad.2.is_some(), "error preserved for debugging");
+    rt.shutdown().await;
 }
 
 // A Stop node ends the run gracefully (succeeded) and halts everything after it.
@@ -283,6 +322,7 @@ async fn workflow_stop_node_succeeds_and_halts() {
 
     assert_eq!(node_status(&rt, exec, "stop").await.expect("stop ran").0, "succeeded");
     assert!(node_status(&rt, exec, "after").await.is_none(), "nodes after Stop are halted");
+    rt.shutdown().await;
 }
 
 // A create node sets a deterministic id derived from (execution, node, item), so a
@@ -304,6 +344,8 @@ async fn workflow_create_node_id_is_idempotent() {
     });
     let (_, body) = rt.post_json("/api/v1/workflows", &json!({"name": "idem-wf", "graph": graph})).await;
     let wf_id = body["id"].as_str().unwrap();
+    grant_contacts(&rt, wf_id, "wfidem", &["create"], &["first_name", "last_name"], &["first_name", "last_name"])
+        .await.expect("workflow collection grant");
     rt.put_json(&format!("/api/v1/workflows/{wf_id}"), &json!({"enabled": true})).await;
     let (_, run) = rt.post_json(&format!("/api/v1/workflows/{wf_id}/run"), &json!({})).await;
     let exec = run["executionId"].as_str().unwrap();
@@ -314,6 +356,7 @@ async fn workflow_create_node_id_is_idempotent() {
     assert_eq!(ids.len(), 1, "exactly one row created");
     let expected = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, format!("{exec}:make:0").as_bytes());
     assert_eq!(ids[0], expected, "row id is the deterministic idempotency uuid (resume-safe)");
+    rt.shutdown().await;
 }
 
 // bulk_create can't be made resume-safe (one multi-row INSERT), so it's refused on
@@ -335,6 +378,8 @@ async fn workflow_bulk_create_refused_on_durable_path() {
     });
     let (_, body) = rt.post_json("/api/v1/workflows", &json!({"name": "bulk-wf", "graph": graph})).await;
     let wf_id = body["id"].as_str().unwrap();
+    grant_contacts(&rt, wf_id, "wfbulk", &["create"], &["first_name", "last_name"], &["first_name", "last_name"])
+        .await.expect("workflow collection grant");
     rt.put_json(&format!("/api/v1/workflows/{wf_id}"), &json!({"enabled": true})).await;
     let (_, run) = rt.post_json(&format!("/api/v1/workflows/{wf_id}/run"), &json!({})).await;
     let exec = run["executionId"].as_str().unwrap();
@@ -344,6 +389,7 @@ async fn workflow_bulk_create_refused_on_durable_path() {
     assert!(err.unwrap_or_default().contains("not allowed inside a workflow"), "refused with guidance");
     let n: i64 = sqlx::query_scalar(r#"SELECT count(*) FROM "wfbulk"."contacts""#).fetch_one(rt.pool()).await.unwrap();
     assert_eq!(n, 0, "no rows written");
+    rt.shutdown().await;
 }
 
 // Expressions in tool node params resolve per-item (not globally over the batch).
@@ -368,6 +414,8 @@ async fn workflow_tool_node_expressions_resolve_per_item() {
     });
     let (_, body) = rt.post_json("/api/v1/workflows", &json!({"name": "expr-per-item", "graph": graph})).await;
     let wf_id = body["id"].as_str().unwrap();
+    grant_contacts(&rt, wf_id, "wfexpr", &["list", "update"], &["first_name", "last_name", "notes"], &["notes"])
+        .await.expect("workflow collection grant");
     rt.put_json(&format!("/api/v1/workflows/{wf_id}"), &json!({"enabled": true})).await;
     let (_, run) = rt.post_json(&format!("/api/v1/workflows/{wf_id}/run"), &json!({})).await;
     assert_eq!(wait_exec(&rt, run["executionId"].as_str().unwrap()).await, "succeeded");
@@ -376,6 +424,7 @@ async fn workflow_tool_node_expressions_resolve_per_item() {
         r#"SELECT notes FROM "wfexpr"."contacts" WHERE notes IS NOT NULL ORDER BY notes"#,
     ).fetch_all(rt.pool()).await.unwrap();
     assert_eq!(notes, vec!["Alice tagged", "Bob tagged"], "each item resolved its own $json.first_name");
+    rt.shutdown().await;
 }
 
 // ── SSE progress stream ──────────────────────────────────────────────
@@ -404,6 +453,7 @@ async fn workflow_run_streams_progress_over_sse() {
     assert!(text.contains("event: node"), "should stream per-node events: {text}");
     assert!(text.contains("event: done"), "should end with a terminal event: {text}");
     assert!(text.contains("\"status\":\"succeeded\""), "final status in stream: {text}");
+    rt.shutdown().await;
 }
 
 // Attaching AFTER a run has finished must still yield the full log: this drives
@@ -429,6 +479,7 @@ async fn workflow_stream_replays_a_finished_run() {
 
     assert!(text.contains("event: node"), "replays persisted node runs: {text}");
     assert!(text.contains("event: done"), "ends with the terminal event: {text}");
+    rt.shutdown().await;
 }
 
 // ── Palette ──────────────────────────────────────────────────────────
@@ -456,6 +507,7 @@ async fn workflow_node_palette_lists_tools_and_data_entities() {
         data.iter().any(|d| d["app"] == "crm" && d["entity"] == "contacts"),
         "data must enumerate installed (app, entity): got {data:?}",
     );
+    rt.shutdown().await;
 }
 
 // ── Executions list ──────────────────────────────────────────────────
@@ -478,6 +530,7 @@ async fn workflow_executions_list() {
     let execs = body.as_array().unwrap();
     assert_eq!(execs.len(), 2);
     assert!(execs.iter().all(|e| e["status"] == "succeeded"));
+    rt.shutdown().await;
 }
 
 // ── Cron trigger ─────────────────────────────────────────────────────
@@ -510,6 +563,7 @@ async fn workflow_cron_trigger_fires() {
     let execs = body.as_array().unwrap();
     assert!(!execs.is_empty(), "cron should have triggered at least one execution");
     assert_eq!(execs[0]["status"], "succeeded");
+    rt.shutdown().await;
 }
 
 // ── Record-change (hook) trigger ─────────────────────────────────────
@@ -542,6 +596,7 @@ async fn workflow_hook_trigger_fires_on_insert() {
     let execs = body.as_array().unwrap();
     assert!(!execs.is_empty(), "hook should have triggered workflow on INSERT");
     assert_eq!(execs[0]["status"], "succeeded");
+    rt.shutdown().await;
 }
 
 // Schedule crons are auto-managed: enable creates the pg_cron entry from the
@@ -561,7 +616,6 @@ async fn workflow_schedule_cron_auto_lifecycle() {
     });
     let (_, body) = rt.post_json("/api/v1/workflows", &json!({"name": "sched-auto", "graph": graph})).await;
     let wf_id = body["id"].as_str().unwrap();
-    let app_id = format!("wf-{wf_id}");
 
     // Not enabled → no cron.
     let crons: i64 = sqlx::query_scalar(
@@ -589,6 +643,7 @@ async fn workflow_schedule_cron_auto_lifecycle() {
         "SELECT count(*) FROM rootcx_system.cron_schedules WHERE payload->>'workflow_id' = $1",
     ).bind(wf_id).fetch_one(rt.pool()).await.unwrap();
     assert_eq!(crons, 0, "cron removed on disable");
+    rt.shutdown().await;
 }
 
 // Record-change hooks are auto-managed: enable creates the hook from the trigger
@@ -637,6 +692,7 @@ async fn workflow_record_change_hook_auto_lifecycle() {
         "SELECT count(*) FROM rootcx_system.entity_hooks WHERE action_config->>'workflow_id' = $1",
     ).bind(wf_id).fetch_one(rt.pool()).await.unwrap();
     assert_eq!(hooks, 0, "hook removed on disable");
+    rt.shutdown().await;
 }
 
 // ── Webhook trigger ─────────────────────────────────────────────────
@@ -679,6 +735,7 @@ async fn workflow_webhook_trigger_fires_and_passes_body() {
         "SELECT output FROM rootcx_system.workflow_node_runs WHERE execution_id = $1::uuid AND node_id = 'echo'",
     ).bind(&exec_id).fetch_one(rt.pool()).await.unwrap();
     assert_eq!(output[0][0]["json"]["got"], "pong", "webhook body propagated to downstream node");
+    rt.shutdown().await;
 }
 
 // A disabled workflow's webhook returns 404 (not 500, not silently queued).
@@ -692,6 +749,7 @@ async fn workflow_webhook_rejects_disabled() {
 
     let (s, _) = rt.post_unauthed(&format!("/api/v1/workflows/{wf_id}/webhook"), &json!({})).await;
     assert_eq!(s, 404, "disabled workflow webhook must return 404");
+    rt.shutdown().await;
 }
 
 // ── Auth boundary ────────────────────────────────────────────────────
@@ -705,6 +763,7 @@ async fn workflow_endpoints_reject_unauthenticated() {
 
     let (s, _) = rt.post_unauthed("/api/v1/workflows", &json!({"name": "x"})).await;
     assert_eq!(s, 401);
+    rt.shutdown().await;
 }
 
 // Authorization is owner-scoped: a different authenticated user must not read a
@@ -735,4 +794,5 @@ async fn workflow_access_is_owner_scoped() {
     // The owner still has access.
     let (s, _) = rt.get_json(&format!("/api/v1/workflows/{wf_id}/executions")).await;
     assert_eq!(s, 200, "owner retains access");
+    rt.shutdown().await;
 }

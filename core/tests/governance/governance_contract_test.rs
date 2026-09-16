@@ -6,7 +6,7 @@
 //! Postgres enforces a rule. After the refactor, data-plane denials surface as
 //! "0 rows" (RLS), not 403 — the assertions accept that semantics.
 
-mod harness;
+use crate::harness;
 
 use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
@@ -413,6 +413,7 @@ async fn t7_5b_call_action_tool_passes_effective_perms_to_caller() {
 
     let ctx = rootcx_core::tools::ToolContext {
         pool: pool.clone(),
+        core_bound_app_id: None,
         app_id: "crm".into(),
         user_id: Uuid::new_v4(),
         invoker_user_id: Some(Uuid::new_v4()),
@@ -473,22 +474,50 @@ async fn db_has_permission_wildcard_and_boundary() {
 
 // ── TEST 3.1 : User invoke direct (with invoke perm -> agent runs) ────
 // Attack: can a user with the correct permission invoke an agent?
-// Level: integration (HTTP). Requires live agent worker.
+// Level: integration (HTTP + raw IPC worker). No LLM required.
 #[tokio::test]
-#[ignore = "requires live agent worker; run with --ignored"]
 async fn t3_1_user_with_invoke_perm_can_invoke_agent() {
     let rt = harness::TestRuntime::boot().await;
     admin(&rt).await;
     rt.install("support", "tickets").await;
     register_agent(rt.pool(), "support").await;
+    let backend = br#"
+import { createInterface } from "node:readline";
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const message = JSON.parse(line);
+  if (message.type === "discover") {
+    send({ type: "discover", protocol: 2 });
+  } else if (message.type === "agent_invoke") {
+    send({
+      type: "agent_done", invoke_id: message.invoke_id,
+      response: "received: " + message.message, tokens: 0,
+    });
+  }
+});
+"#;
+    let (status, body) = rt.deploy(
+        "support", &harness::make_tar_gz(&[("index.ts", backend)]),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "agent fixture deploy failed: {body}");
 
     let (tok, _) = user_with(&rt, "alice@t.local", &["app:support:invoke"]).await;
-    let (s, _) = rt.request_as(
-        Method::POST, "/api/v1/apps/support/agent/invoke", &tok,
-        Some(&json!({"message": "hello"})),
-    ).await;
-    // With a live worker SSE is returned (200). Without -> 500/502.
-    assert_eq!(s, StatusCode::OK, "user with invoke perm must be able to invoke agent");
+    let response = rt.client.post(rt.url("/api/v1/apps/support/agent/invoke"))
+        .bearer_auth(&tok)
+        .json(&json!({"message": "hello"}))
+        .timeout(std::time::Duration::from_secs(30))
+        .send().await.expect("agent invoke request");
+    let status = response.status();
+    let body = response.text().await.expect("agent SSE must finish");
+    assert_eq!(status, StatusCode::OK, "user with invoke perm must be able to invoke agent: {body}");
+    let done = body.split("\n\n").find(|event| {
+        event.lines().any(|line| line.trim_end() == "event: done")
+    }).unwrap_or_else(|| panic!("agent must emit SSE done: {body}"));
+    let data = done.lines().find_map(|line| line.strip_prefix("data:"))
+        .expect("done event must contain data");
+    let result: serde_json::Value = serde_json::from_str(data).expect("done event JSON");
+    assert_eq!(result["response"], json!("received: hello"), "worker must receive the invocation: {body}");
+    assert_eq!(result["tokens"], json!(0), "fixture must complete without an LLM: {body}");
     rt.shutdown().await;
 }
 
@@ -635,6 +664,7 @@ async fn t3_12_sub_agent_invoke_with_perm_succeeds() {
     let rt = harness::TestRuntime::boot().await;
     let ctx = rootcx_core::tools::ToolContext {
         pool: rt.pool().clone(),
+        core_bound_app_id: None,
         app_id: "crm".into(),
         user_id: Uuid::new_v4(),
         invoker_user_id: Some(Uuid::new_v4()),
@@ -668,6 +698,7 @@ async fn sub_agent_invoke_requires_invoke_perm() {
     let rt = harness::TestRuntime::boot().await;
     let ctx = rootcx_core::tools::ToolContext {
         pool: rt.pool().clone(),
+        core_bound_app_id: None,
         app_id: "crm".into(),
         user_id: Uuid::new_v4(),
         invoker_user_id: Some(Uuid::new_v4()),
@@ -706,6 +737,7 @@ async fn task_scope_blocks_cross_app_sub_invoke() {
 
     let ctx = rootcx_core::tools::ToolContext {
         pool: rt.pool().clone(),
+        core_bound_app_id: None,
         app_id: "crm".into(),
         user_id: Uuid::new_v4(),
         invoker_user_id: Some(Uuid::new_v4()),
@@ -954,7 +986,7 @@ async fn call_integration_requires_binding_consent() {
 async fn count_as(pool: &sqlx::PgPool, user: Option<Uuid>, delegated: bool, perms: &str) -> i64 {
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("SET LOCAL search_path TO crm, public").execute(&mut *tx).await.unwrap();
-    sqlx::query("SELECT set_config('rootcx.user_id',$1,true), set_config('rootcx.is_delegated',$2,true), set_config('rootcx.effective_perms',$3,true)")
+    sqlx::query("SELECT set_config('rootcx.user_id',$1,true), set_config('rootcx.is_delegated',$2,true), set_config('rootcx.effective_perms',$3,true), set_config('rootcx.app_id','crm',true)")
         .bind(user.map(|u| u.to_string()).unwrap_or_default())
         .bind(if delegated { "1" } else { "0" })
         .bind(perms)
@@ -969,7 +1001,7 @@ async fn count_as(pool: &sqlx::PgPool, user: Option<Uuid>, delegated: bool, perm
 async fn count_as_billing(pool: &sqlx::PgPool, user: Option<Uuid>, delegated: bool, perms: &str) -> i64 {
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("SET LOCAL search_path TO billing, public").execute(&mut *tx).await.unwrap();
-    sqlx::query("SELECT set_config('rootcx.user_id',$1,true), set_config('rootcx.is_delegated',$2,true), set_config('rootcx.effective_perms',$3,true)")
+    sqlx::query("SELECT set_config('rootcx.user_id',$1,true), set_config('rootcx.is_delegated',$2,true), set_config('rootcx.effective_perms',$3,true), set_config('rootcx.app_id','billing',true)")
         .bind(user.map(|u| u.to_string()).unwrap_or_default())
         .bind(if delegated { "1" } else { "0" })
         .bind(perms)
@@ -984,29 +1016,14 @@ async fn count_as_billing(pool: &sqlx::PgPool, user: Option<Uuid>, delegated: bo
 async fn count_table_as(pool: &sqlx::PgPool, fqn: &str, user: Option<Uuid>, delegated: bool, perms: &str) -> i64 {
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("SET LOCAL search_path TO public").execute(&mut *tx).await.unwrap();
-    sqlx::query("SELECT set_config('rootcx.user_id',$1,true), set_config('rootcx.is_delegated',$2,true), set_config('rootcx.effective_perms',$3,true)")
+    sqlx::query("SELECT set_config('rootcx.user_id',$1,true), set_config('rootcx.is_delegated',$2,true), set_config('rootcx.effective_perms',$3,true), set_config('rootcx.app_id',$4,true)")
         .bind(user.map(|u| u.to_string()).unwrap_or_default())
         .bind(if delegated { "1" } else { "0" })
         .bind(perms)
+        .bind(fqn.split_once('.').expect("schema-qualified table").0)
         .execute(&mut *tx).await.unwrap();
     sqlx::query("SET LOCAL ROLE rootcx_app_executor").execute(&mut *tx).await.unwrap();
     let q = format!("SELECT count(*) FROM {fqn}");
-    let n: i64 = sqlx::query_scalar(&q).fetch_one(&mut *tx).await.unwrap();
-    let _ = tx.rollback().await;
-    n
-}
-
-/// Execute a cross-schema JOIN query under RLS and return row count.
-async fn join_count_as(pool: &sqlx::PgPool, sql: &str, user: Option<Uuid>, delegated: bool, perms: &str) -> i64 {
-    let mut tx = pool.begin().await.unwrap();
-    sqlx::query("SET LOCAL search_path TO public").execute(&mut *tx).await.unwrap();
-    sqlx::query("SELECT set_config('rootcx.user_id',$1,true), set_config('rootcx.is_delegated',$2,true), set_config('rootcx.effective_perms',$3,true)")
-        .bind(user.map(|u| u.to_string()).unwrap_or_default())
-        .bind(if delegated { "1" } else { "0" })
-        .bind(perms)
-        .execute(&mut *tx).await.unwrap();
-    sqlx::query("SET LOCAL ROLE rootcx_app_executor").execute(&mut *tx).await.unwrap();
-    let q = format!("SELECT count(*) FROM ({sql}) sub");
     let n: i64 = sqlx::query_scalar(&q).fetch_one(&mut *tx).await.unwrap();
     let _ = tx.rollback().await;
     n
@@ -1044,20 +1061,33 @@ async fn t1_7_cross_app_join_filters_by_user() {
     // Marie has only crm read
     let marie = db_user(pool, "marie-join@t.local", &["app:crm:contacts.read"]).await;
 
-    // Cross-app LEFT JOIN query using fully-qualified table names
+    // Raw SQL is confined to its Core-bound app, even when the caller has
+    // provider permissions. A cross-app grant must be used through ctx.remote.
     let join_sql = "SELECT c.id, i.id AS inv_id FROM crm.contacts c LEFT JOIN billing.invoices i ON TRUE";
+    for (user, provider_rows) in [(jean, 1), (marie, 0)] {
+        let state = rootcx_core::governance::enforcement::ContextState {
+            user_id: Some(user), ..Default::default()
+        };
+        let joined = rootcx_core::governance::enforcement::run_sql(
+            pool, "crm", &state, join_sql, &[],
+        ).await.unwrap();
+        assert_eq!(joined.rows.len(), 1, "the CRM row remains visible for {user}");
+        assert!(!joined.rows[0][0].is_null(), "CRM side must be readable");
+        assert!(joined.rows[0][1].is_null(), "provider side must be hidden even for Jean");
 
-    // Jean sees both sides of the JOIN (at least 1 combined row)
-    let n = join_count_as(pool, join_sql, Some(jean), false, "").await;
-    assert!(n >= 1, "Jean with both perms sees JOIN result: got {n}");
-
-    // Marie cannot see billing rows (RLS filters the billing side)
-    let billing_n = count_table_as(pool, "billing.invoices", Some(marie), false, "").await;
-    assert_eq!(billing_n, 0, "Marie without billing perm sees 0 billing rows");
-
-    // Marie can still see CRM rows
-    let crm_n = count_table_as(pool, "crm.contacts", Some(marie), false, "").await;
-    assert_eq!(crm_n, 1, "Marie with crm perm sees her crm rows");
+        let foreign = rootcx_core::governance::enforcement::run_sql(
+            pool, "crm", &state, "SELECT id FROM billing.invoices", &[],
+        ).await.unwrap();
+        assert!(foreign.rows.is_empty(), "qualified provider read must be denied for {user}");
+        let local = rootcx_core::governance::enforcement::run_sql(
+            pool, "crm", &state, "SELECT id FROM crm.contacts", &[],
+        ).await.unwrap();
+        assert_eq!(local.rows.len(), 1, "same-app CRM read remains allowed for {user}");
+        let provider = rootcx_core::governance::enforcement::run_sql(
+            pool, "billing", &state, "SELECT id FROM billing.invoices", &[],
+        ).await.unwrap();
+        assert_eq!(provider.rows.len(), provider_rows, "provider-bound reads retain user RBAC");
+    }
     rt.shutdown().await;
 }
 

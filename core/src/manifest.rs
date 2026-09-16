@@ -16,6 +16,22 @@ pub fn is_system_field(name: &str) -> bool {
     SYSTEM_FIELDS.contains(&name)
 }
 
+fn same_governance_contract(previous: &serde_json::Value, next: &serde_json::Value) -> bool {
+    let (Some(previous), Some(next)) = (previous.as_object(), next.as_object()) else {
+        return false;
+    };
+    // Compare everything except this explicit presentation allowlist, so new
+    // fields and unknown fields in a stored manifest fail closed.
+    let contract = |object: &serde_json::Map<String, serde_json::Value>| {
+        let mut contract = object.clone();
+        for key in ["name", "version", "description", "icon"] {
+            contract.remove(key);
+        }
+        contract
+    };
+    contract(previous) == contract(next)
+}
+
 pub async fn install_app(
     pool: &PgPool,
     manifest: &AppManifest,
@@ -25,70 +41,119 @@ pub async fn install_app(
 ) -> Result<(), RuntimeError> {
     validate_manifest(manifest)?;
     let app_id = &manifest.app_id;
-
-    if !manifest.data_contract.is_empty() {
-        let pk_types = build_pk_type_map(&manifest.data_contract);
-
-        sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(app_id)))
-            .execute(pool)
-            .await
-            .map_err(RuntimeError::Schema)?;
-
-        for entity in &manifest.data_contract {
-            let ddl = generate_create_table(app_id, entity, &pk_types);
-            sqlx::query(&ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
-            info!(table = %format!("{}.{}", app_id, entity.entity_name), "table ensured");
+    let manifest_json = serde_json::to_value(manifest)
+        .map_err(|e| RuntimeError::Schema(sqlx::Error::Protocol(e.to_string().into())))?;
+    let mut lifecycle = crate::governance::cross_app::lock_app_lifecycle(pool, app_id).await?;
+    let previous_manifest = load_manifest_json(pool, app_id).await?;
+    let rotated = previous_manifest.as_ref()
+        .is_some_and(|previous| !same_governance_contract(previous, &manifest_json));
+    if !rotated && previous_manifest.as_ref().is_some_and(|previous| previous != &manifest_json) {
+        let active: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM rootcx_system.app_installations WHERE app_id = $1 AND active)",
+        ).bind(app_id).fetch_one(pool).await.map_err(RuntimeError::Schema)?;
+        if active {
+            // Cosmetic updates must not rerun callbacks that assign the installer
+            // ownership or resync trigger authority. Inactive installs still need
+            // the full recovery path, never a metadata-only success.
+            register_app(pool, manifest).await?;
+            return Ok(());
         }
-
-        crate::schema_sync::sync_schema(pool, app_id, &manifest.data_contract, &pk_types).await?;
+    }
+    if rotated {
+        // A contract update is a schema/authorization boundary. Revoke the old
+        // generation before any new contract is exposed, then register a fresh
+        // generation only after the full installation succeeds below.
+        let mut tx = lifecycle.begin().await.map_err(RuntimeError::Schema)?;
+        crate::governance::cross_app::deactivate_installation_tx(
+            &mut tx, app_id, Some(installed_by), "application manifest updated",
+        ).await?;
+        tx.commit().await.map_err(RuntimeError::Schema)?;
     }
 
-    register_app(pool, manifest).await?;
+    // Installation callbacks commit through the pool. If any step fails, keep
+    // the old authority revoked: retrying installation never revives its grants.
+    let result: Result<(), RuntimeError> = async {
+        if !manifest.data_contract.is_empty() {
+            let pk_types = build_pk_type_map(&manifest.data_contract);
 
-    if !manifest.data_contract.is_empty() {
-        for ext in extensions {
+            sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(app_id)))
+                .execute(pool)
+                .await
+                .map_err(RuntimeError::Schema)?;
+
             for entity in &manifest.data_contract {
-                ext.on_table_created(pool, manifest, app_id, &entity.entity_name).await?;
+                let ddl = generate_create_table(app_id, entity, &pk_types);
+                sqlx::query(&ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
+                info!(table = %format!("{}.{}", app_id, entity.entity_name), "table ensured");
+            }
+
+            crate::schema_sync::sync_schema(pool, app_id, &manifest.data_contract, &pk_types).await?;
+        }
+
+        register_app(pool, manifest).await?;
+
+        if !manifest.data_contract.is_empty() {
+            for ext in extensions {
+                for entity in &manifest.data_contract {
+                    ext.on_table_created(pool, manifest, app_id, &entity.entity_name).await?;
+                }
+            }
+
+            for entity in &manifest.data_contract {
+                let fk_statements = generate_foreign_keys(app_id, entity, &manifest.data_contract);
+                for stmt in &fk_statements {
+                    sqlx::query(stmt).execute(pool).await.map_err(RuntimeError::Schema)?;
+                }
+                let table = &entity.entity_name;
+                if let Some(key) = &entity.identity_key {
+                    let name = format!("idx_identity_{table}_{key}");
+                    create_index(pool, app_id, table, &name, key).await?;
+                }
+                // A confined caller's every query carries `owner = <me>`, so the column
+                // needs an index or each read seq-scans the whole table. Named exactly
+                // like the foreign-key index `generate_foreign_keys` emits: when the
+                // owner is a referencing `entity_link` that index already exists and
+                // this is a no-op, rather than a second index on the same column.
+                if let Some(owner) = owner_field(entity) {
+                    let name = format!("idx_{app_id}_{table}_{owner}");
+                    create_index(pool, app_id, table, &name, owner).await?;
+                }
+                drop_orphaned_identity_indexes(pool, app_id, entity).await?;
             }
         }
 
-        for entity in &manifest.data_contract {
-            let fk_statements = generate_foreign_keys(app_id, entity, &manifest.data_contract);
-            for stmt in &fk_statements {
-                sqlx::query(stmt).execute(pool).await.map_err(RuntimeError::Schema)?;
-            }
-            let table = &entity.entity_name;
-            if let Some(key) = &entity.identity_key {
-                let name = format!("idx_identity_{table}_{key}");
-                create_index(pool, app_id, table, &name, key).await?;
-            }
-            // A confined caller's every query carries `owner = <me>`, so the column
-            // needs an index or each read seq-scans the whole table. Named exactly
-            // like the foreign-key index `generate_foreign_keys` emits: when the
-            // owner is a referencing `entity_link` that index already exists and
-            // this is a no-op, rather than a second index on the same column.
-            if let Some(owner) = owner_field(entity) {
-                let name = format!("idx_{app_id}_{table}_{owner}");
-                create_index(pool, app_id, table, &name, owner).await?;
-            }
-            drop_orphaned_identity_indexes(pool, app_id, entity).await?;
+        if !manifest.crons.is_empty() {
+            crate::crons::sync_from_manifest(pool, app_id, &manifest.crons, Some(installed_by)).await?;
         }
-    }
 
-    if !manifest.crons.is_empty() {
-        crate::crons::sync_from_manifest(pool, app_id, &manifest.crons, Some(installed_by)).await?;
-    }
+        if !manifest.webhooks.is_empty() {
+            crate::webhooks::sync_webhooks(pool, app_id, &manifest.webhooks, Some(installed_by), secrets).await?;
+        }
 
-    if !manifest.webhooks.is_empty() {
-        crate::webhooks::sync_webhooks(pool, app_id, &manifest.webhooks, Some(installed_by), secrets).await?;
-    }
+        if !manifest.actions.is_empty() {
+            sync_action_permissions(pool, app_id, &manifest.actions).await?;
+        }
 
-    if !manifest.actions.is_empty() {
-        sync_action_permissions(pool, app_id, &manifest.actions).await?;
-    }
+        for ext in extensions {
+            ext.on_app_installed(pool, manifest, installed_by).await?;
+        }
 
-    for ext in extensions {
-        ext.on_app_installed(pool, manifest, installed_by).await?;
+        // A successful install owns a fresh Core installation identity.  Grants are
+        // tied to this identity rather than only to app_id, so uninstall/reinstall
+        // can never revive a previous cross-app relationship.
+        let mut tx = lifecycle.begin().await.map_err(RuntimeError::Schema)?;
+        crate::governance::cross_app::register_installation_tx(&mut tx, app_id).await?;
+        tx.commit().await.map_err(RuntimeError::Schema)?;
+
+        Ok(())
+    }.await;
+    if let Err(error) = result {
+        if rotated {
+            return Err(RuntimeError::Conflict(format!(
+                "installation failed; previous cross-app authority remains revoked; reinstall successfully and obtain new grant approvals: {error}"
+            )));
+        }
+        return Err(error);
     }
 
     info!(
@@ -120,7 +185,20 @@ async fn create_index(
     Ok(())
 }
 
-pub async fn uninstall_app(pool: &PgPool, app_id: &str) -> Result<(), RuntimeError> {
+/// Authenticated uninstall paths retain their initiating human in grant history.
+pub async fn uninstall_app(
+    pool: &PgPool,
+    app_id: &str,
+    actor_id: Option<Uuid>,
+) -> Result<(), RuntimeError> {
+    // Keep the lifecycle lock until all cleanup completes. Cleanup failures are
+    // fail-closed and retryable: the committed revocation is never undone.
+    let mut lifecycle = crate::governance::cross_app::lock_app_lifecycle(pool, app_id).await?;
+    let mut tx = lifecycle.begin().await.map_err(RuntimeError::Schema)?;
+    crate::governance::cross_app::deactivate_installation_tx(
+        &mut tx, app_id, actor_id, "application uninstalled",
+    ).await?;
+    tx.commit().await.map_err(RuntimeError::Schema)?;
     crate::crons::delete_all_for_app(pool, app_id).await?;
 
     let drop_schema = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(app_id));
@@ -789,6 +867,34 @@ mod tests {
     use super::*;
     use rootcx_types::{EntityContract, FieldContract, FieldReference, OnDeletePolicy};
     use serde_json::json;
+
+    #[test]
+    fn governance_comparison_only_ignores_top_level_presentation_fields() {
+        let original = json!({"appId": "provider", "dataContract": []});
+        assert!(same_governance_contract(&original, &original));
+        for key in ["name", "version", "description", "icon"] {
+            let mut changed = original.clone();
+            changed[key] = json!("new presentation");
+            assert!(same_governance_contract(&original, &changed), "{key}");
+            assert!(same_governance_contract(&changed, &original), "{key} removal");
+        }
+        for key in [
+            "appId", "type", "permissions", "dataContract", "actions",
+            "configSchema", "userAuth", "webhooks", "instructions", "trigger",
+            "crons", "public", "futureAuthority",
+        ] {
+            let mut changed = original.clone();
+            changed[key] = json!({"name": "changed"});
+            assert!(!same_governance_contract(&original, &changed), "{key}");
+            assert!(!same_governance_contract(&changed, &original), "{key} removal");
+        }
+        for malformed in [json!(null), json!([]), json!("manifest")] {
+            assert!(!same_governance_contract(&malformed, &original), "{malformed}");
+        }
+        let original = json!({"dataContract": [{"fields": [{"name": "old"}]}]});
+        let changed = json!({"dataContract": [{"fields": [{"name": "new"}]}]});
+        assert!(!same_governance_contract(&original, &changed));
+    }
 
     fn field(name: &str, field_type: &str) -> FieldContract {
         FieldContract {

@@ -1,4 +1,4 @@
-mod harness;
+use crate::harness;
 
 use reqwest::{Method, StatusCode};
 use serde_json::json;
@@ -100,6 +100,7 @@ async fn invoke_agent_denied_without_permission() {
     ).await;
 
     assert_eq!(status, StatusCode::FORBIDDEN, "user without app:{{id}}:invoke should get 403");
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -115,6 +116,7 @@ async fn invoke_agent_allowed_with_wildcard() {
     ).await;
 
     assert_ne!(status, StatusCode::FORBIDDEN, "admin with '*' should pass invocation ACL");
+    rt.shutdown().await;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -133,6 +135,7 @@ async fn delegation_valid_active() {
 
     rootcx_core::governance::delegation::create(pool, uid, agent, "manual", None).await.unwrap();
     assert!(rootcx_core::governance::delegation::is_valid(pool, uid, agent).await.unwrap());
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -148,6 +151,7 @@ async fn delegation_revoked_denied() {
     let id = rootcx_core::governance::delegation::create(pool, uid, agent, "manual", None).await.unwrap();
     rootcx_core::governance::delegation::revoke(pool, id).await.unwrap();
     assert!(!rootcx_core::governance::delegation::is_valid(pool, uid, agent).await.unwrap());
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -166,6 +170,7 @@ async fn delegation_expired_denied() {
     ).bind(uid).bind(agent).execute(pool).await.unwrap();
 
     assert!(!rootcx_core::governance::delegation::is_valid(pool, uid, agent).await.unwrap());
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -178,6 +183,7 @@ async fn delegation_nonexistent_denied() {
         .bind(random_uid).execute(pool).await.unwrap();
 
     assert!(!rootcx_core::governance::delegation::is_valid(pool, random_uid, Uuid::new_v4()).await.unwrap());
+    rt.shutdown().await;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -190,6 +196,7 @@ async fn webhook_bad_token_404() {
     let res = rt.client.post(rt.url("/api/v1/hooks/nonexistent-xyz"))
         .json(&json!({})).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -204,6 +211,7 @@ async fn webhook_agent_no_owner_403() {
     let res = rt.client.post(rt.url("/api/v1/hooks/tok-noowner"))
         .json(&json!({"x":1})).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -226,6 +234,7 @@ async fn webhook_agent_revoked_delegation_403() {
     let res = rt.client.post(rt.url("/api/v1/hooks/tok-revoked"))
         .json(&json!({})).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -250,6 +259,7 @@ async fn webhook_agent_valid_delegation_accepted() {
     let s = res.status();
     assert!(s != StatusCode::FORBIDDEN && s != StatusCode::NOT_FOUND,
         "valid delegation should pass, got {s}");
+    rt.shutdown().await;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -264,6 +274,7 @@ async fn crud_legacy_token_works_unchanged() {
 
     let (status, _) = rt.get_json("/api/v1/apps/legacyapp/collections/contacts").await;
     assert_eq!(status, StatusCode::OK, "legacy token (no act) must work as before");
+    rt.shutdown().await;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -296,6 +307,7 @@ async fn audit_captures_actor_on_api_write() {
     let admin_uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
         .fetch_one(pool).await.unwrap();
     assert_eq!(actor.unwrap(), admin_uid, "actor should be the authenticated user");
+    rt.shutdown().await;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -326,6 +338,7 @@ async fn cron_creation_creates_delegation() {
 
     assert!(rootcx_core::governance::delegation::is_valid(pool, admin_uid, agent).await.unwrap(),
         "cron creation must auto-create a delegation");
+    rt.shutdown().await;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -364,6 +377,7 @@ async fn worker_permission_intersection_computed_from_db() {
 
     // Verify: has_permission passes for any app:entity permission
     assert!(rootcx_core::governance::authority::has_permission(&effective, &format!("app:{app_id}:tasks.read")));
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -417,6 +431,7 @@ async fn worker_permission_lowpriv_invoker_restricts_agent() {
     let denied_perm = format!("app:{app_id}:tasks.write");
     assert!(!rootcx_core::governance::authority::has_permission(&effective, &denied_perm),
         "effective must NOT include perms the invoker lacks (CRITICAL: escalation prevention)");
+    rt.shutdown().await;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -454,6 +469,7 @@ async fn agent_restricted_via_rbac_bounded_below_admin() {
     assert!(rootcx_core::governance::authority::has_permission(&effective, "tool:query_data"));
     assert!(!rootcx_core::governance::authority::has_permission(&effective, &format!("app:{app_id}:tasks.create")),
         "CRITICAL: agent must NOT exceed its RBAC-assigned grant");
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -465,6 +481,7 @@ async fn agent_default_gets_admin_on_first_deploy() {
 
     let (_, perms) = rootcx_core::governance::authority::resolve_permissions(pool, agent_uid).await.unwrap();
     assert!(perms.contains(&"*".to_string()), "agent gets admin on first deploy for backward compat");
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -497,6 +514,7 @@ async fn agent_redeploy_preserves_restricted_role() {
     let (_, perms) = rootcx_core::governance::authority::resolve_permissions(pool, agent_uid).await.unwrap();
     assert!(!perms.contains(&"*".to_string()),
         "CRITICAL: redeploy must not overwrite admin-assigned restricted role");
+    rt.shutdown().await;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -533,6 +551,7 @@ async fn revoke_role_invalidates_worker() {
     let statuses = wm.all_statuses().await;
     assert!(!statuses.contains_key(&app_id),
         "worker must be invalidated after role revocation (G6: instant revocation)");
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -572,6 +591,7 @@ async fn update_role_perms_invalidates_holders_workers() {
     let statuses = wm.all_statuses().await;
     assert!(!statuses.contains_key(&app_id),
         "worker must be invalidated when role permissions change (G6)");
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -605,6 +625,7 @@ async fn assign_role_invalidates_worker() {
     let statuses = wm.all_statuses().await;
     assert!(!statuses.contains_key(&app_id),
         "worker must be invalidated after role assignment (G6: perms changed)");
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -639,6 +660,7 @@ async fn delete_role_invalidates_worker() {
     let statuses = wm.all_statuses().await;
     assert!(!statuses.contains_key(&app_id),
         "worker must be invalidated after role deletion (G6: perms changed)");
+    rt.shutdown().await;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -670,6 +692,7 @@ async fn legacy_cron_backfilled_to_admin() {
     let agent = agent_uid_for(&app_id);
     assert!(rootcx_core::governance::delegation::is_valid(pool, owner.unwrap(), agent).await.unwrap(),
         "delegation should be created for backfilled cron");
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -693,6 +716,7 @@ async fn legacy_webhook_backfilled_to_admin() {
     let agent = agent_uid_for(&app_id);
     assert!(rootcx_core::governance::delegation::is_valid(pool, owner.unwrap(), agent).await.unwrap(),
         "delegation should be created for backfilled webhook");
+    rt.shutdown().await;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -713,6 +737,7 @@ async fn invoke_permission_generated_on_install() {
     ).bind(format!("app:{app_id}:invoke")).fetch_one(pool).await.unwrap();
 
     assert!(exists, "app:invpermtest:invoke permission should be auto-generated on install");
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -748,6 +773,7 @@ async fn invoke_granted_via_role_allows_access() {
     // Should pass ACL (may fail later because no worker, but NOT 403)
     assert_ne!(status, StatusCode::FORBIDDEN,
         "user with app:{{id}}:invoke should pass invocation ACL");
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -1297,6 +1323,7 @@ async fn webhook_rpc_method_not_routed_to_agent() {
     let s = res.status();
     assert_ne!(s, StatusCode::FORBIDDEN,
         "webhook with RPC method should route to RPC, not agent delegation check; got {s}");
+    rt.shutdown().await;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1343,6 +1370,7 @@ async fn webhook_fires_when_owner_has_invoke() {
     let s = res.status();
     assert!(s != StatusCode::FORBIDDEN && s != StatusCode::NOT_FOUND,
         "webhook owner with invoke permission should pass fire-time checks, got {s}");
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -1365,6 +1393,7 @@ async fn webhook_refused_when_owner_lacks_invoke() {
         .json(&json!({"data": "test"})).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN,
         "webhook owner without app:{{id}}:invoke must be refused at fire time");
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -1393,6 +1422,7 @@ async fn webhook_refused_when_owner_disabled() {
         .json(&json!({"data": "test"})).send().await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN,
         "webhook with a disabled owner must be refused at fire time (invariant #2)");
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -1406,9 +1436,13 @@ async fn cron_fires_when_owner_has_invoke() {
     let agent = agent_uid_for(&app_id);
     rootcx_core::governance::delegation::create(pool, uid, agent, "cron", None).await.unwrap();
 
+    // Model the Core cron producer's envelope, not an untrusted app payload.
+    let cron_id = Uuid::new_v4();
     let msg = json!({
+        "kind": "cron",
         "app_id": app_id,
-        "payload": {"cron_id": Uuid::new_v4().to_string(), "message": "Scheduled test"},
+        "cron_id": cron_id,
+        "payload": {"cron_id": cron_id, "message": "Scheduled test"},
         "user_id": uid.to_string()
     });
     let (msg_id,): (i64,) = sqlx::query_as("SELECT pgmq.send('jobs', $1)")
@@ -1423,6 +1457,7 @@ async fn cron_fires_when_owner_has_invoke() {
     ).bind(msg_id).fetch_optional(pool).await.unwrap();
     assert!(still_queued.is_none(),
         "cron job should have been dequeued by scheduler (invoke check passed)");
+    rt.shutdown().await;
 }
 
 #[tokio::test]
@@ -1436,9 +1471,14 @@ async fn cron_refused_when_owner_lacks_invoke() {
     let agent = agent_uid_for(&app_id);
     rootcx_core::governance::delegation::create(pool, uid, agent, "cron", None).await.unwrap();
 
+    // Trusted provenance reaches the invoke gate; legacy envelopes quarantine
+    // earlier and would not exercise the permission denial asserted below.
+    let cron_id = Uuid::new_v4();
     let msg = json!({
+        "kind": "cron",
         "app_id": app_id,
-        "payload": {"cron_id": Uuid::new_v4().to_string(), "message": "Should be refused"},
+        "cron_id": cron_id,
+        "payload": {"cron_id": cron_id, "message": "Should be refused"},
         "user_id": uid.to_string()
     });
     let (msg_id,): (i64,) = sqlx::query_as("SELECT pgmq.send('jobs', $1)")
@@ -1459,4 +1499,5 @@ async fn cron_refused_when_owner_lacks_invoke() {
     ).bind(msg_id).fetch_optional(pool).await.unwrap();
     assert!(archived.is_none(),
         "cron job should be FAILED (deleted, not archived) when owner lacks invoke permission");
+    rt.shutdown().await;
 }

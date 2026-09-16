@@ -37,19 +37,41 @@ impl Tool for MutateDataTool {
         let action = str_arg(&ctx.args, "action")?;
         let app = ctx.args.get("app").and_then(|v| v.as_str()).unwrap_or(&ctx.app_id);
 
-        let tbl = table(app, entity);
+        if action == "bulk_create" && ctx.idempotency_key.is_some() {
+            return Err("bulk_create is not allowed inside a workflow (not resumable without duplicates); use a per-item create node".into());
+        }
 
-        // RLS context for the delegated agent: user_id = responsible human,
-        // effective_perms = pre-computed intersection. Audit attributes the
-        // write to the agent (actor) on behalf of the human (delegator).
+        // Both paths use the responsible human's RLS identity and the same
+        // permission ceiling, with distinct actor/delegator audit attribution.
         let state = ContextState {
-            user_id: ctx.invoker_user_id,
+            user_id: ctx.data_user_id(),
             is_delegated: true,
             effective_perms: ctx.permissions.clone(),
             connection_id: None,
             audit_actor_id: Some(ctx.user_id),
             audit_delegator_id: ctx.invoker_user_id,
         };
+
+        if app != ctx.app_id {
+            let source = ctx.core_bound_app_id.as_deref()
+                .filter(|source| *source == ctx.app_id)
+                .ok_or("cross-app access requires a Core-bound application worker")?;
+            let data = match action {
+                "create" | "bulk_create" => ctx.args.get("data").cloned().unwrap_or(JsonValue::Null),
+                "update" => json!({"id": ctx.args.get("id"), "data": ctx.args.get("data")}),
+                "delete" => json!({"id": ctx.args.get("id")}),
+                _ => return Err(format!("unknown action: '{action}'")),
+            };
+            return crate::governance::cross_app_operations::execute(
+                &ctx.pool, source, app, action, entity, data,
+                crate::governance::cross_app_operations::OperationContext::collection(
+                    Some(state), &enforcement::InvocationContext::default(), ctx.idempotency_key.as_deref(),
+                ),
+            ).await;
+        }
+
+        let tbl = table(app, entity);
+
         let begin = || enforcement::begin_app_tx(&ctx.pool, app, &state, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool", enforcement::TIMEOUT_AGENT_TOOL_MS);
 
         match action {
@@ -124,9 +146,6 @@ impl Tool for MutateDataTool {
                 // durable workflow a crash-resume would duplicate the whole batch.
                 // Refuse it on that path (fail loud, don't corrupt) — map over items
                 // with a per-item `create` node instead, which is idempotency-keyed.
-                if ctx.idempotency_key.is_some() {
-                    return Err("bulk_create is not allowed inside a workflow (not resumable without duplicates); use a per-item create node".into());
-                }
                 let arr = ctx.args.get("data").and_then(|v| v.as_array())
                     .ok_or("'data' must be an array of objects for bulk_create")?;
                 if arr.is_empty() {

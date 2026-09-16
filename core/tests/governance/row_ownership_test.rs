@@ -6,7 +6,7 @@
 //! through the HTTP API, because the guarantee is a property of the generated SQL
 //! running as the restricted executor role — something no unit test can reach.
 
-mod harness;
+use crate::harness;
 
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -742,12 +742,16 @@ async fn the_boot_pass_rebuilds_a_delegated_chain_from_the_projection() {
 
     // Put the tenant in the state it is in before the pass runs: the projection is
     // there (it is written at deploy and survives), the artifacts derived from it
-    // are not. Policies first — a resolver cannot be dropped while one names it.
+    // are not. Policies first — both base and `_own` policies now reference
+    // ownership resolvers, because cross-app grants also enforce ownership.
     let policies: Vec<(String, String)> = sqlx::query_as(
         "SELECT tablename, policyname FROM pg_policies \
-          WHERE schemaname = 'school' AND policyname LIKE '%\\_own'",
+          WHERE schemaname = 'school' AND policyname LIKE 'rootcx\\_rls\\_%'",
     ).fetch_all(rt.pool()).await.unwrap();
-    assert_eq!(policies.len(), 12, "three owned entities, four commands each");
+    assert_eq!(
+        policies.iter().filter(|(_, policy)| policy.ends_with("_own")).count(),
+        12, "three owned entities, four scoped commands each",
+    );
     for (table, policy) in policies {
         sqlx::query(&format!("DROP POLICY {policy} ON school.{table}"))
             .execute(rt.pool()).await.unwrap();
@@ -778,5 +782,77 @@ async fn the_boot_pass_rebuilds_a_delegated_chain_from_the_projection() {
     assert_eq!(rows.len(), 1, "the rebuilt policy must confine, not deny or open: {body}");
     assert_eq!(rows[0]["note"], json!("jean"), "and confine to the caller's own root");
 
+    rt.shutdown().await;
+}
+
+// Regression: ownership through an entity_link to core:users.
+#[tokio::test]
+async fn entity_link_owner_lets_a_caller_read_its_own_app_user_row() {
+    let app = "pulsecrm";
+    // Synthetic fixture: retain only the links needed to reproduce ownership.
+    let manifest = json!({
+        "appId": app, "name": "Entity link ownership regression", "version": "1.0.0",
+        "dataContract": [
+            { "entityName": "person", "fields": [
+                { "name": "first_name", "type": "text" }
+            ]},
+            { "entityName": "app_user", "fields": [
+                { "name": "person_id", "type": "entity_link",
+                  "references": { "entity": "person", "field": "id" } },
+                { "name": "core_user_id", "type": "entity_link", "owner": true,
+                  "references": { "entity": "core:users", "field": "id" } }
+            ]}
+        ]
+    });
+
+    let rt = harness::TestRuntime::boot().await;
+    let (status, body) = rt.post_json("/api/v1/apps", &manifest).await;
+    assert_eq!(status, 200, "install failed: {body}");
+
+    // A caller with only .own sees its linked row, not another user's.
+    let email = "ownprobe@test.local";
+    let token = rt.register_and_login(email).await;
+    let uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = $1")
+        .bind(email).fetch_one(rt.pool()).await.unwrap();
+    sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1")
+        .bind(uid).execute(rt.pool()).await.unwrap();
+    let perms = vec![
+        format!("app:{app}:invoke"),
+        format!("app:{app}:app_user.read.{}", "own"),
+    ];
+    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, inherits, permissions) VALUES ('probe','{}',$1) ON CONFLICT (name) DO UPDATE SET permissions = EXCLUDED.permissions")
+        .bind(&perms).execute(rt.pool()).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1,'probe') ON CONFLICT DO NOTHING")
+        .bind(uid).execute(rt.pool()).await.unwrap();
+
+    // Two rows: one owned by the caller, one owned by somebody else.
+    // A second REAL core user: `entity_link -> core:users` earns a foreign key,
+    // so a synthetic uuid is rejected before RLS is ever reached.
+    let other_email = "otherprobe@test.local";
+    let _ = rt.register_and_login(other_email).await;
+    let other: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = $1")
+        .bind(other_email).fetch_one(rt.pool()).await.unwrap();
+    for (label, owner) in [("mine", uid), ("theirs", other)] {
+        let person: Uuid = sqlx::query_scalar(&format!(
+            "INSERT INTO {app}.person (first_name) VALUES ($1) RETURNING id"))
+            .bind(label).fetch_one(rt.pool()).await.unwrap();
+        sqlx::query(&format!(
+            "INSERT INTO {app}.app_user (person_id, core_user_id) VALUES ($1,$2)"))
+            .bind(person).bind(owner).execute(rt.pool()).await.unwrap();
+    }
+
+    let (status, rows) = rt.request_as(
+        Method::GET, &format!("/api/v1/apps/{app}/collections/app_user"), &token, None,
+    ).await;
+    assert_eq!(status, StatusCode::OK, "collection read failed: {rows}");
+    let n = rows.as_array().map(Vec::len).unwrap_or(0);
+    assert_eq!(
+        n, 1,
+        "a caller holding only app_user.read.own must see exactly its own row, saw {n}: {rows}",
+    );
+    assert_eq!(
+        rows[0]["core_user_id"], json!(uid),
+        "the visible row must belong to the caller: {rows}",
+    );
     rt.shutdown().await;
 }

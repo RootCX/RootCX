@@ -9,9 +9,9 @@ use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::governance::authority::resolve_permissions;
 use crate::routes::{self, SharedRuntime};
-use rootcx_types::WorkflowGraph;
+use rootcx_types::{WorkflowGraph, WorkflowNodeKind};
 
-use super::events::{LiveEvent, WorkflowEvent};
+use super::events::WorkflowEvent;
 
 fn wf_app_id(workflow_id: Uuid) -> String {
     format!("wf-{workflow_id}")
@@ -76,6 +76,23 @@ pub struct CreateWorkflow {
     graph: Option<WorkflowGraph>,
 }
 
+fn validate_workflow_tools(graph: &WorkflowGraph, registry: &crate::tools::ToolRegistry) -> Result<(), ApiError> {
+    for node in &graph.nodes {
+        if let WorkflowNodeKind::Tool { tool_name } = &node.kind {
+            let tool = registry.get(tool_name).ok_or_else(|| ApiError::BadRequest(
+                format!("workflow node '{}': unknown tool '{tool_name}'", node.id),
+            ))?;
+            if tool.requires_agent_context() {
+                return Err(ApiError::BadRequest(format!(
+                    "workflow node '{}': tool '{tool_name}' requires agent execution context and is unavailable in workflows",
+                    node.id,
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn create_workflow(
     identity: Identity,
     State(rt): State<SharedRuntime>,
@@ -83,7 +100,9 @@ pub async fn create_workflow(
 ) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
     let pool = routes::pool(&rt);
 
-    let graph = serde_json::to_value(body.graph.unwrap_or(WorkflowGraph { nodes: vec![], edges: vec![] }))
+    let graph = body.graph.unwrap_or(WorkflowGraph { nodes: vec![], edges: vec![] });
+    validate_workflow_tools(&graph, rt.tool_registry())?;
+    let graph = serde_json::to_value(graph)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     let wf_id = Uuid::new_v4();
@@ -121,6 +140,17 @@ pub async fn create_workflow(
             ApiError::BadRequest(format!("workflow '{}' already exists", body.name))
         } else { ApiError::Internal(e.to_string()) }
     })?;
+
+    // Workflows are Core-native applications with a system status, but they
+    // still need the same installation generation as ordinary applications so
+    // cross-app grants cannot survive their deletion.
+    sqlx::query(
+        "INSERT INTO rootcx_system.app_installations (app_id, generation)
+         VALUES ($1, 1) ON CONFLICT (app_id, generation) DO NOTHING",
+    )
+    .bind(&app_id)
+    .execute(&mut *tx)
+    .await?;
 
     tx.commit().await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": wf_id }))))
@@ -167,6 +197,16 @@ pub async fn update_workflow(
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
     authorize_workflow(&pool, identity.user_id, workflow_id).await?;
+    if let Some(graph) = &body.graph {
+        validate_workflow_tools(graph, rt.tool_registry())?;
+    } else if body.enabled == Some(true) {
+        let stored: JsonValue = sqlx::query_scalar(
+            "SELECT graph FROM rootcx_system.workflows WHERE id = $1",
+        ).bind(workflow_id).fetch_one(&pool).await?;
+        let graph: WorkflowGraph = serde_json::from_value(stored)
+            .map_err(|e| ApiError::BadRequest(format!("invalid workflow graph: {e}")))?;
+        validate_workflow_tools(&graph, rt.tool_registry())?;
+    }
     let graph_json = body.graph.map(|g| serde_json::to_value(g).unwrap_or_default());
 
     let r = sqlx::query(
@@ -204,19 +244,26 @@ pub async fn delete_workflow(
         "SELECT app_id FROM rootcx_system.workflows WHERE id = $1",
     ).bind(workflow_id).fetch_optional(&pool).await?;
 
+    let aid = app_id.ok_or_else(|| ApiError::NotFound("workflow not found".into()))?;
+    let mut lifecycle = crate::governance::cross_app::lock_app_lifecycle(&pool, &aid).await?;
+    let mut tx = lifecycle.begin().await?;
+    // Authority and deletion are one commit. A failed audit write leaves the
+    // workflow present so the caller can retry, including after a deadlock.
+    crate::governance::cross_app::deactivate_installation_tx(
+        &mut tx, &aid, Some(identity.user_id), "workflow deleted",
+    ).await?;
     let r = sqlx::query("DELETE FROM rootcx_system.workflows WHERE id = $1")
-        .bind(workflow_id).execute(&pool).await?;
+        .bind(workflow_id).execute(&mut *tx).await?;
     if r.rows_affected() == 0 { return Err(ApiError::NotFound("workflow not found".into())); }
 
-    // Remove hooks owned by this workflow before deleting the backing app.
     sqlx::query(
         "DELETE FROM rootcx_system.entity_hooks WHERE action_type = 'workflow' AND action_config->>'workflow_id' = $1",
-    ).bind(workflow_id.to_string()).execute(&pool).await.ok();
-
-    // Clean up backing app
-    if let Some(aid) = app_id {
-        sqlx::query("DELETE FROM rootcx_system.apps WHERE id = $1").bind(&aid).execute(&pool).await.ok();
-    }
+    ).bind(workflow_id.to_string()).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM rootcx_system.apps WHERE id = $1")
+        .bind(&aid)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
 
     Ok(Json(json!({ "deleted": true })))
 }
@@ -325,7 +372,7 @@ async fn sync_schedule_cron(pool: &sqlx::PgPool, workflow_id: Uuid, user_id: Uui
 
 // ── Node palette ─────────────────────────────────────────────────────
 
-/// Palette = capability tools (call_action, invoke_agent, ...) + `data`: the
+/// Palette = tools available without agent callbacks + `data`: the
 /// CRUD surface expanded per visible (app, entity). Each data entry becomes a
 /// `query_data`/`mutate_data` preset on the client; both generic tools stay in
 /// `tools` so the config panel can resolve their schema. Governance is unchanged:
@@ -336,7 +383,10 @@ pub async fn list_nodes(
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
     let (_, perms) = resolve_permissions(&pool, identity.user_id).await?;
-    let tools = rt.tool_registry().descriptors_for_permissions(&perms, &json!([]));
+    let tools: Vec<_> = rt.tool_registry().descriptors_for_permissions(&perms, &json!([]))
+        .into_iter()
+        .filter(|descriptor| rt.tool_registry().get(&descriptor.name).is_some_and(|tool| !tool.requires_agent_context()))
+        .collect();
 
     let mut data = Vec::new();
     use crate::governance::authority::has_permission;
@@ -349,7 +399,15 @@ pub async fn list_nodes(
             let Some(entities) = dc.as_array() else { continue };
             for e in entities {
                 if let Some(entity) = e.get("entityName").and_then(|v| v.as_str()) {
-                    data.push(json!({ "app": id, "appName": name, "entity": entity }));
+                    let read = format!("app:{id}:{entity}.read");
+                    let can_read = has_permission(&perms, &read)
+                        || has_permission(&perms, &format!("app:{id}:{entity}.read.own"));
+                    let can_write = ["create", "update", "delete"].iter().any(|action| {
+                        has_permission(&perms, &format!("app:{id}:{entity}.{action}"))
+                    });
+                    if can_read || can_write {
+                        data.push(json!({ "app": id, "appName": name, "entity": entity }));
+                    }
                 }
             }
         }
@@ -379,12 +437,8 @@ pub async fn run_workflow(
     let exec_id = super::runner::create_execution(&pool, workflow_id, &app_id, identity.user_id, None, None)
         .await.map_err(ApiError::Internal)?;
 
-    let payload = json!({ "action_type": "workflow", "manual": true, "execution_id": exec_id });
-    let msg_id = crate::jobs::enqueue(&pool, &app_id, payload, Some(identity.user_id))
+    crate::jobs::enqueue_manual_workflow(&pool, &app_id, exec_id, identity.user_id)
         .await.map_err(|e| ApiError::Internal(e.to_string()))?;
-    // Bind the lease so a redelivery resumes this very execution.
-    sqlx::query("UPDATE rootcx_system.workflow_executions SET lease_msg_id = $2 WHERE id = $1")
-        .bind(exec_id).bind(msg_id).execute(&pool).await?;
     rt.wake_scheduler();
 
     Ok(Json(json!({ "executionId": exec_id, "status": "queued" })))
@@ -545,7 +599,7 @@ pub async fn webhook_trigger(
         "action_config": { "workflow_id": workflow_id },
         "record": trigger_data,
     });
-    crate::jobs::enqueue(&pool, &app_id, payload, owner)
+    crate::jobs::enqueue_hook(&pool, &app_id, payload, owner)
         .await.map_err(|e| ApiError::Internal(e.to_string()))?;
     rt.wake_scheduler();
 

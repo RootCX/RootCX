@@ -3,13 +3,11 @@
 //! extension adapter there stays the lifecycle/wiring, and all schema setup lives
 //! in one place.
 
-use std::collections::HashMap;
-
 use sqlx::PgPool;
 use tracing::info;
 
 use crate::RuntimeError;
-use super::{OwnerMap, RbacExtension, apply_table_rls, exec};
+use super::{RbacExtension, exec};
 
 impl RbacExtension {
     /// One-shot migration from per-app (old) to global (new) schema.
@@ -314,14 +312,25 @@ impl RbacExtension {
              $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, rootcx_system",
         ).await?;
 
-        // The function RLS policies call. Reads the 3 identity GUCs posed by
-        // the core. is_delegated='1' → check the pre-computed intersection
-        // (empty intersection = deny all); else resolve the user from the DB.
+        // The normal function RLS policies call. Reads the identity GUCs posed
+        // by the Core. Cross-app authority is intentionally not folded into
+        // this predicate: an owned table must combine the grant with its row
+        // ownership predicate instead of letting a permissive base policy OR
+        // away the ownership check.
         exec(pool,
             "CREATE OR REPLACE FUNCTION rootcx_system.check_access(p_required TEXT)
              RETURNS BOOLEAN AS $$
              DECLARE v_user_id UUID; v_delegated TEXT; v_perms TEXT;
              BEGIN
+                 -- User permissions do not authorize a worker to leave its
+                 -- Core-bound app. Authorized remote operations explicitly
+                 -- open a provider-context transaction after grant checks.
+                 IF left(p_required, 4) = 'app:' AND
+                    coalesce(current_setting('rootcx.human_data_request', true), '') <> '1' AND
+                    split_part(p_required, ':', 2) IS DISTINCT FROM
+                        nullif(current_setting('rootcx.app_id', true), '') THEN
+                     RETURN FALSE;
+                 END IF;
                  v_user_id := nullif(current_setting('rootcx.user_id', true), '')::uuid;
                  IF v_user_id IS NULL THEN RETURN FALSE; END IF;
                  v_delegated := current_setting('rootcx.is_delegated', true);
@@ -335,10 +344,62 @@ impl RbacExtension {
              $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, rootcx_system",
         ).await?;
 
-        // Lock down EXECUTE on the RBAC helpers. Only check_access is invoked
-        // by the RLS policies (so the executor must keep it); the helpers it
-        // calls run as the SECURITY DEFINER owner, so the executor never needs
-        // direct EXECUTE on them. New functions default to EXECUTE by PUBLIC, so
+        // Cross-app authority is a separate RLS predicate. The generated
+        // CRUD policies combine it with the target's ownership expression;
+        // this keeps a provider grant from becoming an ownership bypass while
+        // still allowing grants on ordinary (non-owned) collections. Delegated
+        // calls additionally retain their frozen effective-permission ceiling;
+        // only nondelegated calls acquire action authority from the app grant.
+        exec(pool,
+            "CREATE OR REPLACE FUNCTION rootcx_system.check_cross_app_access(p_required TEXT)
+             RETURNS BOOLEAN AS $$
+             DECLARE v_grant UUID; v_source TEXT; v_target TEXT;
+                     v_perms TEXT; v_required TEXT; v_permission TEXT; v_action TEXT;
+             BEGIN
+                 IF nullif(current_setting('rootcx.user_id', true), '') IS NULL THEN
+                     RETURN FALSE;
+                 END IF;
+                 IF current_setting('rootcx.is_delegated', true) = '1' THEN
+                     v_perms := current_setting('rootcx.effective_perms', true);
+                     IF v_perms IS NULL OR v_perms = '' THEN RETURN FALSE; END IF;
+                     v_permission := p_required;
+                     v_action := current_setting('rootcx.cross_app_action', true);
+                     -- Core's fixed mutation executor needs SELECT for
+                     -- targeting and RETURNING. Use its pinned operation's
+                     -- ceiling, preserving the owned-policy scope.
+                     IF v_action IN ('create', 'update', 'delete') THEN
+                         IF right(p_required, 5) = '.read' THEN
+                             v_permission := left(p_required, length(p_required) - 5) || '.' || v_action;
+                         ELSIF right(p_required, 9) = '.read.own' THEN
+                             v_permission := left(p_required, length(p_required) - 9) || '.' || v_action || '.own';
+                         END IF;
+                     END IF;
+                     IF NOT rootcx_system.match_permission(string_to_array(v_perms, ','), v_permission) THEN
+                         RETURN FALSE;
+                     END IF;
+                 END IF;
+                 BEGIN
+                     v_grant := nullif(current_setting('rootcx.cross_app_grant_id', true), '')::uuid;
+                 EXCEPTION WHEN invalid_text_representation THEN
+                     RETURN FALSE;
+                 END;
+                 v_source := coalesce(nullif(current_setting('rootcx.cross_app_source_app', true), ''), '');
+                 v_target := coalesce(nullif(current_setting('rootcx.app_id', true), ''), '');
+                 -- Only owned-table policies call the .own entry point.
+                 -- Check that exact delegated permission before normalizing
+                 -- to the collection action stored on the app grant.
+                 v_required := CASE WHEN p_required ~ '\\.(read|create|update|delete)\\.own$'
+                                    THEN left(p_required, length(p_required) - 4)
+                                    ELSE p_required END;
+                 RETURN rootcx_system.cross_app_grant_allows(v_required, v_target, v_source, v_grant);
+             END;
+             $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, rootcx_system",
+        ).await?;
+
+        // Lock down EXECUTE on the RBAC helpers. The two policy entry points
+        // are check_access and check_cross_app_access; the helpers they call
+        // run as SECURITY DEFINER owners, so the executor never needs direct
+        // access to the RBAC tables. New functions default to EXECUTE by PUBLIC, so
         // without this an app could call resolve_permissions/has_permission with
         // an arbitrary user_id via ctx.sql and enumerate the whole RBAC graph
         // (violating Layer 2: "cannot read rootcx_system").
@@ -347,9 +408,16 @@ impl RbacExtension {
             "rootcx_system.resolve_permissions(uuid)",
             "rootcx_system.match_permission(text[], text)",
             "rootcx_system.has_permission(uuid, text)",
+            "rootcx_system.cross_app_grant_allows(text, text, text, uuid)",
+            "rootcx_system.check_cross_app_access(text)",
         ] {
             exec(pool, &format!("REVOKE EXECUTE ON FUNCTION {sig} FROM PUBLIC")).await?;
         }
+        exec(
+            pool,
+            "GRANT EXECUTE ON FUNCTION rootcx_system.check_cross_app_access(text) TO rootcx_app_executor",
+        )
+        .await?;
 
         // Retroactive RLS across every app, so tables predating a refactor — and
         // any created by a deploy-time migration since the last boot — become

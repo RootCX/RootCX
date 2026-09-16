@@ -39,7 +39,7 @@ async fn http_tx<'a>(
     identity: &Identity,
 ) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, ApiError> {
     let (actor, delegator) = identity.actor_pair();
-    Ok(enforcement::begin_app_tx(
+    Ok(enforcement::begin_human_tx(
         pool,
         app_id,
         &http_context(identity),

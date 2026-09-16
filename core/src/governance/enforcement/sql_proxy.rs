@@ -125,7 +125,11 @@ pub async fn set_rls_context(
         "SELECT set_config('rootcx.user_id', $1, true), \
                 set_config('rootcx.is_delegated', $2, true), \
                 set_config('rootcx.effective_perms', $3, true), \
-                set_config('rootcx.app_id', $4, true)",
+                set_config('rootcx.app_id', $4, true), \
+                set_config('rootcx.cross_app_grant_id', '', true), \
+                set_config('rootcx.cross_app_source_app', '', true), \
+                set_config('rootcx.cross_app_action', '', true), \
+                set_config('rootcx.human_data_request', '', true)",
     )
     .bind(uid)
     .bind(delegated)
@@ -192,6 +196,68 @@ pub async fn begin_app_tx_with_invocation<'a>(
     trigger_ref: &str,
     timeout_ms: u32,
 ) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, sqlx::Error> {
+    begin_data_tx(
+        pool, app_schema, state, invocation, audit_actor, audit_delegator,
+        trigger_ref, timeout_ms, None, DataOrigin::App,
+    ).await
+}
+
+/// Open an RLS transaction carrying a Core-authorized cross-application operation.
+/// The provider schema remains the transaction's app context; the additional
+/// source/grant GUCs are Core-set before the restricted role is applied and are
+/// consumed by the provider's RLS gate. They are never accepted from IPC/SQL.
+pub async fn begin_app_tx_with_invocation_and_cross_app<'a>(
+    pool: &'a PgPool,
+    app_schema: &str,
+    state: &ContextState,
+    invocation: &InvocationContext,
+    audit_actor: Option<Uuid>,
+    audit_delegator: Option<Uuid>,
+    trigger_ref: &str,
+    timeout_ms: u32,
+    cross_app: Option<&crate::governance::cross_app::AuthorizedRead>,
+) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, sqlx::Error> {
+    begin_data_tx(
+        pool, app_schema, state, invocation, audit_actor, audit_delegator,
+        trigger_ref, timeout_ms, cross_app, DataOrigin::App,
+    ).await
+}
+
+#[derive(Clone, Copy)]
+enum DataOrigin {
+    App,
+    HumanHttp,
+}
+
+/// Trusted direct HTTP data paths may query multiple applications under the
+/// human's own RBAC. This marker is never accepted from ContextState or IPC.
+pub(crate) async fn begin_human_tx<'a>(
+    pool: &'a PgPool,
+    app_schema: &str,
+    state: &ContextState,
+    audit_actor: Option<Uuid>,
+    audit_delegator: Option<Uuid>,
+    trigger_ref: &str,
+    timeout_ms: u32,
+) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, sqlx::Error> {
+    begin_data_tx(
+        pool, app_schema, state, &InvocationContext::default(), audit_actor,
+        audit_delegator, trigger_ref, timeout_ms, None, DataOrigin::HumanHttp,
+    ).await
+}
+
+async fn begin_data_tx<'a>(
+    pool: &'a PgPool,
+    app_schema: &str,
+    state: &ContextState,
+    invocation: &InvocationContext,
+    audit_actor: Option<Uuid>,
+    audit_delegator: Option<Uuid>,
+    trigger_ref: &str,
+    timeout_ms: u32,
+    cross_app: Option<&crate::governance::cross_app::AuthorizedRead>,
+    origin: DataOrigin,
+) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     // One round-trip; SET LOCAL scopes every value to this tx only.
     // `transaction_isolation` leads because PostgreSQL refuses it once the tx has
@@ -210,6 +276,23 @@ pub async fn begin_app_tx_with_invocation<'a>(
     );
     tx.execute(sqlx::raw_sql(&batch)).await?;
     set_rls_context(&mut tx, app_schema, state).await?;
+    if matches!(origin, DataOrigin::HumanHttp) {
+        sqlx::query("SELECT set_config('rootcx.human_data_request', '1', true)")
+            .execute(&mut *tx).await?;
+    }
+    if let Some(authority) = cross_app {
+        sqlx::query(
+            "SELECT set_config('rootcx.cross_app_grant_id', $1, true),
+                    set_config('rootcx.cross_app_source_app', $2, true),
+                    set_config('rootcx.cross_app_action', $3, true)",
+        )
+        .bind(authority.grant_id.to_string())
+        .bind(&authority.consumer_app)
+        .bind(&authority.action)
+        .execute(&mut *tx)
+        .await?;
+        crate::governance::cross_app::lock_cross_app_read_in_tx(&mut tx, authority).await?;
+    }
     set_invocation_context(&mut tx, invocation).await?;
     crate::extensions::audit::set_context(&mut tx, audit_actor, audit_delegator, trigger_ref).await?;
     sqlx::query("SET LOCAL ROLE rootcx_app_executor").execute(&mut *tx).await?;

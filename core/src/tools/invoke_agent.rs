@@ -11,17 +11,25 @@ impl Tool for InvokeAgentTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "invoke_agent".into(),
-            description: "Invoke another agent and return its response. Use this to delegate tasks to specialized agents.".into(),
+            description: concat!(
+                "Delegate a task to another agent and return {agent, response}. ",
+                "Requires tool:invoke_agent and effective app:<app_id>:invoke permission. ",
+                "The child is bounded by the parent's effective permissions and task scope; collection grants do not authorize invocation. ",
+                "Requires agent execution context. Not offered in the workflow palette or generic HTTP tool list; ",
+                "workflow saves and generic HTTP execution reject this tool. Collection grants cannot enable it there."
+            ).into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "app_id": { "type": "string", "description": "The app ID of the agent to invoke" },
+                    "app_id": { "type": "string", "description": "Target agent's app ID, different from the calling app (argument name is app_id, not call_action's app)" },
                     "message": { "type": "string", "description": "The message/task to send to the agent" }
                 },
                 "required": ["app_id", "message"]
             }),
         }
     }
+
+    fn requires_agent_context(&self) -> bool { true }
 
     async fn execute(&self, ctx: &ToolContext) -> Result<JsonValue, String> {
         let target = str_arg(&ctx.args, "app_id")?;

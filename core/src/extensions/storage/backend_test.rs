@@ -10,24 +10,10 @@ mod tests {
     use sha2::Digest;
     use sqlx::postgres::types::Oid;
     use sqlx::PgPool;
-    use tokio::sync::Mutex;
     use uuid::Uuid;
 
     use crate::extensions::storage::backend::{PostgresBackend, StorageBackend};
-    use crate::extensions::storage::StorageExtension;
-    use crate::extensions::RuntimeExtension;
-
-    static BOOTSTRAP: Mutex<()> = Mutex::const_new(());
-
-    async fn pool() -> PgPool {
-        let url = std::env::var("TEST_DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://rootcx:rootcx@localhost:5480/rootcx".into());
-        let pool = PgPool::connect(&url).await.expect("connect to test DB");
-        let _bootstrap = BOOTSTRAP.lock().await;
-        sqlx::query("CREATE SCHEMA IF NOT EXISTS rootcx_system").execute(&pool).await.unwrap();
-        StorageExtension.bootstrap(&pool).await.expect("bootstrap storage");
-        pool
-    }
+    use crate::extensions::test_db::pool;
 
     async fn cleanup(pool: &PgPool, ids: &[Uuid]) {
         for id in ids {

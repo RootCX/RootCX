@@ -1,8 +1,8 @@
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
-import { spawn, type ChildProcess } from "node:child_process";
-import { join } from "node:path";
-import { writeFileSync, unlinkSync, mkdtempSync } from "node:fs";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -28,7 +28,6 @@ interface Worker {
 function spawnWorker(script: string): Worker {
   const file = join(tmpDir, `worker-${++seq}.ts`);
   writeFileSync(file, script);
-  tmpFiles.push(file);
 
   const proc = spawn("bun", ["--preload", PRELUDE, file], {
     stdio: ["pipe", "pipe", "pipe"],
@@ -36,7 +35,21 @@ function spawnWorker(script: string): Worker {
 
   let buffer = "";
   const pending: string[] = [];
-  const waiters: Array<(line: string) => void> = [];
+  const waiters: Array<{ line(line: string): void; reject(error: Error): void }> = [];
+  let stopped: Error | undefined;
+  let closing: Promise<void> | undefined;
+  // Subscribe at spawn time: a short-lived worker may exit before close().
+  // "close" also guarantees stdout/stderr have drained after process exit.
+  const exited = new Promise<void>((resolve) => {
+    proc.once("error", (error) => { stopped = error; });
+    proc.once("close", (code, signal) => {
+      stopped ??= new Error(`worker exited (code=${code}, signal=${signal})`);
+      for (const waiter of waiters.splice(0)) waiter.reject(stopped);
+      resolve();
+    });
+  });
+  proc.stderr!.resume();
+  proc.stdin!.on("error", (error) => { stopped ??= error; });
 
   proc.stdout!.setEncoding("utf-8");
   proc.stdout!.on("data", (chunk: string) => {
@@ -47,12 +60,25 @@ function spawnWorker(script: string): Worker {
       buffer = buffer.slice(nl + 1);
       if (!line) continue;
       const w = waiters.shift();
-      if (w) w(line);
+      if (w) w.line(line);
       else pending.push(line);
     }
   });
 
-  return {
+  async function stopWorker(): Promise<void> {
+    // Requests can be intentionally unresolved; EOF would leave their timers running.
+    proc.stdin!.destroy();
+    const timer = setTimeout(() => { proc.kill("SIGKILL"); }, 3000);
+    try {
+      if (proc.exitCode === null && proc.signalCode === null) proc.kill();
+      await exited;
+    } finally {
+      clearTimeout(timer);
+      workers.delete(worker);
+    }
+  }
+
+  const worker: Worker = {
     send(msg) {
       proc.stdin!.write(JSON.stringify(msg) + "\n");
     },
@@ -60,14 +86,21 @@ function spawnWorker(script: string): Worker {
       return new Promise((resolve, reject) => {
         const queued = pending.shift();
         if (queued) return resolve(JSON.parse(queued));
+        if (stopped) return reject(stopped);
         const timer = setTimeout(() => {
           const idx = waiters.indexOf(handler);
           if (idx !== -1) waiters.splice(idx, 1);
           reject(new Error(`readLine: no output after ${timeoutMs}ms`));
         }, timeoutMs);
-        const handler = (line: string) => {
-          clearTimeout(timer);
-          resolve(JSON.parse(line));
+        const handler = {
+          line(line: string) {
+            clearTimeout(timer);
+            try { resolve(JSON.parse(line)); } catch (error) { reject(error); }
+          },
+          reject(error: Error) {
+            clearTimeout(timer);
+            reject(error);
+          },
         };
         waiters.push(handler);
       });
@@ -77,27 +110,42 @@ function spawnWorker(script: string): Worker {
       return pending.length === 0;
     },
     close() {
-      return new Promise((resolve) => {
-        proc.stdin!.end();
-        const timer = setTimeout(() => { proc.kill(); resolve(); }, 3000);
-        proc.on("exit", () => { clearTimeout(timer); resolve(); });
-      });
+      return closing ??= stopWorker();
     },
   };
+  workers.add(worker);
+  return worker;
+}
+
+function spawnCollectionWorker(): Worker {
+  return spawnWorker(`
+    serve({ rpc: {
+      async call(params: any, _caller: any, ctx: any) {
+        const collection = params.remote
+          ? ctx.remote("catalog").collection("items")
+          : ctx.collection("items");
+        return collection[params.method](...params.args);
+      },
+    } });
+  `);
 }
 
 // ─── Setup / teardown ────────────────────────────────────────────────────────
 
 let tmpDir: string;
 let seq = 0;
-const tmpFiles: string[] = [];
+const workers = new Set<Worker>();
 
 beforeAll(() => {
   tmpDir = mkdtempSync(join(tmpdir(), "prelude-test-"));
 });
 
+afterEach(async () => {
+  await Promise.all([...workers].map((worker) => worker.close()));
+});
+
 afterAll(() => {
-  for (const f of tmpFiles) try { unlinkSync(f); } catch {}
+  rmSync(tmpDir, { recursive: true, force: true });
 });
 
 // ─── v4 protocol: serve()-based workers ──────────────────────────────────────
@@ -108,7 +156,7 @@ describe("v4: serve()", () => {
     w.send(DISCOVER);
     const msg = await w.readLine();
     expect(msg.type).toBe("discover");
-    expect(msg.protocol).toBe(4);
+    expect(msg.protocol).toBe(5);
     expect(msg.methods).toEqual(["ping", "echo"]);
     await w.close();
   });
@@ -244,6 +292,100 @@ describe("v4: serve()", () => {
     await w.close();
   });
 
+  test("collections separate full equality arrays from explicit pages on both transports", async () => {
+    const rows = Array.from({ length: 105 }, (_, id) => ({ id: String(id) }));
+    const reserved = { limit: 7, offset: 3, order: "customer-order", orderBy: "label", where: "tag" };
+    const options = { where: { limit: 7 }, orderBy: "name", order: "ASC", limit: 2, offset: 100 };
+    for (const remote of [false, true]) {
+      const w = spawnCollectionWorker();
+      w.send(DISCOVER);
+      await w.readLine();
+      for (const [method, args, data, result] of [
+        ["find", [], {}, rows],
+        ["find", [reserved], reserved, [rows[0]]],
+        ["findPage", [], {}, { data: rows.slice(0, 100), total: 105 }],
+        ["findPage", [options], options, { data: rows.slice(100, 102), total: 105 }],
+        ["findOne", [reserved], reserved, rows[0]],
+        ["findOne", [{ id: "missing" }], { id: "missing" }, null],
+        ["findOne", [], {}, rows[0]],
+      ] as const) {
+        const label = `${remote ? "remote" : "local"}.${method}(${JSON.stringify(args)})`;
+        w.send({
+          type: "rpc", id: label, invocation_id: "core-read",
+          method: "call", params: { remote, method, args },
+        });
+        const op = await w.readLine();
+        expect(op, label).toEqual({
+          type: remote ? "remote_collection_op" : "collection_op",
+          ...(remote ? { provider_app: "catalog" } : {}),
+          id: expect.any(String), invocation_id: "core-read", entity: "items",
+          op: remote && method === "find" ? "findAll" : method,
+          data,
+        });
+        w.send({ type: "collection_op_result", id: op.id, result });
+        expect(await w.readLine(), label).toEqual({ type: "rpc_response", id: label, result });
+      }
+      await w.close();
+    }
+  });
+
+  test("collections preserve create aliases and both update signatures on both transports", async () => {
+    for (const remote of [false, true]) {
+      const w = spawnCollectionWorker();
+      w.send(DISCOVER);
+      await w.readLine();
+      for (const [method, args, localOp, remoteOp, localData, remoteData] of [
+        ["create", [{ name: "new" }], "insert", "create", { name: "new" }, { name: "new" }],
+        ["insert", [{ name: "alias" }], "insert", "create", { name: "alias" }, { name: "alias" }],
+        ["update", [{ id: "record-id", name: "flat" }], "update", "update",
+          { id: "record-id", name: "flat" }, { id: "record-id", data: { name: "flat" } }],
+        ["update", ["record-id", { name: "separate" }], "update", "update",
+          { id: "record-id", name: "separate" }, { id: "record-id", data: { name: "separate" } }],
+        ["delete", ["record-id"], "delete", "delete", { id: "record-id" }, { id: "record-id" }],
+      ] as const) {
+        const label = `${remote ? "remote" : "local"}.${method}(${JSON.stringify(args)})`;
+        w.send({
+          type: "rpc", id: label, invocation_id: "core-mutation",
+          method: "call", params: { remote, method, args },
+        });
+        const op = await w.readLine();
+        expect(op, label).toEqual({
+          type: remote ? "remote_collection_op" : "collection_op",
+          ...(remote ? { provider_app: "catalog" } : {}),
+          id: expect.any(String), invocation_id: "core-mutation", entity: "items",
+          op: remote ? remoteOp : localOp,
+          data: remote ? remoteData : localData,
+        });
+        const result = method === "delete" ? { id: "record-id", deleted: true } : { id: "record-id" };
+        w.send({ type: "collection_op_result", id: op.id, result });
+        expect(await w.readLine(), label).toEqual({ type: "rpc_response", id: label, result });
+      }
+      await w.close();
+    }
+  });
+
+  test("collections propagate Core denials and invalid-update errors instead of successful empty results", async () => {
+    for (const remote of [false, true]) {
+      const w = spawnCollectionWorker();
+      w.send(DISCOVER);
+      await w.readLine();
+      for (const [method, args, error] of [
+        ["findOne", [{ id: "record-id" }], "read denied"],
+        ["create", [{ secret: "hidden" }], "field is not writable"],
+        ["update", [{ id: "record-id" }], "no fields to update"],
+        ["delete", ["missing"], "record not found"],
+      ] as const) {
+        const label = `${remote ? "remote" : "local"}.${method}(${JSON.stringify(args)})`;
+        w.send({ type: "rpc", id: label, method: "call", params: { remote, method, args } });
+        const op = await w.readLine();
+        expect(op.type, label).toBe(remote ? "remote_collection_op" : "collection_op");
+        w.send({ type: "collection_op_result", id: op.id, error });
+        expect(await w.readLine(), label).toEqual({ type: "rpc_response", id: label, error });
+      }
+      await w.close();
+    }
+  });
+
   test("ctx.transaction serializes statements, commits, and returns the callback value", async () => {
     const w = spawnWorker(`
       serve({ rpc: {
@@ -359,14 +501,29 @@ describe("v4: serve()", () => {
   });
 
   test("transaction exposes only tx.sql while its callback is active", async () => {
+    const collectionCalls = [
+      ["find", []], ["findPage", []], ["findOne", []],
+      ["create", [{ name: "new" }]], ["insert", [{ name: "alias" }]],
+      ["update", [{ id: "record-id", name: "flat" }]],
+      ["update", ["record-id", { name: "separate" }]], ["delete", ["record-id"]],
+    ];
     const w = spawnWorker(`
       serve({ rpc: {
         async inspect(_p: any, _c: any, ctx: any) {
           const errors: Array<{ capability: string; error: string }> = [];
+          const calls: Array<[string, () => any]> = [];
+          for (const [name, collection] of [
+            ["ctx.collection", ctx.collection("items")],
+            ["ctx.remote", ctx.remote("catalog").collection("items")],
+          ] as const) {
+            for (const [method, args] of ${JSON.stringify(collectionCalls)}) {
+              calls.push([name + "." + method, () => collection[method](...args)]);
+            }
+          }
           await ctx.transaction(async (_tx: any) => {
             for (const [capability, call] of [
               ["ctx.sql", () => ctx.sql("SELECT outside")],
-              ["ctx.collection", () => ctx.collection("items").find()],
+              ...calls,
               ["global emit", () => globalThis.emit("outside-effect")],
               ["global uploadFile", () => globalThis.uploadFile("x", "x.txt", "text/plain")],
             ]) {
@@ -389,7 +546,9 @@ describe("v4: serve()", () => {
     const response = await w.readLine();
     expect(response.result).toEqual([
       { capability: "ctx.sql", error: expect.stringContaining("ctx.sql cannot be used inside") },
-      { capability: "ctx.collection", error: expect.stringContaining("ctx.collection cannot be used inside") },
+      ...["ctx.collection", "ctx.remote"].flatMap((name) => collectionCalls.map(([method]) => ({
+        capability: `${name}.${method}`, error: expect.stringContaining(`${name} cannot be used inside`),
+      }))),
       { capability: "global emit", error: expect.stringContaining("emit cannot be used inside") },
       { capability: "global uploadFile", error: expect.stringContaining("uploadFile cannot be used inside") },
     ]);
@@ -650,7 +809,9 @@ describe("v4: serve()", () => {
     // Read lines until we find the error log
     const lines = [];
     for (let i = 0; i < 5; i++) {
-      try { lines.push(await w.readLine(1000)); } catch { break; }
+      const msg = await w.readLine(1000);
+      lines.push(msg);
+      if (msg.type === "log" && msg.level === "error") break;
     }
     const errLog = lines.find((m) => m.type === "log" && m.level === "error");
     expect(errLog?.message).toContain("serve() called twice");
@@ -669,7 +830,7 @@ describe("v4 compat: old flat serve() signature", () => {
     let disc = await w.readLine();
     while (disc.type === "log") disc = await w.readLine();
 
-    expect(disc.protocol).toBe(4);
+    expect(disc.protocol).toBe(5);
     expect(disc.methods).toEqual(["ping", "echo"]);
 
     w.send({ type: "rpc", id: "r1", method: "ping", params: {} });

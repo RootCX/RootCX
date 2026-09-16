@@ -72,6 +72,7 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
             SELECT created_by INTO v_user_id
             FROM rootcx_system.cron_schedules WHERE id = p_cron_id;
             v_msg := jsonb_build_object(
+                'kind', 'cron',
                 'app_id',  p_app_id,
                 'payload', p_payload || jsonb_build_object('cron_id', p_cron_id::text),
                 'cron_id', p_cron_id::text

@@ -241,6 +241,7 @@ impl RuntimeExtension for HooksExtension {
                     IF NOT allowed THEN CONTINUE; END IF;
 
                     v_msg := jsonb_build_object(
+                        'kind', 'hook',
                         'app_id', TG_TABLE_SCHEMA,
                         'payload', jsonb_build_object(
                             '_hook', true,

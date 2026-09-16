@@ -16,6 +16,9 @@ pub mod platform_storage;
 pub mod storage;
 pub mod workflows;
 
+#[cfg(test)]
+pub(crate) mod test_db;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

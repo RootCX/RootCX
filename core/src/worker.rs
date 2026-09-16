@@ -1069,6 +1069,56 @@ async fn supervisor_loop(
                                 let _ = tx.send(OutboundMessage::CollectionOpResult { id, result, error }).await;
                             });
                         }
+                        InboundMessage::RemoteCollectionOp { id, invocation_id, provider_app, op, entity, data } => {
+                            if worker_protocol < 5 {
+                                let _ = outbound_tx.send(OutboundMessage::CollectionOpResult {
+                                    id,
+                                    result: None,
+                                    error: Some("ctx.remote requires worker protocol v5".into()),
+                                }).await;
+                                continue;
+                            }
+                            // Agent operations must pass through per-invocation
+                            // tool permissions, task scope and supervision.
+                            // The worker's fixed identity is not that ceiling.
+                            if config.agent_boot_config.is_some() {
+                                let _ = outbound_tx.send(OutboundMessage::CollectionOpResult {
+                                    id,
+                                    result: None,
+                                    error: Some("agents must use query_data or mutate_data for cross-app access".into()),
+                                }).await;
+                                continue;
+                            }
+                            if !rate_buckets.admit(RateClass::Collection) {
+                                let _ = outbound_tx.send(OutboundMessage::CollectionOpResult {
+                                    id, result: None, error: Some("rate limited (100 queries/s)".into()),
+                                }).await;
+                                continue;
+                            }
+                            let pool = config.pool.clone();
+                            let consumer_app = config.app_id.clone();
+                            let tx = outbound_tx.clone();
+                            let state = config.identity.clone();
+                            let invocation = capability_context(
+                                &config.invocation, worker_protocol, &active_invocations,
+                                invocation_id.as_deref(),
+                            );
+                            tokio::spawn(async move {
+                                let (result, error) = match invocation {
+                                    Err(error) => (None, Some(error)),
+                                    Ok(invocation) => match crate::governance::cross_app_operations::execute(
+                                        &pool, &consumer_app, &provider_app, &op, &entity, data,
+                                        crate::governance::cross_app_operations::OperationContext::collection(
+                                            Some(state), &invocation, None,
+                                        ),
+                                    ).await {
+                                        Ok(v) => (Some(v), None),
+                                        Err(e) => (None, Some(e)),
+                                    },
+                                };
+                                let _ = tx.send(OutboundMessage::CollectionOpResult { id, result, error }).await;
+                            });
+                        }
                         InboundMessage::SqlQuery { id, invocation_id, sql, params } => {
                             if !rate_buckets.admit(RateClass::Sql) {
                                 let _ = outbound_tx.send(OutboundMessage::SqlQueryResult {
@@ -1390,31 +1440,28 @@ async fn supervisor_loop(
                             });
                         }
                         InboundMessage::JobEnqueue { id, payload } => {
+                            if config.agent_boot_config.is_some() {
+                                let _ = outbound_tx.send(OutboundMessage::JobEnqueueResult {
+                                    id, msg_id: None,
+                                    error: Some("agent enqueueJob requires invocation-scoped dispatch".into()),
+                                }).await;
+                                continue;
+                            }
                             let pool = config.pool.clone();
                             let app_id = config.app_id.clone();
-                            let user_id = config.identity.user_id;
+                            let identity = config.identity.clone();
                             let tx = outbound_tx.clone();
                             tokio::spawn(async move {
-                                let msg = match user_id {
-                                    Some(uid) => match crate::jobs::enqueue(&pool, &app_id, payload, Some(uid)).await {
-                                        Ok(msg_id) => OutboundMessage::JobEnqueueResult {
-                                            id,
-                                            msg_id: Some(msg_id),
-                                            error: None,
-                                        },
-                                        Err(e) => OutboundMessage::JobEnqueueResult {
-                                            id,
-                                            msg_id: None,
-                                            error: Some(e.to_string()),
-                                        },
-                                    },
-                                    None => OutboundMessage::JobEnqueueResult {
-                                        id,
-                                        msg_id: None,
-                                        error: Some("enqueueJob requires an authenticated user".into()),
-                                    },
+                                let result = match identity.user_id {
+                                    Some(_) => crate::jobs::enqueue_worker(&pool, &app_id, payload, &identity)
+                                        .await.map_err(|e| e.to_string()),
+                                    None => Err("enqueueJob requires an authenticated user".into()),
                                 };
-                                let _ = tx.send(msg).await;
+                                let (msg_id, error) = match result {
+                                    Ok(msg_id) => (Some(msg_id), None),
+                                    Err(error) => (None, Some(error)),
+                                };
+                                let _ = tx.send(OutboundMessage::JobEnqueueResult { id, msg_id, error }).await;
                             });
                         }
                     },
@@ -1739,50 +1786,29 @@ async fn collection_exec(
 
     let tbl = table(app_id, entity);
 
-    // Read ops use `data` as a where-equality map ({col: value}). Empty {} = full scan.
-    if op == "find" || op == "findOne" || op == "list" {
-        let obj = data
-            .as_object()
-            .ok_or("data must be a JSON object (where clause)")?;
-        let conds: Vec<String> = obj
-            .keys()
-            .enumerate()
-            .map(|(i, k)| format!("{} = ${}", quote_ident(k), i + 1))
-            .collect();
-        let where_clause = if conds.is_empty() {
-            String::new()
-        } else {
-            format!(" WHERE {}", conds.join(" AND "))
-        };
-
-        if op == "findOne" {
-            let row = row_json(&tbl, types);
-            let sql = format!("SELECT {row} AS row FROM {tbl}{where_clause} LIMIT 1");
-            let mut query = sqlx::query_as::<_, (JsonValue,)>(&sql);
-            for (k, v) in obj.iter() {
-                query = bind_typed(query, v, types.get(k.as_str()).map(|f| &f.field_type))?;
-            }
-            return match query
-                .fetch_optional(&mut *conn)
-                .await
-                .map_err(|e| e.to_string())?
-            {
-                Some((row,)) => Ok(row),
-                None => Ok(JsonValue::Null),
-            };
+    // Local find/list retain equality-array semantics. Only findPage paginates.
+    if matches!(op, "find" | "findOne" | "list") {
+        use crate::governance::collection_reads::EqualityMode;
+        return crate::governance::collection_reads::equality(
+            conn, types, app_id, entity, data,
+            if op == "findOne" { EqualityMode::One } else { EqualityMode::All },
+        ).await;
+    }
+    if op == "findPage" {
+        return crate::governance::collection_reads::page(
+            conn, types, app_id, entity, data, false,
+        ).await;
+    }
+    if op == "delete" {
+        let id = data.get("id").and_then(JsonValue::as_str)
+            .ok_or("id required for delete")?
+            .parse::<uuid::Uuid>().map_err(|_| "invalid UUID for delete")?;
+        let result = sqlx::query(&format!("DELETE FROM {tbl} WHERE \"id\" = $1"))
+            .bind(id).execute(&mut *conn).await.map_err(|e| e.to_string())?;
+        if result.rows_affected() == 0 {
+            return Err(format!("record '{id}' not found"));
         }
-
-        let row = row_json(&tbl, types);
-        let sql = format!("SELECT {row} AS row FROM {tbl}{where_clause}");
-        let mut query = sqlx::query_as::<_, (JsonValue,)>(&sql);
-        for (k, v) in obj.iter() {
-            query = bind_typed(query, v, types.get(k.as_str()).map(|f| &f.field_type))?;
-        }
-        let rows: Vec<(JsonValue,)> = query
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(|e| e.to_string())?;
-        return Ok(JsonValue::Array(rows.into_iter().map(|(r,)| r).collect()));
+        return Ok(serde_json::json!({"id": id, "deleted": true}));
     }
 
     // Write ops below.
@@ -1829,6 +1855,7 @@ async fn collection_exec(
             .get("id")
             .and_then(|v| v.as_str())
             .ok_or("id required for update")?;
+        let id = id.parse::<uuid::Uuid>().map_err(|_| "invalid UUID for update")?;
         query = query.bind(id);
     }
     let (row,) = query

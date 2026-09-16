@@ -24,7 +24,7 @@ use rootcx_types::{
 };
 
 use super::events::{WorkflowEvent, WorkflowEvents};
-use super::executor;
+use super::{executor, items};
 
 struct RetryPolicy {
     max_attempts: u32,
@@ -103,9 +103,11 @@ pub async fn run(
     events: &WorkflowEvents,
 ) -> Result<WorkflowExecutionStatus, String> {
     let (app_id, workflow_id, graph_json): (String, Uuid, Option<JsonValue>) = sqlx::query_as(
-        "SELECT app_id, workflow_id, graph FROM rootcx_system.workflow_executions WHERE id = $1",
-    ).bind(exec_id).fetch_optional(pool).await.map_err(|e| e.to_string())?
-    .ok_or_else(|| "execution not found".to_string())?;
+        "SELECT app_id, workflow_id, graph FROM rootcx_system.workflow_executions
+         WHERE id = $1 AND run_as_user_id = $2 AND lease_msg_id = $3
+           AND status IN ('queued', 'running')",
+    ).bind(exec_id).bind(user_id).bind(lease_msg_id).fetch_optional(pool).await.map_err(|e| e.to_string())?
+    .ok_or_else(|| "execution identity, lease or status mismatch".to_string())?;
 
     let graph: WorkflowGraph = serde_json::from_value(graph_json.ok_or("execution has no graph snapshot")?)
         .map_err(|e| format!("invalid graph snapshot: {e}"))?;
@@ -179,7 +181,7 @@ pub async fn run(
             });
 
             if rec_status == WorkflowNodeRunStatus::Succeeded {
-                active_ports.insert(node_id.clone(), ports_with_items(&output_json));
+                active_ports.insert(node_id.clone(), items::active_ports(&output_json));
                 run_outputs.insert(node_id.clone(), output_json);
             } else {
                 all_succeeded = false;
@@ -239,16 +241,12 @@ fn seed_resume(prior: Vec<(String, String, Option<JsonValue>)>) -> Resume {
     for (node_id, status, output) in prior {
         if status != WorkflowNodeRunStatus::Succeeded.as_str() { continue; }
         if let Some(out) = output {
-            r.active_ports.insert(node_id.clone(), ports_with_items(&out));
+            r.active_ports.insert(node_id.clone(), items::active_ports(&out));
             r.run_outputs.insert(node_id.clone(), out);
         }
         r.done.insert(node_id);
     }
     r
-}
-
-fn ports_with_items(output: &JsonValue) -> Vec<u8> {
-    super::items::active_ports(output)
 }
 
 #[cfg(test)]

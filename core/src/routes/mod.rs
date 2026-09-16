@@ -284,7 +284,7 @@ pub async fn uninstall_app(
     crate::governance::authority::require_perm(&pool, identity.user_id, "admin:apps.install").await?;
     let data_dir = rt.data_dir().to_path_buf();
     let _ = wm(&rt).stop_app(&app_id).await;
-    crate::manifest::uninstall_app(&pool, &app_id).await?;
+    crate::manifest::uninstall_app(&pool, &app_id, Some(identity.user_id)).await?;
     for sub in ["apps", "frontends"] {
         let dir = data_dir.join(sub).join(&app_id);
         if dir.exists() {

@@ -1,4 +1,4 @@
-mod harness;
+use crate::harness;
 
 use uuid::Uuid;
 
@@ -44,4 +44,5 @@ async fn delegation_matrix_kind_enforcement() {
         let result = rootcx_core::governance::delegation::create(pool, delegator, delegatee, c.trigger, None).await;
         assert_eq!(result.is_ok(), c.ok, "case '{}': expected ok={}, got {:?}", c.label, c.ok, result);
     }
+    rt.shutdown().await;
 }
