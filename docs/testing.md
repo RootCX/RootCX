@@ -4,6 +4,9 @@ Run `make test`. Only Docker Compose is required for the test runtime: Rust,
 Bun and cargo-nextest run in the pinned test image. No host Rust build artifacts
 are read or deleted.
 
+The current PostgreSQL image is ARM64-only, so CI uses a native ARM64 runner.
+An AMD64 host needs ARM64 container emulation to run this image.
+
 ## Commands
 
 | Command | Purpose |
@@ -48,7 +51,7 @@ Nextest does not retry failures. The test container owns all workers, so removin
 it also removes subprocesses after a panic or timeout. Infrastructure and build
 failures are reported before test execution; they are not passing test results.
 
-The Core image release workflow requires this gate to pass before publishing.
+Run `make core-verify` before publishing a Core release.
 The SDK and Peppol Vitest suites are separate from this Core gate. Run-specific
 counts and timings belong in the PR, not in this guide.
 
