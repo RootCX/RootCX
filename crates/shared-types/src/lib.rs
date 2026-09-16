@@ -122,13 +122,15 @@ pub struct AppManifest {
 
 /// Declarative public-access surface for an app.
 ///
-/// Anything listed here is reachable without an Authorization header.
-/// Anything **not** listed retains the default JWT-required behavior.
+/// Listed RPCs and collections are reachable without an Authorization header.
+/// Publications are requests whose data authority requires Core approval.
 ///
 /// See `core/src/extensions/sharing/` for the runtime enforcement.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicSurface {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publications: Vec<PublicPublication>,
     /// Custom RPCs exposed publicly. If `scope` is non-empty, the request
     /// must carry a share token whose `context` matches the request body on
     /// every listed key.
@@ -144,6 +146,8 @@ pub struct PublicSurface {
 #[serde(rename_all = "camelCase")]
 pub struct PublicRpc {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publications: Vec<String>,
     /// Keys to enforce-match between the share token's `context` and the
     /// request body. Empty `scope` means anonymous access (no share token
     /// required). Non-empty means a share token IS required and the listed
@@ -156,8 +160,34 @@ pub struct PublicRpc {
 #[serde(rename_all = "camelCase")]
 pub struct PublicCollection {
     pub entity: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<String>,
     /// Subset of CRUD actions exposed: "list", "read", "create", "update", "delete".
     pub actions: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicPublication {
+    pub name: String,
+    #[serde(default)]
+    pub app: Option<String>,
+    pub entity: String,
+    #[serde(default = "default_publication_actions")]
+    pub actions: Vec<String>,
+    pub fields: Vec<String>,
+    #[serde(default = "default_publication_where", rename = "where")]
+    pub where_clause: JsonValue,
+    #[serde(default)]
+    pub release_ownership: bool,
+}
+
+fn default_publication_actions() -> Vec<String> {
+    vec!["list".into(), "read".into()]
+}
+
+fn default_publication_where() -> JsonValue {
+    serde_json::json!({})
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -322,6 +322,9 @@ impl RbacExtension {
              RETURNS BOOLEAN AS $$
              DECLARE v_user_id UUID; v_delegated TEXT; v_perms TEXT;
              BEGIN
+                 IF coalesce(current_setting('rootcx.publication_id', true), '') <> '' THEN
+                     RETURN FALSE;
+                 END IF;
                  -- User permissions do not authorize a worker to leave its
                  -- Core-bound app. Authorized remote operations explicitly
                  -- open a provider-context transaction after grant checks.
@@ -356,6 +359,9 @@ impl RbacExtension {
              DECLARE v_grant UUID; v_source TEXT; v_target TEXT;
                      v_perms TEXT; v_required TEXT; v_permission TEXT; v_action TEXT;
              BEGIN
+                 IF coalesce(current_setting('rootcx.publication_id', true), '') <> '' THEN
+                     RETURN FALSE;
+                 END IF;
                  IF nullif(current_setting('rootcx.user_id', true), '') IS NULL THEN
                      RETURN FALSE;
                  END IF;
@@ -396,6 +402,31 @@ impl RbacExtension {
              $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, rootcx_system",
         ).await?;
 
+        // Only the Core's publication transaction constructor poses this key,
+        // after locking and revalidating the exact publication and optional grant.
+        exec(pool,
+            "CREATE OR REPLACE FUNCTION rootcx_system.check_publication_access(p_required TEXT)
+             RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog AS $$
+               SELECT EXISTS (
+                 SELECT 1 FROM rootcx_system.publications p
+                 JOIN rootcx_system.app_installations ci ON ci.id = p.consumer_installation_id AND ci.active
+                 JOIN rootcx_system.app_installations pi ON pi.id = p.provider_installation_id AND pi.active
+                 JOIN rootcx_system.public_execution_principals principal ON principal.installation_id = ci.id
+                 JOIN rootcx_system.users u ON u.id = principal.user_id AND u.disabled_at IS NULL
+                 WHERE p.id = nullif(current_setting('rootcx.publication_id', true), '')::uuid
+                   AND u.id = nullif(current_setting('rootcx.user_id', true), '')::uuid
+                   AND p.status = 'active'
+                   AND (p.expires_at IS NULL OR p.expires_at > statement_timestamp())
+                   AND p_required = current_setting('rootcx.publication_read_key', true)
+                   AND p_required = 'app:' || p.provider_app || ':' || (p.definition->>'entity') || '.read'
+                   AND p.provider_app = current_setting('rootcx.app_id', true)
+                   AND (p.consumer_app = p.provider_app OR rootcx_system.cross_app_grant_allows(
+                       p_required, p.provider_app, p.consumer_app,
+                       nullif(current_setting('rootcx.cross_app_grant_id', true), '')::uuid))
+               )
+             $$",
+        ).await?;
+
         // Lock down EXECUTE on the RBAC helpers. The two policy entry points
         // are check_access and check_cross_app_access; the helpers they call
         // run as SECURITY DEFINER owners, so the executor never needs direct
@@ -410,12 +441,14 @@ impl RbacExtension {
             "rootcx_system.has_permission(uuid, text)",
             "rootcx_system.cross_app_grant_allows(text, text, text, uuid)",
             "rootcx_system.check_cross_app_access(text)",
+            "rootcx_system.check_publication_access(text)",
         ] {
             exec(pool, &format!("REVOKE EXECUTE ON FUNCTION {sig} FROM PUBLIC")).await?;
         }
         exec(
             pool,
-            "GRANT EXECUTE ON FUNCTION rootcx_system.check_cross_app_access(text) TO rootcx_app_executor",
+            "GRANT EXECUTE ON FUNCTION rootcx_system.check_cross_app_access(text),
+                 rootcx_system.check_publication_access(text) TO rootcx_app_executor",
         )
         .await?;
 

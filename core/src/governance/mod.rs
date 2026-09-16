@@ -1,6 +1,8 @@
 pub mod authority;
 pub(crate) mod collection_reads;
 pub mod cross_app;
+pub mod publications;
+pub(crate) mod publication_reads;
 pub(crate) mod cross_app_mutations;
 pub(crate) mod cross_app_operations;
 pub mod delegation;

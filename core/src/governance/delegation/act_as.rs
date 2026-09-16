@@ -15,6 +15,12 @@ use crate::governance::authority::{has_permission, resolve_permissions};
 ///   2. anti-escalation: every permission of `target` is held by `human`.
 ///      No bypass exists. The subset check always runs.
 pub async fn assert_can_act_as(pool: &PgPool, human: Uuid, target: Uuid) -> Result<(), ApiError> {
+    let managed: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM rootcx_system.public_execution_principals WHERE user_id = $1)",
+    ).bind(target).fetch_one(pool).await?;
+    if managed {
+        return Err(ApiError::Forbidden("publication principals cannot be impersonated".into()));
+    }
     if human == target {
         return Ok(());
     }

@@ -137,6 +137,7 @@ pub async fn install_app(
         for ext in extensions {
             ext.on_app_installed(pool, manifest, installed_by).await?;
         }
+        crate::governance::publications::register_permissions(pool, app_id).await?;
 
         // A successful install owns a fresh Core installation identity.  Grants are
         // tied to this identity rather than only to app_id, so uninstall/reinstall
@@ -810,6 +811,7 @@ pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
         }
     }
     validate_owner_chains(manifest).map_err(RuntimeError::Invalid)?;
+    crate::governance::publications::validate_manifest(manifest).map_err(RuntimeError::Invalid)?;
     Ok(())
 }
 

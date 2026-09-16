@@ -17,6 +17,7 @@ use crate::secrets::SecretManager;
 use crate::tools::{ActionCaller, AgentDispatcher, IntegrationCaller, ToolRegistry};
 use crate::worker::{self, AgentEvent, FleetEvent, SupervisorHandle, WorkerConfig, WorkerStatus};
 use crate::governance::enforcement::InvocationContext;
+use crate::governance::publications::PublicExecution;
 
 const BACKEND_PRELUDE: &str = include_str!("backend_prelude.js");
 
@@ -47,9 +48,8 @@ fn worker_key_belongs_to_principal(key: &WorkerKey, user_id: uuid::Uuid) -> bool
 
 /// Who a worker process acts as, for its whole life. Each distinct principal
 /// gets its own process, so a worker can never act as another (the cross-user
-/// confused deputy is structurally impossible). Three kinds never share a
-/// process: the privileged lifecycle worker, un-authenticated traffic, and each
-/// real authenticated identity.
+/// confused deputy is structurally impossible). Lifecycle, anonymous, public
+/// execution and authenticated identities never share a process.
 enum Principal {
     /// The per-app lifecycle worker: runs onStart with BYPASSRLS self-schema.
     /// Spawned only by `start_app`, never by an incoming request.
@@ -58,6 +58,8 @@ enum Principal {
     /// webhook/job). Denied every row by RLS, and kept OFF the System worker so
     /// untrusted anonymous traffic never shares the privileged onStart process.
     Anonymous,
+    /// Core-approved public reads, isolated from every human and lifecycle worker.
+    Public(PublicExecution),
     /// A real identity: a direct user, or an agent's delegated authority.
     User(crate::governance::enforcement::ContextState),
 }
@@ -66,7 +68,9 @@ impl Principal {
     /// Classify the identity resolved for an incoming request. A request never
     /// yields System; an empty identity (no user, not delegated) is Anonymous.
     fn from_request(state: crate::governance::enforcement::ContextState) -> Self {
-        if state.user_id.is_none() && !state.is_delegated && state.effective_perms.is_empty() {
+        if let Some(execution) = state.public_execution {
+            Principal::Public(execution)
+        } else if state.user_id.is_none() && !state.is_delegated && state.effective_perms.is_empty() {
             Principal::Anonymous
         } else {
             Principal::User(state)
@@ -79,6 +83,7 @@ impl Principal {
         match self {
             Principal::System => "·system".into(),
             Principal::Anonymous => "·anon".into(),
+            Principal::Public(execution) => format!("{}|{}", execution.principal_id, execution.key()),
             Principal::User(s) => {
                 let uid = s.user_id.map(|u| u.to_string()).unwrap_or_default();
                 let mut perms = s.effective_perms.clone();
@@ -99,6 +104,12 @@ impl Principal {
     fn rls_state(&self) -> crate::governance::enforcement::ContextState {
         match self {
             Principal::User(s) => s.clone(),
+            Principal::Public(execution) => crate::governance::enforcement::ContextState {
+                user_id: Some(execution.principal_id),
+                is_delegated: true,
+                public_execution: Some(execution.clone()),
+                ..Default::default()
+            },
             _ => crate::governance::enforcement::ContextState::default(),
         }
     }
@@ -343,18 +354,23 @@ impl WorkerManager {
     ) -> Result<SupervisorHandle, RuntimeError> {
         let app_dir = self.apps_dir.join(app_id);
         let entry_point = resolve_entry_point(&app_dir)?;
-        let mut credentials = secrets.get_env_for_app(pool, app_id).await?;
-        apply_openai_base_url(
-            &mut credentials,
-            std::env::var("ROOTCX_OPENAI_BASE_URL").ok(),
-        );
-        let (agent_boot_config, supervision) = match self.build_agent_boot(pool, app_id).await {
-            Some((boot, sup)) => (Some(boot), sup),
-            None => (None, None),
+        let (credentials, agent_boot_config, supervision) = if matches!(principal, Principal::Public(_)) {
+            (HashMap::new(), None, None)
+        } else {
+            let mut credentials = secrets.get_env_for_app(pool, app_id).await?;
+            apply_openai_base_url(
+                &mut credentials,
+                std::env::var("ROOTCX_OPENAI_BASE_URL").ok(),
+            );
+            let (boot, supervision) = match self.build_agent_boot(pool, app_id).await {
+                Some((boot, supervision)) => (Some(boot), supervision),
+                None => (None, None),
+            };
+            (credentials, boot, supervision)
         };
         let mut identity = principal.rls_state();
         if identity.audit_actor_id.is_none() {
-            if identity.is_delegated {
+            if identity.is_delegated && identity.public_execution.is_none() {
                 identity.audit_actor_id = Some(crate::extensions::agents::agent_user_id(app_id));
                 identity.audit_delegator_id = identity.user_id;
             } else {
@@ -600,6 +616,17 @@ impl WorkerManager {
             .rpc(id, action, params, caller).await
     }
 
+    pub async fn rpc_public(
+        &self, app_id: &str, id: String, method: String, params: JsonValue,
+        execution: PublicExecution,
+    ) -> Result<JsonValue, RuntimeError> {
+        if execution.consumer_app != app_id {
+            return Err(RuntimeError::Worker("public execution consumer mismatch".into()));
+        }
+        self.get_or_spawn(app_id, Principal::Public(execution), InvocationContext::default()).await?
+            .rpc(id, method, params, None).await
+    }
+
     /// Invoke an app's agent. `parent_perms` is the invoking parent agent's
     /// ALREADY-FROZEN effective set on a sub-invoke (`Some`), or `None` at the
     /// top of a run-tree (human / cron / webhook / channel). The child narrows
@@ -619,6 +646,7 @@ impl WorkerManager {
             user_id: payload.invoker_user_id, is_delegated: true, effective_perms,
             connection_id: None,
             audit_actor_id: Some(agent_uid), audit_delegator_id: payload.invoker_user_id,
+            public_execution: None,
         };
         // An agent invoke is always a delegated principal, never anonymous.
         let session_id = payload.session_id.clone();
@@ -935,6 +963,7 @@ mod tests {
         worker_key_belongs_to_principal,
     };
     use crate::governance::enforcement::{ContextState, InvocationContext};
+    use crate::governance::publications::{ApprovedPublication, PublicExecution};
     use uuid::Uuid;
 
     fn user(uid: Option<Uuid>, delegated: bool, perms: &[&str]) -> Principal {
@@ -945,7 +974,81 @@ mod tests {
             connection_id: None,
             audit_actor_id: uid,
             audit_delegator_id: None,
+            public_execution: None,
         })
+    }
+
+    fn public_execution() -> PublicExecution {
+        let installation_id = Uuid::new_v4();
+        PublicExecution {
+            consumer_app: "shop".into(),
+            installation_id,
+            principal_id: Uuid::new_v4(),
+            publications: vec![ApprovedPublication {
+                id: Uuid::new_v4(),
+                version: 1,
+                consumer_app: "shop".into(),
+                provider_app: "catalog".into(),
+                consumer_installation_id: installation_id,
+                provider_installation_id: Uuid::new_v4(),
+                definition: rootcx_types::PublicPublication {
+                    name: "products".into(),
+                    app: Some("catalog".into()),
+                    entity: "products".into(),
+                    actions: vec!["list".into(), "read".into()],
+                    fields: vec!["name".into()],
+                    where_clause: serde_json::json!({}),
+                    release_ownership: false,
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn public_workers_are_isolated_from_other_authority_and_never_run_onstart() {
+        let execution = public_execution();
+        let public = Principal::Public(execution.clone());
+        for other in [
+            Principal::System, Principal::Anonymous,
+            user(Some(execution.principal_id), false, &[]),
+            user(Some(execution.principal_id), true, &[]),
+        ] {
+            assert_ne!(public.key(), other.key(), "public worker shared another authority");
+        }
+        assert!(!public.run_onstart());
+        assert!(matches!(Principal::from_request(public.rls_state()), Principal::Public(_)));
+        assert!(worker_key_belongs_to_principal(
+            &worker_key("shop", &public, &InvocationContext::default()),
+            execution.principal_id,
+        ));
+    }
+
+    #[test]
+    fn public_workers_are_partitioned_by_installation_and_approved_revision_set() {
+        let base = public_execution();
+        let base_key = worker_key("shop", &Principal::Public(base.clone()), &InvocationContext::default());
+        for change in ["installation", "principal", "revision", "publication", "subset"] {
+            let mut different = base.clone();
+            match change {
+                "installation" => different.installation_id = Uuid::new_v4(),
+                "principal" => different.principal_id = Uuid::new_v4(),
+                "revision" => different.publications[0].version += 1,
+                "publication" => different.publications[0].id = Uuid::new_v4(),
+                _ => different.publications.clear(),
+            }
+            assert_ne!(
+                base_key,
+                worker_key("shop", &Principal::Public(different), &InvocationContext::default()),
+                "{change} must select a different worker",
+            );
+        }
+        let mut two = base.clone();
+        let mut other = two.publications[0].clone();
+        other.id = Uuid::new_v4();
+        two.publications.push(other);
+        let key = Principal::Public(two.clone()).key();
+        two.publications.reverse();
+        assert_eq!(key, Principal::Public(two).key(), "declaration order must not create another worker");
     }
 
     // The worker-routing key for one User identity must be stable regardless of
@@ -1057,6 +1160,7 @@ mod tests {
         let base = ContextState {
             user_id: Some(uid), is_delegated: true, effective_perms: vec!["app:x:*".into()],
             connection_id: None, audit_actor_id: Some(uid), audit_delegator_id: Some(uid),
+            public_execution: None,
         };
         for field in ["connection", "actor", "delegator"] {
             let mut different = base.clone();
@@ -1090,14 +1194,14 @@ mod tests {
         assert!(!p.run_onstart());
         // A real user is classified as User, never Anonymous/System.
         assert!(matches!(
-            Principal::from_request(ContextState { user_id: Some(Uuid::new_v4()), is_delegated: false, effective_perms: vec![], connection_id: None, audit_actor_id: None, audit_delegator_id: None }),
+            Principal::from_request(ContextState { user_id: Some(Uuid::new_v4()), is_delegated: false, effective_perms: vec![], connection_id: None, audit_actor_id: None, audit_delegator_id: None, public_execution: None }),
             Principal::User(_)
         ));
         // A delegated no-user principal (cron/webhook agent) is a real authority,
         // NOT anonymous: it must get its own worker. Guards against simplifying
         // from_request to a `user_id.is_none()` check alone.
         assert!(matches!(
-            Principal::from_request(ContextState { user_id: None, is_delegated: true, effective_perms: vec![], connection_id: None, audit_actor_id: None, audit_delegator_id: None }),
+            Principal::from_request(ContextState { user_id: None, is_delegated: true, effective_perms: vec![], connection_id: None, audit_actor_id: None, audit_delegator_id: None, public_execution: None }),
             Principal::User(_)
         ));
     }

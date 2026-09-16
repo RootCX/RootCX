@@ -161,6 +161,67 @@ fn storage_download_error(id: String, error: impl Into<String>) -> OutboundMessa
     }
 }
 
+const PUBLIC_CAPABILITY_DENIED: &str = "capability denied in public execution";
+
+/// Exhaustive so a new IPC capability cannot silently become public.
+/// Messages without an error response require terminating the worker.
+fn public_capability_denial(msg: &InboundMessage) -> Result<Option<OutboundMessage>, &'static str> {
+    let error = Some(PUBLIC_CAPABILITY_DENIED.to_string());
+    let reply = match msg {
+        InboundMessage::Discover { .. } | InboundMessage::RpcResponse { .. }
+        | InboundMessage::Log { .. } => return Ok(None),
+        InboundMessage::CollectionOp { id, op, .. }
+        | InboundMessage::RemoteCollectionOp { id, op, .. } => {
+            if matches!(op.as_str(), "find" | "findAll" | "findOne" | "findPage" | "list") {
+                return Ok(None);
+            }
+            OutboundMessage::CollectionOpResult { id: id.clone(), result: None, error }
+        }
+        InboundMessage::SqlQuery { id, .. } => OutboundMessage::SqlQueryResult {
+            id: id.clone(), columns: None, rows: None, row_count: None, error,
+        },
+        InboundMessage::SqlBegin { id, .. } => OutboundMessage::SqlBeginResult {
+            id: id.clone(), tx_id: None, error,
+        },
+        InboundMessage::SqlExec { id, .. } => OutboundMessage::SqlExecResult {
+            id: id.clone(), columns: None, rows: None, row_count: None, error,
+        },
+        InboundMessage::SqlCommit { id, .. } | InboundMessage::SqlRollback { id, .. } =>
+            OutboundMessage::SqlEndResult { id: id.clone(), error },
+        InboundMessage::SelfAction { id, .. } => OutboundMessage::SelfActionResult {
+            id: id.clone(), result: None, error,
+        },
+        InboundMessage::StorageDownload { id, .. } =>
+            storage_download_error(id.clone(), PUBLIC_CAPABILITY_DENIED),
+        InboundMessage::JobEnqueue { id, .. } => OutboundMessage::JobEnqueueResult {
+            id: id.clone(), msg_id: None, error,
+        },
+        InboundMessage::AgentToolCall { invoke_id, call_id, .. } => OutboundMessage::AgentToolResult {
+            invoke_id: invoke_id.clone(), call_id: call_id.clone(), result: None, error,
+        },
+        InboundMessage::StorageUpload { .. } | InboundMessage::Event { .. }
+        | InboundMessage::JobResult { .. } | InboundMessage::AgentChunk { .. }
+        | InboundMessage::AgentDone { .. } | InboundMessage::AgentError { .. }
+        | InboundMessage::AgentSessionCompacted { .. } => return Err(PUBLIC_CAPABILITY_DENIED),
+    };
+    Ok(Some(reply))
+}
+
+fn public_invocation_active(
+    worker_protocol: u32,
+    active_invocations: &std::collections::HashSet<String>,
+    invocation_id: Option<&str>,
+) -> Result<(), String> {
+    if worker_protocol < 5 {
+        return Err("public collection reads require worker protocol v5".into());
+    }
+    let id = invocation_id.ok_or("missing invocation id")?;
+    if !active_invocations.contains(id) {
+        return Err("unknown or expired invocation id".into());
+    }
+    Ok(())
+}
+
 fn cancel_job_leases(job_leases: &mut HashMap<i64, CancellationToken>) {
     for (_, token) in job_leases.drain() {
         token.cancel();
@@ -825,7 +886,69 @@ async fn supervisor_loop(
                 }
             } => {
                 match event {
-                    Some(IpcEvent::Message(msg)) => match msg {
+                    Some(IpcEvent::Message(msg)) => {
+                        if let Some(execution) = &config.identity.public_execution {
+                            let denied = public_capability_denial(&msg).and_then(|reply| match reply {
+                                Some(reply) => outbound_tx.try_send(reply)
+                                    .map(|()| true).map_err(|_| "public worker IPC response backlog exceeded"),
+                                None => Ok(false),
+                            });
+                            match denied {
+                                Ok(true) => continue,
+                                Err(error) => {
+                                    for (id, _) in rpc_invocations.drain() {
+                                        pending_rpcs.resolve(&id, Err(error.into()));
+                                    }
+                                    active_invocations.clear();
+                                    ipc_writer = None;
+                                    ipc_reader = None;
+                                    for h in output_handles.drain(..) { h.abort(); }
+                                    kill_child(&mut child).await;
+                                    status = WorkerStatus::Crashed;
+                                    emit_log(&log_tx, "system", error);
+                                    continue;
+                                }
+                                Ok(false) => {}
+                            }
+                            let read = match &msg {
+                                InboundMessage::CollectionOp { id, invocation_id, op, entity, data } =>
+                                    Some((id, invocation_id, &config.app_id, op, entity, data)),
+                                InboundMessage::RemoteCollectionOp { id, invocation_id, provider_app, op, entity, data } =>
+                                    Some((id, invocation_id, provider_app, op, entity, data)),
+                                _ => None,
+                            };
+                            if let Some((id, invocation_id, provider_app, op, entity, data)) = read {
+                                let admitted = public_invocation_active(
+                                    worker_protocol, &active_invocations, invocation_id.as_deref(),
+                                ).and_then(|()| {
+                                    if rate_buckets.admit(RateClass::Collection) { Ok(()) }
+                                    else { Err("rate limited (100 queries/s)".into()) }
+                                });
+                                let id = id.clone();
+                                let provider_app = provider_app.clone();
+                                let op = op.clone();
+                                let entity = entity.clone();
+                                let data = data.clone();
+                                let execution = execution.clone();
+                                let pool = config.pool.clone();
+                                let tx = outbound_tx.clone();
+                                tokio::spawn(async move {
+                                    let result = match admitted {
+                                        Ok(()) => crate::governance::publication_reads::execute(
+                                            &pool, &execution, &provider_app, &op, &entity, data,
+                                        ).await,
+                                        Err(error) => Err(error),
+                                    };
+                                    let (result, error) = match result {
+                                        Ok(value) => (Some(value), None),
+                                        Err(error) => (None, Some(error)),
+                                    };
+                                    let _ = tx.send(OutboundMessage::CollectionOpResult { id, result, error }).await;
+                                });
+                                continue;
+                            }
+                        }
+                        match msg {
                         InboundMessage::Discover { protocol } => {
                             // Worker handshake. Record the negotiated IPC
                             // version; future message-dispatch decisions
@@ -1464,6 +1587,7 @@ async fn supervisor_loop(
                                 let _ = tx.send(OutboundMessage::JobEnqueueResult { id, msg_id, error }).await;
                             });
                         }
+                        }
                     },
                     Some(IpcEvent::Output(line)) => {
                         emit_log(&log_tx, "stdout", &line);
@@ -1893,6 +2017,84 @@ pub async fn collection_op_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_collection_capabilities_require_a_live_invocation_even_without_workflow_scope() {
+        let active = std::collections::HashSet::from(["live".to_string()]);
+        for (protocol, id, allowed) in [
+            (5, Some("live"), true),
+            (6, Some("live"), true),
+            (5, None, false),
+            (5, Some(""), false),
+            (5, Some("expired"), false),
+            (4, Some("live"), false),
+            (0, Some("live"), false),
+            (1, None, false),
+        ] {
+            assert_eq!(
+                public_invocation_active(protocol, &active, id).is_ok(), allowed,
+                "protocol={protocol}, id={id:?}",
+            );
+        }
+        assert!(public_invocation_active(5, &Default::default(), Some("live")).is_err());
+    }
+
+    #[test]
+    fn public_ipc_gate_denies_raw_capabilities_with_the_matching_response() {
+        use serde_json::json;
+        for (request, response) in [
+            (json!({"type":"sql_query","id":"x","sql":"SELECT 1"}), "sql_query_result"),
+            (json!({"type":"sql_begin","id":"x"}), "sql_begin_result"),
+            (json!({"type":"sql_exec","id":"x","tx_id":"t","sql":"SELECT 1"}), "sql_exec_result"),
+            (json!({"type":"sql_commit","id":"x","tx_id":"t"}), "sql_end_result"),
+            (json!({"type":"sql_rollback","id":"x","tx_id":"t"}), "sql_end_result"),
+            (json!({"type":"self_action","id":"x","action":"integration"}), "self_action_result"),
+            (json!({"type":"storage_download","id":"x","app_id":"a","file_id":"f"}), "storage_download_result"),
+            (json!({"type":"job_enqueue","id":"x"}), "job_enqueue_result"),
+            (json!({"type":"agent_tool_call","invoke_id":"i","call_id":"x","tool_name":"query_data"}), "agent_tool_result"),
+        ] {
+            let message = serde_json::from_value(request.clone()).unwrap();
+            let reply = public_capability_denial(&message).unwrap().expect("denial response");
+            let reply = serde_json::to_value(reply).unwrap();
+            assert_eq!(reply["type"], response, "{request}");
+            assert_eq!(reply["error"], PUBLIC_CAPABILITY_DENIED, "{request}");
+            assert_eq!(reply.get("id").or_else(|| reply.get("call_id")), Some(&json!("x")), "{request}");
+        }
+    }
+
+    #[test]
+    fn public_collection_ipc_allows_only_read_operations() {
+        use serde_json::json;
+        for message_type in ["collection_op", "remote_collection_op"] {
+            for (op, allowed) in [
+                ("find", true), ("findAll", true), ("findOne", true), ("list", true), ("findPage", true),
+                ("insert", false), ("update", false), ("delete", false), ("unknown", false), ("", false),
+            ] {
+                let message = serde_json::from_value(json!({
+                    "type":message_type, "id":"x", "provider_app":"catalog", "entity":"products", "op":op,
+                })).unwrap();
+                let denied = public_capability_denial(&message).unwrap().is_some();
+                assert_eq!(denied, !allowed, "{message_type}: {op:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn public_ipc_without_an_error_response_stops_the_worker() {
+        use serde_json::json;
+        for request in [
+            json!({"type":"storage_upload","id":"x","name":"file"}),
+            json!({"type":"event","name":"changed"}),
+            json!({"type":"job_result","id":"x"}),
+            json!({"type":"agent_chunk","invoke_id":"i","delta":"text"}),
+            json!({"type":"agent_done","invoke_id":"i","response":"text"}),
+            json!({"type":"agent_error","invoke_id":"i","error":"text"}),
+            json!({"type":"agent_session_compacted","invoke_id":"i","summary":"text"}),
+        ] {
+            let message = serde_json::from_value(request.clone()).unwrap();
+            assert!(public_capability_denial(&message).is_err(), "{request}");
+        }
+    }
 
     #[test]
     fn backoff_delays() {

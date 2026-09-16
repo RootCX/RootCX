@@ -1,0 +1,5 @@
+[profile.default]
+test-threads = 1
+retries = 0
+slow-timeout = { period = "30s", terminate-after = 4 }
+leak-timeout = "5s"

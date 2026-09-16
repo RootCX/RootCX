@@ -27,7 +27,9 @@ pub struct AudienceIdentity {
 /// at token expiry.
 pub async fn principal_enabled(pool: &sqlx::PgPool, uid: Uuid) -> bool {
     sqlx::query_scalar::<_, bool>(
-        "SELECT disabled_at IS NULL FROM rootcx_system.users WHERE id = $1",
+        "SELECT disabled_at IS NULL AND NOT EXISTS (
+             SELECT 1 FROM rootcx_system.public_execution_principals WHERE user_id = $1
+         ) FROM rootcx_system.users WHERE id = $1",
     )
     .bind(uid)
     .fetch_optional(pool)

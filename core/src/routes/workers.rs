@@ -72,6 +72,17 @@ pub async fn rpc_proxy(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let p = pool(&rt);
+    if let Some(decl) = find_public_rpc(&p, &app_id, &method).await?
+        && !decl.publications.is_empty()
+    {
+        if !decl.scope.is_empty() {
+            return Err(ApiError::Forbidden("scoped RPCs cannot use public publications".into()));
+        }
+        authorize_public_rpc(&decl, &auth, &app_id, &params)?;
+        let execution = crate::governance::publications::resolve(&p, &app_id, &decl.publications).await?;
+        let result = wm(&rt).rpc_public(&app_id, id, method, params, execution).await?;
+        return Ok(Json(result));
+    }
     let (caller, action_scope) = match &auth {
         CallerAuth::User(identity) => {
             // `None` when the method is not a declared action; `Some(isolated)`

@@ -24,7 +24,10 @@ pub async fn resolve_caller_inheriting(
     pool: &PgPool, user_id: Uuid, inherit: Option<&[String]>,
 ) -> Option<RpcCaller> {
     let (email,): (String,) = sqlx::query_as(
-        "SELECT email FROM rootcx_system.users WHERE id = $1 AND disabled_at IS NULL")
+        "SELECT email FROM rootcx_system.users WHERE id = $1 AND disabled_at IS NULL
+         AND NOT EXISTS (
+             SELECT 1 FROM rootcx_system.public_execution_principals WHERE user_id = $1
+         )")
         .bind(user_id).fetch_optional(pool).await.ok()??;
     Some(RpcCaller { user_id: user_id.to_string(), email, effective_perms: inherit.map(<[String]>::to_vec), connection_id: None })
 }

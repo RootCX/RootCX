@@ -41,3 +41,18 @@ pagination explicit instead of silently truncating existing calls.
 API examples, lifecycle details and migration steps:
 [Cross-app collections](../cross-app-collections.md).
 Contributor checks: [Core testing](../testing.md).
+
+## Amendment: public collection reads
+
+A public execution additionally requires a provider-approved publication bound
+to the installation generations, exact fields, fixed row predicate and declared
+public entry. Core supplies a managed, credentialless service identity.
+The publication never substitutes for a cross-app grant.
+
+An explicit `releaseOwnership` approval grants a separate read authority over
+the published rows. A grant alone still cannot bypass ownership. Publication
+RLS ceilings apply to every policy branch; other restrictive provider policies
+remain effective. Public execution cannot mutate data or acquire ordinary
+worker capabilities. Local and remote publications use the same read executor.
+
+Developer contract and approval lifecycle: [Public data](../publications.md).

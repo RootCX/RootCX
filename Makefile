@@ -32,12 +32,17 @@ else
 endif
 
 ifeq ($(HOST),)
+ifneq ($(filter-out test test-integration core-test core-unit core-governance core-verify test-image,$(MAKECMDGOALS)),)
   $(error rustc not found in PATH — install from https://rustup.rs)
+endif
+ifeq ($(MAKECMDGOALS),)
+  $(error rustc not found in PATH — install from https://rustup.rs)
+endif
 endif
 
 DIST := target/dist
 
-.PHONY: test-image core-check core-check-tests core-test core-unit core-governance core-verify \
+.PHONY: test test-integration test-image core-check core-check-tests core-test core-unit core-governance core-verify \
 	release dev deps dev-mode prod-mode \
         deps-mac-arm deps-mac-x86 deps-linux deps-linux-arm deps-win \
         require-mac require-linux require-win \
@@ -86,28 +91,18 @@ core-check-tests:
 
 core-test:
 	@test -n "$(TEST)" || { echo "usage: make core-test TEST=governance_test FILTER=cross_app_grants_test" >&2; exit 2; }
-	@echo "[core/test] running $(TEST)"
-	cargo test -p rootcx-core --test $(TEST) $(CARGO_JOB_ARGS) -- "$(FILTER)" --test-threads=$(TEST_THREADS) --nocapture
+	CARGO_JOBS="$(CARGO_JOBS)" TEST_THREADS="$(TEST_THREADS)" bash scripts/core-test.sh integration "$(TEST)" "$(FILTER)"
 
 core-unit:
-	@echo "[core/unit] running Core library tests against disposable PostgreSQL"
-	bash scripts/core-unit.sh $(CARGO_JOB_ARGS)
+	CARGO_JOBS="$(CARGO_JOBS)" TEST_THREADS="$(TEST_THREADS)" bash scripts/core-test.sh unit "" "$(FILTER)"
 
 core-governance:
-	@echo "[core/governance] real PostgreSQL, HTTP and worker boundaries"
-	cargo test -p rootcx-core $(CARGO_JOB_ARGS) --test governance_test \
-		-- "$(FILTER)" --test-threads=$(TEST_THREADS) $(if $(TEST_TIMINGS),--nocapture,)
+	CARGO_JOBS="$(CARGO_JOBS)" TEST_THREADS="$(TEST_THREADS)" bash scripts/core-test.sh integration governance_test "$(FILTER)"
 
-core-verify:
-	@echo "[core/verify] phase 1/4 — compile and run Core library tests"
-	$(MAKE) core-unit CARGO_JOBS="$(CARGO_JOBS)"
-	@echo "[core/verify] phase 2/4 — compile and run governance regressions"
-	$(MAKE) core-governance CARGO_JOBS="$(CARGO_JOBS)" FILTER= TEST_THREADS="$(TEST_THREADS)"
-	@echo "[core/verify] phase 3/4 — run worker prelude tests"
-	bun test core/src/backend_prelude.test.ts
-	@echo "[core/verify] phase 4/4 — check patch whitespace"
-	git diff --check
-	@echo "[core/verify] all local verification phases passed"
+test core-verify:
+	CARGO_JOBS="$(CARGO_JOBS)" TEST_THREADS="$(TEST_THREADS)" bash scripts/core-test.sh verify
+
+test-integration: core-governance
 
 # ── Development ───────────────────────────────────────────────────────────────
 

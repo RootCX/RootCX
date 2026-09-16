@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: ghcr.io/rootcx/postgresql:16-pgmq-cron
+    user: root
+    entrypoint: ["/pg-entrypoint.sh"]
+    environment:
+      POSTGRES_USER: rootcx
+      POSTGRES_PASSWORD: rootcx
+      POSTGRES_DB: rootcx_test
+      PGDATA: /tmp/pgdata
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=rootcx psql -h $$(hostname -i) -U rootcx -d postgres -Atqc 'SELECT 1'"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  tests:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.test
+    init: true
+    environment:
+      TEST_DATABASE_URL: postgres://rootcx:rootcx@postgres:5432/rootcx_test
+      CARGO_HOME: /cache/cargo
+      CARGO_TARGET_DIR: /cache/target
+      CARGO_BUILD_JOBS: ${CARGO_JOBS:-2}
+      CARGO_PROFILE_DEV_DEBUG: "1"
+      TEST_THREADS: ${TEST_THREADS:-2}
+    volumes:
+      - cache:/cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  cache:
+    name: rootcx-core-test-cache
+    external: true

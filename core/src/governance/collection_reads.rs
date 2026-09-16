@@ -154,3 +154,116 @@ pub(crate) async fn page(
         .map_err(|error| error.to_string())?;
     Ok(page)
 }
+
+/// A publication keeps its row predicate and projection together. Neither is
+/// taken from the caller's query, and the count uses the same scoped statement.
+pub(crate) async fn published(
+    conn: &mut PgConnection,
+    types: &FieldTypes,
+    app_id: &str,
+    entity: &str,
+    fields: &[String],
+    predicate: &JsonValue,
+    query_filter: &JsonValue,
+    options: &serde_json::Map<String, JsonValue>,
+    mode: PublicationRead,
+) -> Result<JsonValue, String> {
+    let mut binds = Vec::new();
+    let mut index = 0;
+    let fixed = build_where_clause(predicate, types, &mut binds, &mut index)
+        .map_err(|e| format!("{e:?}"))?;
+    let requested = build_where_clause(query_filter, types, &mut binds, &mut index)
+        .map_err(|e| format!("{e:?}"))?;
+    let scope = format!("({fixed}) AND ({requested})");
+    let tbl = table(app_id, entity);
+    let projection = publication_projection(types, fields);
+    let (order_by, direction, limit, offset) = cross_app::parse_query_options(options)?;
+    let sort = order_by.as_ref().unwrap_or(&fields[0]);
+    if !fields.contains(sort) {
+        return Err("publication does not allow this sort field".into());
+    }
+    let sort = quote_ident(sort);
+    let sql = match mode {
+        PublicationRead::Page => format!(
+            "WITH page AS (
+               SELECT {projection} AS row, {sort} AS sort_value FROM {tbl} t
+               WHERE {scope} ORDER BY {sort} {direction} LIMIT {limit} OFFSET {offset}
+             ) SELECT jsonb_build_object(
+               'data', COALESCE((SELECT jsonb_agg(row ORDER BY sort_value {direction}) FROM page), '[]'::jsonb),
+               'total', (SELECT count(*) FROM {tbl} t WHERE {scope}))"
+        ),
+        PublicationRead::One => format!("SELECT {projection} FROM {tbl} t WHERE {scope} LIMIT 1"),
+        PublicationRead::All => format!(
+            "SELECT {projection} FROM {tbl} t WHERE {scope} ORDER BY {sort} {direction} LIMIT 10001"
+        ),
+    };
+    let mut query = sqlx::query_as::<_, (JsonValue,)>(&sql);
+    for bind in &binds {
+        query = query.bind(bind);
+    }
+    let result = match mode {
+        PublicationRead::One => query
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(|e| e.to_string())?
+            .map_or(JsonValue::Null, |(row,)| row),
+        PublicationRead::Page => {
+            query
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(|e| e.to_string())?
+                .0
+        }
+        PublicationRead::All => {
+            let rows = query
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(|e| e.to_string())?;
+            if rows.len() > 10_000 {
+                return Err("public read exceeds 10000 rows; use findPage".into());
+            }
+            JsonValue::Array(rows.into_iter().map(|(row,)| row).collect())
+        }
+    };
+    if result.to_string().len() > 4 * 1024 * 1024 {
+        return Err("public read exceeds the 4 MiB response limit; use a smaller page".into());
+    }
+    Ok(result)
+}
+
+fn publication_projection(types: &FieldTypes, fields: &[String]) -> String {
+    // Chunk the projection to stay below PostgreSQL's function argument limit.
+    fields
+        .chunks(40)
+        .map(|chunk| {
+            let entries = chunk
+                .iter()
+                .map(|name| {
+                    let cast = if types
+                        .get(name)
+                        .is_some_and(|field| field.field_type.is_decimal())
+                    {
+                        "::text"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "{}, t.{}{cast}",
+                        crate::manifest::quote_literal(name),
+                        quote_ident(name),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("jsonb_build_object({entries})")
+        })
+        .collect::<Vec<_>>()
+        .join(" || ")
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum PublicationRead {
+    All,
+    One,
+    Page,
+}

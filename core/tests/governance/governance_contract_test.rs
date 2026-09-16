@@ -825,7 +825,7 @@ impl rootcx_core::tools::IntegrationCaller for RecordingCaller {
 
 // A direct (non-delegated) worker identity acting as `uid`.
 fn direct(uid: Uuid) -> rootcx_core::governance::enforcement::ContextState {
-    rootcx_core::governance::enforcement::ContextState { user_id: Some(uid), is_delegated: false, effective_perms: vec![], connection_id: None, audit_actor_id: Some(uid), audit_delegator_id: None }
+    rootcx_core::governance::enforcement::ContextState { user_id: Some(uid), is_delegated: false, effective_perms: vec![], connection_id: None, audit_actor_id: Some(uid), audit_delegator_id: None, public_execution: None }
 }
 
 async fn call_ci(pool: &sqlx::PgPool, caller: &RecordingCaller, params: Value, requester: Uuid) -> Result<Value, String> {
@@ -921,6 +921,7 @@ async fn sync_fanout_pins_connection_and_reentry_inherits() {
         connection_id: Some(conn_new.to_string()),
         audit_actor_id: Some(jean),
         audit_delegator_id: None,
+        public_execution: None,
     };
     let r = rootcx_core::extensions::integrations::execute_self_action(
         pool, &caller, "gmail", "triggerAction",
@@ -1877,6 +1878,7 @@ async fn regression_agent_tool_delegated_context_blocks_excess_perms() {
         connection_id: None,
         audit_actor_id: Some(rootcx_core::extensions::agents::agent_user_id("crm")),
         audit_delegator_id: Some(jean),
+        public_execution: None,
     };
     let mut tx = rootcx_core::governance::enforcement::begin_app_tx(pool, "crm", &state, Some(jean), None, "test", rootcx_core::governance::enforcement::TIMEOUT_INTERACTIVE_MS)
         .await.unwrap();
@@ -2006,6 +2008,7 @@ async fn sql_proxy_timeout_kills_long_running_query() {
         connection_id: None,
         audit_actor_id: None,
         audit_delegator_id: None,
+        public_execution: None,
     };
 
     // Use a 1-second timeout (minimum practical). pg_sleep(5) must be cancelled.
@@ -2044,6 +2047,7 @@ async fn sql_proxy_oversized_result_rolls_back() {
         connection_id: None,
         audit_actor_id: Some(uid),
         audit_delegator_id: None,
+        public_execution: None,
     };
 
     // Insert 1001 rows via generate_series RETURNING. Must exceed MAX_ROWS=1000.
@@ -2083,6 +2087,7 @@ async fn sql_proxy_row_cap_boundary_1000_succeeds() {
         connection_id: None,
         audit_actor_id: None,
         audit_delegator_id: None,
+        public_execution: None,
     };
 
     // Exactly 1000 rows: must succeed.
@@ -2123,6 +2128,7 @@ fn writer_state(uid: Uuid) -> ContextState {
         connection_id: None,
         audit_actor_id: None,
         audit_delegator_id: None,
+        public_execution: None,
     }
 }
 
@@ -2344,7 +2350,9 @@ async fn an_app_transaction_is_read_committed_whatever_the_server_default() {
     rt.install("crm", "contacts").await;
     let (_, uid) = user_with(&rt, "txiso@t.local", &["app:crm:contacts.read"]).await;
 
-    sqlx::query("ALTER DATABASE rootcx SET default_transaction_isolation = 'repeatable read'")
+    let database: String = sqlx::query_scalar("SELECT quote_ident(current_database())")
+        .fetch_one(rt.pool()).await.unwrap();
+    sqlx::query(&format!("ALTER DATABASE {database} SET default_transaction_isolation = 'repeatable read'"))
         .execute(rt.pool()).await.unwrap();
     // A database-level default only reaches sessions opened after it is set, so
     // the existing pool's connections would still report the old value.
@@ -2365,7 +2373,7 @@ async fn an_app_transaction_is_read_committed_whatever_the_server_default() {
     );
 
     fresh.close().await;
-    sqlx::query("ALTER DATABASE rootcx RESET default_transaction_isolation")
+    sqlx::query(&format!("ALTER DATABASE {database} RESET default_transaction_isolation"))
         .execute(rt.pool()).await.unwrap();
     rt.shutdown().await;
 }
@@ -2419,6 +2427,7 @@ async fn public_caller_deny_all_on_data() {
         connection_id: None,
         audit_actor_id: None,
         audit_delegator_id: None,
+        public_execution: None,
     };
     assert!(public_state.user_id.is_none(), "precondition: empty string must parse to None");
 
@@ -2724,6 +2733,7 @@ async fn typed_bind_uuid_number_decimal_date_bool_array_jsonb() {
         connection_id: None,
         audit_actor_id: Some(uid),
         audit_delegator_id: None,
+        public_execution: None,
     };
 
     // Insert a row with all typed columns via run_sql (exercises build_typed_args).

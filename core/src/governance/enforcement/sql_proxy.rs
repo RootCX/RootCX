@@ -40,6 +40,7 @@ pub struct ContextState {
     /// the responsible human owns rows while the app/agent is the actor.
     pub audit_actor_id: Option<Uuid>,
     pub audit_delegator_id: Option<Uuid>,
+    pub public_execution: Option<crate::governance::publications::PublicExecution>,
 }
 
 /// The unit of work a statement belongs to, attached by Core at an execution
@@ -99,6 +100,7 @@ impl ContextState {
                 connection_id: c.connection_id.clone(),
                 audit_actor_id: if c.effective_perms.is_none() { c.user_id.parse().ok() } else { None },
                 audit_delegator_id: None,
+                public_execution: None,
             },
             None => Self::default(),
         }
@@ -129,7 +131,10 @@ pub async fn set_rls_context(
                 set_config('rootcx.cross_app_grant_id', '', true), \
                 set_config('rootcx.cross_app_source_app', '', true), \
                 set_config('rootcx.cross_app_action', '', true), \
-                set_config('rootcx.human_data_request', '', true)",
+                set_config('rootcx.human_data_request', '', true), \
+                set_config('rootcx.publication_id', '', true), \
+                set_config('rootcx.publication_read_key', '', true), \
+                set_config('rootcx.publication_release_ownership', '', true)",
     )
     .bind(uid)
     .bind(delegated)
@@ -198,7 +203,7 @@ pub async fn begin_app_tx_with_invocation<'a>(
 ) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, sqlx::Error> {
     begin_data_tx(
         pool, app_schema, state, invocation, audit_actor, audit_delegator,
-        trigger_ref, timeout_ms, None, DataOrigin::App,
+        trigger_ref, timeout_ms, None, DataOrigin::App, None,
     ).await
 }
 
@@ -219,7 +224,7 @@ pub async fn begin_app_tx_with_invocation_and_cross_app<'a>(
 ) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, sqlx::Error> {
     begin_data_tx(
         pool, app_schema, state, invocation, audit_actor, audit_delegator,
-        trigger_ref, timeout_ms, cross_app, DataOrigin::App,
+        trigger_ref, timeout_ms, cross_app, DataOrigin::App, None,
     ).await
 }
 
@@ -242,7 +247,7 @@ pub(crate) async fn begin_human_tx<'a>(
 ) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, sqlx::Error> {
     begin_data_tx(
         pool, app_schema, state, &InvocationContext::default(), audit_actor,
-        audit_delegator, trigger_ref, timeout_ms, None, DataOrigin::HumanHttp,
+        audit_delegator, trigger_ref, timeout_ms, None, DataOrigin::HumanHttp, None,
     ).await
 }
 
@@ -257,7 +262,11 @@ async fn begin_data_tx<'a>(
     timeout_ms: u32,
     cross_app: Option<&crate::governance::cross_app::AuthorizedRead>,
     origin: DataOrigin,
+    publication: Option<&crate::governance::publications::ApprovedPublication>,
 ) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, sqlx::Error> {
+    if state.public_execution.is_some() && publication.is_none() {
+        return Err(sqlx::Error::Protocol("public execution requires a publication read".into()));
+    }
     let mut tx = pool.begin().await?;
     // One round-trip; SET LOCAL scopes every value to this tx only.
     // `transaction_isolation` leads because PostgreSQL refuses it once the tx has
@@ -280,6 +289,10 @@ async fn begin_data_tx<'a>(
         sqlx::query("SELECT set_config('rootcx.human_data_request', '1', true)")
             .execute(&mut *tx).await?;
     }
+    // Lifecycle transitions take installation locks before grant locks.
+    if let Some(publication) = publication {
+        crate::governance::publications::lock_in_tx(&mut tx, publication).await?;
+    }
     if let Some(authority) = cross_app {
         sqlx::query(
             "SELECT set_config('rootcx.cross_app_grant_id', $1, true),
@@ -293,10 +306,45 @@ async fn begin_data_tx<'a>(
         .await?;
         crate::governance::cross_app::lock_cross_app_read_in_tx(&mut tx, authority).await?;
     }
+    if let Some(publication) = publication {
+        if cross_app.is_some() {
+            // The grant lock may have waited past the publication's expiry.
+            crate::governance::publications::lock_in_tx(&mut tx, publication).await?;
+        }
+        sqlx::query(
+            "SELECT set_config('rootcx.publication_id', $1, true),
+                    set_config('rootcx.publication_read_key', $2, true),
+                    set_config('rootcx.publication_release_ownership', $3, true)",
+        )
+        .bind(publication.id.to_string())
+        .bind(format!("app:{}:{}.read", publication.provider_app, publication.definition.entity))
+        .bind(if publication.definition.release_ownership { "1" } else { "0" })
+        .execute(&mut *tx).await?;
+    }
     set_invocation_context(&mut tx, invocation).await?;
     crate::extensions::audit::set_context(&mut tx, audit_actor, audit_delegator, trigger_ref).await?;
     sqlx::query("SET LOCAL ROLE rootcx_app_executor").execute(&mut *tx).await?;
     Ok(tx)
+}
+
+pub(crate) async fn begin_publication_tx<'a>(
+    pool: &'a PgPool,
+    execution: &crate::governance::publications::PublicExecution,
+    publication: &crate::governance::publications::ApprovedPublication,
+    cross_app: Option<&crate::governance::cross_app::AuthorizedRead>,
+) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, sqlx::Error> {
+    let state = ContextState {
+        user_id: Some(execution.principal_id),
+        is_delegated: true,
+        audit_actor_id: Some(execution.principal_id),
+        public_execution: Some(execution.clone()),
+        ..Default::default()
+    };
+    begin_data_tx(
+        pool, &publication.provider_app, &state, &InvocationContext::None,
+        Some(execution.principal_id), None, "public_collection",
+        TIMEOUT_INTERACTIVE_MS, cross_app, DataOrigin::App, Some(publication),
+    ).await
 }
 
 /// Statements an app may send. Anything else is refused.

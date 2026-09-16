@@ -29,6 +29,7 @@ fn http_context(identity: &Identity) -> ContextState {
         connection_id: None,
         audit_actor_id: Some(identity.user_id),
         audit_delegator_id: None,
+        public_execution: None,
     }
 }
 

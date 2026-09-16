@@ -1,79 +1,56 @@
 # Core testing
 
-Requires Rust/Cargo, Bun and a running Docker engine.
-
-Use Cargo for Rust and `bun test` for the worker prelude. Make targets only
-orchestrate these existing runners; testcontainers supplies real PostgreSQL.
-No additional runner or coverage framework is required.
-
-The SDK and Peppol integration separately use Vitest. Those package tests are
-outside this Core gate; their presence does not add a runtime to the RLS/CRUD
-test path. See `runtime/sdk/src/*.test.ts` and
-`core/resources/integrations/peppol/*.test.ts`.
+Run `make test`. Only Docker Compose is required for the test runtime: Rust,
+Bun and cargo-nextest run in the pinned test image. No host Rust build artifacts
+are read or deleted.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
-| `make core-verify` | Library tests, governance integration tests, Bun prelude, whitespace check |
-| `make core-unit` | All library tests, including their SQL/provider boundary tests, with one disposable database |
-| `make core-governance` | Cross-app CRUD, lifecycle, metadata, delegation, identity, ownership and workflows |
-| `make core-governance FILTER=cross_app_lifecycle_test::revoke_waits` | One integration behavior |
-| `cargo test -p rootcx-core --lib governance::cross_app::tests` | Fast grant validator/projection tests; no database needed |
-| `bun test core/src/backend_prelude.test.ts` | Real worker subprocess protocol tests |
-| `make core-check-tests` | Type-check every Core test target, including suites outside the governance release gate |
+| `make test` / `make core-verify` | Library tests, governance integration tests, Bun prelude, whitespace check |
+| `make core-unit FILTER=publications` | Library tests matching a name |
+| `make test-integration FILTER=publications_test` | One integration suite |
+| `make core-test TEST=api_integration FILTER=cron` | A suite outside the governance gate |
+| `make core-check-tests` | Native type-check of every Core test target |
 
-`TEST_THREADS=2` bounds concurrent integration containers by default.
-`CARGO_JOBS` separately controls compilation parallelism. `core-verify` clears
-the integration name filter so an inherited `FILTER` cannot silently narrow
-the release gate.
+Compilation and execution are separate phases. The first build downloads and
+compiles dependencies; subsequent runs reuse the Docker volume
+`rootcx-core-test-cache`. `CARGO_JOBS` defaults to 2. Do not delete this cache as
+part of a normal test run. `core-verify` ignores `FILTER` so a release check cannot
+silently run a subset.
 
-`core-verify` compiles the tests it executes. It does not first run a redundant
-`cargo check` build. It is a Core governance gate, not the entire repository's
-test suite or a production performance benchmark.
+## Isolation, limits and cleanup
 
-## Isolation and cost
+Each invocation creates one private Compose project with one PostgreSQL server.
+It never connects to the development database or exposes PostgreSQL on a host
+port. The PostgreSQL container is removed on success, failure or interruption;
+only the Rust build cache persists.
 
-Each integration test gets its own PostgreSQL container, data directory, Core
-runtime, HTTP server and real Bun workers. This preserves isolation of SQL
-roles, migrations, grants and ownership policies. Product errors are not retried.
-The harness has a bounded retry only for Docker failing to publish a port,
-before Core starts.
+Integration tests run sequentially through nextest. Each Core fixture acquires a
+PostgreSQL advisory lock and recreates `rootcx_test` before booting. Its connection
+holds the lock until shutdown. Even direct parallel invocation of the Rust test
+binary cannot reset another fixture's database. Each fixture still has a fresh
+Core runtime, HTTP server, app data directory and real Bun workers.
 
-The governance suites live in `core/tests/governance/` and share one native
-Cargo entry point, `governance_test.rs`. Their names remain usable as filters.
-This compiles the harness once and avoids repeated executable startup. It
-does not share databases or runtimes between tests.
+This serialization is intentional: pg_cron supports one installation database
+per PostgreSQL server. Independent concurrent databases would disable or fake
+cron behavior. We keep the real pg_cron and pgmq extensions, and reset their data
+between tests. The shared executor role is bootstrapped idempotently.
 
-Every fixture-owning governance test awaits `rt.shutdown()`. The harness stops
-its HTTP server, drains Core workers and closes the database pool before the
-container is removed. Omitting shutdown previously left PostgreSQL sockets
-open in the shared process; separate test binaries had hidden that accumulation.
-`TEST_TIMINGS=1` also reports open descriptors where `/dev/fd` is available.
+Library tests run once with Cargo's test harness and share their disposable
+database. Their pools belong to each test's Tokio runtime. The seeded assistant
+is a committed worker fixture; tests do not download an assistant or call an LLM.
 
-The seeded assistant is a committed, dependency-free worker fixture. Core
-still registers and starts it normally; tests do not download GitHub's latest
-assistant release, run its package installation, or contact an LLM.
-The production assistant download remains the default outside the harness.
-Loopback harness requests explicitly bypass host proxy discovery.
+Limits are explicit: compilation 20 minutes, library tests 5 minutes, integration
+suite 20 minutes, each integration test 2 minutes, and Bun tests 2 minutes.
+Nextest does not retry failures. The test container owns all workers, so removing
+it also removes subprocesses after a panic or timeout. Infrastructure and build
+failures are reported before test execution; they are not passing test results.
 
-Library SQL tests share bootstrap completion, but each gets a pool belonging
-to its own Tokio runtime. `TEST_DATABASE_URL` is mandatory for these tests.
-`make core-unit` creates and removes a fresh database container and runs the
-library suite once; it never falls back to a developer's database.
-
-Bun tests terminate and await their fixture processes, including after failed
-assertions. Already-exited processes no longer incur a teardown timeout.
-
-For per-phase integration timings:
-
-```sh
-TEST_TIMINGS=1 make core-governance FILTER=cross_app_metadata_test
-```
-
-Record run-specific counts, timings and release blockers in the PR or issue,
-not in this guide. Test timings exclude compilation and are not production
-latency measurements.
+The Core image release workflow requires this gate to pass before publishing.
+The SDK and Peppol Vitest suites are separate from this Core gate. Run-specific
+counts and timings belong in the PR, not in this guide.
 
 ## Governance coverage by invariant
 

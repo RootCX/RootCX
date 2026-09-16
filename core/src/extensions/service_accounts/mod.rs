@@ -47,7 +47,11 @@ fn key_prefix(full: &str) -> String {
 }
 
 async fn assert_is_service_account(pool: &PgPool, id: Uuid) -> Result<(), ApiError> {
-    let is_sa: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rootcx_system.users WHERE id = $1 AND kind = 'service')")
+    let is_sa: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.users WHERE id = $1 AND kind = 'service'
+         AND NOT EXISTS (
+             SELECT 1 FROM rootcx_system.public_execution_principals WHERE user_id = $1
+         ))")
         .bind(id).fetch_one(pool).await?;
     if is_sa { Ok(()) } else { Err(ApiError::NotFound("service account not found".into())) }
 }
@@ -154,7 +158,9 @@ async fn list_sa(
     let rows: Vec<(Uuid, String, Option<String>, Option<chrono::DateTime<chrono::Utc>>, chrono::DateTime<chrono::Utc>)> =
         sqlx::query_as(
             "SELECT id, email, display_name, disabled_at, created_at \
-             FROM rootcx_system.users WHERE kind = 'service' AND id <> $1 ORDER BY email",
+             FROM rootcx_system.users u WHERE kind = 'service' AND id <> $1 \
+             AND NOT EXISTS (SELECT 1 FROM rootcx_system.public_execution_principals p WHERE p.user_id = u.id) \
+             ORDER BY email",
         )
         .bind(SYSTEM_UID)
         .fetch_all(&pool)
@@ -187,6 +193,7 @@ async fn enable_sa(
 async fn set_disabled(rt: &SharedRuntime, caller: Uuid, id: Uuid, disabled: bool) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(rt);
     require_perm(&pool, caller, MANAGE).await?;
+    assert_is_service_account(&pool, id).await?;
     let r = sqlx::query(
         "UPDATE rootcx_system.users SET disabled_at = CASE WHEN $2 THEN now() ELSE NULL END \
          WHERE id = $1 AND kind = 'service'",
@@ -208,6 +215,7 @@ async fn delete_sa(
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
     require_perm(&pool, identity.user_id, MANAGE).await?;
+    assert_is_service_account(&pool, id).await?;
     // Revoke standing delegations first (no FK on delegations), then delete the
     // user. sa_credentials cascade; cron_schedules.created_by -> NULL (denied).
     sqlx::query("UPDATE rootcx_system.delegations SET revoked_at = now() WHERE delegatee_uid = $1 AND revoked_at IS NULL")
@@ -305,6 +313,7 @@ async fn revoke_credential(
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
     require_perm(&pool, identity.user_id, MANAGE).await?;
+    assert_is_service_account(&pool, id).await?;
     let r = sqlx::query(
         "UPDATE rootcx_system.sa_credentials SET revoked_at = now() \
          WHERE id = $1 AND sa_user_id = $2 AND revoked_at IS NULL",
@@ -345,6 +354,7 @@ async fn revoke_act_as(
 ) -> Result<Json<JsonValue>, ApiError> {
     let pool = routes::pool(&rt);
     require_perm(&pool, identity.user_id, MANAGE).await?;
+    assert_is_service_account(&pool, id).await?;
     crate::governance::delegation::act_as::revoke(&pool, body.user_id, id).await.map_err(|e| ApiError::Internal(e.to_string()))?;
     Ok(Json(json!({ "message": "act-as revoked" })))
 }
@@ -372,7 +382,10 @@ async fn issue_token(
         .map_err(|_| ApiError::Unauthorized("invalid_client".into()))?;
 
     let sa: Option<(String, Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>)> = sqlx::query_as(
-        "SELECT email, disabled_at, owner_of_record FROM rootcx_system.users WHERE id = $1 AND kind = 'service'",
+        "SELECT email, disabled_at, owner_of_record FROM rootcx_system.users WHERE id = $1 AND kind = 'service'
+         AND NOT EXISTS (
+             SELECT 1 FROM rootcx_system.public_execution_principals WHERE user_id = $1
+         )",
     ).bind(sa_id).fetch_optional(&pool).await?;
     let (email, disabled_at, owner) = sa.ok_or_else(|| ApiError::Unauthorized("invalid_client".into()))?;
     if disabled_at.is_some() {

@@ -1,5 +1,8 @@
-//! Governance release gate: one Cargo binary, independent PostgreSQL per test.
+//! Governance release gate: one Cargo binary, fresh PostgreSQL database per test.
 mod harness;
+
+#[path = "governance/harness_isolation_test.rs"]
+mod harness_isolation_test;
 
 #[path = "governance/collection_reads_test.rs"]
 mod collection_reads_test;
@@ -24,6 +27,8 @@ mod delegation_matrix_test;
 mod governance_contract_test;
 #[path = "governance/row_ownership_test.rs"]
 mod row_ownership_test;
+#[path = "governance/publications_test.rs"]
+mod publications_test;
 #[path = "governance/tool_availability_test.rs"]
 mod tool_availability_test;
 #[path = "governance/workflows_integration.rs"]

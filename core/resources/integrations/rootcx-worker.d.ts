@@ -112,6 +112,7 @@ interface RootCxCtx {
   downloadFile(appId: string, fileId: string): Promise<RootCxBufferedFile>;
   openFile(fileId: string): Promise<RootCxStreamingFile>;
   openFile(appId: string, fileId: string): Promise<RootCxStreamingFile>;
+  enqueueJob(payload: unknown): Promise<{ msgId: number }>;
   /** Same-app collection; optional T adds row typing while retaining legacy untyped calls. */
   collection<T = any>(entity: string): RootCxCollection<T>;
   /**

@@ -18,6 +18,10 @@ two apps never creates a grant.
 
 The design rationale is recorded in [ADR 0004](adr/0004-cross-app-collection-grants.md).
 
+Anonymous callers need an additional provider-approved [publication](publications.md).
+Core runs declared public reads with a managed server identity; an existing
+cross-app grant alone never makes its data public.
+
 ## Choose the interaction
 
 | Intent | API | Authority |

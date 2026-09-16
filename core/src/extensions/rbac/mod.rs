@@ -353,7 +353,7 @@ pub(crate) async fn apply_table_rls(
         let predicate = collection_gate(&key, mine.as_deref());
         set_policy(
             pool, &qt, policy, command, clauses,
-            Some(&predicate),
+            Some(&predicate), false,
         ).await?;
 
         // The row-scoped twin. PERMISSIVE, so Postgres ORs it with the unscoped
@@ -366,9 +366,29 @@ pub(crate) async fn apply_table_rls(
             format!("{} AND {mine}", gate(&own_key))
         });
         set_policy(
-            pool, &qt, &format!("{policy}_own"), command, clauses, scoped.as_deref(),
+            pool, &qt, &format!("{policy}_own"), command, clauses, scoped.as_deref(), false,
+        ).await?;
+
+        // Even a provider's additional permissive policy cannot widen a public
+        // execution. Other restrictive provider policies continue to apply.
+        let public = if action == "read" {
+            publication_gate(&key, mine.as_deref(), owners.contains_key(table))
+        } else {
+            "FALSE".into()
+        };
+        let ceiling = format!(
+            "coalesce(current_setting('rootcx.publication_id', true), '') = '' OR ({public})"
+        );
+        set_policy(
+            pool, &qt, &format!("{policy}_publication_ceiling"), command, clauses,
+            Some(&ceiling), true,
         ).await?;
     }
+
+    let public = publication_gate(
+        &format!("app:{schema}:{table}.read"), mine.as_deref(), owners.contains_key(table),
+    );
+    set_policy(pool, &qt, "rootcx_rls_select_publication", "SELECT", &["USING"], Some(&public), false).await?;
 
     Ok(())
 }
@@ -413,6 +433,20 @@ fn collection_gate(key: &str, mine: Option<&str>) -> String {
     }
 }
 
+fn publication_gate(key: &str, mine: Option<&str>, has_owner: bool) -> String {
+    let gate = format!(
+        "(SELECT rootcx_system.check_publication_access({}))",
+        crate::manifest::quote_literal(key),
+    );
+    if !has_owner {
+        return gate;
+    }
+    format!(
+        "{gate} AND (current_setting('rootcx.publication_release_ownership', true) = '1' OR ({}))",
+        mine.unwrap_or("FALSE"),
+    )
+}
+
 /// (Re)define one policy, or drop it when there is no predicate. Dropped first
 /// either way, so every call is a redefinition rather than a duplicate — which is
 /// what makes `apply_table_rls` safe to run on each install and on every boot.
@@ -423,6 +457,7 @@ async fn set_policy(
     command: &str,
     clauses: &[&str],
     predicate: Option<&str>,
+    restrictive: bool,
 ) -> Result<(), RuntimeError> {
     exec(pool, &format!("DROP POLICY IF EXISTS {name} ON {qt}")).await?;
     let Some(predicate) = predicate else { return Ok(()) };
@@ -431,7 +466,8 @@ async fn set_policy(
         .map(|clause| format!("{clause} ({predicate})"))
         .collect::<Vec<_>>()
         .join(" ");
-    exec(pool, &format!("CREATE POLICY {name} ON {qt} FOR {command} {body}")).await
+    let mode = if restrictive { "AS RESTRICTIVE" } else { "" };
+    exec(pool, &format!("CREATE POLICY {name} ON {qt} {mode} FOR {command} {body}")).await
 }
 
 /// Ownership per entity of one schema: the owning column, and the sibling entity

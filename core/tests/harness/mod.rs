@@ -9,11 +9,7 @@ use reqwest::{Client, Method, StatusCode, multipart};
 use rootcx_core::{ReadyRuntime, Runtime, server};
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::{ContainerAsync, GenericImage, ImageExt, runners::AsyncRunner};
-
-const PG_IMAGE: &str = "ghcr.io/rootcx/postgresql";
-const PG_TAG: &str = "16-pgmq-cron";
+use sqlx::{Connection, PgConnection, postgres::PgConnectOptions};
 
 // This harness is shared by integration targets with intentionally different
 // surfaces; each target uses only the helpers it needs.
@@ -25,7 +21,7 @@ pub struct TestRuntime {
     pub token: String,
     server: tokio::task::JoinHandle<()>,
     _tmp: TempDir,
-    _container: ContainerAsync<GenericImage>,
+    _database: PgConnection,
 }
 
 #[allow(dead_code)]
@@ -55,10 +51,9 @@ impl TestRuntime {
         let data_dir = tmp.path().to_path_buf();
         let api_port = free_port();
 
-        let (container, pg_port) = start_postgres().await;
+        let (database, db_url) = fresh_database().await;
         timing("postgres", started);
         let started = Instant::now();
-        let db_url = format!("postgresql://rootcx:rootcx@127.0.0.1:{pg_port}/rootcx");
 
         let resources_dir = data_dir.join("resources");
         std::fs::create_dir_all(&resources_dir).unwrap();
@@ -133,7 +128,7 @@ impl TestRuntime {
             token,
             server,
             _tmp: tmp,
-            _container: container,
+            _database: database,
         }
     }
 
@@ -344,48 +339,23 @@ fn timing(phase: &str, started: Instant) {
     }
 }
 
-async fn start_postgres() -> (ContainerAsync<GenericImage>, u16) {
-    for attempt in 1..=3 {
-        let container = GenericImage::new(PG_IMAGE, PG_TAG)
-            .with_exposed_port(5432_u16.tcp())
-            .with_wait_for(WaitFor::message_on_stderr(
-                "database system is ready to accept connections",
-            ))
-            .with_entrypoint("/pg-entrypoint.sh")
-            .with_mapped_port(0, 5432_u16.tcp())
-            .with_user("root")
-            .with_env_var("POSTGRES_USER", "rootcx")
-            .with_env_var("POSTGRES_PASSWORD", "rootcx")
-            .with_env_var("POSTGRES_DB", "rootcx")
-            .with_env_var("PGDATA", "/tmp/pgdata")
-            .start()
-            .await
-            .expect("failed to start postgres container");
-
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        let error = loop {
-            match container.get_host_port_ipv4(5432).await {
-                Ok(port) => return (container, port),
-                Err(testcontainers::TestcontainersError::PortNotExposed { .. })
-                    if tokio::time::Instant::now() < deadline =>
-                {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-                Err(error @ testcontainers::TestcontainersError::PortNotExposed { .. }) => break error,
-                Err(error) => panic!("postgres port inspection failed: {error}"),
-            }
-        };
-        let stderr = container.stderr_to_vec().await.unwrap_or_default();
-        eprintln!(
-            "PostgreSQL infrastructure attempt {attempt}/3: {error}\n{}",
-            String::from_utf8_lossy(&stderr),
-        );
-        container.rm().await.expect("remove container without published port");
-        // Retry only Docker's missing-port condition before Core, migrations
-        // or any test assertion runs. Product failures are never retried.
-        assert!(attempt < 3, "Docker failed to publish PostgreSQL after 3 fresh containers");
-    }
-    unreachable!("loop returns a container or reports startup failure")
+async fn fresh_database() -> (PgConnection, String) {
+    let url = std::env::var("TEST_DATABASE_URL").expect("run integration tests with make test-integration");
+    let options: PgConnectOptions = url.parse().expect("valid test database URL");
+    assert_eq!(options.get_database(), Some("rootcx_test"), "refusing to reset a non-test database");
+    let database = tokio::time::timeout(Duration::from_secs(45), async {
+        let mut admin = PgConnection::connect_with(&options.database("postgres")).await.unwrap();
+        // pg_cron owns one database per server. Keep it real and serialize resets,
+        // including when the test binary is invoked without nextest.
+        sqlx::query("SELECT pg_advisory_lock(82409125)")
+            .execute(&mut admin).await.unwrap();
+        sqlx::query("DROP DATABASE IF EXISTS rootcx_test WITH (FORCE)")
+            .execute(&mut admin).await.unwrap();
+        sqlx::query("CREATE DATABASE rootcx_test")
+            .execute(&mut admin).await.unwrap();
+        admin
+    }).await.expect("test database reset exceeded 45 seconds");
+    (database, url)
 }
 
 fn free_port() -> u16 {

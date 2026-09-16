@@ -693,6 +693,7 @@ async fn one_app_cannot_resolve_another_s_ownership() {
         connection_id: None,
         audit_actor_id: Some(mine),
         audit_delegator_id: None,
+        public_execution: None,
     };
 
     let probe = "SELECT rootcx_system.\"rootcx_own.school.assignment\"() AS id";

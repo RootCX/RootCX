@@ -20,7 +20,13 @@ env:
   IMAGE: ghcr.io/rootcx/core
 
 jobs:
+  test:
+    uses: ./.github/workflows/core-tests.yml
+    permissions:
+      contents: read
+
   build:
+    needs: test
     permissions:
       contents: read
       packages: write

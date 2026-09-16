@@ -375,6 +375,7 @@ async fn revoke_waits_for_governed_read_commit_and_rejects_saved_authority() {
         connection_id: None,
         audit_actor_id: Some(actor),
         audit_delegator_id: None,
+        public_execution: None,
     };
     let invocation = enforcement::InvocationContext::default();
     let mut read = enforcement::begin_app_tx_with_invocation_and_cross_app(
@@ -1112,6 +1113,7 @@ async fn governance_fixes_expiry_after_lock_wait_checks_fresh_database_time() {
         connection_id: None,
         audit_actor_id: Some(actor),
         audit_delegator_id: None,
+        public_execution: None,
     };
     let mut blocker = enforcement::begin_app_tx_with_invocation_and_cross_app(
         rt.pool(),

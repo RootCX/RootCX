@@ -1,0 +1,27 @@
+name: Core tests
+
+on:
+  pull_request:
+    paths:
+      - "core/**"
+      - "crates/**"
+      - "Cargo.*"
+      - "Makefile"
+      - "docker/Dockerfile.test"
+      - "docker-compose.test.yml"
+      - "scripts/core-test*.sh"
+      - ".config/nextest.toml"
+      - ".github/workflows/core-tests.yml"
+      - ".github/workflows/docker.yml"
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/core-test.sh verify

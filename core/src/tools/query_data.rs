@@ -72,6 +72,7 @@ impl Tool for QueryDataTool {
             connection_id: None,
             audit_actor_id: Some(ctx.user_id),
             audit_delegator_id: ctx.invoker_user_id,
+            public_execution: None,
         };
         let has_query = PAGE_OPTION_KEYS
             .iter()
