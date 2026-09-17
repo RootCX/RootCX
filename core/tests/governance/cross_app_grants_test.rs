@@ -328,7 +328,7 @@ async fn provider_ownership_remains_authoritative_for_a_cross_app_read() {
         connection_id: None,
         audit_actor_id: Some(plain),
         audit_delegator_id: None,
-        public_execution: None,
+        public_execution: None, approved_action: None,
     };
     let mut tx = rootcx_core::governance::enforcement::begin_app_tx_with_invocation_and_cross_app(
         rt.pool(),

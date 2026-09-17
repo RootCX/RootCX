@@ -18,8 +18,38 @@ use crate::tools::{ActionCaller, AgentDispatcher, IntegrationCaller, ToolRegistr
 use crate::worker::{self, AgentEvent, FleetEvent, SupervisorHandle, WorkerConfig, WorkerStatus};
 use crate::governance::enforcement::InvocationContext;
 use crate::governance::publications::PublicExecution;
+use crate::governance::approved_actions;
 
 const BACKEND_PRELUDE: &str = include_str!("backend_prelude.js");
+
+fn write_backend_prelude(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        // Replace atomically: a later nonroot Core start must also be able to
+        // refresh the read-only file without opening it for writing in place.
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::other("backend prelude has no parent directory")
+        })?;
+        let staged = parent.join(format!(".prelude-{}.tmp", uuid::Uuid::new_v4()));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true).create_new(true).mode(0o600).open(&staged)?;
+        let result = (|| {
+            file.write_all(BACKEND_PRELUDE.as_bytes())?;
+            file.set_permissions(std::fs::Permissions::from_mode(0o444))?;
+            std::fs::rename(&staged, path)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&staged);
+        }
+        result
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, BACKEND_PRELUDE)
+    }
+}
 
 /// A worker process is keyed by (app_id, identity). One process serves exactly
 /// ONE identity for its whole life, so a malicious app can never act as another
@@ -243,7 +273,7 @@ impl WorkerManager {
         max_workers: Option<usize>,
     ) -> Self {
         let prelude_path = apps_dir.join(".prelude.js");
-        std::fs::write(&prelude_path, BACKEND_PRELUDE).expect("write backend prelude");
+        write_backend_prelude(&prelude_path).expect("write backend prelude");
         let (fleet_tx, _) = broadcast::channel(512);
         let cap = max_workers.unwrap_or_else(|| {
             worker_cap(
@@ -352,14 +382,34 @@ impl WorkerManager {
         &self, pool: &PgPool, secrets: &SecretManager, app_id: &str,
         principal: &Principal, invocation: &InvocationContext,
     ) -> Result<SupervisorHandle, RuntimeError> {
-        let app_dir = self.apps_dir.join(app_id);
+        let config = self.config_for(pool, secrets, app_id, principal, invocation).await?;
+        let handle = worker::spawn_supervisor(config);
+        handle.start().await?;
+        Ok(handle)
+    }
+
+    async fn config_for(
+        &self, pool: &PgPool, secrets: &SecretManager, app_id: &str,
+        principal: &Principal, invocation: &InvocationContext,
+    ) -> Result<WorkerConfig, RuntimeError> {
+        let mut identity = principal.rls_state();
+        let approved = identity.approved_action.is_some();
+        let app_dir = match &identity.approved_action {
+            Some(execution) => {
+                approved_actions::verify_execution(pool, execution).await?;
+                let data_dir = self.apps_dir.parent()
+                    .ok_or_else(|| RuntimeError::Config("apps directory has no parent".into()))?;
+                approved_actions::artifact_dir(data_dir, execution.revision)
+            }
+            None => self.apps_dir.join(app_id),
+        };
         // A refused archive may still be on disk after a failed deploy. Manual
         // starts, lazy request workers and boot recovery must also fail closed.
         crate::app_migrations::run(pool, app_id, &app_dir)
             .await
             .map_err(RuntimeError::Invalid)?;
         let entry_point = resolve_entry_point(&app_dir)?;
-        let (credentials, agent_boot_config, supervision) = if matches!(principal, Principal::Public(_)) {
+        let (credentials, agent_boot_config, supervision) = if approved || matches!(principal, Principal::Public(_)) {
             (HashMap::new(), None, None)
         } else {
             let mut credentials = secrets.get_env_for_app(pool, app_id).await?;
@@ -373,16 +423,15 @@ impl WorkerManager {
             };
             (credentials, boot, supervision)
         };
-        let mut identity = principal.rls_state();
         if identity.audit_actor_id.is_none() {
-            if identity.is_delegated && identity.public_execution.is_none() {
+            if identity.is_delegated && identity.public_execution.is_none() && !approved {
                 identity.audit_actor_id = Some(crate::extensions::agents::agent_user_id(app_id));
                 identity.audit_delegator_id = identity.user_id;
             } else {
                 identity.audit_actor_id = identity.user_id;
             }
         }
-        let config = WorkerConfig {
+        Ok(WorkerConfig {
             app_id: app_id.to_string(),
             identity,
             invocation: invocation.clone(),
@@ -396,22 +445,13 @@ impl WorkerManager {
             prelude_path: self.prelude_path.clone(),
             tool_registry: Arc::clone(&self.tool_registry),
             pending_approvals: self.pending_approvals.clone(),
-            agent_dispatch: self.dispatch.get().cloned(),
-            integration_caller: self.integration_call.get().cloned(),
-            action_caller: self.action_call.get().cloned(),
+            agent_dispatch: if approved { None } else { self.dispatch.get().cloned() },
+            integration_caller: if approved { None } else { self.integration_call.get().cloned() },
+            action_caller: if approved { None } else { self.action_call.get().cloned() },
             agent_boot_config,
             supervision,
             upload_nonces: Arc::clone(&self.upload_nonces),
-        };
-        // No protocol floor here. A scoped unit of work (an action, a job) is not a
-        // new execution path a worker has to be certified for — it is how the
-        // product has always dispatched. Refusing a worker that announces no
-        // version took down every declared action and every cron on every worker
-        // written before the version field existed. What v4 buys is the invocation
-        // echo, and `worker::capability_context` decides that per message.
-        let handle = worker::spawn_supervisor(config);
-        handle.start().await?;
-        Ok(handle)
+        })
     }
 
     /// Take a pod slot for a new worker, evicting to make room if need be.
@@ -461,6 +501,9 @@ impl WorkerManager {
     async fn get_or_spawn(
         &self, app_id: &str, principal: Principal, invocation: InvocationContext,
     ) -> Result<SupervisorHandle, RuntimeError> {
+        if principal.rls_state().approved_action.is_some() {
+            return Err(RuntimeError::Worker("approved actions cannot use cached workers".into()));
+        }
         let key = worker_key(app_id, &principal, &invocation);
         // The read guard must drop at this semicolon: an `if let` scrutinee
         // temporary lives through the then-block, so reading inline would hold
@@ -604,21 +647,54 @@ impl WorkerManager {
     pub async fn rpc(
         &self, app_id: &str, id: String, method: String, params: JsonValue, caller: Option<RpcCaller>,
     ) -> Result<JsonValue, RuntimeError> {
-        let principal = Principal::from_request(crate::governance::enforcement::ContextState::from_caller(caller.as_ref()));
-        self.get_or_spawn(app_id, principal, InvocationContext::default()).await?
-            .rpc(id, method, params, caller).await
+        self.rpc_resolved(app_id, id, method, params, caller, InvocationContext::default()).await
     }
 
     pub async fn rpc_action(
         &self, app_id: &str, id: String, action: String, params: JsonValue,
         caller: Option<RpcCaller>,
     ) -> Result<JsonValue, RuntimeError> {
-        let principal = Principal::from_request(
-            crate::governance::enforcement::ContextState::from_caller(caller.as_ref()),
-        );
         let invocation = InvocationContext::action(&action);
-        self.get_or_spawn(app_id, principal, invocation).await?
-            .rpc(id, action, params, caller).await
+        self.rpc_resolved(app_id, id, action, params, caller, invocation).await
+    }
+
+    async fn rpc_resolved(
+        &self, app_id: &str, id: String, action: String, params: JsonValue,
+        caller: Option<RpcCaller>, invocation: InvocationContext,
+    ) -> Result<JsonValue, RuntimeError> {
+        let mut state = crate::governance::enforcement::ContextState::from_caller(caller.as_ref());
+        let Some(execution) = approved_actions::resolve(&self.pool, app_id, &action, &state).await? else {
+            let principal = Principal::from_request(state);
+            return self.get_or_spawn(app_id, principal, invocation).await?
+                .rpc(id, action, params, caller).await;
+        };
+        state.approved_action = Some(execution.clone());
+        let config = self.config_for(
+            &self.pool, &self.secret_manager, app_id, &Principal::User(state.clone()),
+            &InvocationContext::action(&action),
+        ).await?;
+        let slot = self.take_slot().await?;
+        let pool = self.pool.clone();
+        // This task owns cleanup even when the requesting HTTP future is dropped.
+        tokio::spawn(async move {
+            let _slot = slot;
+            let audit_id = approved_actions::start_execution(&pool, &execution, &state).await?;
+            let handle = worker::spawn_supervisor(config);
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(35),
+                async {
+                    handle.start().await?;
+                    handle.rpc(id, action, params, caller).await
+                },
+            )
+            .await
+            .unwrap_or_else(|_| Err(RuntimeError::Worker("approved action timeout (35s)".into())));
+            let stopped = handle.stop().await;
+            let result = result.and_then(|value| stopped.map(|()| value));
+            let error = result.as_ref().err().map(ToString::to_string);
+            approved_actions::finish_execution(&pool, audit_id, result.is_ok(), error.as_deref()).await?;
+            result
+        }).await.map_err(|e| RuntimeError::Worker(format!("approved execution task failed: {e}")))?
     }
 
     pub async fn rpc_public(
@@ -652,6 +728,7 @@ impl WorkerManager {
             connection_id: None,
             audit_actor_id: Some(agent_uid), audit_delegator_id: payload.invoker_user_id,
             public_execution: None,
+            approved_action: None,
         };
         // An agent invoke is always a delegated principal, never anonymous.
         let session_id = payload.session_id.clone();
@@ -952,10 +1029,10 @@ impl IntegrationCaller for IntegrationCallImpl {
     }
 }
 
-fn resolve_entry_point(app_dir: &Path) -> Result<PathBuf, RuntimeError> {
+pub(crate) fn resolve_entry_point(app_dir: &Path) -> Result<PathBuf, RuntimeError> {
     for name in ["index.ts", "index.js", "main.ts", "main.js", "src/index.ts", "src/index.js"] {
         let p = app_dir.join(name);
-        if p.exists() { return Ok(p); }
+        if p.is_file() { return Ok(p); }
     }
     Err(RuntimeError::Worker(format!("no entry point in {}", app_dir.display())))
 }
@@ -965,11 +1042,43 @@ mod tests {
     use super::{
         DRAIN_POLL, SupervisorHandle, drain_until_idle,
         DEFAULT_WORKER_CAP, MAX_WORKERS, MIN_WORKERS, Principal, worker_cap, worker_key,
-        worker_key_belongs_to_principal,
+        worker_key_belongs_to_principal, write_backend_prelude, BACKEND_PRELUDE,
     };
     use crate::governance::enforcement::{ContextState, InvocationContext};
     use crate::governance::publications::{ApprovedPublication, PublicExecution};
     use uuid::Uuid;
+
+    #[test]
+    fn entry_point_requires_a_file_and_skips_directory_candidates() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("README.md"), "backend").unwrap();
+        assert!(super::resolve_entry_point(directory.path()).is_err());
+        std::fs::create_dir(directory.path().join("index.ts")).unwrap();
+        assert!(super::resolve_entry_point(directory.path()).is_err());
+        let fallback = directory.path().join("main.js");
+        std::fs::write(&fallback, "").unwrap();
+        assert_eq!(super::resolve_entry_point(directory.path()).unwrap(), fallback);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prelude_refresh_replaces_readonly_files_and_does_not_follow_symlinks() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let directory = tempfile::tempdir().unwrap();
+        let prelude = directory.path().join(".prelude.js");
+        let unrelated = directory.path().join("unrelated");
+        std::fs::write(&unrelated, "keep").unwrap();
+        symlink(&unrelated, &prelude).unwrap();
+
+        for _ in 0..2 {
+            write_backend_prelude(&prelude).unwrap();
+            assert_eq!(std::fs::read_to_string(&prelude).unwrap(), BACKEND_PRELUDE);
+            let metadata = std::fs::symlink_metadata(&prelude).unwrap();
+            assert!(metadata.is_file());
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o444);
+            assert_eq!(std::fs::read_to_string(&unrelated).unwrap(), "keep");
+        }
+    }
 
     fn user(uid: Option<Uuid>, delegated: bool, perms: &[&str]) -> Principal {
         Principal::User(ContextState {
@@ -980,6 +1089,7 @@ mod tests {
             audit_actor_id: uid,
             audit_delegator_id: None,
             public_execution: None,
+            approved_action: None,
         })
     }
 
@@ -1166,6 +1276,7 @@ mod tests {
             user_id: Some(uid), is_delegated: true, effective_perms: vec!["app:x:*".into()],
             connection_id: None, audit_actor_id: Some(uid), audit_delegator_id: Some(uid),
             public_execution: None,
+            approved_action: None,
         };
         for field in ["connection", "actor", "delegator"] {
             let mut different = base.clone();
@@ -1198,14 +1309,14 @@ mod tests {
         assert!(!p.run_onstart());
         // A real user is classified as User, never Anonymous/System.
         assert!(matches!(
-            Principal::from_request(ContextState { user_id: Some(Uuid::new_v4()), is_delegated: false, effective_perms: vec![], connection_id: None, audit_actor_id: None, audit_delegator_id: None, public_execution: None }),
+            Principal::from_request(ContextState { user_id: Some(Uuid::new_v4()), is_delegated: false, effective_perms: vec![], connection_id: None, audit_actor_id: None, audit_delegator_id: None, public_execution: None, approved_action: None }),
             Principal::User(_)
         ));
         // A delegated no-user principal (cron/webhook agent) is a real authority,
         // NOT anonymous: it must get its own worker. Guards against simplifying
         // from_request to a `user_id.is_none()` check alone.
         assert!(matches!(
-            Principal::from_request(ContextState { user_id: None, is_delegated: true, effective_perms: vec![], connection_id: None, audit_actor_id: None, audit_delegator_id: None, public_execution: None }),
+            Principal::from_request(ContextState { user_id: None, is_delegated: true, effective_perms: vec![], connection_id: None, audit_actor_id: None, audit_delegator_id: None, public_execution: None, approved_action: None }),
             Principal::User(_)
         ));
     }

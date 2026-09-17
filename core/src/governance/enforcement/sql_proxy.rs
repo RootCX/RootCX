@@ -3,8 +3,9 @@
 //! Apps never hold a DB connection. They send SQL over IPC; the core executes
 //! it inside a transaction that (1) scopes the search_path to the app schema
 //! (never `rootcx_system`), (2) poses the RLS identity GUCs, and (3)
-//! drops to the non-superuser `rootcx_app_executor` role before running the
-//! statement. RLS — not the app — decides what rows are visible.
+//! drops to a restricted database role before running the statement. Ordinary
+//! workers use `rootcx_app_executor`; approved actions use their exact ACL role.
+//! Approved backend code decides business access within that Core-enforced ceiling.
 
 use serde_json::Value as JsonValue;
 use sqlx::postgres::PgColumn;
@@ -41,6 +42,7 @@ pub struct ContextState {
     pub audit_actor_id: Option<Uuid>,
     pub audit_delegator_id: Option<Uuid>,
     pub public_execution: Option<crate::governance::publications::PublicExecution>,
+    pub approved_action: Option<crate::governance::approved_actions::ApprovedActionExecution>,
 }
 
 /// The unit of work a statement belongs to, attached by Core at an execution
@@ -101,6 +103,7 @@ impl ContextState {
                 audit_actor_id: if c.effective_perms.is_none() { c.user_id.parse().ok() } else { None },
                 audit_delegator_id: None,
                 public_execution: None,
+                approved_action: None,
             },
             None => Self::default(),
         }
@@ -132,6 +135,7 @@ pub async fn set_rls_context(
                 set_config('rootcx.cross_app_source_app', '', true), \
                 set_config('rootcx.cross_app_action', '', true), \
                 set_config('rootcx.human_data_request', '', true), \
+                set_config('rootcx.approved_action_id', '', true), \
                 set_config('rootcx.publication_id', '', true), \
                 set_config('rootcx.publication_read_key', '', true), \
                 set_config('rootcx.publication_release_ownership', '', true)",
@@ -322,8 +326,13 @@ async fn begin_data_tx<'a>(
         .execute(&mut *tx).await?;
     }
     set_invocation_context(&mut tx, invocation).await?;
-    crate::extensions::audit::set_context(&mut tx, audit_actor, audit_delegator, trigger_ref).await?;
-    sqlx::query("SET LOCAL ROLE rootcx_app_executor").execute(&mut *tx).await?;
+    crate::governance::approved_actions::bind_context(&mut tx, app_schema, state, invocation).await?;
+    let action_ref = state.approved_action.as_ref().map(|a| format!("approved-action:{}", a.execution_id));
+    crate::extensions::audit::set_context(&mut tx, audit_actor, audit_delegator, action_ref.as_deref().unwrap_or(trigger_ref)).await?;
+    let executor = state.approved_action.as_ref()
+        .map(crate::governance::approved_actions::execution_role)
+        .unwrap_or_else(|| "rootcx_app_executor".into());
+    sqlx::query(&format!("SET LOCAL ROLE {}", quote_ident(&executor))).execute(&mut *tx).await?;
     Ok(tx)
 }
 
@@ -646,14 +655,14 @@ pub async fn run_sql_with_invocation(
 // ── Multi-statement transaction session ─────────────────────────────
 
 use std::time::Duration;
+use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
 use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::time::{sleep_until, Instant as TokioInstant};
+use tokio_util::sync::CancellationToken;
 
-/// Absolute wall-time budget for an entire transaction (begin → commit). Bounds
-/// TOTAL lifetime, independent of the per-statement `statement_timeout` (8s) and
-/// the between-statement `idle_in_transaction_session_timeout` (30s) already
-/// posed by `begin_app_tx`. Without it, an app could pace statements to keep a
-/// transaction (and its pooled connection) alive forever.
+/// Deadline for admitting transaction work. Once finalization has started we
+/// await PostgreSQL's terminal result: dropping a timed-out COMMIT future cannot
+/// prove that COMMIT will not take effect after the caller reports completion.
 const TX_MAX_WALL_TIME: Duration = Duration::from_secs(60);
 
 /// Process-global cap on concurrent held-open app transactions. Held strictly
@@ -672,8 +681,65 @@ enum TxCmd {
 }
 
 const TX_GONE: &str = "transaction no longer active";
+const TX_CANCELLED: &str = "transaction invocation closed";
 pub const TX_NONE: &str = "no open transaction";
 pub const TX_MISMATCH: &str = "tx_id mismatch";
+
+const TX_ACTIVE: u8 = 0;
+const TX_FINALIZING: u8 = 1;
+const TX_CANCEL_REQUESTED: u8 = 2;
+const TX_FINISHED: u8 = 3;
+
+/// Independent ownership of the transaction actor, including after Commit has
+/// consumed its session. Cancellation and beginning finalization race on one
+/// atomic state; a started COMMIT is drained rather than locally abandoned.
+#[derive(Clone)]
+pub struct TxLifecycle {
+    phase: Arc<AtomicU8>,
+    cancellation: CancellationToken,
+    completion: CancellationToken,
+}
+
+impl TxLifecycle {
+    fn new() -> Self {
+        Self {
+            phase: Arc::new(AtomicU8::new(TX_ACTIVE)),
+            cancellation: CancellationToken::new(),
+            completion: CancellationToken::new(),
+        }
+    }
+
+    pub fn cancel(&self) {
+        if self.phase.compare_exchange(
+            TX_ACTIVE, TX_CANCEL_REQUESTED, Ordering::AcqRel, Ordering::Acquire,
+        ).is_ok() {
+            self.cancellation.cancel();
+        }
+    }
+
+    pub async fn finished(&self) {
+        self.completion.cancelled().await;
+    }
+
+    fn begin_finalization(&self) -> bool {
+        self.phase.compare_exchange(
+            TX_ACTIVE, TX_FINALIZING, Ordering::AcqRel, Ordering::Acquire,
+        ).is_ok()
+    }
+
+    fn mark_finished(&self) {
+        self.phase.store(TX_FINISHED, Ordering::Release);
+        self.completion.cancel();
+    }
+}
+
+struct TxActorCompletion(TxLifecycle);
+
+impl Drop for TxActorCompletion {
+    fn drop(&mut self) {
+        self.0.mark_finished();
+    }
+}
 
 async fn round_trip<R>(
     cmd_tx: &mpsc::Sender<TxCmd>,
@@ -733,14 +799,20 @@ impl TxExec {
 ///
 /// The task owns the PG transaction AND the semaphore permit, and self-
 /// terminates on the first of: commit, rollback, the wall-time deadline, or this
-/// handle being dropped (worker crash/stop closes the command channel). On exit
-/// it reports its `tx_id` on the `done` channel so the supervisor can clear its
-/// slot. The task and TX permit are released by `TX_MAX_WALL_TIME`; at an
-/// exhausted deadline the SQLx transaction is dropped so its driver-managed
-/// rollback begins without awaiting more network I/O in this task.
+/// handle being dropped. Actor ownership survives a queued commit through
+/// `TxLifecycle`; closing an invocation cancels active work and waits for any
+/// already-started finalization. Completion is signalled before the bounded
+/// supervisor `done` channel, so draining cannot deadlock on that channel.
 pub struct TxSession {
     pub tx_id: String,
     cmd_tx: mpsc::Sender<TxCmd>,
+    lifecycle: TxLifecycle,
+}
+
+impl Drop for TxSession {
+    fn drop(&mut self) {
+        self.lifecycle.cancel();
+    }
 }
 
 impl TxSession {
@@ -786,9 +858,12 @@ impl TxSession {
         let task_tx_id = tx_id.clone();
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<TxCmd>(8);
         let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
+        let lifecycle = TxLifecycle::new();
+        let actor = lifecycle.clone();
 
         tokio::spawn(async move {
-            let _permit = permit; // released on task exit → frees the TX slot
+            let completed = TxActorCompletion(actor.clone());
+            let permit = permit;
 
             // Inner scope so `pg_tx` is fully finalized (committed, rolled back,
             // or dropped → implicit rollback) BEFORE we signal `done`. A received
@@ -811,11 +886,13 @@ impl TxSession {
                 loop {
                     tokio::select! {
                         biased;
+                        _ = actor.cancellation.cancelled() => {
+                            let _ = pg_tx.rollback().await;
+                            break;
+                        }
                         _ = sleep_until(deadline) => {
-                            // The deadline is already exhausted, so do not await
-                            // network I/O beyond it. Dropping Transaction starts
-                            // SQLx's rollback-on-drop and releases our ownership.
-                            drop(pg_tx);
+                            actor.cancel();
+                            let _ = pg_tx.rollback().await;
                             break;
                         }
                         cmd = cmd_rx.recv() => match cmd {
@@ -832,16 +909,23 @@ impl TxSession {
                                         .map_err(|e| e.to_string())?;
                                     serialize_rows(rows)
                                 };
-                                match tokio::time::timeout_at(deadline, execution).await {
+                                let outcome = tokio::select! {
+                                    biased;
+                                    _ = actor.cancellation.cancelled() => Err(TX_CANCELLED),
+                                    _ = sleep_until(deadline) => Err("transaction deadline exceeded"),
+                                    result = execution => Ok(result),
+                                };
+                                match outcome {
                                     Ok(result) => {
                                         if let Err(error) = &result {
                                             failed = Some(error.clone());
                                         }
                                         let _ = reply.send(result);
                                     }
-                                    Err(_) => {
-                                        let _ = reply.send(Err("transaction deadline exceeded".into()));
-                                        drop(pg_tx);
+                                    Err(reason) => {
+                                        actor.cancel();
+                                        let _ = reply.send(Err(reason.into()));
+                                        let _ = pg_tx.rollback().await;
                                         break;
                                     }
                                 }
@@ -853,11 +937,13 @@ impl TxSession {
                                 let _ = reply.send(Ok(()));
                             }
                             Some(TxCmd::Commit { reply }) => {
-                                if let Some(reason) = failed {
-                                    let rollback = match tokio::time::timeout_at(deadline, pg_tx.rollback()).await {
-                                        Ok(result) => result.map_err(|e| e.to_string()),
-                                        Err(_) => Err("transaction deadline exceeded during rollback".into()),
-                                    };
+                                // This CAS, not the reply task's lifetime, decides
+                                // whether cancellation or COMMIT won.
+                                if !actor.begin_finalization() {
+                                    let _ = pg_tx.rollback().await;
+                                    let _ = reply.send(Err(TX_CANCELLED.into()));
+                                } else if let Some(reason) = failed {
+                                    let rollback = pg_tx.rollback().await.map_err(|e| e.to_string());
                                     let error = match rollback {
                                         Ok(()) => format!("transaction rolled back after statement error: {reason}"),
                                         Err(rollback_error) => format!(
@@ -866,34 +952,35 @@ impl TxSession {
                                     };
                                     let _ = reply.send(Err(error));
                                 } else {
-                                    let result = match tokio::time::timeout_at(deadline, pg_tx.commit()).await {
-                                        Ok(result) => result.map_err(|e| e.to_string()),
-                                        Err(_) => Err("transaction deadline exceeded during commit".into()),
-                                    };
+                                    let result = pg_tx.commit().await.map_err(|e| e.to_string());
                                     let _ = reply.send(result);
                                 }
                                 break;
                             }
                             Some(TxCmd::Rollback { reply }) => {
-                                let result = match tokio::time::timeout_at(deadline, pg_tx.rollback()).await {
-                                    Ok(result) => result.map_err(|e| e.to_string()),
-                                    Err(_) => Err("transaction deadline exceeded during rollback".into()),
-                                };
+                                actor.begin_finalization();
+                                let result = pg_tx.rollback().await.map_err(|e| e.to_string());
                                 let _ = reply.send(result);
                                 break;
                             }
-                            // Channel closed (handle dropped on worker crash/stop):
-                            // pg_tx drops at scope end → implicit rollback.
-                            None => break,
+                            None => {
+                                let _ = pg_tx.rollback().await;
+                                break;
+                            }
                         }
                     }
                 }
             }
+            drop(cmd_rx);
+            drop(permit);
+            // Independent latch first: the supervisor may be awaiting it while
+            // its completion channel is full of other finished transactions.
+            drop(completed);
             let _ = done.send(task_tx_id).await;
         });
 
         match ready_rx.await {
-            Ok(Ok(())) => Ok(Self { tx_id, cmd_tx }),
+            Ok(Ok(())) => Ok(Self { tx_id, cmd_tx, lifecycle }),
             Ok(Err(e)) => Err(e),
             Err(_) => Err("begin_app_tx task died".into()),
         }
@@ -904,12 +991,18 @@ impl TxSession {
         TxExec { cmd_tx: self.cmd_tx.clone() }
     }
 
+    pub fn lifecycle(&self) -> TxLifecycle {
+        self.lifecycle.clone()
+    }
+
     /// Construct a handle with no live task, for unit-testing pure consumers
     /// (e.g. the supervisor's tx_id-matching guard). Never opens a DB tx.
     #[cfg(test)]
     pub(crate) fn dummy(tx_id: &str) -> Self {
         let (cmd_tx, _rx) = mpsc::channel(1);
-        Self { tx_id: tx_id.to_string(), cmd_tx }
+        let lifecycle = TxLifecycle::new();
+        lifecycle.mark_finished();
+        Self { tx_id: tx_id.to_string(), cmd_tx, lifecycle }
     }
 
     pub async fn commit(self) -> Result<(), String> {
@@ -924,6 +1017,24 @@ impl TxSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancellation_cannot_turn_a_queued_commit_into_started_finalization() {
+        for commit_started in [false, true] {
+            let lifecycle = TxLifecycle::new();
+            if commit_started {
+                assert!(lifecycle.begin_finalization());
+            }
+            lifecycle.cancel();
+            assert_eq!(lifecycle.cancellation.is_cancelled(), !commit_started);
+            assert!(!lifecycle.begin_finalization(), "cancelled or finalizing actors cannot start another commit");
+
+            let mut finished = Box::pin(lifecycle.finished());
+            assert!(futures::poll!(&mut finished).is_pending(), "cancellation is not actor completion");
+            lifecycle.mark_finished();
+            finished.await;
+        }
+    }
 
     #[test]
     fn rejects_privileged_statements_hidden_behind_comments() {

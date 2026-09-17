@@ -440,7 +440,7 @@ pub(super) async fn inspect(conn: &mut PgConnection, schema: &str) -> Result<(),
             })
             || matches!(
                 name.as_str(),
-                "rootcx_rls_select_publication" | "rootcx_rls_select_shared"
+                "rootcx_rls_select_publication" | "rootcx_rls_select_shared" | "rootcx_rls_action_lock"
             );
         if !reserved {
             return Err(refused(

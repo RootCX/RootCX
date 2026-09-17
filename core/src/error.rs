@@ -1,5 +1,7 @@
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
     #[error("database connection error: {0}")]
     Database(sqlx::Error),
 

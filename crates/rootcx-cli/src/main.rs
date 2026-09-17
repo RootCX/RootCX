@@ -7,6 +7,7 @@ use std::path::Path;
 mod archive;
 mod auth;
 mod bun;
+mod cmd_actions;
 mod cmd_agents;
 mod cmd_apps;
 mod cmd_auth;
@@ -166,12 +167,16 @@ USAGE
 COMMANDS
   list      List installed apps (alias: ls)
   describe  Show app structure (entities, fields, types)
+  actions   Review, approve, and revoke backend action access
   rm        Uninstall an app (requires confirmation)
 
 EXAMPLES
   $ rootcx apps list
   $ rootcx apps list --json
   $ rootcx apps describe my_app
+  $ rootcx apps actions list my_app
+  $ rootcx apps actions approve my_app send_report
+  $ rootcx apps actions revoke my_app send_report
   $ rootcx apps rm my_app
   $ rootcx apps rm my_app -y        # skip confirmation
 ";
@@ -272,6 +277,9 @@ enum AuthCmd {
 
 #[derive(Subcommand, Debug)]
 enum AppsCmd {
+    /// Review, approve, and revoke backend action access (approval requires admin)
+    #[command(subcommand)]
+    Actions(cmd_actions::ActionsCmd),
     /// List installed apps
     #[command(alias = "ls")]
     List {
@@ -521,6 +529,7 @@ async fn main() -> Result<()> {
             AuthCmd::Whoami { json } => cmd_auth::whoami(json).await,
         },
         Cmd::Apps(sub) => match sub {
+            AppsCmd::Actions(sub) => cmd_actions::run(sub).await,
             AppsCmd::List { json } => cmd_apps::list(json).await,
             AppsCmd::Describe { app_id, json } => cmd_apps::describe(&app_id, json).await,
             AppsCmd::Rm { app_id, yes } => cmd_apps::rm(&app_id, yes).await,

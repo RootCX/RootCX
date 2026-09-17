@@ -51,6 +51,7 @@ impl Tool for MutateDataTool {
             audit_actor_id: Some(ctx.user_id),
             audit_delegator_id: ctx.invoker_user_id,
             public_execution: None,
+            approved_action: None,
         };
 
         if app != ctx.app_id {

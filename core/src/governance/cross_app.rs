@@ -400,6 +400,8 @@ pub(crate) async fn deactivate_installation_tx(
     .execute(&mut **tx)
     .await
     .map_err(RuntimeError::Schema)?;
+    crate::governance::approved_actions::revoke_app(tx, app_id, actor_id, reason)
+        .await.map_err(RuntimeError::Schema)?;
     let grant_ids: Vec<Uuid> = sqlx::query_scalar(
         "SELECT id FROM rootcx_system.cross_app_collection_grants
           WHERE status IN ('pending', 'active', 'disabled')

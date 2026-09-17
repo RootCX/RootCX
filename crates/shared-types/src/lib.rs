@@ -77,6 +77,35 @@ pub struct ActionDefinition {
     /// value another action could have supplied.
     #[serde(default)]
     pub isolated_scope: bool,
+    /// Requested backend data authority; only an operator-approved release may use it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<ActionAuthority>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ActionAuthority {
+    pub data: std::collections::BTreeMap<String, Vec<DataOperation>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DataOperation {
+    Read,
+    Create,
+    Update,
+    Delete,
+}
+
+impl DataOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Create => "create",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,4 +1,5 @@
 pub mod authority;
+pub mod approved_actions;
 pub(crate) mod row_access;
 pub(crate) mod collection_reads;
 pub mod cross_app;

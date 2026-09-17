@@ -25,6 +25,35 @@ const client = useRuntimeClient();
 const result = await client.rpc(appId, "method_name", { ...params });
 ```
 
+Ordinary declared actions accept `app:{appId}:invoke` OR the fine
+`app:{appId}:action:{id}` grant; undeclared RPCs require `invoke`. Actions with
+`authority` require the fine grant and current operator approval. Plain
+`invoke` is insufficient.
+
+## Approved backend actions
+
+Use the [manifest rule](manifest.md) to request exact local CRUD authority.
+Core preserves permission/IPC checks, the per-approval PostgreSQL role and RLS,
+transaction controls and the revocation barrier. Caller data permissions do
+not widen that ceiling. Sensitive reads remain forbidden; jobs, remote or
+self-action calls, tools, integrations, storage, events and injected credentials
+are unavailable throughout approved execution.
+
+Each approved invocation uses a fresh process through the usual cross-platform
+Bun spawning path, bound by Core to its caller, action and approval, then stopped
+after use. It adds no OS-identity or volume-ownership prerequisite.
+The approver trusts the full artifact, dependencies, initialization and every
+handler sharing that runtime for business checks and output projection.
+Versioned snapshots are hashed after dependency installation and verified at
+approval and approved-process startup. Read-only settings are defensive, not
+immutability against hostile processes under the same OS account or protection
+against interference after verification.
+
+Ordinary apps remain untrusted at governed IPC/SQL boundaries. Host filesystem
+and process confinement are outside the existing deployment model; do not
+claim complete malicious-app confinement or platform test coverage from the
+spawning architecture alone.
+
 ## Callback transactions
 
 ```typescript
@@ -52,5 +81,6 @@ statement, 1,000 returned rows, 30 seconds idle and a 60-second resource ceiling
 
 - Entry point: `index.ts` → `index.js` → `main.ts` → `main.js` → `src/index.ts`
 - RPC timeout: 30s; keep interactive transactions below it.
-- Put external effects before/after the transaction, or persist an outbox row.
+- In ordinary workers, put external effects before/after the transaction, or
+  persist an outbox row. Approved actions have no external-effect capabilities.
 - Crash recovery: max 5 crashes in 60s → failed state

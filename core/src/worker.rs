@@ -17,7 +17,7 @@ use crate::RuntimeError;
 use crate::extensions::agents::approvals::{ApprovalRequest, ApprovalResponse, PendingApprovals};
 use crate::extensions::agents::supervision::{PolicyDecision, PolicyEvaluator};
 use crate::extensions::logs::{LOG_CHANNEL_CAPACITY, LogEntry, emit_log, spawn_output_reader};
-use crate::governance::enforcement::{SqlOk, TX_MISMATCH, TX_NONE, TxSession};
+use crate::governance::enforcement::{SqlOk, TX_MISMATCH, TX_NONE, TxLifecycle, TxSession};
 use crate::ipc::{
     AgentBootConfig, AgentInvokePayload, InboundMessage, IpcEvent, IpcReader, IpcWriter,
     OutboundMessage, PendingRpcs, RpcCaller,
@@ -34,6 +34,34 @@ const MAX_OPEN_TRANSACTIONS_PER_WORKER: usize = 4;
 
 fn dead() -> RuntimeError {
     RuntimeError::Worker("supervisor actor dead".into())
+}
+
+fn spawn_data_task(
+    approved: bool,
+    tasks: &mut tokio::task::JoinSet<()>,
+    future: impl std::future::Future<Output = ()> + Send + 'static,
+) {
+    if approved {
+        tasks.spawn(future);
+    } else {
+        tokio::spawn(future);
+    }
+}
+
+/// A one-shot operation may already have sent COMMIT. Draining its future,
+/// rather than aborting it, prevents reporting completion before that outcome.
+/// Its IPC response is irrelevant once the invocation is closing; discard
+/// responses here so a full outbound queue cannot deadlock the drain.
+async fn drain_data_tasks(
+    tasks: &mut tokio::task::JoinSet<()>,
+    outbound: &mut mpsc::Receiver<OutboundMessage>,
+) {
+    while !tasks.is_empty() {
+        tokio::select! {
+            _ = tasks.join_next() => {}
+            Some(_) = outbound.recv() => {}
+        }
+    }
 }
 
 /// Resolve the active transaction for an inbound TX message: present AND its
@@ -116,6 +144,47 @@ fn finish_tx(session: TxSession, commit: bool, id: String, out: mpsc::Sender<Out
             .send(OutboundMessage::SqlEndResult { id, error: r.err() })
             .await;
     });
+}
+
+/// Owns the database actors independently of the sessions and IPC reply tasks.
+/// Commit consumes a session, but must not detach its actor from the invocation.
+#[derive(Default)]
+struct ApprovedTransactions {
+    actors: HashMap<String, (String, TxLifecycle)>,
+}
+
+impl ApprovedTransactions {
+    fn track(&mut self, invocation_id: &str, session: &TxSession) {
+        self.actors.insert(
+            session.tx_id.clone(), (invocation_id.to_string(), session.lifecycle()),
+        );
+    }
+
+    fn completed(&mut self, tx_id: &str) {
+        self.actors.remove(tx_id);
+    }
+
+    fn cancel(&self, tx_id: &str) {
+        if let Some((_, lifecycle)) = self.actors.get(tx_id) {
+            lifecycle.cancel();
+        }
+    }
+
+    async fn close(&mut self, invocation_id: Option<&str>) {
+        let ids: Vec<_> = self.actors.iter()
+            .filter(|(_, (owner, _))| invocation_id.is_none_or(|id| id == owner))
+            .map(|(id, _)| id.clone()).collect();
+        let actors: Vec<_> = ids.into_iter()
+            .filter_map(|id| self.actors.remove(&id).map(|(_, actor)| actor)).collect();
+        // Cancel every actor before awaiting any of them. Cancellation is an
+        // actor-level decision: a queued commit loses, a started commit drains.
+        for actor in &actors {
+            actor.cancel();
+        }
+        for actor in actors {
+            actor.finished().await;
+        }
+    }
 }
 
 fn sql_exec_result(id: String, result: Result<SqlOk, String>) -> OutboundMessage {
@@ -222,6 +291,82 @@ fn public_invocation_active(
     Ok(())
 }
 
+const APPROVED_CAPABILITY_DENIED: &str = "capability denied in approved action execution";
+
+/// Exhaustive allowlist. New IPC variants must explicitly choose whether they
+/// are available to approved code; caller authority never escapes via a subcall.
+fn approved_capability_denial(
+    msg: &InboundMessage,
+    worker_protocol: u32,
+    active: &std::collections::HashSet<String>,
+) -> Result<Option<OutboundMessage>, &'static str> {
+    let invocation_id = match msg {
+        InboundMessage::Discover { protocol } => {
+            return if *protocol >= INVOCATION_PROTOCOL_VERSION {
+                Ok(None)
+            } else {
+                Err("approved actions require worker protocol v4 or newer")
+            };
+        }
+        InboundMessage::Log { .. } => return Ok(None),
+        InboundMessage::RpcResponse { .. } => {
+            return if worker_protocol >= INVOCATION_PROTOCOL_VERSION && !active.is_empty() {
+                Ok(None)
+            } else {
+                Err("approved action response requires a live v4 invocation")
+            };
+        }
+        InboundMessage::SqlQuery { invocation_id, .. }
+        | InboundMessage::CollectionOp { invocation_id, .. }
+        | InboundMessage::SqlBegin { invocation_id, .. }
+        | InboundMessage::SqlExec { invocation_id, .. }
+        | InboundMessage::SqlCommit { invocation_id, .. }
+        | InboundMessage::SqlRollback { invocation_id, .. } => Some(invocation_id),
+        InboundMessage::RemoteCollectionOp { .. } | InboundMessage::SelfAction { .. }
+        | InboundMessage::StorageDownload { .. } | InboundMessage::JobEnqueue { .. }
+        | InboundMessage::AgentToolCall { .. } => None,
+        // These wire messages have no error response. Fail the invocation and
+        // stop the process instead of silently leaving a caller waiting.
+        InboundMessage::StorageUpload { .. } | InboundMessage::Event { .. }
+        | InboundMessage::JobResult { .. } | InboundMessage::AgentChunk { .. }
+        | InboundMessage::AgentDone { .. } | InboundMessage::AgentError { .. }
+        | InboundMessage::AgentSessionCompacted { .. } => return Err(APPROVED_CAPABILITY_DENIED),
+    };
+    let reason = if let Some(invocation_id) = invocation_id {
+        if worker_protocol >= INVOCATION_PROTOCOL_VERSION
+            && invocation_id.as_ref().is_some_and(|id| active.contains(id))
+        {
+            return Ok(None);
+        }
+        "approved data access requires a live v4 invocation"
+    } else {
+        APPROVED_CAPABILITY_DENIED
+    };
+    let error = Some(reason.to_string());
+    let reply = match msg {
+        InboundMessage::CollectionOp { id, .. } | InboundMessage::RemoteCollectionOp { id, .. } =>
+            OutboundMessage::CollectionOpResult { id: id.clone(), result: None, error },
+        InboundMessage::SqlQuery { id, .. } => OutboundMessage::SqlQueryResult {
+            id: id.clone(), columns: None, rows: None, row_count: None, error,
+        },
+        InboundMessage::SqlBegin { id, .. } =>
+            OutboundMessage::SqlBeginResult { id: id.clone(), tx_id: None, error },
+        InboundMessage::SqlExec { id, .. } => sql_exec_result(id.clone(), Err(reason.into())),
+        InboundMessage::SqlCommit { id, .. } | InboundMessage::SqlRollback { id, .. } =>
+            OutboundMessage::SqlEndResult { id: id.clone(), error },
+        InboundMessage::SelfAction { id, .. } =>
+            OutboundMessage::SelfActionResult { id: id.clone(), result: None, error },
+        InboundMessage::StorageDownload { id, .. } => storage_download_error(id.clone(), reason),
+        InboundMessage::JobEnqueue { id, .. } =>
+            OutboundMessage::JobEnqueueResult { id: id.clone(), msg_id: None, error },
+        InboundMessage::AgentToolCall { invoke_id, call_id, .. } => OutboundMessage::AgentToolResult {
+            invoke_id: invoke_id.clone(), call_id: call_id.clone(), result: None, error,
+        },
+        _ => return Err(APPROVED_CAPABILITY_DENIED),
+    };
+    Ok(Some(reply))
+}
+
 fn cancel_job_leases(job_leases: &mut HashMap<i64, CancellationToken>) {
     for (_, token) in job_leases.drain() {
         token.cancel();
@@ -244,6 +389,30 @@ fn close_workflow_invocation(
         open_txs.remove(&tx_id);
         tx_invocations.remove(&tx_id);
     }
+}
+
+async fn finish_rpc_response(
+    id: String,
+    result: Result<JsonValue, String>,
+    invocation_id: Option<String>,
+    active_invocations: &mut std::collections::HashSet<String>,
+    tx_invocations: &mut HashMap<String, String>,
+    open_txs: &mut HashMap<String, TxSession>,
+    approved_transactions: &mut ApprovedTransactions,
+    approved_data_tasks: &mut tokio::task::JoinSet<()>,
+    outbound_rx: &mut mpsc::Receiver<OutboundMessage>,
+    pending_rpcs: &mut PendingRpcs,
+) {
+    if let Some(invocation_id) = invocation_id {
+        // Stop admitting the invocation before awaiting any database actor.
+        active_invocations.remove(&invocation_id);
+        approved_transactions.close(Some(&invocation_id)).await;
+        drain_data_tasks(approved_data_tasks, outbound_rx).await;
+        close_workflow_invocation(
+            &invocation_id, active_invocations, tx_invocations, open_txs,
+        );
+    }
+    pending_rpcs.resolve(&id, result);
 }
 
 /// The scope a data message runs under, and the one place that decides whether the
@@ -589,8 +758,10 @@ async fn supervisor_loop(
     mut cmd_rx: mpsc::Receiver<SupervisorCommand>,
     log_tx: broadcast::Sender<LogEntry>,
 ) {
+    let approved = config.identity.approved_action.is_some();
     let app_id = config.app_id.clone();
     let mut status = WorkerStatus::Stopped;
+    let mut startup_error: Option<String> = None;
     let mut child: Option<AsyncGroupChild> = None;
     let mut ipc_writer: Option<IpcWriter> = None;
     let mut ipc_reader: Option<IpcReader> = None;
@@ -605,6 +776,9 @@ async fn supervisor_loop(
     let mut job_payloads: HashMap<i64, JsonValue> = HashMap::new();
     let mut active_invocations = std::collections::HashSet::<String>::new();
     let mut rpc_invocations = HashMap::<String, String>::new();
+    // Approved one-shot SQL/collection futures must not outlive their invocation.
+    // Ordinary workers retain their existing independent dispatch behavior.
+    let mut approved_data_tasks = tokio::task::JoinSet::new();
     let mut job_invocations = HashMap::<i64, String>::new();
     // Per-worker, per-class rate limiter (best-effort DoS guard).
     let mut rate_buckets = RateBuckets::default();
@@ -616,6 +790,7 @@ async fn supervisor_loop(
     // wall-time deadline, crash) — the single source of truth for clearing the
     // slot, so the supervisor never has to remember to do it on each path.
     let mut open_txs: HashMap<String, TxSession> = HashMap::new();
+    let mut approved_transactions = ApprovedTransactions::default();
     let mut tx_invocations = HashMap::<String, String>::new();
     let (tx_done_tx, mut tx_done_rx) = mpsc::channel::<String>(4);
     let (invocation_expiry_tx, mut invocation_expiry_rx) =
@@ -623,7 +798,7 @@ async fn supervisor_loop(
     let pending_approvals = config.pending_approvals.clone();
     let mut crash_times: Vec<Instant> = Vec::new();
     let mut restart_count: u32 = 0;
-    let mut output_handles = Vec::new();
+    let mut output_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     // IPC protocol version negotiated with the worker via the `discover`
     // handshake. Defaults to v1 (legacy: apps that don't call `serve()`)
     // until the worker explicitly advertises a higher version.
@@ -639,21 +814,44 @@ async fn supervisor_loop(
 
     loop {
         tokio::select! {
+            Some(_) = approved_data_tasks.join_next(), if !approved_data_tasks.is_empty() => {}
+
             Some(msg) = outbound_rx.recv() => {
                 if let Some(ref mut w) = ipc_writer {
-                    let _ = w.send(&msg).await;
+                    if approved {
+                        if !matches!(tokio::time::timeout(IPC_SEND_TIMEOUT, w.send(&msg)).await, Ok(Ok(()))) {
+                            approved_transactions.close(None).await;
+                            drain_data_tasks(&mut approved_data_tasks, &mut outbound_rx).await;
+                            for (id, _) in rpc_invocations.drain() {
+                                pending_rpcs.resolve(&id, Err("approved worker unresponsive".into()));
+                            }
+                            active_invocations.clear();
+                            open_txs.clear();
+                            tx_invocations.clear();
+                            ipc_writer = None;
+                            ipc_reader = None;
+                            for h in output_handles.drain(..) { h.abort(); }
+                            kill_child(&mut child).await;
+                            status = WorkerStatus::Crashed;
+                        }
+                    } else {
+                        let _ = w.send(&msg).await;
+                    }
                 }
             }
 
             // A TX task ended (commit, rollback, deadline, or worker death).
             // Clear the slot iff it's still the active session.
             Some(done_id) = tx_done_rx.recv() => {
+                approved_transactions.completed(&done_id);
                 open_txs.remove(&done_id);
                 tx_invocations.remove(&done_id);
             }
 
             Some((request_id, invocation_id)) = invocation_expiry_rx.recv() => {
                 if rpc_invocations.get(&request_id) == Some(&invocation_id) {
+                    approved_transactions.close(Some(&invocation_id)).await;
+                    drain_data_tasks(&mut approved_data_tasks, &mut outbound_rx).await;
                     rpc_invocations.remove(&request_id);
                     close_workflow_invocation(
                         &invocation_id,
@@ -681,6 +879,7 @@ async fn supervisor_loop(
                                 ipc_reader = Some(reader);
                                 output_handles.push(spawn_output_reader(stderr, "stderr", log_tx.clone()));
                                 status = WorkerStatus::Running;
+                                startup_error = None;
                                 worker_protocol = 1;
                                 restart_count = 0;
                                 info!(app_id = %app_id, "worker started");
@@ -689,14 +888,21 @@ async fn supervisor_loop(
                             Err(e) => {
                                 error!(app_id = %app_id, "spawn failed: {e}");
                                 emit_log(&log_tx, "system", format!("spawn failed: {e}"));
+                                startup_error = Some(e.to_string());
                                 status = WorkerStatus::Crashed;
                             }
                         }
                     }
 
                     SupervisorCommand::Stop { reply } => {
+                        approved_transactions.close(None).await;
+                        drain_data_tasks(&mut approved_data_tasks, &mut outbound_rx).await;
                         if let Some(ref mut w) = ipc_writer {
-                            let _ = w.send(&OutboundMessage::Shutdown).await;
+                            if approved {
+                                let _ = tokio::time::timeout(IPC_SEND_TIMEOUT, w.send(&OutboundMessage::Shutdown)).await;
+                            } else {
+                                let _ = w.send(&OutboundMessage::Shutdown).await;
+                            }
                         }
                         ipc_writer = None;
                         ipc_reader = None;
@@ -717,15 +923,19 @@ async fn supervisor_loop(
                         open_txs.clear();
                         tx_invocations.clear();
                         status = WorkerStatus::Stopped;
+                        startup_error = None;
                         crash_times.clear();
                         info!(app_id = %app_id, "worker stopped");
                         emit_log(&log_tx, "system", "worker stopped");
                         let _ = reply.send(());
+                        if approved {
+                            return;
+                        }
                     }
 
                     SupervisorCommand::Rpc { id, method, params, caller, reply } => {
                         if status != WorkerStatus::Running {
-                            let _ = reply.send(Err("worker not running".into()));
+                            let _ = reply.send(Err(startup_error.clone().unwrap_or_else(|| "worker not running".into())));
                             continue;
                         }
                         // The invocation is minted and tracked whatever the worker
@@ -876,6 +1086,52 @@ async fn supervisor_loop(
             } => {
                 match event {
                     Some(IpcEvent::Message(msg)) => {
+                        if config.identity.approved_action.is_some() {
+                            let denied = approved_capability_denial(&msg, worker_protocol, &active_invocations)
+                                .and_then(|reply| match reply {
+                                    Some(reply) => {
+                                        if let InboundMessage::SqlExec { tx_id, .. }
+                                            | InboundMessage::SqlCommit { tx_id, .. }
+                                            | InboundMessage::SqlRollback { tx_id, .. } = &msg
+                                        {
+                                            approved_transactions.cancel(tx_id);
+                                            open_txs.remove(tx_id);
+                                            tx_invocations.remove(tx_id);
+                                        }
+                                        outbound_tx.try_send(reply).map(|()| true)
+                                            .map_err(|_| "approved worker IPC response backlog exceeded")
+                                    }
+                                    None => {
+                                        if let InboundMessage::RpcResponse { id, .. } = &msg
+                                            && !rpc_invocations.contains_key(id)
+                                        {
+                                            return Err("unknown approved action response");
+                                        }
+                                        Ok(false)
+                                    }
+                                });
+                            match denied {
+                                Ok(true) => continue,
+                                Ok(false) => {}
+                                Err(error) => {
+                                    approved_transactions.close(None).await;
+                                    drain_data_tasks(&mut approved_data_tasks, &mut outbound_rx).await;
+                                    for (id, _) in rpc_invocations.drain() {
+                                        pending_rpcs.resolve(&id, Err(error.into()));
+                                    }
+                                    active_invocations.clear();
+                                    open_txs.clear();
+                                    tx_invocations.clear();
+                                    ipc_writer = None;
+                                    ipc_reader = None;
+                                    for h in output_handles.drain(..) { h.abort(); }
+                                    kill_child(&mut child).await;
+                                    status = WorkerStatus::Crashed;
+                                    emit_log(&log_tx, "system", error);
+                                    continue;
+                                }
+                            }
+                        }
                         if let Some(execution) = &config.identity.public_execution {
                             let denied = public_capability_denial(&msg).and_then(|reply| match reply {
                                 Some(reply) => outbound_tx.try_send(reply)
@@ -956,18 +1212,16 @@ async fn supervisor_loop(
                             }
                         }
                         InboundMessage::RpcResponse { id, result, error } => {
-                            if let Some(invocation_id) = rpc_invocations.remove(&id) {
-                                close_workflow_invocation(
-                                    &invocation_id,
-                                    &mut active_invocations,
-                                    &mut tx_invocations,
-                                    &mut open_txs,
-                                );
-                            }
-                            pending_rpcs.resolve(&id, match error {
+                            let invocation_id = rpc_invocations.remove(&id);
+                            let result = match error {
                                 Some(e) => Err(e),
                                 None => Ok(result.unwrap_or(JsonValue::Null)),
-                            });
+                            };
+                            finish_rpc_response(
+                                id, result, invocation_id, &mut active_invocations,
+                                &mut tx_invocations, &mut open_txs, &mut approved_transactions,
+                                &mut approved_data_tasks, &mut outbound_rx, &mut pending_rpcs,
+                            ).await;
                         }
                         InboundMessage::JobResult { id, error } => {
                             if let Ok(msg_id) = id.parse::<i64>() {
@@ -1163,7 +1417,7 @@ async fn supervisor_loop(
                                 &config.invocation, worker_protocol, &active_invocations,
                                 invocation_id.as_deref(),
                             );
-                            tokio::spawn(async move {
+                            spawn_data_task(approved, &mut approved_data_tasks, async move {
                                 let (result, error) = match invocation {
                                     Err(error) => (None, Some(error)),
                                     Ok(invocation) => match collection_op(
@@ -1246,7 +1500,7 @@ async fn supervisor_loop(
                                 &config.invocation, worker_protocol, &active_invocations,
                                 invocation_id.as_deref(),
                             );
-                            tokio::spawn(async move {
+                            spawn_data_task(approved, &mut approved_data_tasks, async move {
                                 let result = match invocation {
                                     Ok(invocation) => crate::governance::enforcement::run_sql_with_invocation(
                                         &pool, &aid, &state, &invocation, &sql, &params,
@@ -1293,19 +1547,35 @@ async fn supervisor_loop(
                                 Err(error) => OutboundMessage::SqlBeginResult {
                                     id, tx_id: None, error: Some(error),
                                 },
-                                Ok(invocation) => match TxSession::begin_with_invocation(
-                                    &config.pool, &config.app_id, &config.identity,
-                                    &invocation, tx_done_tx.clone(),
-                                ).await {
-                                Ok(session) => {
-                                    let tid = session.tx_id.clone();
-                                    open_txs.insert(tid.clone(), session);
-                                    if let Some(owner) = invocation_id.clone() {
-                                        tx_invocations.insert(tid.clone(), owner);
+                                Ok(invocation) => {
+                                    let begin = TxSession::begin_with_invocation(
+                                        &config.pool, &config.app_id, &config.identity,
+                                        &invocation, tx_done_tx.clone(),
+                                    );
+                                    let result = if approved {
+                                        tokio::time::timeout(Duration::from_secs(8), begin).await
+                                            .unwrap_or_else(|_| Err("approved transaction acquisition timed out".into()))
+                                    } else {
+                                        begin.await
+                                    };
+                                    match result {
+                                        Ok(session) => {
+                                            let tid = session.tx_id.clone();
+                                            if approved {
+                                                // The approved IPC gate requires this id.
+                                                approved_transactions.track(
+                                                    invocation_id.as_deref().expect("approved invocation id"),
+                                                    &session,
+                                                );
+                                            }
+                                            open_txs.insert(tid.clone(), session);
+                                            if let Some(owner) = invocation_id.clone() {
+                                                tx_invocations.insert(tid.clone(), owner);
+                                            }
+                                            OutboundMessage::SqlBeginResult { id, tx_id: Some(tid), error: None }
+                                        }
+                                        Err(e) => OutboundMessage::SqlBeginResult { id, tx_id: None, error: Some(e) },
                                     }
-                                    OutboundMessage::SqlBeginResult { id, tx_id: Some(tid), error: None }
-                                }
-                                Err(e) => OutboundMessage::SqlBeginResult { id, tx_id: None, error: Some(e) },
                                 },
                             };
                             let _ = outbound_tx.send(msg).await;
@@ -1581,6 +1851,8 @@ async fn supervisor_loop(
                         continue;
                     }
                     None => {
+                        approved_transactions.close(None).await;
+                        drain_data_tasks(&mut approved_data_tasks, &mut outbound_rx).await;
                         if let Some(ref mut c) = child {
                             let _ = c.start_kill();
                             let exit = c.wait().await;
@@ -1602,6 +1874,11 @@ async fn supervisor_loop(
                         effective_permissions.clear(); task_scopes.clear();
                         cancel_job_leases(&mut job_leases);
                         job_payloads.clear();
+                        if approved {
+                            for id in rpc_invocations.keys() {
+                                pending_rpcs.resolve(id, Err("approved worker crashed".into()));
+                            }
+                        }
                         active_invocations.clear();
                         rpc_invocations.clear();
                         job_invocations.clear();
@@ -1638,6 +1915,9 @@ async fn supervisor_loop(
                                             info!(app_id = %app_id, "worker stopped during backoff");
                                             emit_log(&log_tx, "system", "worker stopped");
                                             let _ = reply.send(());
+                                            if approved {
+                                                return;
+                                            }
                                             continue;
                                         }
                                         SupervisorCommand::GetStatus { reply } => {
@@ -1659,12 +1939,14 @@ async fn supervisor_loop(
                                 ipc_reader = Some(reader);
                                 output_handles.push(spawn_output_reader(stderr, "stderr", log_tx.clone()));
                                 status = WorkerStatus::Running;
+                                startup_error = None;
                                 worker_protocol = 1;
                                 emit_log(&log_tx, "system", "worker restarted");
                             }
                             Err(e) => {
                                 error!(app_id = %app_id, "restart failed: {e}");
                                 emit_log(&log_tx, "system", format!("restart failed: {e}"));
+                                startup_error = Some(e.to_string());
                                 status = WorkerStatus::Crashed;
                             }
                         }
@@ -1678,6 +1960,8 @@ async fn supervisor_loop(
         }
     }
 
+    approved_transactions.close(None).await;
+    drain_data_tasks(&mut approved_data_tasks, &mut outbound_rx).await;
     kill_child(&mut child).await;
     info!(app_id = %app_id, "supervisor exited");
 }
@@ -1726,6 +2010,21 @@ async fn spawn_worker(
     ),
     RuntimeError,
 > {
+    let approved = config.identity.approved_action.is_some();
+    if let Some(execution) = &config.identity.approved_action {
+        let data_dir = config.working_dir.parent().and_then(std::path::Path::parent)
+            .ok_or_else(|| RuntimeError::Config("approved artifact has no data directory".into()))?;
+        if config.working_dir != crate::governance::approved_actions::artifact_dir(data_dir, execution.revision) {
+            return Err(RuntimeError::Worker("approved artifact directory does not match its revision".into()));
+        }
+        tokio::time::timeout(Duration::from_secs(8), async {
+            crate::governance::approved_actions::verify_artifact(&config.working_dir, &execution.backend_digest).await?;
+            // Fingerprinting can take time: recheck revocation after inspecting
+            // the sealed bytes, immediately before starting the process.
+            crate::governance::approved_actions::verify_execution(&config.pool, execution).await
+        }).await.map_err(|_| RuntimeError::Worker("approved startup verification timed out".into()))??;
+        verify_approved_prelude(&config.prelude_path)?;
+    }
     let bin = &config.js_runtime;
     info!(app_id = %config.app_id, bin = %bin.display(), entry = %config.entry_point.display(), "spawning worker");
 
@@ -1742,15 +2041,17 @@ async fn spawn_worker(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .envs(sandbox_env(
-            &config.app_id,
-            &config.runtime_url,
-            &config.credentials,
-        ));
+        .envs(if approved {
+            vec![
+                ("ROOTCX_APP_ID".into(), config.app_id.clone()),
+                ("ROOTCX_RUNTIME_URL".into(), config.runtime_url.clone()),
+            ]
+        } else {
+            sandbox_env(&config.app_id, &config.runtime_url, &config.credentials)
+        });
 
-    // Phase 0d: drop to the dedicated worker UID on Unix so the worker cannot
-    // read /proc/<core>/environ. Best-effort: only when the core runs as root
-    // (production containers) and the user exists; harmless no-op otherwise.
+    // Preserve the usual Unix privilege drop when Core is already root.
+    // Nonroot deployments keep their process identity.
     #[cfg(unix)]
     apply_worker_uid(&mut cmd);
 
@@ -1777,31 +2078,53 @@ async fn spawn_worker(
     // Hand the worker its own stored manifest so it can read its declared schema
     // (e.g. enum vocabulary) at runtime — best-effort: a missing manifest just
     // means the worker boots without it, exactly as before.
-    let manifest = crate::manifest::load_manifest_json(&config.pool, &config.app_id)
-        .await
-        .ok()
-        .flatten();
+    let manifest = match &config.identity.approved_action {
+        Some(execution) => Some(execution.manifest.clone()),
+        None => crate::manifest::load_manifest_json(&config.pool, &config.app_id)
+            .await.ok().flatten(),
+    };
 
     let mut writer = IpcWriter::new(stdin);
-    writer
-        .send(&OutboundMessage::Discover {
+    let discover = OutboundMessage::Discover {
             app_id: config.app_id.clone(),
             runtime_url: config.runtime_url.clone(),
             credentials: config.credentials.clone(),
             agent_config: config.agent_boot_config.clone(),
             run_onstart: config.run_onstart,
             manifest,
-        })
-        .await?;
+        };
+    if approved {
+        let sent = tokio::time::timeout(IPC_SEND_TIMEOUT, writer.send(&discover)).await;
+        if !matches!(sent, Ok(Ok(()))) {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(RuntimeError::Worker("approved worker discovery failed or timed out".into()));
+        }
+    } else {
+        writer.send(&discover).await?;
+    }
 
     Ok((child, writer, IpcReader::new(stdout), stderr))
 }
 
-/// Dedicated worker UID/GID (matches the `rootcx-worker` user the Dockerfile
-/// creates). Setting these requires the core to run as root; otherwise the
-/// `pre_exec` setuid fails and we skip it (dev/local runs as a normal user).
+/// Existing shared worker identity, used only when Core can drop privileges.
 #[cfg(unix)]
 const WORKER_UID: u32 = 1001;
+
+/// Detect an unexpected runtime change before approving or executing backend code.
+pub(crate) fn verify_approved_prelude(path: &std::path::Path) -> Result<(), RuntimeError> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|e| RuntimeError::Worker(format!("approved Core prelude: {e}")))?;
+    if !metadata.is_file() {
+        return Err(RuntimeError::Worker("approved Core prelude must be a regular file".into()));
+    }
+    let source = std::fs::read(path)
+        .map_err(|e| RuntimeError::Worker(format!("approved Core prelude: {e}")))?;
+    if source != include_bytes!("backend_prelude.js") {
+        return Err(RuntimeError::Worker("approved Core prelude does not match this Core build".into()));
+    }
+    Ok(())
+}
 
 #[cfg(unix)]
 fn apply_worker_uid(cmd: &mut Command) {
@@ -1812,7 +2135,10 @@ fn apply_worker_uid(cmd: &mut Command) {
     }
     unsafe {
         cmd.pre_exec(|| {
-            if libc::setgid(WORKER_UID) != 0 || libc::setuid(WORKER_UID) != 0 {
+            if libc::setgroups(0, std::ptr::null()) != 0
+                || libc::setgid(WORKER_UID) != 0
+                || libc::setuid(WORKER_UID) != 0
+            {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
@@ -1835,13 +2161,18 @@ async fn collection_op(
     let types = crate::manifest::field_type_map(pool, app_id, entity)
         .await
         .map_err(|e| e.to_string())?;
+    let (audit_actor, audit_delegator) = if state.approved_action.is_some() {
+        (state.audit_actor_id.or(state.user_id), state.audit_delegator_id)
+    } else {
+        (state.user_id, None)
+    };
     let mut tx = crate::governance::enforcement::begin_app_tx_with_invocation(
         pool,
         app_id,
         &state,
         invocation,
-        state.user_id,
-        None,
+        audit_actor,
+        audit_delegator,
         "collection",
         crate::governance::enforcement::TIMEOUT_INTERACTIVE_MS,
     )
@@ -1978,6 +2309,243 @@ pub async fn collection_op_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rpc_completion_drains_admitted_one_shot_finalization_and_full_response_queue() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let committed = Arc::new(AtomicBool::new(false));
+        let (release, wait) = oneshot::channel::<()>();
+        let (started, ready) = oneshot::channel::<()>();
+        let (out, mut outbound) = mpsc::channel(1);
+        out.send(OutboundMessage::SqlEndResult { id: "backlog".into(), error: None }).await.unwrap();
+        let mut tasks = tokio::task::JoinSet::new();
+        let effect = Arc::clone(&committed);
+        spawn_data_task(true, &mut tasks, async move {
+            started.send(()).unwrap();
+            wait.await.unwrap();
+            effect.store(true, Ordering::Release);
+            out.send(OutboundMessage::SqlEndResult { id: "query".into(), error: None }).await.unwrap();
+        });
+        ready.await.unwrap();
+        let mut active = std::collections::HashSet::from(["invocation".into()]);
+        let mut owners = HashMap::new();
+        let mut open = HashMap::new();
+        let mut transactions = ApprovedTransactions::default();
+        let mut pending = PendingRpcs::default();
+        let mut response = pending.register("rpc".into());
+        let mut completion = Box::pin(finish_rpc_response(
+            "rpc".into(), Ok(JsonValue::Null), Some("invocation".into()),
+            &mut active, &mut owners, &mut open, &mut transactions,
+            &mut tasks, &mut outbound, &mut pending,
+        ));
+        assert!(futures::poll!(&mut completion).is_pending());
+        assert!(matches!(response.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        release.send(()).expect("finalization must be drained, never aborted");
+        tokio::time::timeout(Duration::from_secs(1), &mut completion).await
+            .expect("a full IPC queue must not block finalization");
+        assert!(committed.load(Ordering::Acquire));
+        assert!(response.await.unwrap().is_ok());
+    }
+
+    /// Replay the raw Exec → Commit → RpcResponse sequence through the worker's
+    /// finalizers with a real transaction actor. Locks make both races explicit:
+    /// queued behind INSERT, and already inside COMMIT's deferred FK check.
+    #[tokio::test]
+    async fn raw_ipc_completion_cancels_queued_commit_and_drains_started_commit() {
+        use serde_json::json;
+        let pool = crate::extensions::test_db::pool().await;
+        for commit_started in [false, true] {
+            let schema = format!("commit_lifetime_{}", uuid::Uuid::new_v4().simple());
+            sqlx::raw_sql(&format!(
+                "CREATE SCHEMA {schema};
+                 CREATE TABLE {schema}.parent (id integer PRIMARY KEY);
+                 INSERT INTO {schema}.parent VALUES (1);
+                 CREATE TABLE {schema}.records (
+                   parent_id integer REFERENCES {schema}.parent(id) DEFERRABLE INITIALLY DEFERRED
+                 );
+                 GRANT USAGE ON SCHEMA {schema} TO rootcx_app_executor;
+                 GRANT SELECT, INSERT ON ALL TABLES IN SCHEMA {schema} TO rootcx_app_executor;"
+            )).execute(&pool).await.unwrap();
+
+            let mut gate = pool.begin().await.unwrap();
+            let lock = if commit_started {
+                format!("SELECT id FROM {schema}.parent FOR UPDATE")
+            } else {
+                format!("LOCK TABLE {schema}.records IN ACCESS EXCLUSIVE MODE")
+            };
+            sqlx::query(&lock).execute(&mut *gate).await.unwrap();
+
+            let (done_tx, _done_rx) = mpsc::channel(1);
+            done_tx.send("occupied-completion-channel".into()).await.unwrap();
+            let session = TxSession::begin_with_invocation(
+                &pool, &schema, &Default::default(),
+                &crate::governance::enforcement::InvocationContext::action("probe"), done_tx,
+            ).await.unwrap();
+            let pid = session.executor().exec("SELECT pg_backend_pid()".into(), vec![])
+                .await.unwrap().rows[0][0].as_i64().unwrap() as i32;
+            let tx_id = session.tx_id.clone();
+            let invocation_id = "raw-invocation";
+            let mut transactions = ApprovedTransactions::default();
+            transactions.track(invocation_id, &session);
+            let mut active = std::collections::HashSet::from([invocation_id.to_string()]);
+            let mut owners = HashMap::from([(tx_id.clone(), invocation_id.to_string())]);
+            let mut open = HashMap::from([(tx_id.clone(), session)]);
+
+            let exec: InboundMessage = serde_json::from_value(json!({
+                "type": "sql_exec", "id": "insert", "invocation_id": invocation_id,
+                "tx_id": tx_id, "sql": format!("INSERT INTO {schema}.records VALUES (1)"),
+            })).unwrap();
+            let InboundMessage::SqlExec { sql, params, .. } = exec else { unreachable!() };
+            let insert_reply = open[&tx_id].executor().enqueue_exec(sql, params).unwrap();
+            if commit_started {
+                insert_reply.await.unwrap().unwrap();
+            }
+
+            let commit: InboundMessage = serde_json::from_value(json!({
+                "type": "sql_commit", "id": "commit", "invocation_id": invocation_id,
+                "tx_id": tx_id,
+            })).unwrap();
+            let (out, mut replies) = mpsc::channel(4);
+            let InboundMessage::SqlCommit { id, tx_id, .. } = commit else { unreachable!() };
+            owners.remove(&tx_id);
+            finish_tx(open.remove(&tx_id).unwrap(), true, id, out);
+
+            // Observe the actual SQL actor blocked at the intended boundary.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                         WHERE pid = $1 AND wait_event_type = 'Lock'
+                           AND (($2 AND query = 'COMMIT') OR (NOT $2 AND query LIKE 'INSERT%')))",
+                    ).bind(pid).bind(commit_started).fetch_one(&pool).await.unwrap();
+                    if waiting { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("transaction must reach its lock before RpcResponse");
+
+            let response: InboundMessage = serde_json::from_value(json!({
+                "type": "rpc_response", "id": "rpc", "result": "finished",
+            })).unwrap();
+            let InboundMessage::RpcResponse { id, result, error } = response else { unreachable!() };
+            let mut pending = PendingRpcs::default();
+            let mut rpc_result = pending.register(id.clone());
+            let mut data_tasks = tokio::task::JoinSet::new();
+            let mut completion = Box::pin(finish_rpc_response(
+                id, error.map_or_else(|| Ok(result.unwrap()), Err), Some(invocation_id.into()),
+                &mut active, &mut owners, &mut open, &mut transactions,
+                &mut data_tasks, &mut replies, &mut pending,
+            ));
+            // Polling starts actor cancellation before the database gate opens.
+            // An already-started COMMIT cannot be reported finished at this point.
+            let first_poll = futures::poll!(&mut completion);
+            if commit_started {
+                assert!(first_poll.is_pending(), "RPC must await the in-progress COMMIT");
+                assert!(matches!(rpc_result.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+            }
+            gate.commit().await.unwrap();
+            if first_poll.is_pending() {
+                tokio::time::timeout(Duration::from_secs(10), &mut completion)
+                    .await.expect("actor finalization must complete after unlocking");
+            }
+            drop(completion);
+            assert_eq!(rpc_result.await.unwrap().unwrap(), json!("finished"));
+            let finalized = tokio::time::timeout(Duration::from_secs(5), replies.recv())
+                .await.unwrap().unwrap();
+            let OutboundMessage::SqlEndResult { error, .. } = finalized else { unreachable!() };
+            assert_eq!(error.is_none(), commit_started, "queued commits must be cancelled");
+            let rows: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM {schema}.records"))
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(rows, i64::from(commit_started), "no commit may follow RPC completion");
+            sqlx::raw_sql(&format!("DROP SCHEMA {schema} CASCADE")).execute(&pool).await.unwrap();
+        }
+    }
+
+    #[test]
+    fn approved_data_capabilities_require_v4_and_a_live_invocation() {
+        let active = std::collections::HashSet::from(["live".to_string()]);
+        for (protocol, invocation_id, allowed) in [
+            (4, Some("live"), true),
+            (5, Some("live"), true),
+            (3, Some("live"), false),
+            (1, None, false),
+            (4, None, false),
+            (4, Some(""), false),
+            (4, Some("expired"), false),
+        ] {
+            let invocation_id = invocation_id.map(str::to_owned);
+            let messages = [
+                InboundMessage::CollectionOp {
+                    id: "request".into(), invocation_id: invocation_id.clone(),
+                    op: "create".into(), entity: "records".into(), data: JsonValue::Null,
+                },
+                InboundMessage::SqlQuery {
+                    id: "request".into(), invocation_id: invocation_id.clone(),
+                    sql: "SELECT 1".into(), params: vec![],
+                },
+                InboundMessage::SqlBegin { id: "request".into(), invocation_id: invocation_id.clone() },
+                InboundMessage::SqlExec {
+                    id: "request".into(), invocation_id: invocation_id.clone(),
+                    tx_id: "tx".into(), sql: "SELECT 1".into(), params: vec![],
+                },
+                InboundMessage::SqlCommit {
+                    id: "request".into(), invocation_id: invocation_id.clone(), tx_id: "tx".into(),
+                },
+                InboundMessage::SqlRollback {
+                    id: "request".into(), invocation_id: invocation_id.clone(), tx_id: "tx".into(),
+                },
+            ];
+            for msg in messages {
+                assert_eq!(
+                    matches!(approved_capability_denial(&msg, protocol, &active), Ok(None)),
+                    allowed, "protocol={protocol}, message={msg:?}",
+                );
+                assert!(
+                    !matches!(approved_capability_denial(&msg, protocol, &Default::default()), Ok(None)),
+                    "completed invocation must deny message={msg:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn approved_execution_does_not_export_capabilities() {
+        let active = std::collections::HashSet::from(["live".to_string()]);
+        for msg in [
+            InboundMessage::RemoteCollectionOp {
+                id: "request".into(), invocation_id: Some("live".into()), provider_app: "other".into(),
+                op: "find".into(), entity: "records".into(), data: JsonValue::Null,
+            },
+            InboundMessage::SelfAction { id: "request".into(), action: "send".into(), params: JsonValue::Null },
+            InboundMessage::JobEnqueue { id: "request".into(), payload: JsonValue::Null },
+            InboundMessage::AgentToolCall {
+                invoke_id: "live".into(), call_id: "request".into(), tool_name: "query_data".into(),
+                args: JsonValue::Null,
+            },
+            InboundMessage::StorageDownload {
+                id: "request".into(), app_id: "local".into(), file_id: "file".into(),
+            },
+        ] {
+            assert!(
+                matches!(approved_capability_denial(&msg, 5, &active), Ok(Some(_))),
+                "forbidden capability must return its error response: {msg:?}",
+            );
+        }
+        for msg in [
+            InboundMessage::StorageUpload {
+                id: "request".into(), name: "file".into(), content_type: "text/plain".into(), size: 1,
+            },
+            InboundMessage::Event { name: "event".into(), data: JsonValue::Null },
+            InboundMessage::JobResult { id: "job".into(), error: None },
+        ] {
+            assert!(
+                approved_capability_denial(&msg, 5, &active).is_err(),
+                "a forbidden message without an error response must terminate execution: {msg:?}",
+            );
+        }
+        assert!(approved_capability_denial(
+            &InboundMessage::Discover { protocol: 3 }, 1, &active,
+        ).is_err());
+    }
 
     #[test]
     fn public_collection_capabilities_require_a_live_invocation_even_without_workflow_scope() {

@@ -84,6 +84,9 @@ pub async fn deploy_from_catalog(
         .execute(&pool)
         .await?;
 
+    let _lifecycle = crate::governance::cross_app::lock_app_lifecycle(&pool, &id).await?;
+    let revision = crate::governance::approved_actions::begin_deployment(&pool, &id, identity.user_id).await?;
+    let _ = wm.stop_app(&id).await;
     if app_dir.exists() {
         tokio::fs::remove_dir_all(&app_dir).await.map_err(|e| ApiError::Internal(format!("clear: {e}")))?;
     }
@@ -104,6 +107,7 @@ pub async fn deploy_from_catalog(
         }
     }
 
+    crate::governance::approved_actions::finish_deployment(&pool, &id, revision, &app_dir).await?;
     let _ = wm.stop_app(&id).await;
     wm.start_app(&pool, &secrets, &id).await?;
 

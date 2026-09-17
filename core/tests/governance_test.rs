@@ -43,6 +43,9 @@ mod assignment_access_test;
 #[path = "governance/resource_sharing_test.rs"]
 mod resource_sharing_test;
 
+#[path = "governance/approved_actions_test.rs"]
+mod approved_actions_test;
+
 #[path = "governance/manifest_sql_admission_test.rs"]
 mod manifest_sql_admission_test;
 

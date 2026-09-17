@@ -325,6 +325,8 @@ impl RbacExtension {
              $$ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog, rootcx_system",
         ).await?;
 
+        crate::governance::approved_actions::install_gate(pool).await?;
+
         // The normal function RLS policies call. Reads the identity GUCs posed
         // by the Core. Cross-app authority is intentionally not folded into
         // this predicate: an owned table must combine the grant with its row
@@ -335,6 +337,9 @@ impl RbacExtension {
              RETURNS BOOLEAN AS $$
              DECLARE v_user_id UUID; v_delegated TEXT; v_perms TEXT;
              BEGIN
+                 IF coalesce(current_setting('rootcx.approved_action_id', true), '') <> '' THEN
+                     RETURN rootcx_system.check_approved_action_access(p_required);
+                 END IF;
                  IF coalesce(current_setting('rootcx.publication_id', true), '') <> '' THEN
                      RETURN FALSE;
                  END IF;
@@ -378,6 +383,9 @@ impl RbacExtension {
              DECLARE v_grant UUID; v_source TEXT; v_target TEXT;
                      v_perms TEXT; v_required TEXT; v_permission TEXT; v_action TEXT;
              BEGIN
+                 IF coalesce(current_setting('rootcx.approved_action_id', true), '') <> '' THEN
+                     RETURN FALSE;
+                 END IF;
                  IF coalesce(current_setting('rootcx.publication_id', true), '') <> '' THEN
                      RETURN FALSE;
                  END IF;

@@ -42,6 +42,74 @@ version has not been bumped. See [row access](../../../docs/row-access.md) and
 
 `text` `number` `boolean` `date` `timestamp` `json` `file` `entity_link` `[text]` `[number]`
 
+### Approved action authority
+
+Declare an action's exact local data ceiling separately from user permissions:
+
+```json
+{
+  "id": "add_interaction",
+  "name": "Add an interaction",
+  "authority": {
+    "data": {
+      "assignment": ["read"],
+      "interaction": ["read", "create"]
+    }
+  }
+}
+```
+
+This is one `actions[]` entry; declare both entities in `dataContract`.
+Use lowercase snake_case IDs consistently in handlers, grants and calls;
+permission-key validation rejects uppercase. API/body keys remain camelCase.
+Allowed verbs are `read`, `create`, `update`, `delete`, with nonempty unique
+lists and exact local entity names. No wildcards, external entities or policy
+DSL. An authority action cannot also be a public RPC. `isolatedScope` alone
+never grants data authority.
+
+The administrator approves the full manifest and backend artifact, including
+resolved dependencies and every handler sharing its runtime. Core hashes after
+dependency installation and records a versioned snapshot, verifying its hash
+at approval and approved-process startup. Read-only settings are defensive,
+not immutability against hostile processes under the same OS account.
+Every backend deployment and every full manifest change, including cosmetic changes, rotates
+the release revision and invalidates approval. Old approvals never revive.
+The current API pins exact review with `revision`, `backendDigest` and
+`installationId`; no extra `manifestDigest` is needed.
+
+Grant ordinary users only `app:{appId}:action:{id}` for the workflow. Approved
+calls require that fine grant plus current approval; `invoke` alone is
+insufficient. Ordinary declared actions without authority accept `invoke` OR
+the fine action grant; undeclared RPCs require `invoke`. Declaration/deployment
+does not approve actions or grant users collection permissions.
+Invocation without current approval returns HTTP 403; a stale approval POST
+returns HTTP 409.
+
+Sensitive reads remain forbidden and caller data grants do not widen the
+approved ceiling. The per-approval PostgreSQL role and RLS enforce denied
+table/verb access with database errors. Foreign-key cascades,
+set-null and set-default effects require explicit authority for all affected
+local entities/verbs or approval is rejected; cross-app effects are refused.
+Approved contexts support only local CRUD, with no jobs,
+remote/self-action calls, tools, integrations, storage, events or credentials.
+Approved execution uses the usual cross-platform Bun spawning path, with a
+fresh process per invocation that is stopped after use. It adds no OS-identity
+or volume-ownership prerequisite. Ordinary apps remain untrusted at governed
+IPC/SQL boundaries; the full approved artifact is trusted for business checks.
+Host filesystem/process confinement is outside the existing deployment model.
+Do not infer complete malicious-app confinement or tested platform coverage
+from this architecture.
+
+See the [complete manifest, worker and operator recipe](../../../docs/approved-actions.md).
+It keeps one case for two readers, hides private notes through explicit
+projections and creates under an active assignment lock in `ctx.transaction`.
+Assignment `read` alone permits `SELECT ... FOR SHARE`; do not add `update`
+for locking. Core's technical primary-key UPDATE ACL and RLS `USING` support
+the lock, but `WITH CHECK` denies updates without declared `update`, including
+primary-key changes. `interaction.read` permits `RETURNING`. Assignment
+revocation follows app transaction rules; Core approval revocation separately
+waits for admitted database transactions.
+
 ### Rules
 
 - `id`, `created_at`, `updated_at` are auto-generated — omit from `fields`

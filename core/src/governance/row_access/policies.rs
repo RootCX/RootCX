@@ -18,6 +18,7 @@ pub(crate) async fn apply_table_rls(
     owners: &OwnerMap,
     shared: Option<&str>,
     sensitive: &[String],
+    approved_read: bool,
 ) -> Result<(), RuntimeError> {
     use crate::manifest::quote_ident;
     let qt = format!("{}.{}", quote_ident(schema), quote_ident(table));
@@ -106,6 +107,17 @@ pub(crate) async fn apply_table_rls(
         &format!("app:{schema}:{table}.read"), mine.as_deref(), owners.contains_key(table),
     );
     set_policy(conn, &qt, "rootcx_rls_select_publication", "SELECT", &["USING"], Some(&public), false).await?;
+
+    // PostgreSQL row locks require UPDATE privilege and its USING predicate.
+    // An approved reader may lock a row, but never pass a write's WITH CHECK.
+    exec(conn, &format!("DROP POLICY IF EXISTS rootcx_rls_action_lock ON {qt}")).await?;
+    if approved_read {
+        let read_key = crate::manifest::quote_literal(&format!("app:{schema}:{table}.read"));
+        exec(conn, &format!(
+            "CREATE POLICY rootcx_rls_action_lock ON {qt} FOR UPDATE \
+             USING ((SELECT rootcx_system.check_approved_action_access({read_key}))) WITH CHECK (FALSE)"
+        )).await?;
+    }
 
     Ok(())
 }
@@ -339,6 +351,7 @@ async fn declare_owner_resolver(
     use crate::manifest::{quote_ident, quote_literal};
     let signature = format!("rootcx_system.{}()", quote_ident(resolver));
     let own_app = quote_literal(schema);
+    let approved_read = quote_literal(&format!("app:{schema}:{entity}.read"));
     // STABLE, never IMMUTABLE: the answer depends on the caller's GUCs and on the
     // table, so an IMMUTABLE marking would let the planner constant-fold one
     // caller's reachable set into a cached plan and serve it to every other user —
@@ -350,6 +363,8 @@ async fn declare_owner_resolver(
          SELECT {} FROM {}.{} \
           WHERE (current_setting('rootcx.human_data_request', true) = '1' \
                  OR coalesce(nullif(current_setting('rootcx.app_id', true), ''), {own_app}) = {own_app}) \
+            AND (coalesce(current_setting('rootcx.approved_action_id', true), '') = '' \
+                 OR rootcx_system.check_approved_action_access({approved_read})) \
             AND {mine} $rootcx$",
         quote_ident(pk), quote_ident(schema), quote_ident(entity),
     )).await?;

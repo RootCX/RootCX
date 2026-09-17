@@ -89,8 +89,9 @@ pub async fn rpc_proxy(
             // when it is. Two different questions, one lookup: declaration
             // decides which permission may authorize the call, isolation decides
             // whether Core poses an invocation identity in SQL for it.
-            let declaration: Option<bool> = sqlx::query_scalar(
-                "SELECT COALESCE((action->>'isolatedScope')::boolean, false)
+            let declaration: Option<(bool, bool)> = sqlx::query_as(
+                "SELECT COALESCE((action->>'isolatedScope')::boolean, false),
+                        action->'authority' IS NOT NULL AND action->'authority' <> 'null'::jsonb
                    FROM rootcx_system.apps app
                    CROSS JOIN LATERAL jsonb_array_elements(
                      COALESCE(app.manifest->'actions', '[]'::jsonb)
@@ -104,6 +105,7 @@ pub async fn rpc_proxy(
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
             let declared_action = declaration.is_some();
+            let approved_action = declaration.is_some_and(|(_, authority)| authority);
             // Two grains of one right, the coarse implying the fine: `invoke` is
             // the whole app, `action:{method}` is that method alone. Same idiom as
             // `app:{id}:*` implying everything beneath it. Requiring BOTH would
@@ -112,11 +114,17 @@ pub async fn rpc_proxy(
             // INSTEAD of `invoke`.
             let invoke_key = format!("app:{app_id}:invoke");
             let action_key = format!("app:{app_id}:action:{method}");
-            let allowed = has_permission_db(&p, identity.user_id, &invoke_key).await?
-                || (declared_action
-                    && has_permission_db(&p, identity.user_id, &action_key).await?);
+            let allowed = if approved_action {
+                has_permission_db(&p, identity.user_id, &action_key).await?
+            } else {
+                has_permission_db(&p, identity.user_id, &invoke_key).await?
+                    || (declared_action
+                        && has_permission_db(&p, identity.user_id, &action_key).await?)
+            };
             if !allowed {
-                let needed = if declared_action {
+                let needed = if approved_action {
+                    action_key
+                } else if declared_action {
                     format!("{invoke_key} or {action_key}")
                 } else {
                     invoke_key
@@ -133,7 +141,7 @@ pub async fn rpc_proxy(
             // declared action shares its caller's worker and reaches SQL with
             // the invocation settings empty — nothing to borrow, and a policy
             // written against them denies rather than trusting a neighbour.
-            }), (declaration == Some(true)).then(|| method.clone()))
+            }), declaration.is_some_and(|(isolated, authority)| isolated || authority).then(|| method.clone()))
         }
         CallerAuth::ShareToken(share) => {
             let (manifest, decl) = find_public_rpc_full(&p, &app_id, &method)

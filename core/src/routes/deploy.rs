@@ -58,6 +58,9 @@ pub async fn deploy_backend(
     let wm = rt.worker_manager().clone();
 
     let bytes = read_archive(&mut multipart).await?;
+    let _lifecycle = crate::governance::cross_app::lock_app_lifecycle(&pool, &app_id).await?;
+    let revision = crate::governance::approved_actions::begin_deployment(&pool, &app_id, identity.user_id).await?;
+    let _ = wm.stop_app(&app_id).await;
     extract_to(bytes, &app_dir).await?;
 
     // Refuse app SQL before dependency scripts, agent registration, or startup.
@@ -85,6 +88,7 @@ pub async fn deploy_backend(
         .await
         .map_err(|e| ApiError::Internal(format!("governing app tables: {e}")))?;
 
+    crate::governance::approved_actions::finish_deployment(&pool, &app_id, revision, &app_dir).await?;
     let _ = wm.stop_app(&app_id).await;
     wm.start_app(&pool, &secrets, &app_id).await?;
 

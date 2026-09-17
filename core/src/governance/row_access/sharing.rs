@@ -294,11 +294,17 @@ pub(super) async fn declare(
     };
     let resolver = format!("rootcx_shared.{schema}.{table}");
     let signature = format!("rootcx_system.{}()", quote_ident(&resolver));
-    // Drop first: a changed declaration can change the resolver's return type.
+    // Preserve grants on an identical reconciliation (including approved-action
+    // roles). PostgreSQL requires a drop only when the return type changes.
     exec(conn, &format!("DROP POLICY IF EXISTS rootcx_rls_select_shared ON {}.{}", quote_ident(schema), quote_ident(table))).await?;
-    exec(conn, &format!("DROP FUNCTION IF EXISTS {signature}")).await?;
+    let same_type: Option<bool> = sqlx::query_scalar(
+        "SELECT prorettype = to_regtype($2) FROM pg_proc WHERE oid = to_regprocedure($1)",
+    ).bind(&signature).bind(&ty).fetch_optional(&mut *conn).await.map_err(crate::RuntimeError::Schema)?;
+    if same_type == Some(false) {
+        exec(conn, &format!("DROP FUNCTION {signature}")).await?;
+    }
     exec(conn, &format!(
-        "CREATE FUNCTION {signature} RETURNS SETOF {ty} LANGUAGE sql STABLE
+        "CREATE OR REPLACE FUNCTION {signature} RETURNS SETOF {ty} LANGUAGE sql STABLE
          SECURITY DEFINER SET search_path = pg_catalog AS $rootcx$
          {select} $rootcx$",
     )).await?;

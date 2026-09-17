@@ -1,6 +1,6 @@
 # Governed row access
 
-This guide describes the next release; the release version has not been bumped.
+This guide describes governed row access in Core v0.27.0.
 Core enforces row access with PostgreSQL RLS and sensitive-field access with
 database column privileges. The rules apply to generated collection operations,
 worker SQL, and callback transactions.

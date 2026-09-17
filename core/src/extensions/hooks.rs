@@ -101,6 +101,7 @@ impl RuntimeExtension for HooksExtension {
                 link TEXT;
                 prev_user TEXT;
                 prev_app TEXT;
+                prev_approval TEXT;
                 owned BOOLEAN := false;
             BEGIN
                 IF p_principal IS NULL OR p_row IS NULL OR p_owner_field IS NULL THEN
@@ -121,9 +122,13 @@ impl RuntimeExtension for HooksExtension {
 
                 prev_user := current_setting('rootcx.user_id', true);
                 prev_app := current_setting('rootcx.app_id', true);
+                prev_approval := current_setting('rootcx.approved_action_id', true);
                 BEGIN
                     PERFORM set_config('rootcx.user_id', p_principal::text, true);
                     PERFORM set_config('rootcx.app_id', p_schema, true);
+                    -- This private Core helper resolves trigger provenance,
+                    -- never data returned to the approved backend.
+                    PERFORM set_config('rootcx.approved_action_id', '', true);
                     EXECUTE format(
                         'SELECT EXISTS (SELECT 1 FROM rootcx_system.%I() AS pk WHERE pk::text = $1)',
                         'rootcx_own.' || p_schema || '.' || p_owner_parent
@@ -133,6 +138,7 @@ impl RuntimeExtension for HooksExtension {
                 END;
                 PERFORM set_config('rootcx.user_id', COALESCE(prev_user, ''), true);
                 PERFORM set_config('rootcx.app_id', COALESCE(prev_app, ''), true);
+                PERFORM set_config('rootcx.approved_action_id', COALESCE(prev_approval, ''), true);
 
                 RETURN COALESCE(owned, false);
             END;

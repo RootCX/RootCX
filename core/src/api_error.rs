@@ -62,6 +62,7 @@ impl From<sqlx::Error> for ApiError {
 impl From<crate::RuntimeError> for ApiError {
     fn from(e: crate::RuntimeError) -> Self {
         match &e {
+            crate::RuntimeError::PermissionDenied(_) => Self::Forbidden(e.to_string()),
             // Worker/Job/IPC errors are user-facing (e.g., "no worker for app 'x'")
             crate::RuntimeError::Conflict(_) => Self::Conflict(e.to_string()),
             crate::RuntimeError::NotFound(_) => Self::NotFound(e.to_string()),

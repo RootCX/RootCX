@@ -32,6 +32,81 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
 
 `text` `number` `decimal` `boolean` `date` `timestamp` `json` `file` `entity_link` `[text]` `[number]`
 
+### Approved action authority
+
+An entry in `actions` can request exact local CRUD authority:
+
+```json
+{
+  "id": "add_interaction",
+  "name": "Add an interaction",
+  "authority": {
+    "data": {
+      "assignment": ["read"],
+      "interaction": ["read", "create"]
+    }
+  }
+}
+```
+
+Declare these entities in `dataContract`. Allowed verbs are `read`, `create`,
+`update`, `delete`; lists must be nonempty and unique. No wildcards, external
+entities or policy DSL. Authority actions cannot also be public RPCs.
+`isolatedScope` alone does not grant data authority.
+Use lowercase snake_case IDs in declarations, handlers, grants and calls;
+uppercase is rejected by permission-key validation. API/body keys remain
+camelCase.
+
+An administrator must review and approve the full manifest and entire backend
+artifact, including resolved dependencies, initialization and every handler
+sharing its runtime. Core hashes the installed tree after dependencies and
+records a versioned snapshot, verifying its hash at approval and process startup.
+Read-only settings are defensive, not immutability against hostile processes
+under the same OS account. Every backend deployment and every full manifest
+change, even cosmetic, rotates revision and invalidates approval; old approvals
+never revive. Exact review is pinned by `revision`, `backendDigest` and
+`installationId`, with no extra `manifestDigest`.
+
+Use `rootcx apps actions list <app> --json`, then
+`rootcx apps actions approve <app> <action>` to review and confirm.
+Noninteractive `--yes` requires `--revision`, `--digest` and `--installation`
+from an already reviewed snapshot. Revoke with
+`rootcx apps actions revoke <app> <action>`. Deployment never approves.
+
+Users need `app:{appId}:action:{id}` plus current approval, not entity CRUD;
+plain `invoke` is insufficient. Ordinary declared actions without authority
+accept `invoke` OR the fine action grant; undeclared RPCs require `invoke`.
+Invocation without current approval returns HTTP 403; a stale approval POST
+returns HTTP 409.
+Caller data permissions do not widen approved authority. The per-approval
+PostgreSQL role and RLS enforce denied tables/verbs with database errors.
+Foreign-key cascades, set-null and
+set-default writes require explicit authority for every affected local entity
+and verb or approval is rejected; cross-app effects are refused. Sensitive reads
+remain forbidden. No jobs, remote/self-action calls, tools, integrations,
+storage, events or injected credentials are available.
+
+Implement business checks with `serve`, trusted `caller.userId`, parameterized
+`ctx.sql` and `ctx.transaction`. For a guarded create, lock the active business
+assignment with `SELECT ... FOR SHARE`, then insert in that same transaction.
+Assignment `read` alone permits the lock; do not request `update` for it.
+Core provides a technical primary-key UPDATE ACL and RLS `USING` for read locks,
+while `WITH CHECK` denies mutations without declared `update`, including
+primary-key changes. An explicit `RETURNING` needs target `read`.
+Revoke assignments through a separately authorized update/delete of the same
+row. Core approval
+revocation separately waits for admitted DB transactions. Use explicit output
+projections to hide private notes while sharing one case and its interactions
+between readers; never duplicate business data per reader.
+
+Approved execution uses the usual cross-platform Bun spawning path with a
+fresh process per invocation, stopped after use and never returned to the
+ordinary worker cache. It adds no OS-identity or volume-ownership prerequisite.
+Ordinary apps remain untrusted at the governed IPC/SQL layer; the full approved
+artifact is trusted for business checks. Host filesystem/process confinement is
+outside the existing deployment model. Do not claim complete malicious-app
+confinement or tested platform coverage without evidence from actual runs.
+
 ### Rules
 
 - `id`, `created_at`, `updated_at` are auto-generated — omit from `fields`

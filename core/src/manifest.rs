@@ -46,6 +46,17 @@ pub async fn install_app(
     let mut lifecycle = crate::governance::cross_app::lock_app_lifecycle(pool, app_id).await?;
     crate::governance::row_access::inspect_schema(pool, app_id).await?;
     let previous_manifest = load_manifest_json(pool, app_id).await?;
+    if previous_manifest.as_ref().is_some_and(|previous| previous != &manifest_json) {
+        let mut tx = lifecycle.begin().await.map_err(RuntimeError::Schema)?;
+        // The revision pins the complete reviewed code+manifest, including
+        // presentation changes that do not rotate the installation generation.
+        sqlx::query("UPDATE rootcx_system.backend_releases SET revision=$2 WHERE app_id=$1")
+            .bind(app_id).bind(Uuid::new_v4()).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
+        crate::governance::approved_actions::revoke_app(
+            &mut tx, app_id, Some(installed_by), "manifest changed",
+        ).await.map_err(RuntimeError::Schema)?;
+        tx.commit().await.map_err(RuntimeError::Schema)?;
+    }
     let rotated = previous_manifest.as_ref()
         .is_some_and(|previous| !same_governance_contract(previous, &manifest_json));
     if !rotated && previous_manifest.as_ref().is_some_and(|previous| previous != &manifest_json) {
@@ -601,6 +612,7 @@ fn validate_perm_key_schema(key: &str) -> Result<(), RuntimeError> {
 
 pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
     validate_ident(&manifest.app_id, "appId")?;
+    crate::governance::approved_actions::validate(manifest)?;
     if let Some(perms) = &manifest.permissions {
         for p in &perms.permissions {
             validate_perm_key_schema(&p.key)?;

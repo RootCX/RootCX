@@ -1,6 +1,6 @@
 # ADR 0006: Governed row access
 
-Status: Accepted for the next release. The release version has not been bumped.
+Status: Accepted for Core v0.27.0.
 
 [ADR 0007](0007-resource-sharing.md) adds explicit resource scope. This ADR's
 identity scope remains the default for existing declarations.

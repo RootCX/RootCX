@@ -1,7 +1,4 @@
-# Migration guide: next release — governed row access
-
-This document prepares the next release, provisionally v0.27. The version has
-not been bumped and this is not a release announcement.
+# Migration guide: Core v0.27.0 — governed row access
 
 The upgrade introduces assignment-based shared reads and enforces sensitive
 columns in PostgreSQL. It also removes lifecycle collection bypass and
@@ -10,11 +7,12 @@ can be admitted or started.
 
 ## Compatibility changes
 
-| Existing behavior or artifact | Next-release behavior |
+| Existing behavior or artifact | Core v0.27.0 behavior |
 | --- | --- |
 | `owner: true` and `.own` permissions | Existing owner definitions and scoped operations remain intact |
 | Assignment sharing | An explicit `share` declaration enables subject-identity reads, gated by each target's `.read.shared` permission |
 | Exact resource sharing | Opt into `scope: "resource"` with explicit target paths; the subject needs no Owner and app data is not copied |
+| Approved backend actions | Optional `actions[].authority.data` requests require operator approval of the exact release; callers need the action permission, not direct collection rights |
 | Raw SQL reading a sensitive column | Denied by database column `SELECT` privileges, including expressions, filters, and `RETURNING` |
 | `SELECT *` or `RETURNING *` on a table with sensitive columns | Denied; explicitly select safe columns |
 | Generated reads of sensitive fields | Continue to omit those fields and reject filter/sort references |
@@ -29,6 +27,23 @@ can be admitted or started.
 
 No upgrade step silently grants admin, user, shared-read, or assignment-write
 permissions to preserve old behavior.
+
+Approved actions introduce an explicit trust decision for reviewed backend code.
+They use the usual cross-platform Bun worker spawning path, with a fresh
+approved process per invocation and no new OS-identity or volume-ownership
+prerequisite. Preserve existing managed app data, configuration and keys.
+Review the full artifact, including dependencies and all handlers sharing its
+runtime: that code is trusted for business checks. Core verifies versioned
+snapshot hashes at approval and process startup. Read-only settings do not
+make snapshots immutable against hostile processes under the same OS account.
+Host filesystem/process confinement remains outside the existing deployment
+model; ordinary apps remain untrusted at governed IPC/SQL boundaries.
+
+See the [approved-action guide](approved-actions.md) for the complete
+development/approval workflow. Exact database roles, permission/IPC checks,
+transaction controls and the revocation barrier remain enforced. Backend
+redeployment or any full manifest change, including cosmetic changes, retires
+approvals. Ordinary actions retain caller-based governance.
 
 ## Operator procedure
 
@@ -205,4 +220,4 @@ reintroduce the authority paths removed by this release.
 
 See [ADR 0006](adr/0006-governed-row-access.md) for the decision. Historical
 migration guides describe their releases; their earlier statements allowing
-raw SQL reads of sensitive fields do not describe this next release.
+raw SQL reads of sensitive fields do not describe Core v0.27.0.

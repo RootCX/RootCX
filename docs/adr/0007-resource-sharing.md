@@ -1,6 +1,6 @@
 # ADR 0007: Share an exact resource without duplicating app data
 
-Status: Accepted for the next release; the release version has not been bumped.
+Status: Accepted for Core v0.27.0.
 
 ## Context
 

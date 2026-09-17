@@ -24,6 +24,15 @@ compiles dependencies; subsequent runs reuse the Docker volume
 part of a normal test run. `core-verify` ignores `FILTER` so a release check cannot
 silently run a subset.
 
+When the test container runs as root, `scripts/core-test-runner.sh` finishes
+compilation before exporting the host target's Cargo runner:
+`setpriv --reuid=1000 --regid=1000 --clear-groups`. Cargo and nextest then execute
+Rust library/integration test binaries, and the workers they spawn, as UID/GID
+1000 without supplementary groups. The build cache remains root-owned.
+An already nonroot runner keeps its existing identity. This is test execution
+configuration, not a deployment requirement; the separate Bun prelude command
+does not use the Cargo runner.
+
 ## Isolation, limits and cleanup
 
 Each invocation creates one private Compose project with one PostgreSQL server.
@@ -62,6 +71,22 @@ requires its passing baseline. Run it separately from `core-verify`.
 The SDK and Peppol Vitest suites are separate from this Core gate. Run-specific
 counts and timings belong in the PR, not in this guide.
 
+Approved actions retain the usual cross-platform Bun process architecture.
+The container test runtime above is a test setup, not an approved-action
+deployment prerequisite. A passing run establishes evidence only for the
+platform and configuration actually exercised; it does not certify every
+platform or confinement of malicious apps at the host filesystem/process layer.
+Ordinary apps remain untrusted at governed IPC/SQL boundaries, while approved
+artifacts are trusted for business checks.
+Native compilation, including macOS compilation, is separate evidence from
+runtime integration tests on that platform.
+
+Approved-action verification should cover fresh processes per invocation,
+snapshot hash checks at approval/startup, exact database roles, permission/IPC
+denials, read-only assignment locking, rollback and the revocation barrier.
+Read-only snapshot settings are defensive; these checks do not prove
+immutability against hostile processes sharing an OS account.
+
 ## Governance coverage by invariant
 
 | Invariant / realistic regression | Primary checks |
@@ -86,6 +111,7 @@ counts and timings belong in the PR, not in this guide.
 | Own-scoped rows follow direct, chained and core-user entity links without widening writes | `row_ownership_test` |
 | Assignment access is many-to-many, non-transitive and revoked on the next statement, including Bun callback transactions | `assignment_access_test` |
 | Resource sharing confines reads to exact roots and explicit targets, including owner-free resources; public role/assignment operations revoke one reader without affecting another; resolver guards and legacy contracts remain intact | `resource_sharing_test` |
+| Approved actions bind reviewed code to exact data authority; real users exercise assignment checks, safe output, atomic writes, direct-access refusal, individual revocation, release retirement and explicit FK effects | `approved_actions_test` |
 | Sensitive values cannot be read through raw SQL, expressions or predicates; generated responses remain usable | `sensitive_sql_test` |
 | Invalid projections fail visibly and atomically; no-share policies retain historical definitions | `row_access_projection_test` |
 | Untrusted SQL and executable legacy artifacts cannot enter privileged schema operations | `manifest_sql_admission_test`, `app_migrations_test` |

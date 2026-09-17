@@ -15,6 +15,15 @@ esac
 echo "[build] compiling tests (maximum 20 minutes)"
 timeout --kill-after=10s 20m "${build[@]}"
 
+# Keep the build cache owned by the container, but exercise Core and Bun with
+# the production image's ordinary UID. Root would hide permission regressions.
+if [[ "$(id -u)" == 0 ]]; then
+  runner_target="$(rustc -vV | sed -n 's/^host: //p')"
+  runner_target="${runner_target//-/_}"
+  export "CARGO_TARGET_${runner_target^^}_RUNNER=setpriv --reuid=1000 --regid=1000 --clear-groups"
+  echo "[runtime] Core tests execute as UID 1000 without supplementary groups"
+fi
+
 if [[ "$mode" != integration ]]; then
   echo "[unit] running library tests (maximum 5 minutes)"
   timeout --kill-after=10s 5m cargo test --locked -p rootcx-core --lib \
