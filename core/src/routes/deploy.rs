@@ -60,6 +60,12 @@ pub async fn deploy_backend(
     let bytes = read_archive(&mut multipart).await?;
     extract_to(bytes, &app_dir).await?;
 
+    // Refuse app SQL before dependency scripts, agent registration, or startup.
+    // Historical files may remain in archives, but this path never applies any.
+    let applied = crate::app_migrations::run(&pool, &app_id, &app_dir)
+        .await
+        .map_err(ApiError::BadRequest)?;
+
     info!(app_id = %app_id, dir = %app_dir.display(), "backend deployed");
 
     if app_dir.join("package.json").exists() {
@@ -74,24 +80,10 @@ pub async fn deploy_backend(
 
     store_manifest_icon(&pool, &app_id, &app_dir).await;
 
-    // Deploy-time DDL: apply backend/migrations/*.sql as owner before the worker
-    // (which cannot do DDL) starts. A failure aborts here, leaving the previous
-    // worker stopped and the new one unstarted, rather than serving a half-built
-    // schema. The app schema is the validated app_id.
-    let applied = crate::app_migrations::run(&pool, &app_id, &app_dir)
-        .await
-        .map_err(|e| ApiError::Internal(format!("migrations: {e}")))?;
-    if !applied.is_empty() {
-        info!(app_id = %app_id, count = applied.len(), "applied deploy-time migrations");
-    }
-
-    // Govern whatever the migrations just created. `apply_table_rls` only ran for
-    // manifest entities, but its GRANT is schema-wide, so a migration-created
-    // table would otherwise sit with full CRUD for the executor role and no RLS
-    // until an unrelated restart swept it up.
+    // Preserve governance of existing legacy tables on redeploy.
     crate::extensions::rbac::govern_schema_tables(&pool, Some(&app_id))
         .await
-        .map_err(|e| ApiError::Internal(format!("governing migrated tables: {e}")))?;
+        .map_err(|e| ApiError::Internal(format!("governing app tables: {e}")))?;
 
     let _ = wm.stop_app(&app_id).await;
     wm.start_app(&pool, &secrets, &app_id).await?;
@@ -119,7 +111,11 @@ fn safe_unpack(bytes: &[u8], dest: &std::path::Path) -> Result<(), ApiError> {
 async fn install_deps(bun_bin: &Path, dir: &Path) -> Result<(), ApiError> {
     info!(bin = %bun_bin.display(), dir = %dir.display(), "installing dependencies");
     let out = tokio::process::Command::new(bun_bin)
+        // An archive is untrusted even when an operator may deploy it. Package
+        // scripts must not regain the Core authority removed from app migrations.
+        .env_clear()
         .arg("install")
+        .arg("--ignore-scripts")
         .current_dir(dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

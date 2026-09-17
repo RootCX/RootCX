@@ -1003,7 +1003,7 @@ mod tests {
     }
 
     fn mentity(name: &str, fields: Vec<FieldContract>) -> EntityContract {
-        EntityContract { entity_name: name.to_string(), fields, identity_kind: None, identity_key: None, indexes: vec![], checks: vec![] }
+        EntityContract { entity_name: name.to_string(), fields, share: None, identity_kind: None, identity_key: None, indexes: vec![], checks: vec![] }
     }
 
     // ── normalize / defaults ─────────────────────────────────────────

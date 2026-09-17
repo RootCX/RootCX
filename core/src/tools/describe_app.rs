@@ -63,6 +63,10 @@ pub(crate) fn project_human_contract(
                     permissions,
                     &format!("{read}.own"),
                 )
+                && !crate::governance::authority::has_permission(
+                    permissions,
+                    &format!("{read}.shared"),
+                )
             {
                 return None;
             }

@@ -401,7 +401,8 @@ pub async fn list_nodes(
                 if let Some(entity) = e.get("entityName").and_then(|v| v.as_str()) {
                     let read = format!("app:{id}:{entity}.read");
                     let can_read = has_permission(&perms, &read)
-                        || has_permission(&perms, &format!("app:{id}:{entity}.read.own"));
+                        || has_permission(&perms, &format!("app:{id}:{entity}.read.own"))
+                        || has_permission(&perms, &format!("app:{id}:{entity}.read.shared"));
                     let can_write = ["create", "update", "delete"].iter().any(|action| {
                         has_permission(&perms, &format!("app:{id}:{entity}.{action}"))
                     });

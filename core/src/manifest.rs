@@ -7,7 +7,7 @@ use uuid::Uuid;
 use crate::RuntimeError;
 use crate::data_types::{FieldType, FieldTypes, field_types, sql_default, system_field_types};
 use crate::extensions::RuntimeExtension;
-use rootcx_types::{AppManifest, EntityContract, FieldContract};
+use rootcx_types::{AppManifest, EntityContract};
 
 pub const SYSTEM_FIELDS: &[&str] = &["id", "created_at", "updated_at"];
 
@@ -44,6 +44,7 @@ pub async fn install_app(
     let manifest_json = serde_json::to_value(manifest)
         .map_err(|e| RuntimeError::Schema(sqlx::Error::Protocol(e.to_string().into())))?;
     let mut lifecycle = crate::governance::cross_app::lock_app_lifecycle(pool, app_id).await?;
+    crate::governance::row_access::inspect_schema(pool, app_id).await?;
     let previous_manifest = load_manifest_json(pool, app_id).await?;
     let rotated = previous_manifest.as_ref()
         .is_some_and(|previous| !same_governance_contract(previous, &manifest_json));
@@ -552,170 +553,17 @@ pub fn validate_perm_key(key: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The column deciding who a row belongs to, when the entity declares one.
-///
-/// Either it holds the user id itself — an `entity_link` to `core:users` (typed
-/// UUID, and it earns a foreign key and index for free), a bare `uuid`, or `text`
-/// — or it links to another entity that carries the ownership (see
-/// [`owner_parent`]). Text is not a concession: the bundled gmail, google_calendar
-/// and imap_smtp integrations store `user_id` as text across nine tables, and
-/// confining those per user is the same need. The generated policy casts the
-/// *caller's* id to the column's type rather than the column to text, so each shape
-/// stays indexable (see `rbac::owner_predicate`).
-pub(crate) fn owner_field(entity: &EntityContract) -> Option<&str> {
-    entity
-        .fields
-        .iter()
-        .find(|f| f.owner)
-        .map(|f| f.name.as_str())
-}
+pub(crate) use crate::governance::row_access::{owner_field, MAX_OWNER_CHAIN};
+#[cfg(test)]
+use crate::governance::row_access::{validate_owner_chains, validate_owner_field};
 
-/// The entity this one delegates ownership to, when its owner column is a link to
-/// a sibling entity rather than a user id. `None` covers both "no owner declared"
-/// and "owns directly", which is exactly the distinction the policy builder needs.
-pub(crate) fn owner_parent(entity: &EntityContract) -> Option<&str> {
-    let field = entity.fields.iter().find(|f| f.owner)?;
-    let target = &field.references.as_ref()?.entity;
-    (field.field_type == "entity_link" && matches!(parse_entity_ref(target), RefTarget::Local(_)))
-        .then_some(target.as_str())
-}
-
-/// Every entity's ownership as the policy builder consumes it: the column, and the
-/// sibling it defers to. Built once from the manifest at install and once from the
-/// projection at boot, so both paths generate the same SQL from the same shape.
-pub(crate) fn owner_map(entities: &[EntityContract]) -> crate::extensions::rbac::OwnerMap {
-    entities
-        .iter()
-        .filter_map(|e| {
-            let column = owner_field(e)?.to_string();
-            Some((e.entity_name.clone(), (column, owner_parent(e).map(str::to_string))))
-        })
-        .collect()
-}
-
-/// How many entities a delegation chain may span. Each extra link is one more
-/// resolver the planner must run per confined query, and a chain this long is
-/// already a modelling smell — so it is a refusal at install rather than a
-/// surprise in production.
-pub(crate) const MAX_OWNER_CHAIN: usize = 4;
-
-/// Delegated ownership must terminate in a real user id, and must do so in bounded
-/// time. Cross-entity, so it cannot live in `validate_owner_field`.
-///
-/// Every failure here would otherwise surface as a broken *table*: a chain that
-/// loops makes Postgres report `infinite recursion detected in policy` only when
-/// the table is first queried, and until the manifest is fixed the table cannot be
-/// read at all. A chain ending on an entity that owns nothing is quieter and worse
-/// — the policies simply match nothing, which reads as an access bug.
-fn validate_owner_chains(manifest: &AppManifest) -> Result<(), String> {
-    let by_name: HashMap<&str, &EntityContract> =
-        manifest.data_contract.iter().map(|e| (e.entity_name.as_str(), e)).collect();
-
-    for entity in &manifest.data_contract {
-        let Some(mut parent) = owner_parent(entity) else { continue };
-        let mut chain = vec![entity.entity_name.as_str()];
-        loop {
-            if chain.contains(&parent) {
-                chain.push(parent);
-                return Err(format!(
-                    "entity '{}' delegates ownership in a loop ({}); a chain must end on a \
-                     column holding a user id",
-                    entity.entity_name, chain.join(" -> "),
-                ));
-            }
-            chain.push(parent);
-            if chain.len() > MAX_OWNER_CHAIN {
-                return Err(format!(
-                    "entity '{}' delegates ownership through {} entities ({}); at most \
-                     {MAX_OWNER_CHAIN} are allowed",
-                    entity.entity_name, chain.len(), chain.join(" -> "),
-                ));
-            }
-            // Anything on the chain but the first link is resolved by a generated
-            // function whose name carries both identifiers. Truncation at Postgres's
-            // 63-byte limit would collide two entities into one resolver, silently
-            // handing one entity's rows the other's owners, so refuse the name here.
-            let resolver = crate::extensions::rbac::owner_resolver_name(&manifest.app_id, parent);
-            if !crate::extensions::rbac::fits_ident_limit(&resolver) {
-                return Err(format!(
-                    "entity '{parent}' of app '{}' needs an ownership resolver named \
-                     '{resolver}', which exceeds PostgreSQL's 63-byte identifier limit; \
-                     shorten the app or entity name",
-                    manifest.app_id,
-                ));
-            }
-
-            // The reference itself is validated with every other `entity_link`, so a
-            // missing target cannot reach here.
-            let target = by_name[parent];
-            if owner_field(target).is_none() {
-                return Err(format!(
-                    "entity '{}' delegates ownership to '{parent}', which declares no owner \
-                     field; mark the column that owns a '{parent}' row with \"owner\": true",
-                    entity.entity_name,
-                ));
-            }
-            match owner_parent(target) {
-                Some(next) => parent = next,
-                None => break,
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_owner_field(entity: &EntityContract) -> Result<(), String> {
-    let owners: Vec<&FieldContract> = entity.fields.iter().filter(|f| f.owner).collect();
-
-    // Zero is the norm. Two would make "the owner" ambiguous, and silently picking
-    // one decides who sees what — so refuse rather than guess.
-    let [owner] = owners[..] else {
-        if owners.is_empty() {
-            return Ok(());
-        }
-        let names: Vec<&str> = owners.iter().map(|f| f.name.as_str()).collect();
-        return Err(format!(
-            "entity '{}' marks {} fields as owner ({}); exactly one column may own a row",
-            entity.entity_name, owners.len(), names.join(", ")
-        ));
-    };
-
-    // A user id is compared as-is against the caller's, so the column has to be
-    // able to hold one. Anything else would build a policy matching no row, which
-    // reads as an access bug rather than as the manifest mistake it is.
-    if !matches!(owner.field_type.as_str(), "entity_link" | "uuid" | "text") {
-        return Err(format!(
-            "entity '{}': owner field '{}' is '{}'; must be entity_link, uuid or text to hold a user id",
-            entity.entity_name, owner.name, owner.field_type
-        ));
-    }
-
-    // Without a target there is no way to tell "holds a user id" from "defers to
-    // the entity it links to", and the two generate opposite policies.
-    if owner.field_type == "entity_link" && owner.references.is_none() {
-        return Err(format!(
-            "entity '{}': owner field '{}' is an entity_link with no 'references'; point it at \
-             'core:users' to hold a user id, or at the entity that owns the row",
-            entity.entity_name, owner.name,
-        ));
-    }
-    Ok(())
-}
-
-/// The only row scope the core mints and builds policies for.
+/// Scope used for ownership policies.
 pub(crate) const OWN_SCOPE: &str = "own";
 
-/// The suffixes a permission key's action segment may not end on, because the core
-/// owns their meaning. The single source of truth for the three sites that care:
-/// `validate_declared_perm_key` (refuses them at declaration),
-/// `RbacExtension::warn_on_reserved_scope_keys` (reports pre-existing ones), and
-/// the minting site in `rbac::on_app_installed` (creates the `own` twins).
-///
-/// Only `own` is minted and only `own` has policies. The others are reserved
-/// *ahead* of use and mean nothing yet: turning a suffix into a core scope after an
-/// app could declare it, and an admin grant it, would retroactively widen every
-/// role already holding that key — a silent over-grant with no migration path. The
-/// window is only free before the first release that allows it.
+/// Apps cannot declare row-scope keys: permission intersection depends on their
+/// Core-defined meaning. Core mints `.own` operations and `.read.shared`;
+/// reserving the suffixes prevents unrelated app capabilities from acquiring
+/// those semantics retroactively.
 pub(crate) const RESERVED_SCOPE_SUFFIXES: [&str; 2] = [OWN_SCOPE, "shared"];
 
 /// Validate a key an *app* wants to declare. Stricter than `validate_perm_key`: it
@@ -738,8 +586,8 @@ pub fn validate_declared_perm_key(key: &str) -> Result<(), String> {
     {
         return Err(format!(
             "permission key '{key}': the '.{suffix}' suffix is reserved for the core's \
-             row-scoped keys, which the core mints itself from a field marked \
-             \"owner\": true. The permission lattice reads it as weaker than the same \
+             row-scoped keys, which the core mints from ownership and share declarations. \
+             The permission lattice reads it as weaker than the same \
              key without it, so an app meaning something else by it would make a \
              delegated agent narrow to the wrong capability — rename the action"
         ));
@@ -762,10 +610,21 @@ pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
         validate_perm_key_schema(&action.id)?;
     }
     let all_entity_names: Vec<&str> = manifest.data_contract.iter().map(|e| e.entity_name.as_str()).collect();
+    let unique: std::collections::HashSet<_> = all_entity_names.iter().collect();
+    if unique.len() != all_entity_names.len() {
+        return Err(RuntimeError::Invalid("dataContract contains duplicate entity names".into()));
+    }
     for entity in &manifest.data_contract {
         validate_ident(&entity.entity_name, "entity name")?;
+        let mut fields = std::collections::HashSet::new();
         for field in &entity.fields {
             validate_ident(&field.name, "field name")?;
+            if !fields.insert(&field.name) {
+                return Err(RuntimeError::Invalid(format!("entity '{}': duplicate field '{}'", entity.entity_name, field.name)));
+            }
+            if is_system_field(&field.name) && field.sensitive {
+                return Err(RuntimeError::Invalid(format!("entity '{}': system field '{}' cannot be sensitive", entity.entity_name, field.name)));
+            }
             FieldType::from_field(field).map_err(RuntimeError::Invalid)?;
         }
         for field in &entity.fields {
@@ -795,7 +654,6 @@ pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
             }
         }
 
-        validate_owner_field(entity).map_err(RuntimeError::Invalid)?;
 
         if let (Some(kind), Some(key)) = (&entity.identity_kind, &entity.identity_key) {
             validate_ident(kind, "identityKind")?;
@@ -810,7 +668,7 @@ pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
             ));
         }
     }
-    validate_owner_chains(manifest).map_err(RuntimeError::Invalid)?;
+    crate::governance::row_access::validate(manifest)?;
     crate::governance::publications::validate_manifest(manifest).map_err(RuntimeError::Invalid)?;
     Ok(())
 }
@@ -915,7 +773,7 @@ mod tests {
     }
 
     fn entity(name: &str, fields: Vec<FieldContract>) -> EntityContract {
-        EntityContract { entity_name: name.to_string(), fields, identity_kind: None, identity_key: None, indexes: vec![], checks: vec![] }
+        EntityContract { entity_name: name.to_string(), fields, share: None, identity_kind: None, identity_key: None, indexes: vec![], checks: vec![] }
     }
 
     /// Every reserved suffix is refused on the action segment, whole, and nowhere

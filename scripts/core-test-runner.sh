@@ -8,7 +8,7 @@ build=(cargo test --locked -p rootcx-core --no-run)
 case "$mode" in
   unit) build+=(--lib) ;;
   integration) build+=(--test "$target") ;;
-  verify) build+=(--lib --test governance_test) ;;
+  verify) build+=(--lib --test governance_test --test worker_lifecycle_test --test app_migrations_test) ;;
   *) echo "unknown test mode: $mode" >&2; exit 2 ;;
 esac
 
@@ -22,8 +22,12 @@ if [[ "$mode" != integration ]]; then
 fi
 if [[ "$mode" != unit ]]; then
   echo "[integration] fresh database per test; maximum 2 minutes per test, 20 minutes total"
+  targets=(--test "$target")
+  if [[ "$mode" == verify ]]; then
+    targets+=(--test worker_lifecycle_test --test app_migrations_test)
+  fi
   timeout --kill-after=10s 20m cargo nextest run --locked -p rootcx-core \
-    --test "$target" -- "$filter"
+    --no-fail-fast "${targets[@]}" -- "$filter"
 fi
 if [[ "$mode" == verify ]]; then
   echo "[worker] running Bun tests (maximum 2 minutes)"

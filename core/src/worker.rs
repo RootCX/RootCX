@@ -447,10 +447,9 @@ pub struct WorkerConfig {
     /// Core-derived workflow scope fixed for this process. It is part of the
     /// worker routing key and never read from app-controlled IPC.
     pub invocation: crate::governance::enforcement::InvocationContext,
-    /// Only the per-app System (lifecycle) worker runs onStart with BYPASSRLS
-    /// self-schema access. Anonymous and User workers never run onStart and never
-    /// bypass — even though Anonymous, like System, carries the default (no-user)
-    /// identity, it is a distinct worker (see `Principal` in worker_manager).
+    /// Only the per-app System (lifecycle) worker runs onStart. This controls
+    /// hook execution only: every capability uses the worker's fixed identity,
+    /// including the default (no-user, no-authority) lifecycle identity.
     pub run_onstart: bool,
     pub entry_point: PathBuf,
     pub working_dir: PathBuf,
@@ -621,11 +620,6 @@ async fn supervisor_loop(
     let (tx_done_tx, mut tx_done_rx) = mpsc::channel::<String>(4);
     let (invocation_expiry_tx, mut invocation_expiry_rx) =
         mpsc::channel::<(String, String)>(16);
-    // Marks the end of the onStart phase (first Rpc/Job/AgentInvoke dispatched).
-    // Only the lifecycle worker (config.run_onstart) bypasses RLS for self-schema
-    // access, and only before this flips. After it, collection ops run under the
-    // worker's fixed identity. User workers never bypass.
-    let mut onstart_done = false;
     let pending_approvals = config.pending_approvals.clone();
     let mut crash_times: Vec<Instant> = Vec::new();
     let mut restart_count: u32 = 0;
@@ -689,8 +683,6 @@ async fn supervisor_loop(
                                 status = WorkerStatus::Running;
                                 worker_protocol = 1;
                                 restart_count = 0;
-                                // Fresh process: onStart may BYPASSRLS again.
-                                onstart_done = false;
                                 info!(app_id = %app_id, "worker started");
                                 emit_log(&log_tx, "system", "worker started");
                             }
@@ -736,7 +728,6 @@ async fn supervisor_loop(
                             let _ = reply.send(Err("worker not running".into()));
                             continue;
                         }
-                        onstart_done = true;
                         // The invocation is minted and tracked whatever the worker
                         // announces: a v4 worker echoes it and gets the open-invocation
                         // proof, an older one ignores it and keeps the attribution the
@@ -789,7 +780,6 @@ async fn supervisor_loop(
                             warn!(app_id = %app_id, job_id = %id, "worker not running");
                             continue;
                         }
-                        onstart_done = true;
                         // Single-flight per pgmq message. Once the lease heartbeat is
                         // bounded, a hung job's message redelivers; without this guard
                         // the redelivery would start a SECOND concurrent run of the
@@ -834,7 +824,6 @@ async fn supervisor_loop(
                             }).await;
                             continue;
                         }
-                        onstart_done = true;
                         let invoke_id = payload.invoke_id.clone();
 
                         if let Some(ref supervision) = config.supervision {
@@ -1168,12 +1157,8 @@ async fn supervisor_loop(
                             let pool = config.pool.clone();
                             let aid = config.app_id.clone();
                             let tx = outbound_tx.clone();
-                            // Identity is this worker's fixed identity. Only the
-                            // lifecycle worker, during onStart, gets the BYPASSRLS
-                            // self-schema window (state=None). Everyone else runs
-                            // under RLS as their fixed identity. Fail-closed.
-                            let allow_bypass = config.run_onstart && !onstart_done;
-                            let state = if allow_bypass { None } else { Some(config.identity.clone()) };
+                            // Lifecycle and anonymous workers carry no implicit authority.
+                            let state = config.identity.clone();
                             let invocation = capability_context(
                                 &config.invocation, worker_protocol, &active_invocations,
                                 invocation_id.as_deref(),
@@ -1183,7 +1168,7 @@ async fn supervisor_loop(
                                     Err(error) => (None, Some(error)),
                                     Ok(invocation) => match collection_op(
                                         &pool, &aid, &op, &entity, data, state,
-                                        &invocation, allow_bypass,
+                                        &invocation,
                                     ).await {
                                     Ok(v) => (Some(v), None),
                                     Err(e) => (None, Some(e)),
@@ -1620,7 +1605,6 @@ async fn supervisor_loop(
                         active_invocations.clear();
                         rpc_invocations.clear();
                         job_invocations.clear();
-                        onstart_done = false;
                         worker_protocol = 1;
                         // Drop the stale TX handle so the respawned process can
                         // open a fresh one (its task rolls back + frees the slot).
@@ -1836,63 +1820,42 @@ fn apply_worker_uid(cmd: &mut Command) {
     }
 }
 
-/// `ctx.collection()` op. With a resolved user context it runs inside an RLS
-/// transaction under `rootcx_app_executor` (filtered by the caller); during
-/// onStart (no context, `allow_bypass`) it runs on the owner pool (BYPASSRLS,
-/// self-schema only). No context after onStart → deny.
+/// Every collection operation uses the worker's immutable identity, including
+/// lifecycle and anonymous workers, through the same governed transaction as SQL.
 async fn collection_op(
     pool: &PgPool,
     app_id: &str,
     op: &str,
     entity: &str,
     data: JsonValue,
-    state: Option<crate::governance::enforcement::ContextState>,
+    state: crate::governance::enforcement::ContextState,
     invocation: &crate::governance::enforcement::InvocationContext,
-    allow_bypass: bool,
 ) -> Result<JsonValue, String> {
-    use crate::manifest::field_type_map;
-
-    // Metadata always via the superuser pool (the RLS executor role cannot read
-    // rootcx_system).
-    let types = field_type_map(pool, app_id, entity)
+    // Only metadata uses the owner pool; app data always uses the executor role.
+    let types = crate::manifest::field_type_map(pool, app_id, entity)
         .await
         .map_err(|e| e.to_string())?;
-
-    match state {
-        // RLS-governed path: a real sqlx transaction. It rolls back on drop, and
-        // a failed COMMIT surfaces as an error instead of silently dropping the
-        // write or leaking an open transaction back to the pool.
-        Some(st) => {
-            let mut tx = crate::governance::enforcement::begin_app_tx_with_invocation(
-                pool,
-                app_id,
-                &st,
-                invocation,
-                st.user_id,
-                None,
-                "collection",
-                crate::governance::enforcement::TIMEOUT_INTERACTIVE_MS,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-            match collection_exec(&mut tx, &types, app_id, op, entity, data).await {
-                Ok(v) => {
-                    tx.commit().await.map_err(|e| e.to_string())?;
-                    Ok(v)
-                }
-                Err(e) => {
-                    let _ = tx.rollback().await;
-                    Err(e)
-                }
-            }
+    let mut tx = crate::governance::enforcement::begin_app_tx_with_invocation(
+        pool,
+        app_id,
+        &state,
+        invocation,
+        state.user_id,
+        None,
+        "collection",
+        crate::governance::enforcement::TIMEOUT_INTERACTIVE_MS,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    match collection_exec(&mut tx, &types, app_id, op, entity, data).await {
+        Ok(value) => {
+            tx.commit().await.map_err(|e| e.to_string())?;
+            Ok(value)
         }
-        // onStart self-schema access (no user context): owner pool, BYPASSRLS.
-        None if allow_bypass => {
-            let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
-            collection_exec(&mut conn, &types, app_id, op, entity, data).await
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
         }
-        // After onStart, a missing/unknown context is a hard deny (fail-closed).
-        None => Err("collection access denied: no active user context".into()),
     }
 }
 
@@ -2004,13 +1967,11 @@ pub async fn collection_op_test(
     op: &str,
     entity: &str,
     data: serde_json::Value,
-    state: Option<crate::governance::enforcement::ContextState>,
-    allow_bypass: bool,
+    state: crate::governance::enforcement::ContextState,
 ) -> Result<serde_json::Value, String> {
     collection_op(
         pool, app_id, op, entity, data, state,
         &crate::governance::enforcement::InvocationContext::default(),
-        allow_bypass,
     ).await
 }
 

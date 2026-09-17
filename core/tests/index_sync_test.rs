@@ -23,6 +23,7 @@ fn field(name: &str, required: bool) -> FieldContract {
 // column diff is empty and only the index reconcile acts.
 fn contacts(indexes: Vec<IndexContract>) -> Vec<EntityContract> {
     vec![EntityContract {
+            share: None,
         entity_name: "contacts".into(),
         fields: vec![
             field("first_name", true), field("last_name", true),

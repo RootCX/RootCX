@@ -1,0 +1,168 @@
+//! The Core-owned data contract: validate once, reconcile atomically, replay at
+//! boot. Apps supply relationships, never SQL authorization expressions.
+use std::collections::HashMap;
+
+use rootcx_types::{AppManifest, EntityContract};
+use sqlx::{PgConnection, PgPool};
+
+use crate::RuntimeError;
+
+mod admission;
+mod ownership;
+mod policies;
+mod sharing;
+
+pub(crate) use ownership::{owner_field, owner_parent, owner_map, MAX_OWNER_CHAIN, validate_owner_chains, validate_owner_field};
+pub(crate) use policies::{OwnerMap, fits_ident_limit, owner_resolver_name};
+
+async fn exec(conn: &mut PgConnection, sql: &str) -> Result<(), RuntimeError> {
+    sqlx::query(sql).execute(conn).await.map_err(RuntimeError::Schema)?;
+    Ok(())
+}
+
+pub(crate) fn validate(manifest: &AppManifest) -> Result<(), RuntimeError> {
+    for entity in &manifest.data_contract {
+        validate_owner_field(entity).map_err(RuntimeError::Invalid)?;
+    }
+    validate_owner_chains(manifest).map_err(RuntimeError::Invalid)?;
+    admission::validate_manifest(manifest)?;
+    sharing::validate(manifest)
+}
+
+pub(crate) async fn inspect_schema(pool: &PgPool, schema: &str) -> Result<(), RuntimeError> {
+    let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
+    admission::inspect(&mut tx, schema).await?;
+    tx.commit().await.map_err(RuntimeError::Schema)
+}
+
+pub(crate) fn shared_entities(manifest: &AppManifest) -> impl Iterator<Item = &EntityContract> {
+    let has_shares = manifest.data_contract.iter().any(|e| e.share.is_some());
+    manifest.data_contract.iter().filter(move |e| has_shares && owner_field(e).is_some())
+}
+
+/// Bootstrap only the projection. Triggers need it before RBAC itself boots.
+pub(crate) async fn bootstrap_projection(pool: &PgPool) -> Result<(), RuntimeError> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS rootcx_system.row_access_contracts (
+            app_id TEXT PRIMARY KEY, version INTEGER NOT NULL CHECK (version = 1),
+            entities JSONB NOT NULL
+        )",
+    ).execute(pool).await.map_err(RuntimeError::Schema)?;
+    Ok(())
+}
+
+pub(crate) async fn install(pool: &PgPool, manifest: &AppManifest) -> Result<(), RuntimeError> {
+    validate(manifest)?;
+    let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
+    admission::inspect(&mut tx, &manifest.app_id).await?;
+    reconcile(&mut tx, manifest).await?;
+    sqlx::query(
+        "INSERT INTO rootcx_system.row_access_contracts (app_id, version, entities)
+         VALUES ($1, 1, $2) ON CONFLICT (app_id) DO UPDATE
+         SET version = EXCLUDED.version, entities = EXCLUDED.entities",
+    )
+    .bind(&manifest.app_id)
+    .bind(serde_json::to_value(&manifest.data_contract).map_err(|e| RuntimeError::Invalid(e.to_string()))?)
+    .execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
+    tx.commit().await.map_err(RuntimeError::Schema)
+}
+
+async fn reconcile(conn: &mut PgConnection, manifest: &AppManifest) -> Result<(), RuntimeError> {
+    let schema = &manifest.app_id;
+    let owners = owner_map(&manifest.data_contract);
+    let has_shares = manifest.data_contract.iter().any(|e| e.share.is_some());
+    let entities: HashMap<_, _> = manifest.data_contract.iter()
+        .map(|e| (e.entity_name.as_str(), e)).collect();
+    let tables: Vec<String> = sqlx::query_scalar(
+        "SELECT tablename FROM pg_tables WHERE schemaname = $1 ORDER BY tablename",
+    ).bind(schema).fetch_all(&mut *conn).await.map_err(RuntimeError::Schema)?;
+    for entity in &manifest.data_contract {
+        if !tables.contains(&entity.entity_name) {
+            return Err(RuntimeError::Invalid(format!(
+                "governance: declared table '{schema}.{}' is missing; redeploy its manifest",
+                entity.entity_name,
+            )));
+        }
+    }
+    let mut shared_resolvers = Vec::new();
+    sharing::reconcile_indexes(conn, manifest).await?;
+    for table in &tables {
+        let sensitive: Vec<String> = entities.get(table.as_str()).into_iter()
+            .flat_map(|e| &e.fields).filter(|f| f.sensitive).map(|f| f.name.clone()).collect();
+        let shared = if has_shares && owners.contains_key(table) {
+            let (predicate, resolver) = sharing::declare(conn, manifest, table, &owners).await?;
+            shared_resolvers.push(resolver);
+            Some(predicate)
+        } else {
+            None
+        };
+        policies::apply_table_rls(conn, schema, table, &owners, shared.as_deref(), &sensitive).await?;
+    }
+    let parents: Vec<String> = owners.values().filter_map(|(_, p)| p.clone()).collect();
+    policies::prune_owner_resolvers_tx(conn, schema, &parents).await?;
+    sharing::prune(conn, schema, &shared_resolvers).await?;
+
+    // Audit and hooks consume this projection, but governance is its sole writer.
+    sqlx::query("DELETE FROM rootcx_system.sensitive_fields WHERE app_id = $1")
+        .bind(schema).execute(&mut *conn).await.map_err(RuntimeError::Schema)?;
+    for entity in &manifest.data_contract {
+        let fields: Vec<&str> = entity.fields.iter().filter(|f| f.sensitive)
+            .map(|f| f.name.as_str()).collect();
+        let owner = owner_field(entity);
+        if fields.is_empty() && owner.is_none() { continue; }
+        sqlx::query(
+            "INSERT INTO rootcx_system.sensitive_fields (app_id, entity, fields, owner_field, owner_parent)
+             VALUES ($1, $2, $3, $4, $5)",
+        ).bind(schema).bind(&entity.entity_name).bind(fields).bind(owner).bind(owner_parent(entity))
+            .execute(&mut *conn).await.map_err(RuntimeError::Schema)?;
+    }
+    Ok(())
+}
+
+/// Old installations are validated and migrated from the stored manifest once.
+/// Subsequent boots replay the versioned projection through the same compiler.
+pub(crate) async fn govern_schema_tables(pool: &PgPool, only: Option<&str>) -> Result<(), RuntimeError> {
+    bootstrap_projection(pool).await?;
+    let apps: Vec<(String, Option<serde_json::Value>, Option<i32>, Option<serde_json::Value>)> = sqlx::query_as(
+        "SELECT a.id, a.manifest, c.version, c.entities FROM rootcx_system.apps a
+         LEFT JOIN rootcx_system.row_access_contracts c ON c.app_id = a.id
+         WHERE a.id <> 'core' AND ($1::text IS NULL OR a.id = $1) ORDER BY a.id",
+    ).bind(only).fetch_all(pool).await.map_err(RuntimeError::Schema)?;
+    for (app, json, version, entities) in apps {
+        let Some(json) = json else {
+            let has_tables: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_tables WHERE schemaname = $1)",
+            ).bind(&app).fetch_one(pool).await.map_err(RuntimeError::Schema)?;
+            if has_tables || version.is_some() {
+                return Err(RuntimeError::Invalid(format!("governance for '{app}': restore the missing manifest before governing its data")));
+            }
+            // Agent-only registrations have no data contract or app tables.
+            continue;
+        };
+        let mut manifest: AppManifest = serde_json::from_value(json)
+            .map_err(|e| RuntimeError::Invalid(format!("governance for '{app}': invalid stored manifest: {e}")))?;
+        if let Some(version) = version {
+            if version != 1 {
+                return Err(RuntimeError::Invalid(format!("governance for '{app}': unsupported contract version {version}")));
+            }
+            manifest.data_contract = serde_json::from_value(entities.unwrap_or_default())
+                .map_err(|e| RuntimeError::Invalid(format!("governance for '{app}': invalid projection: {e}")))?;
+        }
+        crate::manifest::validate_manifest(&manifest)?;
+        install(pool, &manifest).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn prune_owner_resolvers(pool: &PgPool, schema: &str, keep: &[String]) -> Result<(), RuntimeError> {
+    let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
+    policies::prune_owner_resolvers_tx(&mut tx, schema, keep).await?;
+    if keep.is_empty() {
+        sharing::prune(&mut tx, schema, &[]).await?;
+        sqlx::query("DELETE FROM rootcx_system.row_access_contracts WHERE app_id = $1")
+            .bind(schema).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
+        sqlx::query("DELETE FROM rootcx_system.rbac_permissions WHERE source_app = $1")
+            .bind(schema).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
+    }
+    tx.commit().await.map_err(RuntimeError::Schema)
+}

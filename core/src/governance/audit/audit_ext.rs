@@ -112,6 +112,7 @@ impl RuntimeExtension for AuditExtension {
                 "ALTER TABLE rootcx_system.sensitive_fields ADD COLUMN IF NOT EXISTS {column} TEXT",
             )).await?;
         }
+        crate::governance::row_access::bootstrap_projection(pool).await?;
 
         exec(
             pool,

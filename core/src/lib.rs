@@ -131,6 +131,15 @@ impl Runtime {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(POOL_MAX_CONNECTIONS)
             .acquire_timeout(std::time::Duration::from_secs(10))
+            .after_connect(|connection, _| Box::pin(async move {
+                // Core renders literal-only defaults and generated policy SQL.
+                // Never inherit a legacy database setting that treats backslashes
+                // as escapes inside the standard string literals we quote.
+                // Apply this to every connection, including schema reconciliation.
+                sqlx::query("SET standard_conforming_strings = on")
+                    .execute(connection).await?;
+                Ok(())
+            }))
             .connect(&self.database_url)
             .await
             .map_err(RuntimeError::Database)?;

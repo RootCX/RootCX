@@ -210,6 +210,19 @@ impl RbacExtension {
             END $$",
         ).await?;
 
+        // Reassert the executor's shape on upgrade too. CREATE ROLE IF ABSENT
+        // alone would preserve privileges granted by a historical owner migration.
+        exec(pool, "ALTER ROLE rootcx_app_executor NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS").await?;
+        let memberships: Vec<String> = sqlx::query_scalar(
+            "SELECT parent.rolname FROM pg_auth_members m
+             JOIN pg_roles parent ON parent.oid = m.roleid
+             JOIN pg_roles member ON member.oid = m.member
+             WHERE member.rolname = 'rootcx_app_executor'",
+        ).fetch_all(pool).await.map_err(RuntimeError::Schema)?;
+        for role in memberships {
+            exec(pool, &format!("REVOKE {} FROM rootcx_app_executor", crate::manifest::quote_ident(&role))).await?;
+        }
+
         // The executor must call the SECURITY DEFINER RBAC functions (USAGE on
         // the schema) but must NOT read system tables (no table grants).
         exec(pool, "REVOKE ALL ON SCHEMA rootcx_system FROM PUBLIC").await?;
@@ -332,6 +345,12 @@ impl RbacExtension {
                     coalesce(current_setting('rootcx.human_data_request', true), '') <> '1' AND
                     split_part(p_required, ':', 2) IS DISTINCT FROM
                         nullif(current_setting('rootcx.app_id', true), '') THEN
+                     RETURN FALSE;
+                 END IF;
+                 IF left(p_required, 4) = 'app:' AND NOT EXISTS (
+                     SELECT 1 FROM rootcx_system.app_installations
+                      WHERE app_id = split_part(p_required, ':', 2) AND active
+                 ) THEN
                      RETURN FALSE;
                  END IF;
                  v_user_id := nullif(current_setting('rootcx.user_id', true), '')::uuid;

@@ -84,9 +84,10 @@ pub enum OutboundMessage {
         credentials: HashMap<String, String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         agent_config: Option<AgentBootConfig>,
-        /// Only the per-app lifecycle worker runs onStart (with BYPASSRLS
-        /// self-schema). Per-user workers get `false` so onStart never runs
-        /// under a user identity. Absent → false (legacy/v1 workers ignore it).
+        /// Only the per-app lifecycle worker runs onStart. This controls hook
+        /// execution, not data authority: all capabilities use its fixed identity
+        /// and governed transactions. Per-user workers get `false`.
+        /// Absent → false (legacy/v1 workers ignore it).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         run_onstart: bool,
         /// The app's own manifest, verbatim from `rootcx_system.apps`. The worker

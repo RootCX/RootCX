@@ -63,17 +63,19 @@ fn dfs_cycle<'a>(
 /// it also backs the anti-escalation subset check in `delegation::act_as`, which
 /// must not accept a weaker key as equivalent. This answers a lattice meet —
 /// "what is the weaker of these two?" — and is used only where authority is
-/// narrowed. Scope: `All ⊐ Own`, encoded as the `.own` suffix, which
-/// `manifest::validate_perm_key` reserves for core-minted keys so the relation is
+/// narrowed. `Own` and `Shared` are distinct scopes below `All`, encoded as
+/// `.own` and `.shared`, which `manifest::validate_perm_key` reserves for
+/// core-minted keys so the relation is
 /// a fact about provenance rather than a naming convention.
 pub(crate) fn meet(key: &str, other: &[String]) -> Option<String> {
     if has_permission(other, key) {
         return Some(key.to_string());
     }
-    // Descend only: an `All` grant narrows to `Own`, never the reverse — an
-    // already-scoped key has nothing weaker to fall back to.
-    if key.ends_with(".own") {
-        return None;
+    // Keep the scoped grant when the other side allows the whole table.
+    // intersect_permissions visits both sides, retaining each matching scope.
+    if key.ends_with(".own") || key.ends_with(".shared") {
+        let base = key.rsplit_once('.').unwrap().0;
+        return has_permission(other, base).then(|| key.to_string());
     }
     let scoped = format!("{key}.own");
     has_permission(other, &scoped).then_some(scoped)
@@ -107,6 +109,21 @@ pub fn has_permission(permissions: &[String], required: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_and_own_are_distinct_scopes_below_all() {
+        let all = "app:example:note.read".to_string();
+        let own = format!("{all}.own");
+        let shared = format!("{all}.shared");
+        for (a, b, expected) in [
+            (vec![all.clone()], vec![shared.clone()], vec![shared.clone()]),
+            (vec![own.clone()], vec![shared.clone()], vec![]),
+            (vec![all], vec![own.clone(), shared.clone()], vec![own, shared]),
+        ] {
+            assert_eq!(intersect_permissions(&a, &b), expected, "{a:?} ∩ {b:?}");
+            assert_eq!(intersect_permissions(&b, &a), expected, "{b:?} ∩ {a:?}");
+        }
+    }
 
     fn roles(entries: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
         entries.iter().map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect())).collect()

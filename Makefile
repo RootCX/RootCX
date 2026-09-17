@@ -32,7 +32,7 @@ else
 endif
 
 ifeq ($(HOST),)
-ifneq ($(filter-out test test-integration core-test core-unit core-governance core-verify test-image,$(MAKECMDGOALS)),)
+ifneq ($(filter-out test test-integration core-test core-unit core-governance core-verify core-mutations test-image,$(MAKECMDGOALS)),)
   $(error rustc not found in PATH — install from https://rustup.rs)
 endif
 ifeq ($(MAKECMDGOALS),)
@@ -42,7 +42,7 @@ endif
 
 DIST := target/dist
 
-.PHONY: test test-integration test-image core-check core-check-tests core-test core-unit core-governance core-verify \
+.PHONY: test test-integration test-image core-check core-check-tests core-test core-unit core-governance core-verify core-mutations \
 	release dev deps dev-mode prod-mode \
         deps-mac-arm deps-mac-x86 deps-linux deps-linux-arm deps-win \
         require-mac require-linux require-win \
@@ -101,6 +101,9 @@ core-governance:
 
 test core-verify:
 	CARGO_JOBS="$(CARGO_JOBS)" TEST_THREADS="$(TEST_THREADS)" bash scripts/core-test.sh verify
+
+core-mutations:
+	CARGO_JOBS="$(CARGO_JOBS)" bash scripts/core-test.sh mutations $(FILTER)
 
 test-integration: core-governance
 

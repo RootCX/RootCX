@@ -12,11 +12,11 @@ async fn human_metadata_uses_entity_permissions_instead_of_claimed_app_identity(
             "entityName": "records",
             "fields": [
                 {"name": "name", "type": "text", "default_value": "private-default"},
-                {"name": "secret", "type": "text", "sensitive": true},
+                {"name": "secret", "type": "text", "sensitive": true,
+                 "enum_values": ["private-constraint"]},
                 {"name": "user_id", "type": "uuid", "owner": true}
             ],
-            "indexes": [{"columns": ["secret"]}],
-            "checks": [{"expr": "secret <> 'private-constraint'"}]
+            "indexes": [{"columns": ["secret"]}]
         }, {
             "entityName": "hidden",
             "fields": [{"name": "secret", "type": "text"}]
@@ -53,7 +53,7 @@ async fn human_metadata_uses_entity_permissions_instead_of_claimed_app_identity(
 
     // Use the same caller throughout. Removing a permission must take effect
     // without a new token; changing appId must never change visibility.
-    for permission in [None, Some("read"), Some("read.own"), Some("create"), None] {
+    for permission in [None, Some("read"), Some("read.own"), Some("read.shared"), Some("create"), None] {
         let mut permissions = vec![
             "tool:describe_app".to_string(),
             "tool:list_apps".to_string(),
@@ -68,7 +68,7 @@ async fn human_metadata_uses_entity_permissions_instead_of_claimed_app_identity(
         .execute(rt.pool())
         .await
         .unwrap();
-        let readable = matches!(permission, Some("read" | "read.own"));
+        let readable = matches!(permission, Some("read" | "read.own" | "read.shared"));
         for claimed_app in ["provider", "unrelated", "nonexistent"] {
             let (status, body) = rt
                 .request_as(

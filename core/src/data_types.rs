@@ -233,36 +233,40 @@ pub(crate) fn sql_default(value: &JsonValue, field_type: &FieldType) -> Option<S
     }
 }
 
-/// Build the one canonical database-row → JSON representation used by every
-/// app-data read path. Two transforms, in order:
-///
-/// 1. Sensitive fields are deleted. `to_jsonb(record.*)` takes the whole row as
-///    one value, so there is no column list to omit them from; `- text[]`
-///    removes the keys inside Postgres instead, before the row ever reaches the
-///    Core. Because every read path already routes through here, no caller can
-///    forget to strip them.
-/// 2. Decimal columns override their JSON value with text — PostgreSQL can
-///    represent NUMERIC exactly, JSON/JS cannot. This runs *after* the deletion
-///    so a sensitive decimal stays deleted instead of being re-added as text.
+/// Build the canonical database-row → JSON representation using only readable
+/// manifest and system columns. Whole-row references require SELECT on sensitive
+/// columns even if their keys are subsequently removed. They can also expose
+/// undeclared migration columns, including on entities with no sensitive fields.
+/// Decimal values are serialized as text to preserve their precision in JS.
 pub(crate) fn row_json(record_ref: &str, types: &FieldTypes) -> String {
-    let mut expression = format!("to_jsonb({record_ref}.*)");
-
-    let sensitive = sorted_names(types, |field| field.sensitive);
-    if !sensitive.is_empty() {
-        let keys: Vec<String> = sensitive.iter().map(|name| quote_literal(name)).collect();
-        expression = format!("({expression} - ARRAY[{}]::text[])", keys.join(", "));
+    let readable = sorted_names(types, |field| !field.sensitive);
+    if readable.is_empty() {
+        return "'{}'::jsonb".into();
     }
-
-    for field in sorted_names(types, |field| {
-        field.field_type.is_decimal() && !field.sensitive
-    }) {
-        expression.push_str(&format!(
-            " || jsonb_build_object({}, to_jsonb({record_ref}.{}::text))",
-            quote_literal(field),
-            quote_ident(field)
-        ));
-    }
-    expression
+    // Two arguments per field. Bound each call independently of entity width.
+    readable
+        .chunks(40)
+        .map(|chunk| {
+            let entries = chunk
+                .iter()
+                .map(|name| {
+                    let cast = if types[*name].field_type.is_decimal() {
+                        "::text"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "{}, {record_ref}.{}{cast}",
+                        quote_literal(name),
+                        quote_ident(name),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("jsonb_build_object({entries})")
+        })
+        .collect::<Vec<_>>()
+        .join(" || ")
 }
 
 pub(crate) type JsonRowQuery<'q> =
@@ -412,6 +416,7 @@ mod tests {
 
     fn types_of(entity_fields: &[(&str, &str, bool)]) -> FieldTypes {
         let entity = EntityContract {
+            share: None,
             entity_name: "account".into(),
             fields: entity_fields
                 .iter()
@@ -438,35 +443,35 @@ mod tests {
         field_types(&entity).expect("valid entity")
     }
 
-    /// Asserted on the exact string, not on `contains`: the projection is the
-    /// only thing standing between a sensitive column and the wire, so a
-    /// substring match would pass even if a later transform re-added the key.
-    /// Multi-field cases also pin the ordering, which must stay stable because
-    /// the generated SQL is a prepared-statement cache key.
+    /// Pin the permitted column references, including decimal casts. Removing
+    /// keys after reading a whole row would still violate column privileges.
     #[test]
     fn row_json_excludes_exactly_the_sensitive_fields() {
         for (fields, expected) in [
-            // No sensitive field: byte-identical to the pre-feature projection.
-            (vec![("email", "text", false)], "to_jsonb(t.*)".to_string()),
+            // Even without sensitive fields, undeclared columns stay out.
+            (
+                vec![("email", "text", false)],
+                "jsonb_build_object('created_at', t.\"created_at\", 'email', t.\"email\", 'id', t.\"id\", 'updated_at', t.\"updated_at\")",
+            ),
             (
                 vec![("email", "text", false), ("password_hash", "text", true)],
-                "(to_jsonb(t.*) - ARRAY['password_hash']::text[])".to_string(),
+                "jsonb_build_object('created_at', t.\"created_at\", 'email', t.\"email\", 'id', t.\"id\", 'updated_at', t.\"updated_at\")",
             ),
-            // Two sensitive fields, sorted regardless of declaration order.
             (
                 vec![("token", "text", true), ("password_hash", "text", true)],
-                "(to_jsonb(t.*) - ARRAY['password_hash', 'token']::text[])".to_string(),
+                "jsonb_build_object('created_at', t.\"created_at\", 'id', t.\"id\", 'updated_at', t.\"updated_at\")",
             ),
-            // A readable decimal still gets its exact-text override.
             (
                 vec![("salary", "decimal", false)],
-                "to_jsonb(t.*) || jsonb_build_object('salary', to_jsonb(t.\"salary\"::text))"
-                    .to_string(),
+                "jsonb_build_object('created_at', t.\"created_at\", 'id', t.\"id\", 'salary', t.\"salary\"::text, 'updated_at', t.\"updated_at\")",
             ),
-            // A sensitive decimal must not come back through that override.
+            (
+                vec![("salary", "decimal", false), ("token", "text", true)],
+                "jsonb_build_object('created_at', t.\"created_at\", 'id', t.\"id\", 'salary', t.\"salary\"::text, 'updated_at', t.\"updated_at\")",
+            ),
             (
                 vec![("salary", "decimal", true)],
-                "(to_jsonb(t.*) - ARRAY['salary']::text[])".to_string(),
+                "jsonb_build_object('created_at', t.\"created_at\", 'id', t.\"id\", 'updated_at', t.\"updated_at\")",
             ),
         ] {
             assert_eq!(

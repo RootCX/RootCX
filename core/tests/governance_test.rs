@@ -7,6 +7,9 @@ mod harness_isolation_test;
 #[path = "governance/collection_reads_test.rs"]
 mod collection_reads_test;
 
+#[path = "governance/sensitive_sql_test.rs"]
+mod sensitive_sql_test;
+
 #[path = "governance/agent_identity_test.rs"]
 mod agent_identity_test;
 #[path = "governance/cross_app_crud_test.rs"]
@@ -33,3 +36,12 @@ mod publications_test;
 mod tool_availability_test;
 #[path = "governance/workflows_integration.rs"]
 mod workflows_integration;
+
+#[path = "governance/assignment_access_test.rs"]
+mod assignment_access_test;
+
+#[path = "governance/manifest_sql_admission_test.rs"]
+mod manifest_sql_admission_test;
+
+#[path = "governance/row_access_projection_test.rs"]
+mod row_access_projection_test;

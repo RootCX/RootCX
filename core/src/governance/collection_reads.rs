@@ -38,12 +38,8 @@ pub(crate) async fn equality(
     let object = data
         .as_object()
         .ok_or("data must be a JSON object (where clause)")?;
-    // Local equality reads historically allow sensitive predicates while
-    // row_json hides their values. Remote callers validate grant scope first.
     for name in object.keys() {
-        if !types.contains_key(name) {
-            return Err(format!("unknown field '{name}'"));
-        }
+        validate_field(types, name)?;
     }
     let tbl = table(app_id, entity);
     let conditions: Vec<String> = object

@@ -17,5 +17,10 @@ trap 'exit 143' TERM
 docker volume create rootcx-core-test-cache >/dev/null
 "${compose[@]}" build tests
 "${compose[@]}" up -d --wait --wait-timeout 45 postgres
-"${compose[@]}" run --rm -T tests "${1:-verify}" "${2:-governance_test}" "${3:-}"
+if [[ "${1:-verify}" == mutations ]]; then
+  "${compose[@]}" run --rm -T -e ROOTCX_MUTATION_SANDBOX=1 \
+    --entrypoint bun tests scripts/row-access-mutations.ts "${@:2}"
+else
+  "${compose[@]}" run --rm -T tests "${1:-verify}" "${2:-governance_test}" "${3:-}"
+fi
 git diff --check

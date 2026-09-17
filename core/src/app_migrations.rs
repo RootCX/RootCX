@@ -1,119 +1,74 @@
-//! Deploy-time SQL migrations for an app.
+//! Refuse pending app-supplied SQL migrations without executing or recording them.
 //!
-//! Apps run under the restricted `rootcx_app_executor` role at runtime and
-//! cannot issue DDL — structural setup the manifest can't express (indexes,
-//! triggers, CHECK constraints, seed data) lives in `backend/migrations/*.sql`
-//! and is applied HERE, by the core, as the DB owner, once per file, before the
-//! worker starts. This is the deploy-time counterpart to the runtime SQL proxy:
-//! the admin who deploys already has full DB authority, so running owner DDL at
-//! deploy is no escalation; the runtime sandbox is untouched.
-//!
-//! Convention: the manifest's `dataContract` owns tables and columns; migrations
-//! own everything else and run AFTER manifest schema-sync (which the install
-//! step performs before backend upload), so the tables they target already
-//! exist. Files apply in lexicographic filename order, each in its own
-//! transaction with its bookkeeping row, so a failure leaves no partial record
-//! and aborts the deploy (the worker is never started against a half-built
-//! schema). A session advisory lock serializes concurrent deploys.
+//! The legacy ledger is read only to allow redeployment of already-applied files.
+//! New schema changes belong in the declarative manifest or in an independently
+//! authorized, administrator-controlled database migration.
 
 use std::collections::HashSet;
 use std::path::Path;
 
-use sqlx::{Connection as _, Executor as _, PgPool};
+use sqlx::PgPool;
 
 use crate::manifest::quote_ident;
 
-/// Apply pending migrations from `<app_dir>/migrations`. Returns the filenames
-/// newly applied this run. No migrations dir, or none pending, is a clean no-op.
+/// Check `<app_dir>/migrations`. Success always returns an empty list: this path
+/// never executes SQL from an app or marks a file as applied.
 pub async fn run(pool: &PgPool, schema: &str, app_dir: &Path) -> Result<Vec<String>, String> {
-    let dir = app_dir.join("migrations");
-    if !dir.is_dir() {
-        return Ok(vec![]);
+    crate::governance::row_access::inspect_schema(pool, schema)
+        .await.map_err(|error| error.to_string())?;
+    let entries = match std::fs::read_dir(app_dir.join("migrations")) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(error) => return Err(format!("read migrations dir: {error}")),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("read migration entry: {error}"))?;
+        let path = entry.path();
+        if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("sql"))
+        {
+            files.push(
+                entry
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| "migration filename must be valid UTF-8".to_string())?,
+            );
+        }
     }
-
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .map_err(|e| format!("read migrations dir: {e}"))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "sql"))
-        .collect();
-    files.sort();
     if files.is_empty() {
         return Ok(vec![]);
     }
+    files.sort();
 
-    let q = quote_ident(schema);
-    let lock_key = format!("{schema}.schema_migrations");
-
-    // One session-scoped advisory lock on a reserved connection serializes
-    // concurrent deploys; all per-file transactions share this connection.
-    let mut conn = pool.acquire().await.map_err(|e| e.to_string())?;
-    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
-        .bind(&lock_key)
-        .execute(&mut *conn)
+    let ledger = format!("{}.schema_migrations", quote_ident(schema));
+    let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(&ledger)
+        .fetch_one(pool)
         .await
-        .map_err(|e| e.to_string())?;
-
-    let result = apply(&mut conn, &q, &files).await;
-
-    // Always release the session lock, even on the error path.
-    let _ = sqlx::query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
-        .bind(&lock_key)
-        .execute(&mut *conn)
-        .await;
-    result
-}
-
-async fn apply(
-    conn: &mut sqlx::PgConnection,
-    qschema: &str,
-    files: &[std::path::PathBuf],
-) -> Result<Vec<String>, String> {
-    conn.execute(
-        format!(
-            "CREATE TABLE IF NOT EXISTS {qschema}.schema_migrations (
-                filename text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"
-        )
-        .as_str(),
-    )
-    .await
-    .map_err(|e| format!("create schema_migrations: {e}"))?;
-
-    let applied: HashSet<String> = sqlx::query_scalar(&format!(
-        "SELECT filename FROM {qschema}.schema_migrations"
-    ))
-    .fetch_all(&mut *conn)
-    .await
-    .map_err(|e| e.to_string())?
-    .into_iter()
-    .collect();
-
-    let mut newly = Vec::new();
-    for path in files {
-        let name = path.file_name().unwrap().to_string_lossy().to_string();
-        if applied.contains(&name) {
-            continue;
-        }
-        let body = std::fs::read_to_string(path).map_err(|e| format!("{name}: read: {e}"))?;
-
-        let mut tx = conn.begin().await.map_err(|e| format!("{name}: begin: {e}"))?;
-        // Unqualified names resolve to the app schema; the file + its bookkeeping
-        // row commit atomically, so a crash mid-file records nothing. A bare `&str`
-        // runs via the simple-query protocol (multi-statement files OK).
-        tx.execute(format!("SET LOCAL search_path TO {qschema}, public").as_str())
+        .map_err(|error| format!("check migration history: {error}"))?;
+    let applied: HashSet<String> = if exists {
+        sqlx::query_scalar(&format!("SELECT filename FROM {ledger}"))
+            .fetch_all(pool)
             .await
-            .map_err(|e| format!("{name}: search_path: {e}"))?;
-        tx.execute(body.as_str())
-            .await
-            .map_err(|e| format!("{name}: {e}"))?;
-        sqlx::query(&format!(
-            "INSERT INTO {qschema}.schema_migrations (filename) VALUES ($1)"
-        ))
-        .bind(&name)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("{name}: record: {e}"))?;
-        tx.commit().await.map_err(|e| format!("{name}: commit: {e}"))?;
-        newly.push(name);
+            .map_err(|error| format!("read migration history: {error}"))?
+            .into_iter()
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    files.retain(|name| !applied.contains(name));
+    if files.is_empty() {
+        return Ok(vec![]);
     }
-    Ok(newly)
+    Err(format!(
+        "app-supplied SQL migrations are disabled; pending files: {}. \
+         Use the declarative manifest for schema changes, or have an administrator \
+         perform an independently controlled database migration and remove the \
+         pending files from the backend archive. No SQL was executed and no files \
+         were marked applied.",
+        files.join(", ")
+    ))
 }

@@ -444,10 +444,10 @@ function _selfAction(action, params) {
   });
 }
 
-// Per-call ctx. It carries NO identity token: the core resolves the caller's
-// RLS identity from this worker's sole in-flight unit of work. During onStart
-// (no active unit) ctx.sql denies (no identity) and ctx.collection runs
-// BYPASSRLS on the self-schema.
+// Per-call ctx. It carries NO identity token: Core binds capabilities to the
+// worker's fixed identity and the invocation scope. Lifecycle and anonymous
+// workers carry no implicit data authority; SQL and collections both use
+// governed transactions, including during onStart.
 function _makeCtx(invocationId = null) {
   const invocation = { id: invocationId, transactionActive: false };
   const outsideTransaction = (capability, run) => {
@@ -648,9 +648,9 @@ function _dispatch(msg) {
         protocol: PROTOCOL_VERSION,
         methods: Object.keys(_handlers.rpc ?? {}),
       });
-      // onStart runs ONLY in the per-app lifecycle worker (run_onstart). Per-user
-      // workers skip it: it seeds the self-schema under BYPASSRLS, which must not
-      // run under a user identity, and the seeding already happened once.
+      // onStart runs only in the per-app lifecycle worker (run_onstart).
+      // Request workers skip the hook. Running it grants no data authority;
+      // initialization that needs data access requires explicit authorization.
       if (_handlers.onStart && !_started && msg.run_onstart) {
         _started = true;
         _resolve(_handlers.onStart, [_ctx],

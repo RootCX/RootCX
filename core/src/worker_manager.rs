@@ -51,12 +51,12 @@ fn worker_key_belongs_to_principal(key: &WorkerKey, user_id: uuid::Uuid) -> bool
 /// confused deputy is structurally impossible). Lifecycle, anonymous, public
 /// execution and authenticated identities never share a process.
 enum Principal {
-    /// The per-app lifecycle worker: runs onStart with BYPASSRLS self-schema.
+    /// The per-app lifecycle worker: runs onStart without implicit data authority.
     /// Spawned only by `start_app`, never by an incoming request.
     System,
     /// A request with no authenticated user (public/share-token RPC, owner-less
     /// webhook/job). Denied every row by RLS, and kept OFF the System worker so
-    /// untrusted anonymous traffic never shares the privileged onStart process.
+    /// untrusted anonymous traffic never shares the lifecycle process.
     Anonymous,
     /// Core-approved public reads, isolated from every human and lifecycle worker.
     Public(PublicExecution),
@@ -96,7 +96,7 @@ impl Principal {
         }
     }
 
-    /// Only the lifecycle worker runs onStart / may BYPASSRLS the self-schema.
+    /// Only the lifecycle worker runs onStart; this does not confer data authority.
     fn run_onstart(&self) -> bool { matches!(self, Principal::System) }
 
     /// The RLS identity posed for this principal. System and Anonymous carry no
@@ -347,12 +347,17 @@ impl WorkerManager {
     }
 
     /// Spawn a fresh worker bound for life to `principal`. Only the System
-    /// principal gets `run_onstart` (BYPASSRLS self-schema for onStart).
+    /// principal gets `run_onstart`; its RLS identity has no user or permissions.
     async fn spawn_for(
         &self, pool: &PgPool, secrets: &SecretManager, app_id: &str,
         principal: &Principal, invocation: &InvocationContext,
     ) -> Result<SupervisorHandle, RuntimeError> {
         let app_dir = self.apps_dir.join(app_id);
+        // A refused archive may still be on disk after a failed deploy. Manual
+        // starts, lazy request workers and boot recovery must also fail closed.
+        crate::app_migrations::run(pool, app_id, &app_dir)
+            .await
+            .map_err(RuntimeError::Invalid)?;
         let entry_point = resolve_entry_point(&app_dir)?;
         let (credentials, agent_boot_config, supervision) = if matches!(principal, Principal::Public(_)) {
             (HashMap::new(), None, None)
@@ -1130,7 +1135,7 @@ mod tests {
     // The security-critical property: distinct principals NEVER share a worker.
     // If two collided, one could act inside another's process. Crucially this
     // includes System vs Anonymous: untrusted anonymous traffic must never land
-    // on the privileged onStart/BYPASSRLS worker.
+    // on the lifecycle worker.
     #[test]
     fn distinct_principals_never_share_a_worker() {
         let u1 = Uuid::new_v4();
@@ -1173,8 +1178,7 @@ mod tests {
         }
     }
 
-    // Only System runs onStart / may BYPASSRLS. Anonymous (no-user requests) and
-    // every User must not — else they would inherit the self-schema bypass.
+    // Only System runs onStart. Request workers must not repeat lifecycle hooks.
     #[test]
     fn only_system_runs_onstart() {
         assert!(Principal::System.run_onstart());
@@ -1184,7 +1188,7 @@ mod tests {
     }
 
     // A no-user request is Anonymous, NOT System: it gets its own worker, off the
-    // privileged onStart process. (Regression guard for follow-up #1.)
+    // lifecycle process. (Regression guard for follow-up #1.)
     #[test]
     fn empty_request_identity_is_anonymous_not_system() {
         let p = Principal::from_request(ContextState::default());

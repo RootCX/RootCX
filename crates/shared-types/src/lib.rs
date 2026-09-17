@@ -253,21 +253,40 @@ fn default_version() -> String {
 pub struct EntityContract {
     pub entity_name: String,
     pub fields: Vec<FieldContract>,
+    /// An active row in this entity shares the subject's ownership with the
+    /// grantee. Both fields link to locally owned entities. Core generates only
+    /// `.read.shared` permissions; this never grants authority to write a relation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<ShareContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity_key: Option<String>,
-    /// Declarative secondary indexes (reconciled by name against pg_indexes at
-    /// deploy). Covers the Prisma/Drizzle index surface: composite, unique,
-    /// partial, functional, method, operator class, sort/nulls order.
+    /// Declarative secondary indexes: quoted columns, composite/unique indexes,
+    /// supported methods and sort/null ordering. Raw SQL expression fields in
+    /// legacy index contracts are retained for explicit migration diagnostics,
+    /// but rejected when installing an app.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexes: Vec<IndexContract>,
-    /// Declarative table-level CHECK constraints (reconciled by tag against
-    /// pg_constraint at deploy, exactly like `indexes`). Arbitrary boolean SQL
-    /// expressions: multi-column, conditional, format. Covers the Drizzle
-    /// `check()` / Atlas `check {}` surface.
+    /// Legacy SQL CHECK contracts, retained for migration diagnostics. App
+    /// installation rejects them; field enums generate Core-controlled checks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckContract>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ShareContract {
+    pub grantee: String,
+    pub subject: String,
+    pub active_when: ShareCondition,
+}
+
+/// Deliberately bounded: authorization expressions never contain app SQL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ShareCondition {
+    pub is_null: String,
 }
 
 /// A declarative index. Mirrors what Prisma/Drizzle let you declare for
@@ -356,11 +375,10 @@ pub struct FieldContract {
     pub is_primary_key: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_delete: Option<OnDeletePolicy>,
-    /// Never leaves the Core through a generated data path: excluded from every
-    /// read projection, and rejected as a filter or sort key so it cannot be
-    /// probed. Writes are unaffected — the app still sets the value. The app's
-    /// own `ctx.sql` may still select it explicitly; this governs the generated
-    /// surface, not the app's SQL.
+    /// Excluded from generated reads and denied by PostgreSQL column privileges
+    /// in worker SQL, including expressions, predicates and RETURNING. Writes
+    /// remain governed by the entity's RLS permissions. On a sensitive table SQL
+    /// must select readable columns explicitly; SELECT * is denied.
     #[serde(default)]
     pub sensitive: bool,
     /// This column decides which user a row belongs to. The Core then mints

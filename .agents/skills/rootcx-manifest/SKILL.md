@@ -8,6 +8,10 @@ version: 0.1.0
 
 Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` hooks and `@rootcx/ui` components.
 
+The governed row-access guidance below targets the next release; the release
+version has not been bumped. See [row access](../../../docs/row-access.md) and
+[operator migration](../../../docs/migration-v027.md).
+
 ## manifest.json
 
 ```json
@@ -44,7 +48,7 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
 - `entity_link` requires `"references": { "entity": "<target>", "field": "id" }`. `<target>` is `"<entity>"` (same app) or `"core:users"` (FK → `rootcx_system.users`, `ON DELETE SET NULL`). Cross-app refs not yet supported.
 - `"required": true` = mandatory on create; omit key for optional
 - `"enum_values": [...]` restricts text fields to fixed values
-- `"sensitive": true` keeps a column out of every API response, filter and sort. It stays writable and usable in SQL inside the app; it just never travels back over the wire.
+- `"sensitive": true` omits a column from generated reads and rejects generated filter/sort references. Core also withholds the worker executor's PostgreSQL column `SELECT` privilege, so raw SQL references, expressions, filters, and `RETURNING` cannot read it. `SELECT *` and `RETURNING *` fail on tables containing sensitive columns; explicitly project safe columns. Writes may set sensitive values subject to RLS, but cannot read their existing values or return them. Broad app RBAC grants do not override column privileges.
 - `"owner": true` marks the column deciding which user a row belongs to. Core then mints `{entity}.{action}.own` permissions next to the unscoped ones, and a role holding only those reaches that user's own rows. One column per entity. Rows whose owner is NULL belong to nobody, so adopting this on an existing table needs no backfill. It scopes rows, not columns: a confined caller reads its own row whole, so mark credential columns `"sensitive": true` too.
   - **Direct** — a `uuid`, `text`, or `entity_link` to `core:users` column holding the user id itself.
   - **Delegated** — an `entity_link` to another entity of the same app: the row belongs to whoever owns the row it links to. That entity must be marked `"owner": true` in turn, so the chain ends on a real user id. This is how a table that stores no user id anywhere still has owners.
@@ -60,13 +64,119 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
       "references": { "entity": "assignment", "field": "id" }, "owner": true }] }
 ```
 
-  A role holding `app:school:submission.read.own` now sees the submissions hanging off its own enrollments, and no others. Ownership is resolved from the data alone, so grants on `assignment` or `enrollment` neither widen nor narrow it. Refused at install: a chain that loops, one spanning more than four entities, one ending on an entity that declares no owner, and an `entity_link` owner with no `references`. Cost: one indexed lookup per link, so keep the link columns indexed (`entity_link` already is).
+  A role holding `app:school:submission.read.own` now sees the submissions hanging off its own enrollments, and no others. Ownership is resolved from the data alone, so grants on `assignment` or `enrollment` neither widen nor narrow it. Refused at install: a chain that loops, one spanning more than four entities, one ending on an entity that declares no owner, and an `entity_link` owner with no `references`. Core indexes link columns to support ownership resolution (`entity_link` already is indexed); the complete RLS predicate and query determine the actual scan plan.
+
+### Assignment sharing
+
+Keep existing owner definitions intact. An assignment can separately declare
+shared reads:
+
+```json
+{
+  "entityName": "assignment",
+  "share": {
+    "grantee": "helper_enrollment_id",
+    "subject": "helped_enrollment_id",
+    "activeWhen": { "isNull": "end_date" }
+  },
+  "fields": [
+    {
+      "name": "helper_enrollment_id",
+      "type": "entity_link",
+      "references": { "entity": "enrollment", "field": "id" }
+    },
+    {
+      "name": "helped_enrollment_id",
+      "type": "entity_link",
+      "references": { "entity": "enrollment", "field": "id" }
+    },
+    { "name": "end_date", "type": "date" }
+  ]
+}
+```
+
+Both links must target local entities with valid owners; `enrollment` above
+must already declare ownership. The fields must be distinct, and `end_date`
+must be a nullable date or timestamp. No SQL condition is accepted.
+Ownership fields must be nonsensitive in an app declaring sharing: Core refuses
+`owner: true` combined with `sensitive: true`, because callable shared resolvers
+return ownership keys. Keep confidential values in separate fields.
+
+Core follows existing owner chains to match the grantee to the caller and
+resolve the **subject's Core identity**. Shared reads reach that identity's rows
+across owned entities in the same app, including sibling enrollments, only where
+the caller holds the target's `app:{app}:{entity}.read.shared` permission. They
+are not restricted to descendants of the one referenced subject row. Sharing
+never follows another sharing relation, and source/intermediate-table read
+grants are not required for resolution.
+
+`.own` remains separate. `.read.shared` grants no create, update, delete, owner
+change, or assignment-management authority. Do not declare custom permissions
+ending in `.shared`; Core generates the supported target read keys. Provision
+target read and assignment-management permissions explicitly; never compensate
+for missing authorization with automatic admin/user grants.
+
+Only NULL means active. Any non-NULL `end_date`, including a future date,
+revokes that assignment. Under governed `READ COMMITTED` transactions, a
+revocation committed before the next statement begins is visible to that
+statement, including inside `ctx.transaction`. Other independent grants may
+still allow access.
+
+### Performance limits
+
+The table-wide OR `.own` OR `.shared` read-policy union may cause a target
+`Seq Scan` on an unfiltered SELECT, as exposed by the 200,000-row regression.
+Shared membership uses `column IN (SELECT rootcx_shared...)`; the regression
+checks a `hashed SubPlan` built once, with no correlated per-row resolver.
+Assignment lookups are indexed. Do not promise an indexed or index-only scan
+of every target query.
+
+Do not unify all read branches into one precomputed allowed-key array: that
+approach broke authorized `INSERT ... RETURNING` for brand-new ownership values
+because a `STABLE` resolver's snapshot lacked the new keys. Keep ownership and
+the separate policy branches intact.
 
 ---
 
 ## Schema Sync
 
-On install/deploy, Core runs `CREATE SCHEMA IF NOT EXISTS` + `CREATE TABLE IF NOT EXISTS` for each entity in `dataContract`. Then `sync_schema` diffs DB vs manifest and auto-applies all changes (add/drop columns, alter types, nullability, defaults, check constraints). Studio shows a confirmation dialog before applying.
+Core validates declarations and performs SQL admission before applying schema
+changes. For admitted manifests, schema sync creates missing schemas/tables and
+reconciles supported fields, types, nullability, literal defaults, enums, and
+indexes. The row-access governance module owns versioned
+`rootcx_system.row_access_contracts` and the `sensitive_fields` projection used
+by audit/hooks, reconciling these with resolvers, column privileges, and RLS
+atomically per app. Legacy stored manifests are validated before migration;
+later boots validate and replay the versioned contract.
+
+Ownership interpretation and validation live in
+`core/src/governance/row_access/ownership.rs`; old `manifest.rs` ownership names
+are compatibility aliases into governance, not a second validation module.
+
+Raw manifest `checks`, index expressions (`expr`), partial-index predicates
+(`where`), operator classes (`ops`), and index storage parameters (`with`) are
+refused for now. Use field enums and supported column-based indexes.
+Core-generated indexes remain supported, including active-assignment indexes;
+do not copy their SQL into a manifest or backend migration file.
+
+Unexpected legacy routines, views, triggers, rules, or other unsupported SQL
+artifacts require an independently controlled administrator migration. App
+SQL is not run to repair admission failures. Admission cannot certify a
+historically compromised Core/global database; operators must establish trusted
+provenance or restore/rebuild from a trusted baseline.
+
+`onStart` has no implicit data authority: lifecycle and anonymous collection
+operations use the worker's fixed identity through governed transactions.
+Initialize data through an explicitly authorized operation. Pending
+`backend/migrations/*.sql` files cause deployment/start refusal without execution
+or being marked applied. Archives with no pending files remain deployable,
+subject to admission. Use the declarative manifest or an independently
+authorized administrator migration for required changes.
+
+Backend uploads install dependencies without package lifecycle scripts, including
+root-package and explicitly trusted dependency scripts, and without inheriting
+the Core environment. Build required generated/native artifacts in a controlled
+pipeline before upload.
 
 ### Manifest ↔ DB contract
 

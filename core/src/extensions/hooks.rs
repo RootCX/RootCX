@@ -293,11 +293,10 @@ impl RuntimeExtension for HooksExtension {
     async fn on_table_created(
         &self,
         pool: &PgPool,
-        manifest: &rootcx_types::AppManifest,
+        _manifest: &rootcx_types::AppManifest,
         schema: &str,
         table: &str,
     ) -> Result<(), RuntimeError> {
-        sync_sensitive_fields(pool, manifest, schema, table).await?;
         let sql = format!(
             "SELECT rootcx_system.enable_hooks('{}.{}'::regclass)",
             quote_ident(schema),
@@ -312,10 +311,6 @@ impl RuntimeExtension for HooksExtension {
         manifest: &rootcx_types::AppManifest,
         installed_by: uuid::Uuid,
     ) -> Result<(), RuntimeError> {
-        // Before the trigger early-return: every app needs its projection
-        // reconciled, whether or not it declares a trigger.
-        prune_sensitive_fields(pool, manifest).await?;
-
         let trigger = match &manifest.trigger {
             Some(t) => t,
             None => return Ok(()),
@@ -414,95 +409,6 @@ fn validate_trigger(
             }
         })
         .collect()
-}
-
-/// The entity's derived row shape: which fields never leave the Core, which column
-/// decides who owns the row, and the sibling entity that column defers to when
-/// ownership is delegated. Nothing is set when the entity is absent from the
-/// manifest or declares none of it — which is what makes the projection additive,
-/// since nothing projected means every trigger and policy behaves exactly as before.
-fn row_shape<'m>(
-    manifest: &'m rootcx_types::AppManifest,
-    table: &str,
-) -> (Vec<String>, Option<&'m str>, Option<&'m str>) {
-    let entity = manifest.data_contract.iter().find(|e| e.entity_name == table);
-    let sensitive = entity
-        .into_iter()
-        .flat_map(|e| &e.fields)
-        .filter(|f| f.sensitive)
-        .map(|f| f.name.clone())
-        .collect();
-    (
-        sensitive,
-        entity.and_then(crate::manifest::owner_field),
-        entity.and_then(crate::manifest::owner_parent),
-    )
-}
-
-/// Project the entity's row shape into `sensitive_fields`, so the row-level
-/// triggers and the retroactive RLS pass each read one indexed row instead of
-/// walking `apps.manifest` JSON. Upserted so a redeploy that adds or clears either
-/// declaration reconciles, mirroring how permission keys are re-synced on install.
-/// An entity declaring neither is deleted rather than stored empty, keeping the
-/// table proportional to what actually declares something.
-async fn sync_sensitive_fields(
-    pool: &PgPool,
-    manifest: &rootcx_types::AppManifest,
-    schema: &str,
-    table: &str,
-) -> Result<(), RuntimeError> {
-    let (fields, owner, parent) = row_shape(manifest, table);
-
-    let query = if fields.is_empty() && owner.is_none() {
-        sqlx::query("DELETE FROM rootcx_system.sensitive_fields WHERE app_id = $1 AND entity = $2")
-            .bind(schema)
-            .bind(table)
-    } else {
-        sqlx::query(
-            "INSERT INTO rootcx_system.sensitive_fields (app_id, entity, fields, owner_field, owner_parent) \
-             VALUES ($1, $2, $3, $4, $5) \
-             ON CONFLICT (app_id, entity) \
-             DO UPDATE SET fields = EXCLUDED.fields, owner_field = EXCLUDED.owner_field, \
-                           owner_parent = EXCLUDED.owner_parent",
-        )
-        .bind(schema)
-        .bind(table)
-        .bind(&fields)
-        .bind(owner)
-        .bind(parent)
-    };
-
-    query.execute(pool).await.map_err(RuntimeError::Schema)?;
-    Ok(())
-}
-
-/// Drop projections for entities the manifest no longer declares.
-///
-/// `sync_sensitive_fields` runs per declared entity, so it cannot see an entity
-/// that was *removed* from the manifest. Left behind, the row would keep stripping
-/// a column from a table that has been reshaped — or from a same-named entity
-/// re-added later without the flag. Reconciled against the whole manifest, in the
-/// same spirit as the permission-key re-sync on install.
-async fn prune_sensitive_fields(
-    pool: &PgPool,
-    manifest: &rootcx_types::AppManifest,
-) -> Result<(), RuntimeError> {
-    let declared: Vec<String> = manifest
-        .data_contract
-        .iter()
-        .map(|e| e.entity_name.clone())
-        .collect();
-
-    sqlx::query(
-        "DELETE FROM rootcx_system.sensitive_fields \
-         WHERE app_id = $1 AND entity <> ALL($2)",
-    )
-    .bind(&manifest.app_id)
-    .bind(&declared)
-    .execute(pool)
-    .await
-    .map_err(RuntimeError::Schema)?;
-    Ok(())
 }
 
 // ── Authorization ────────────────────────────────────────────────────────
@@ -735,6 +641,7 @@ mod tests {
 
     fn manifest_with(entity: &str, fields: &[(&str, bool)]) -> rootcx_types::AppManifest {
         let entity = rootcx_types::EntityContract {
+            share: None,
             entity_name: entity.into(),
             fields: fields
                 .iter()
@@ -820,41 +727,6 @@ mod tests {
                 (got, want) => panic!("{why}: got {got:?}, wanted {want:?}"),
             }
         }
-    }
-
-    /// Feeds the projection the row-level triggers and the retroactive RLS pass
-    /// read. Projecting nothing means "strip nothing, confine nobody", so the
-    /// absent-entity and no-flag cases are what keep an upgrade on a pre-flag app
-    /// behaviourally identical.
-    #[test]
-    fn row_shape_projects_only_what_the_entity_declares() {
-        let m = manifest_with(
-            "accounts",
-            &[("email", false), ("password_hash", true), ("token", true)],
-        );
-        assert_eq!(
-            row_shape(&m, "accounts"),
-            (vec!["password_hash".to_string(), "token".to_string()], None, None),
-            "only flagged fields, in declaration order, and no owner",
-        );
-        assert_eq!(
-            row_shape(&m, "other_entity"),
-            (vec![], None, None),
-            "an entity absent from the manifest projects nothing",
-        );
-        assert_eq!(
-            row_shape(&manifest_with("accounts", &[("email", false)]), "accounts"),
-            (vec![], None, None),
-            "an entity declaring neither projects nothing",
-        );
-
-        let mut owned = manifest_with("accounts", &[("user_id", false), ("token", true)]);
-        owned.data_contract[0].fields[0].owner = true;
-        assert_eq!(
-            row_shape(&owned, "accounts"),
-            (vec!["token".to_string()], Some("user_id"), None),
-            "the two declarations are independent and travel together",
-        );
     }
 
     /// A hook fires with its owner's authority and carries rows only that owner

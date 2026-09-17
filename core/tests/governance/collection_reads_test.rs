@@ -272,15 +272,7 @@ async fn local_and_remote_pages_share_bounds_totals_and_field_safety() {
         let (_, body) = call(&f, scope, "find", json!([{"unknown": 1}])).await;
         assert!(body["error"].is_string(), "{scope}: {body}");
         let (_, body) = call(&f, scope, "find", json!([{"secret": "secret"}])).await;
-        if scope == "remote" {
-            assert!(body["error"].is_string(), "{body}");
-        } else {
-            let rows = body["result"]
-                .as_array()
-                .expect("legacy local equality predicate");
-            assert_eq!(rows.len(), VISIBLE);
-            assert!(rows.iter().all(|row| row.get("secret").is_none()));
-        }
+        assert!(body["error"].is_string(), "{scope}: sensitive predicates must be denied: {body}");
     }
     // An allowed query-control-named column cannot conceal another forbidden field.
     let (_, body) = call(

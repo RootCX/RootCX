@@ -1576,35 +1576,6 @@ async fn t5_8_multi_statement_refused() {
     rt.shutdown().await;
 }
 
-#[tokio::test]
-async fn t5_10_collection_onstart_bypass_rls() {
-    // The onStart collection access (no user context) should have full
-    // self-schema access via BYPASSRLS. We test this indirectly: if data
-    // was inserted during admin setup (as owner pool) and we can read it
-    // via the admin-authed HTTP route, the table has data. The real onStart
-    // bypass is tested by the worker's internal `collection_op` path with
-    // `allow_bypass=true`; at the integration level we verify the data
-    // exists (proving BYPASSRLS owner pool access works for the core).
-    let rt = harness::TestRuntime::boot().await;
-    admin(&rt).await;
-    rt.install("crm", "contacts").await;
-    rt.create("crm", "contacts", &rec()).await;
-
-    // Admin (who has *) can see the row proving the superuser pool works.
-    let (s, body) = rt.get_json("/api/v1/apps/crm/collections/contacts").await;
-    assert_eq!(s, StatusCode::OK);
-    assert_eq!(body.as_array().map(|a| a.len()), Some(1),
-        "admin/owner pool can read data (BYPASSRLS works for core operations)");
-
-    // Additionally verify: the executor role WITHOUT a user context sees 0
-    // rows (proving that RLS is FORCE'd and the executor does not bypass).
-    let n = count_as(rt.pool(), None, false, "").await;
-    assert_eq!(n, 0,
-        "executor role with no user context sees 0 (FORCE RLS active, no bypass)");
-
-    rt.shutdown().await;
-}
-
 // ── CATEGORY 4 : Sandbox worker (process isolation) ──────────────────
 //
 // The central security claim: "the app holds no DB credentials and no JWT."
@@ -1817,25 +1788,6 @@ async fn regression_nonadmin_cannot_deploy_frontend() {
         .unwrap()
         .status();
     assert_eq!(s, StatusCode::FORBIDDEN, "non-admin must not deploy frontend");
-    rt.shutdown().await;
-}
-
-// GAP 13: collection_op after onStart denies without valid context (BYPASSRLS disabled)
-#[tokio::test]
-async fn regression_collection_op_denies_after_onstart() {
-    let rt = harness::TestRuntime::boot().await;
-    admin(&rt).await;
-    rt.install("crm", "contacts").await;
-    let pool = rt.pool();
-
-    // Simulate post-onStart: allow_bypass = false, state = None.
-    // This calls the internal collection_op with the exact args that the
-    // supervisor uses after onstart_done=true when context_token is missing.
-    let result = rootcx_core::worker::collection_op_test(
-        pool, "crm", "find", "contacts", json!({}), None, false,
-    ).await;
-    assert!(result.is_err(), "collection_op without context after onStart must deny");
-    assert!(result.unwrap_err().contains("access denied"), "must be access denied, not a random error");
     rt.shutdown().await;
 }
 
@@ -2438,52 +2390,14 @@ async fn public_caller_deny_all_on_data() {
     assert!(result.is_ok(), "query executes without error");
     assert_eq!(result.unwrap().row_count, 0, "public caller must see 0 rows via ctx.sql");
 
-    // ctx.collection after onStart: state=Some but user_id=None -> RLS tx denies
+    // An anonymous collection operation uses the same deny-all RLS identity.
     let coll_result = rootcx_core::worker::collection_op_test(
-        pool, "crm", "find", "contacts", json!({}), Some(public_state), false,
+        pool, "crm", "find", "contacts", json!({}), public_state,
     ).await;
     assert!(coll_result.is_ok(), "collection_op executes");
     let rows = coll_result.unwrap();
     assert_eq!(rows.as_array().map(|a| a.len()), Some(0),
         "public caller must see 0 rows via ctx.collection after onStart");
-
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn integration_worker_deny_all_on_sql_but_onstart_bypass_works() {
-    let rt = harness::TestRuntime::boot().await;
-    admin(&rt).await;
-    rt.install("crm", "contacts").await;
-    rt.create("crm", "contacts", &rec()).await;
-    let pool = rt.pool();
-
-    // Integration caller: None -> ContextState::default()
-    let integration_state = rootcx_core::governance::enforcement::ContextState::from_caller(None);
-    assert!(integration_state.user_id.is_none(), "precondition: None caller -> None user_id");
-    assert!(!integration_state.is_delegated, "precondition: not delegated");
-
-    // ctx.sql with integration identity: deny-all (0 rows)
-    let sql_result = rootcx_core::governance::enforcement::run_sql(
-        pool, "crm", &integration_state, "SELECT * FROM crm.contacts", &[],
-    ).await;
-    assert!(sql_result.is_ok(), "query executes without error");
-    assert_eq!(sql_result.unwrap().row_count, 0,
-        "integration worker (caller: None) must see 0 rows via ctx.sql");
-
-    // ctx.collection after onStart with no state: hard deny
-    let denied = rootcx_core::worker::collection_op_test(
-        pool, "crm", "find", "contacts", json!({}), None, false,
-    ).await;
-    assert!(denied.is_err(), "collection without context after onStart must deny");
-
-    // ctx.collection DURING onStart (allow_bypass=true): BYPASSRLS, full access
-    let bypass = rootcx_core::worker::collection_op_test(
-        pool, "crm", "find", "contacts", json!({}), None, true,
-    ).await;
-    assert!(bypass.is_ok(), "onStart collection must succeed with BYPASSRLS");
-    assert_eq!(bypass.unwrap().as_array().map(|a| a.len()), Some(1),
-        "onStart BYPASSRLS sees all rows");
 
     rt.shutdown().await;
 }
