@@ -14,8 +14,6 @@ use crate::manifest::quote_ident;
 /// Check `<app_dir>/migrations`. Success always returns an empty list: this path
 /// never executes SQL from an app or marks a file as applied.
 pub async fn run(pool: &PgPool, schema: &str, app_dir: &Path) -> Result<Vec<String>, String> {
-    crate::governance::row_access::inspect_schema(pool, schema)
-        .await.map_err(|error| error.to_string())?;
     let entries = match std::fs::read_dir(app_dir.join("migrations")) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),

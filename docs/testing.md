@@ -114,9 +114,9 @@ immutability against hostile processes sharing an OS account.
 | Approved actions bind reviewed code to exact data authority; real users exercise assignment checks, safe output, atomic writes, direct-access refusal, individual revocation, release retirement and explicit FK effects | `approved_actions_test` |
 | Sensitive values cannot be read through raw SQL, expressions or predicates; generated responses remain usable | `sensitive_sql_test` |
 | Invalid projections fail visibly and atomically; no-share policies retain historical definitions | `row_access_projection_test` |
-| Untrusted SQL and executable legacy artifacts cannot enter privileged schema operations | `manifest_sql_admission_test`, `app_migrations_test` |
+| New raw manifest SQL and pending migration files are refused; stored manifests and legacy partial indexes survive bootstrap without losing constraints | `manifest_sql_admission_test`, `app_migrations_test` |
 | Lifecycle and anonymous workers cannot manufacture assignments | `worker_lifecycle_test` |
-| Identity, supervision, triggers and workflow CRUD enforce their real process/SQL boundaries | `agent_identity_test`, `governance_contract_test`, `workflows_integration` |
+| Identity, supervision, triggers and workflow CRUD enforce their real process/SQL boundaries; workflows still run after RBAC bootstrap | `agent_identity_test`, `governance_contract_test`, `workflows_integration` |
 | Shared local/remote collection signatures preserve both update forms, route equality versus page requests, and reject transaction misuse | `backend_prelude.test.ts`, `cross_app_crud_test` |
 
 Mutation builds use a separate Cargo target cache and rebuild the Core package

@@ -138,12 +138,11 @@ Ownership interpretation and validation now live in
 `manifest.rs` remain compatibility aliases into governance; they are not a
 second implementation or validation authority.
 
-An older installation without a versioned contract must pass validation and SQL
-admission before its stored manifest is migrated into the contract. Subsequent
-boots validate and replay the versioned contract through the same reconciliation
-path. Malformed or unsupported contracts and unexpected SQL artifacts fail closed;
-reconciliation is not a promise that an entire deployment or fleet upgrade is
-atomic.
+An older installation without a versioned contract must pass structural and
+access-declaration validation before its stored manifest is migrated into the
+contract. Subsequent boots validate and replay the versioned contract through the
+same reconciliation path. Malformed or unsupported access contracts fail closed;
+reconciliation does not make an entire deployment or fleet upgrade atomic.
 
 Applications provide bounded declarations, not authorization SQL. Admission
 rejects raw manifest `checks`, index expressions, partial-index predicates,
@@ -151,11 +150,14 @@ operator-class specifications, and index `with` storage parameters for now.
 Supported column-based indexes, field enums, and Core-generated indexes remain
 available, including Core's generated active-assignment index.
 
-Admission inspects catalog metadata before operating on app relations.
-Unexpected legacy routines, views, triggers, rewrite rules, policies, executable
-defaults, and other unsupported artifacts require an independently controlled
-administrator migration. A familiar Core object name is not proof that its
-contents are trusted. Recognized policy slots are regenerated atomically.
+The post-0.27.0 correction removes retroactive catalog inspection. That inspection
+rejected legitimate historical partial indexes, including Calendar's attachment
+uniqueness constraint, and prevented Core from booting. Existing SQL objects are
+operator-managed and trusted at this boundary. Boot validates the access contract
+and regenerates recognized Core policy slots atomically, without reapplying
+stored column, check, or index declarations. New manifest submissions still pass
+SQL declaration admission before DDL. This correction does not change ownership,
+sharing, sensitive-column enforcement, or approved-action scope.
 
 ### No implicit lifecycle or migration authority
 
@@ -179,16 +181,15 @@ required generated or native artifacts in a controlled pipeline before upload.
 ## Consequences and limits
 
 Apps using startup seeding, sensitive `SELECT *`, or owner-executed SQL files
-need an explicit migration. Operators must inventory SQL artifacts, take and
-verify backups, migrate unsupported objects, and verify confined access before
-restoring traffic. No upgrade step silently grants permissions to make an app
-work.
+need an explicit migration. Existing SQL objects do not require removal simply
+to pass boot. Operators remain responsible for their provenance and behavior.
+No upgrade step silently grants permissions to make an app work.
 
 Admission cannot certify a historically compromised Core database. Earlier owner
 migrations could have modified global roles, extensions, Core routines, or
 objects outside an app schema. If trusted provenance cannot be established,
 restore or rebuild from a trusted baseline and review data import separately.
-Passing app-schema admission is not a substitute for that recovery.
+New-declaration admission is not a substitute for that recovery.
 
 See [row-access usage](../row-access.md), the
 [next-release migration guide](../migration-v027.md), and

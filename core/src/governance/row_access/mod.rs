@@ -12,6 +12,7 @@ mod ownership;
 mod policies;
 mod sharing;
 
+pub(crate) use admission::validate_manifest as validate_sql_declarations;
 pub(crate) use ownership::{owner_field, owner_parent, owner_map, MAX_OWNER_CHAIN, validate_owner_chains, validate_owner_field};
 pub(crate) use policies::{OwnerMap, fits_ident_limit, owner_resolver_name};
 
@@ -25,14 +26,7 @@ pub(crate) fn validate(manifest: &AppManifest) -> Result<(), RuntimeError> {
         validate_owner_field(entity).map_err(RuntimeError::Invalid)?;
     }
     validate_owner_chains(manifest).map_err(RuntimeError::Invalid)?;
-    admission::validate_manifest(manifest)?;
     sharing::validate(manifest)
-}
-
-pub(crate) async fn inspect_schema(pool: &PgPool, schema: &str) -> Result<(), RuntimeError> {
-    let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
-    admission::inspect(&mut tx, schema).await?;
-    tx.commit().await.map_err(RuntimeError::Schema)
 }
 
 pub(crate) fn shared_entities(manifest: &AppManifest) -> impl Iterator<Item = &EntityContract> {
@@ -68,7 +62,6 @@ pub(crate) async fn bootstrap_projection(pool: &PgPool) -> Result<(), RuntimeErr
 pub(crate) async fn install(pool: &PgPool, manifest: &AppManifest) -> Result<(), RuntimeError> {
     validate(manifest)?;
     let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
-    admission::inspect(&mut tx, &manifest.app_id).await?;
     reconcile(&mut tx, manifest).await?;
     sqlx::query(
         "INSERT INTO rootcx_system.row_access_contracts (app_id, version, entities)
@@ -136,26 +129,23 @@ async fn reconcile(conn: &mut PgConnection, manifest: &AppManifest) -> Result<()
     Ok(())
 }
 
-/// Old installations are validated and migrated from the stored manifest once.
-/// Subsequent boots replay the versioned projection through the same compiler.
+/// Replay access rules for apps with tables, declared entities or a saved contract.
+/// Registrations without data (such as workflows) have no row policies to replay.
 pub(crate) async fn govern_schema_tables(pool: &PgPool, only: Option<&str>) -> Result<(), RuntimeError> {
     bootstrap_projection(pool).await?;
     let apps: Vec<(String, Option<serde_json::Value>, Option<i32>, Option<serde_json::Value>)> = sqlx::query_as(
         "SELECT a.id, a.manifest, c.version, c.entities FROM rootcx_system.apps a
          LEFT JOIN rootcx_system.row_access_contracts c ON c.app_id = a.id
-         WHERE a.id <> 'core' AND ($1::text IS NULL OR a.id = $1) ORDER BY a.id",
+         WHERE a.id <> 'core' AND ($1::text IS NULL OR a.id = $1)
+           AND (c.app_id IS NOT NULL
+             OR EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = a.id)
+             OR COALESCE(a.manifest->'dataContract', '[]'::jsonb) <> '[]'::jsonb)
+         ORDER BY a.id",
     ).bind(only).fetch_all(pool).await.map_err(RuntimeError::Schema)?;
     for (app, json, version, entities) in apps {
-        let Some(json) = json else {
-            let has_tables: bool = sqlx::query_scalar(
-                "SELECT EXISTS(SELECT 1 FROM pg_tables WHERE schemaname = $1)",
-            ).bind(&app).fetch_one(pool).await.map_err(RuntimeError::Schema)?;
-            if has_tables || version.is_some() {
-                return Err(RuntimeError::Invalid(format!("governance for '{app}': restore the missing manifest before governing its data")));
-            }
-            // Agent-only registrations have no data contract or app tables.
-            continue;
-        };
+        let json = json.ok_or_else(|| RuntimeError::Invalid(format!(
+            "governance for '{app}': restore the missing manifest before governing its data"
+        )))?;
         let mut manifest: AppManifest = serde_json::from_value(json)
             .map_err(|e| RuntimeError::Invalid(format!("governance for '{app}': invalid stored manifest: {e}")))?;
         if let Some(version) = version {
@@ -170,7 +160,7 @@ pub(crate) async fn govern_schema_tables(pool: &PgPool, only: Option<&str>) -> R
                 )));
             }
         }
-        crate::manifest::validate_manifest(&manifest)?;
+        crate::manifest::validate_stored_manifest(&manifest)?;
         install(pool, &manifest).await?;
     }
     Ok(())

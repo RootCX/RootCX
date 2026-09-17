@@ -15,7 +15,7 @@
 | Shared-read scope | A target entity's `.read.shared` permission; grants reads through active assignments without changing ownership or granting writes |
 | Sensitive field | A column withheld from the worker executor's `SELECT` privileges and omitted from generated read projections |
 | Row-access contract | The validated, versioned Core projection used to reconcile ownership, sharing, sensitive privileges, and RLS |
-| SQL admission | Catalog and declaration checks that refuse unsupported app SQL artifacts; not certification of a historically compromised global database |
+| SQL admission | Checks on new manifest SQL declarations before DDL; existing database objects remain operator-managed and are not audited at boot |
 | Lifecycle worker | The fixed no-user worker that runs `onStart` without implicit data authority |
 | Approved action | A declared backend action whose exact local CRUD authority and executable release an administrator has reviewed and approved |
 | Action authority | The approved local entity/verb ceiling used by reviewed backend code; distinct from the user's permission to invoke the action |

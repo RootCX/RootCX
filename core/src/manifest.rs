@@ -44,7 +44,6 @@ pub async fn install_app(
     let manifest_json = serde_json::to_value(manifest)
         .map_err(|e| RuntimeError::Schema(sqlx::Error::Protocol(e.to_string().into())))?;
     let mut lifecycle = crate::governance::cross_app::lock_app_lifecycle(pool, app_id).await?;
-    crate::governance::row_access::inspect_schema(pool, app_id).await?;
     let previous_manifest = load_manifest_json(pool, app_id).await?;
     if previous_manifest.as_ref().is_some_and(|previous| previous != &manifest_json) {
         let mut tx = lifecycle.begin().await.map_err(RuntimeError::Schema)?;
@@ -611,6 +610,17 @@ fn validate_perm_key_schema(key: &str) -> Result<(), RuntimeError> {
 }
 
 pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
+    validate_stored_manifest(manifest)?;
+    for entity in &manifest.data_contract {
+        for field in &entity.fields {
+            FieldType::from_field(field).map_err(RuntimeError::Invalid)?;
+        }
+    }
+    crate::governance::row_access::validate_sql_declarations(manifest)
+}
+
+/// Boot replays access declarations, not historical column types, checks or indexes.
+pub(crate) fn validate_stored_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
     validate_ident(&manifest.app_id, "appId")?;
     crate::governance::approved_actions::validate(manifest)?;
     if let Some(perms) = &manifest.permissions {
@@ -637,7 +647,6 @@ pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
             if is_system_field(&field.name) && field.sensitive {
                 return Err(RuntimeError::Invalid(format!("entity '{}': system field '{}' cannot be sensitive", entity.entity_name, field.name)));
             }
-            FieldType::from_field(field).map_err(RuntimeError::Invalid)?;
         }
         for field in &entity.fields {
             if field.field_type != "entity_link" { continue; }

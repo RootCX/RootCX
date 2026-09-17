@@ -1,15 +1,8 @@
-//! Manifest and legacy-schema admission before DDL and migration-ledger reads.
-//!
-//! Mutation targets:
-//! - Remove manifest refusal: raw-fragment requests succeed or create a schema.
-//! - Move inspection after DDL: the pending-schema test finds the new relation.
-//! - Trust object comments/names: forged CHECK/trigger fixtures are admitted.
-//! - Skip routines/views/policies/defaults: the corresponding fixture succeeds.
-//! - Inspect after reading schema_migrations: the ledger-view marker is written.
-//! Fixture function bodies are inert until called; admission must never call them.
+//! New manifest SQL stays bounded; historical schema objects survive boot.
 
 use crate::harness::TestRuntime;
 use reqwest::StatusCode;
+use rootcx_core::extensions::{RuntimeExtension, rbac::RbacExtension};
 use serde_json::{Value, json};
 
 fn manifest(app: &str) -> Value {
@@ -102,7 +95,7 @@ async fn generated_artifacts_literal_defaults_and_simple_indexes_survive_reinsta
         ]
     });
     rt.install_manifest(&request).await;
-    // Same shape emitted by the share compiler. No comment/name proof required.
+    // Same shape emitted by the share compiler.
     sqlx::query(
         "CREATE INDEX rootcx_share_admission_safe_items
          ON admission_safe.items (person_id, id) WHERE end_date IS NULL",
@@ -128,172 +121,87 @@ async fn generated_artifacts_literal_defaults_and_simple_indexes_survive_reinsta
     .unwrap();
     assert!(
         count > 0,
-        "fixture must exercise generated audit/hooks admission"
+        "fixture must exercise generated audit/hooks on reinstall"
     );
     rt.shutdown().await;
 }
 
 #[tokio::test]
-async fn pending_schemas_with_legacy_artifacts_are_refused_without_ddl_or_execution() {
+async fn legacy_schema_declarations_survive_bootstrap_without_losing_constraints() {
     let rt = TestRuntime::boot().await;
-    sqlx::query("CREATE TABLE rootcx_system.admission_probe (label text)")
-        .execute(rt.pool())
-        .await
-        .unwrap();
-    // This body is deliberately only stored, never called by test setup.
+    let app = "legacy_calendar";
+    let request = json!({
+        "appId": app, "name": app,
+        "dataContract": [{"entityName": "event_attachments", "fields": [
+            {"name": "event_id", "type": "text"},
+            {"name": "file_id", "type": "text"},
+            {"name": "status", "type": "text"},
+            {"name": "active", "type": "boolean"},
+            {"name": "position", "type": "number"}
+        ]}]
+    });
+    rt.install_manifest(&request).await;
     sqlx::query(
-        "CREATE FUNCTION rootcx_system.admission_probe_value() RETURNS text
-         LANGUAGE plpgsql SECURITY DEFINER AS $$
-         BEGIN INSERT INTO rootcx_system.admission_probe VALUES ('executed');
-         RETURN '001.sql'; END $$",
-    )
-    .execute(rt.pool())
-    .await
-    .unwrap();
-
-    let cases = [
-        (
-            "routine",
-            "CREATE FUNCTION {s}.legacy() RETURNS text LANGUAGE sql SECURITY DEFINER AS 'SELECT rootcx_system.admission_probe_value()'",
-        ),
-        (
-            "view",
-            "CREATE VIEW {s}.legacy AS SELECT rootcx_system.admission_probe_value() AS value",
-        ),
-        (
-            "materialized",
-            "CREATE MATERIALIZED VIEW {s}.legacy AS SELECT rootcx_system.admission_probe_value() AS value WITH NO DATA",
-        ),
-        (
-            "trigger",
-            "CREATE TRIGGER legacy AFTER INSERT ON {s}.items FOR EACH ROW EXECUTE FUNCTION rootcx_system.audit_trigger_fn()",
-        ),
-        (
-            "forged_trigger",
-            "CREATE TRIGGER audit_{s}_items BEFORE INSERT ON {s}.items FOR EACH ROW EXECUTE FUNCTION rootcx_system.audit_trigger_fn()",
-        ),
-        (
-            "policy",
-            "CREATE POLICY allow_everything ON {s}.items USING (true)",
-        ),
-        (
-            "rule",
-            "CREATE RULE legacy AS ON DELETE TO {s}.items DO INSTEAD NOTHING",
-        ),
-        (
-            "default",
-            "ALTER TABLE {s}.items ALTER COLUMN status SET DEFAULT rootcx_system.admission_probe_value()",
-        ),
-        (
-            "check",
-            "ALTER TABLE {s}.items ADD CONSTRAINT legacy CHECK (length(status)>0) NOT VALID",
-        ),
-        (
-            "index",
-            "CREATE INDEX legacy ON {s}.items ((lower(status)))",
-        ),
-        (
-            "predicate",
-            "CREATE INDEX legacy ON {s}.items (status) WHERE status IS NOT NULL",
-        ),
-        (
-            "type",
-            "CREATE DOMAIN {s}.legacy AS text CHECK (VALUE IS NOT NULL)",
-        ),
-    ];
-    for (name, ddl) in cases {
-        let app = format!("legacy_{name}");
-        sqlx::query(&format!("CREATE SCHEMA {app}"))
-            .execute(rt.pool())
-            .await
-            .unwrap();
-        sqlx::query(&format!("CREATE TABLE {app}.items (status text)"))
-            .execute(rt.pool())
-            .await
-            .unwrap();
-        sqlx::query(&ddl.replace("{s}", &app))
-            .execute(rt.pool())
-            .await
-            .unwrap();
-        if name == "check" {
-            sqlx::query(&format!(
-                "COMMENT ON CONSTRAINT legacy ON {app}.items IS 'rootcx:chk:forged'"
-            ))
-            .execute(rt.pool())
-            .await
-            .unwrap();
-        }
-        let mut request = manifest(&app);
-        request["dataContract"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"entityName": "must_not_be_created", "fields": []}));
-        let (status, body) = rt.post_json("/api/v1/apps", &request).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {body}");
-        assert!(body.to_string().contains("SQL admission"), "{name}: {body}");
-        let created: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
-            .bind(format!("{app}.must_not_be_created"))
-            .fetch_one(rt.pool())
-            .await
-            .unwrap();
-        assert!(!created, "{name}: inspection must precede app DDL");
-        let executions: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM rootcx_system.admission_probe")
-                .fetch_one(rt.pool())
-                .await
-                .unwrap();
-        assert_eq!(executions, 0, "{name}: admission evaluated legacy code");
+        "CREATE UNIQUE INDEX idx_gcal_attach_unique
+         ON legacy_calendar.event_attachments (event_id, file_id)
+         WHERE file_id IS NOT NULL AND file_id <> ''",
+    ).execute(rt.pool()).await.unwrap();
+    for (name, predicate) in [
+        ("not_null", "file_id IS NOT NULL"),
+        ("boolean", "active = true AND file_id IS NULL"),
+        ("boolean_test", "active IS TRUE OR NOT active"),
+        ("numeric", "position > 0::double precision"),
+        ("statuses", "status = ANY(ARRAY['queued','publishing']::text[])"),
+        ("exclusions", "status <> ALL(ARRAY['failed','deleting']::text[])"),
+    ] {
+        sqlx::query(&format!(
+            "CREATE INDEX {name} ON legacy_calendar.event_attachments (event_id) WHERE {predicate}"
+        )).execute(rt.pool()).await.unwrap();
     }
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn deploy_refuses_a_legacy_ledger_view_before_selecting_its_rows() {
-    let rt = TestRuntime::boot().await;
-    let app = "admission_ledger";
-    rt.install_manifest(&manifest(app)).await;
-    sqlx::query("CREATE TABLE rootcx_system.ledger_probe (label text)")
-        .execute(rt.pool())
-        .await
-        .unwrap();
     sqlx::query(
-        "CREATE FUNCTION rootcx_system.ledger_probe_value() RETURNS text
-         LANGUAGE plpgsql SECURITY DEFINER AS $$
-         BEGIN INSERT INTO rootcx_system.ledger_probe VALUES ('executed');
-         RETURN '001.sql'; END $$",
-    )
-    .execute(rt.pool())
-    .await
-    .unwrap();
-    sqlx::query(
-        "CREATE VIEW admission_ledger.schema_migrations
-         AS SELECT rootcx_system.ledger_probe_value() AS filename",
-    )
-    .execute(rt.pool())
-    .await
-    .unwrap();
+        "INSERT INTO legacy_calendar.event_attachments (event_id, file_id)
+         VALUES ('event', NULL), ('event', NULL), ('event', ''), ('event', ''), ('event', 'file')",
+    ).execute(rt.pool()).await.unwrap();
+    let before: Vec<(String, String)> = sqlx::query_as(
+        "SELECT indexname::text, indexdef::text FROM pg_indexes
+         WHERE schemaname='legacy_calendar' ORDER BY indexname",
+    ).fetch_all(rt.pool()).await.unwrap();
 
-    let mut archive = tar::Builder::new(Vec::new());
-    // An already-applied filename would cause the old ledger gate to accept it.
-    // The file itself is harmless and must not run.
-    let body = b"SELECT 1;";
-    let mut header = tar::Header::new_gnu();
-    header.set_size(body.len() as u64);
-    header.set_mode(0o644);
-    header.set_cksum();
-    archive
-        .append_data(&mut header, "migrations/001.sql", &body[..])
-        .unwrap();
-    let tar = archive.into_inner().unwrap();
-    let mut compressed = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    std::io::Write::write_all(&mut compressed, &tar).unwrap();
-    let (status, body) = rt.deploy(app, &compressed.finish().unwrap()).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
-    assert!(body.to_string().contains("SQL admission"), "{body}");
-    let executions: i64 = sqlx::query_scalar("SELECT count(*) FROM rootcx_system.ledger_probe")
-        .fetch_one(rt.pool())
-        .await
-        .unwrap();
-    assert_eq!(executions, 0, "ledger was evaluated before admission");
+    sqlx::query("ALTER TABLE legacy_calendar.event_attachments ADD CONSTRAINT valid_position CHECK (position >= 0)")
+        .execute(rt.pool()).await.unwrap();
+    let mut historical = request.clone();
+    // Old manifests also used type aliases; replay must not recreate columns.
+    historical["dataContract"][0]["fields"][2]["type"] = json!("string");
+    historical["dataContract"][0]["checks"] = json!([{"name": "valid_position", "expr": "position >= 0"}]);
+    historical["dataContract"][0]["indexes"] = json!([{
+        "name": "idx_gcal_attach_unique", "columns": ["event_id", "file_id"], "unique": true,
+        "where": "file_id IS NOT NULL AND file_id <> ''"
+    }]);
+    // A pre-0.27 tenant has stored SQL declarations but no access projection.
+    sqlx::query("UPDATE rootcx_system.apps SET manifest=$2 WHERE id=$1")
+        .bind(app).bind(&historical).execute(rt.pool()).await.unwrap();
+    sqlx::query("DELETE FROM rootcx_system.row_access_contracts WHERE app_id=$1")
+        .bind(app).execute(rt.pool()).await.unwrap();
+    RbacExtension.bootstrap(rt.pool()).await.expect("legacy partial indexes must not prevent boot");
+    RbacExtension.bootstrap(rt.pool()).await.expect("the saved projection must also survive restart");
+    let (status, body) = rt.post_json("/api/v1/apps", &historical).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "historical SQL must not be resubmittable as new DDL: {body}");
+
+    let after: Vec<(String, String)> = sqlx::query_as(
+        "SELECT indexname::text, indexdef::text FROM pg_indexes
+         WHERE schemaname='legacy_calendar' ORDER BY indexname",
+    ).fetch_all(rt.pool()).await.unwrap();
+    assert_eq!(after, before, "bootstrap must not remove or rewrite business indexes");
+    let error = sqlx::query(
+        "INSERT INTO legacy_calendar.event_attachments (event_id, file_id) VALUES ('event', 'file')",
+    ).execute(rt.pool()).await.expect_err("duplicate attachments must remain forbidden");
+    assert_eq!(error.as_database_error().and_then(|e| e.code()).as_deref(), Some("23505"));
+    let error = sqlx::query(
+        "INSERT INTO legacy_calendar.event_attachments (event_id, position) VALUES ('negative', -1)",
+    ).execute(rt.pool()).await.expect_err("historical CHECK must remain enforced");
+    assert_eq!(error.as_database_error().and_then(|e| e.code()).as_deref(), Some("23514"));
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM legacy_calendar.event_attachments")
+        .fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(rows, 5, "legacy data and the NULL/empty-file exceptions must survive");
     rt.shutdown().await;
 }

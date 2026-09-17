@@ -364,9 +364,9 @@ const mutants: Mutant[] = [
     description: "Omit manifest SQL admission before raw expressions can cause DDL.",
     test: "manifest_sql_admission_test::raw_manifest_sql_is_refused_before_creating_a_schema",
     edits: [{
-      file: ROW_ACCESS,
-      before: "    admission::validate_manifest(manifest)?;",
-      after: "    // Mutation: manifest SQL admission omitted.",
+      file: MANIFEST,
+      before: "    crate::governance::row_access::validate_sql_declarations(manifest)",
+      after: "    Ok(()) // Mutation: manifest SQL admission omitted.",
     }],
     assertions: [{
       anchor: 'assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {body}");',
@@ -374,23 +374,6 @@ const mutants: Mutant[] = [
     }, {
       anchor: 'assert!(!exists, "{name}: refusal must precede CREATE SCHEMA");',
       marker: /check: refusal must precede CREATE SCHEMA/,
-    }],
-  },
-  {
-    id: "omit-pre-ddl-schema-inspection",
-    description: "Omit the manifest install inspection before CREATE TABLE and schema synchronization.",
-    test: "manifest_sql_admission_test::pending_schemas_with_legacy_artifacts_are_refused_without_ddl_or_execution",
-    edits: [{
-      file: MANIFEST,
-      before: "    crate::governance::row_access::inspect_schema(pool, app_id).await?;",
-      after: "    // Mutation: pre-DDL schema inspection omitted.",
-    }],
-    assertions: [{
-      anchor: 'assert!(!created, "{name}: inspection must precede app DDL");',
-      marker: /routine: inspection must precede app DDL/,
-    }, {
-      anchor: 'assert_eq!(executions, 0, "{name}: admission evaluated legacy code");',
-      marker: /routine: admission evaluated legacy code/,
     }],
   },
   {

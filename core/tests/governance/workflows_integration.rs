@@ -1,6 +1,7 @@
 use crate::harness;
 use harness::TestRuntime;
 use reqwest::{Method, StatusCode};
+use rootcx_core::extensions::{RuntimeExtension, rbac::RbacExtension};
 use serde_json::{Value, json};
 
 /// Grant the workflow's actual backing installation access to the test collection.
@@ -136,6 +137,9 @@ async fn workflow_run_linear_dag() {
 
     let (_, body) = rt.post_json("/api/v1/workflows", &json!({"name": "linear-run", "graph": simple_graph()})).await;
     let wf_id = body["id"].as_str().unwrap();
+    // Workflow registrations are not app data manifests and must survive reboot.
+    RbacExtension.bootstrap(rt.pool()).await.expect("workflow registration must not prevent boot");
+    RbacExtension.bootstrap(rt.pool()).await.expect("workflow registration must survive repeated boot");
     rt.put_json(&format!("/api/v1/workflows/{wf_id}"), &json!({"enabled": true})).await;
 
     let (s, body) = rt.post_json(&format!("/api/v1/workflows/{wf_id}/run"), &json!({})).await;

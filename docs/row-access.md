@@ -258,6 +258,8 @@ the contract; later boots validate and replay the versioned contract. Resource
 sharing uses version 2; identity-only and nonsharing contracts remain version 1.
 Core refuses a resource declaration stored as version 1. Old Core binaries do
 not support version 2.
+Registrations without tables, declared entities, or a saved row-access contract
+(such as workflows) have no row policies to replay.
 
 Ownership validation lives in `core/src/governance/row_access/ownership.rs`.
 The old ownership names in `manifest.rs` are compatibility aliases into that
@@ -269,10 +271,14 @@ sharing declarations. Raw manifest checks, index expressions, partial-index
 Core-generated indexes remain supported, including the partial index generated
 from `activeWhen.isNull`.
 
-Unexpected legacy database routines, views, triggers, rules, or other
-unsupported artifacts require an administrator-controlled migration. Admission
-does not execute app SQL to repair them and cannot certify a compromised
-historical Core/global database.
+Existing database objects remain under operator control. Boot validates the
+stored access contract and reconciles Core governance without auditing historical
+SQL objects or reapplying stored column, check, or index declarations. Legacy
+partial indexes, constraints, and non-access field type aliases therefore do not
+block startup. New manifest submissions still reject the raw SQL forms listed
+above before DDL, including on reinstall.
+This boundary assumes a trusted existing database; it does not neutralize
+dangerous SQL installed by earlier owner-authorized migrations.
 
 `onStart` receives no implicit data authority. Its collection and SQL operations
 use the lifecycle worker's fixed no-user identity through governed transactions.

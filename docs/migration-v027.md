@@ -1,5 +1,12 @@
 # Migration guide: Core v0.27.0 — governed row access
 
+This guide includes the post-0.27.0 correction: historical database objects and
+stored check/index declarations no longer fail boot-time SQL admission. The
+released 0.27.0 binary still performs that inspection; use a Core containing the
+correction. New submissions remain subject to SQL declaration validation.
+Stored non-access column types are not revalidated at boot; new submissions
+still require supported field types.
+
 The upgrade introduces assignment-based shared reads and enforces sensitive
 columns in PostgreSQL. It also removes lifecycle collection bypass and
 owner-executed app SQL migrations. Existing apps may need changes before they
@@ -7,7 +14,7 @@ can be admitted or started.
 
 ## Compatibility changes
 
-| Existing behavior or artifact | Core v0.27.0 behavior |
+| Existing behavior or artifact | Behavior with the post-0.27.0 correction |
 | --- | --- |
 | `owner: true` and `.own` permissions | Existing owner definitions and scoped operations remain intact |
 | Assignment sharing | An explicit `share` declaration enables subject-identity reads, gated by each target's `.read.shared` permission |
@@ -21,9 +28,9 @@ can be admitted or started.
 | Pending backend `migrations/*.sql` files | Deployment/start refused; SQL is not executed or marked applied |
 | No pending migration files | Deployment remains supported, subject to normal admission |
 | Package lifecycle scripts during backend upload | Never executed, including root-package scripts and trusted dependency scripts; build required artifacts before upload |
-| Raw manifest `checks`, expression/partial/opclass/index `with` specifications | Refused for now |
+| Raw manifest `checks`, expression/partial/opclass/index `with` specifications | Refused on new submissions, including reinstall; stored declarations are not executed during boot |
 | Supported column-based indexes and Core-generated indexes | Remain supported |
-| Unexpected legacy SQL objects | Refused pending an independently controlled administrator migration |
+| Existing SQL objects, including partial indexes | Remain operator-managed; no retroactive catalog audit at boot |
 
 No upgrade step silently grants admin, user, shared-read, or assignment-write
 permissions to preserve old behavior.
@@ -89,15 +96,15 @@ changed Core routines, roles, extensions, or objects outside the app schema.
 Admission is not a forensic certification of those global objects. Establish
 their provenance against a trusted baseline. If that cannot be done, restore or
 rebuild a trusted database and separately review any data import; do not rely on
-app-schema admission to repair a compromised Core database.
+declaration admission to repair a compromised Core database.
 
 ### 3. Prepare manifests and backend code
 
 Use field enums and supported declarative structures instead of raw `checks`.
-Remove expression indexes (`expr`), partial-index predicates (`where`),
-operator-class specifications (`ops`), and index storage parameters (`with`)
-from app manifests. Simple supported column-based indexes remain available.
-Do not reproduce Core's generated sharing indexes as app-supplied SQL.
+Before submitting a manifest again, remove expression indexes (`expr`),
+partial-index predicates (`where`), operator-class specifications (`ops`), and
+index storage parameters (`with`). Simple supported column-based indexes remain
+available. Do not reproduce Core's generated sharing indexes as app-supplied SQL.
 
 Replace sensitive wildcard reads with explicit safe columns. Audit SQL
 expressions, filters, sorting, and write `RETURNING` lists as well as SELECT
@@ -136,14 +143,13 @@ Sharing requires nonsensitive ownership fields. A shared resolver returns
 ownership keys, so Core refuses `owner: true` combined with `sensitive: true`
 in an app declaring sharing. Keep confidential values in separate fields.
 
-### 4. Migrate unsupported database artifacts independently
+### 4. Manage historical database artifacts independently
 
-Use a reviewed migration under administrator control to remove or replace
-unsupported legacy routines, views, triggers, rules, policies, executable
-defaults, and other refused artifacts. Simply moving SQL out of an archive does
-not make the resulting objects admissible. Use the admission error to identify
-what must change, preserving application data and required invariants through
-the reviewed migration.
+Existing partial indexes, constraints, routines, and other SQL objects no longer
+require removal to pass boot. They remain under operator control. When an
+artifact needs changing, use a reviewed administrator migration that preserves
+application data and invariants. Removing a declaration from a manifest does not
+by itself migrate the existing database object.
 
 App deployments do not execute that migration for you. Prefer the declarative
 manifest where it expresses the change. After independently completing and
@@ -151,14 +157,13 @@ verifying a required migration, remove the pending SQL files from the backend
 archive. Do not insert ledger rows merely to suppress refusal. Pending files
 are never silently marked applied, and historical files are never replayed.
 
-Known Core policy names are reserved reconciliation slots, not proof of trusted
-policy contents. Do not rename an unsupported object to resemble a Core object.
+Known Core policy names remain reserved reconciliation slots.
 
 ### 5. Upgrade and reconcile in staging first
 
 Without an existing `rootcx_system.row_access_contracts` entry, Core validates
-the stored manifest and performs SQL admission before migrating it into the
-versioned contract. Identity-only and nonsharing contracts use version 1;
+the stored manifest's structure and access declarations before migrating it into
+the versioned contract. Identity-only and nonsharing contracts use version 1;
 resource-sharing contracts use version 2. Core upgrades its metadata version
 constraint without modifying app data. Later boots validate and
 replay that contract through the same governance module.
@@ -167,10 +172,9 @@ Core owns both `row_access_contracts` and the `sensitive_fields` projection.
 It reconciles those projections, resolvers, RLS, and column privileges
 transactionally per app. Audit and hooks consume the sensitive projection;
 operators and apps must not edit either projection as an authorization shortcut.
-Unsupported contract versions, invalid declarations, and unexpected catalog
-artifacts fail closed. Resolve the reported cause through the controlled
-migration path and retry. This transaction does not make a whole fleet upgrade
-or all schema DDL atomic.
+Unsupported contract versions and invalid access declarations fail closed.
+Resolve the reported cause through the controlled migration path and retry.
+This transaction does not make a whole fleet upgrade or all schema DDL atomic.
 
 Pending SQL files cause backend upload to fail before dependency installation,
 agent registration, or worker startup. Manual starts, lazy worker
