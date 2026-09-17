@@ -68,6 +68,7 @@ const TARGET_SOURCES = {
 } as const;
 const GOVERNANCE_SOURCES: Record<string, string> = {
   assignment_access_test: "core/tests/governance/assignment_access_test.rs",
+  resource_sharing_test: "core/tests/governance/resource_sharing_test.rs",
   sensitive_sql_test: "core/tests/governance/sensitive_sql_test.rs",
   manifest_sql_admission_test: "core/tests/governance/manifest_sql_admission_test.rs",
   row_access_projection_test: "core/tests/governance/row_access_projection_test.rs",
@@ -121,6 +122,43 @@ type Result = {
 };
 
 const mutants: Mutant[] = [
+  {
+    id: "resource-subject-tautology",
+    description: "Drop the exact resource match while retaining the active grantee and target permission.",
+    test: "resource_sharing_test::resource_reads_are_exact_roots_and_explicit_multihop_targets_with_safe_projection",
+    edits: [{
+      file: SHARING,
+      before: "quote_ident(&share.subject), target.resource,",
+      after: 'quote_ident(&share.subject), format!("a.{}", quote_ident(&share.subject)),',
+    }],
+    assertions: [{
+      anchor: `assert_eq!(
+                sql_ids(&body["result"]),
+                expected,
+                "{entity}/tx={transaction}: sibling, self and undeclared descendants stay private"
+            );`,
+      marker: /project\/tx=false: sibling, self and undeclared descendants stay private/,
+    }],
+  },
+  {
+    id: "resource-active-when-tautology",
+    description: "Retain resource scope but let ended assignments authorize resource reads.",
+    test: "resource_sharing_test::committed_resource_revocation_reaches_the_next_statement_in_a_bun_callback",
+    edits: [{
+      file: SHARING,
+      before: `SELECT {} FROM {}.{} a, {}, {}
+                 WHERE a.{} = {} AND a.{} = {} AND a.{} IS NULL AND {} =`,
+      after: `SELECT {} FROM {}.{} a, {}, {}
+                 WHERE a.{} = {} AND a.{} = {} AND (a.{} IS NULL OR TRUE) AND {} =`,
+    }],
+    assertions: [{
+      anchor: `assert!(
+            sql_ids(&body["after"]).is_empty(),
+            "delete={delete}: stale shared resource: {body}"
+        );`,
+      marker: /delete=false: stale shared resource:/,
+    }],
+  },
   {
     id: "omit-package-script-refusal",
     description: "Allow package install scripts to run with Core authority during deployment.",
@@ -225,8 +263,10 @@ const mutants: Mutant[] = [
     test: "assignment_access_test::ending_or_deleting_the_last_assignment_revokes_on_the_next_statement",
     edits: [{
       file: SHARING,
-      before: "WHERE a.{} = {} AND a.{} = {} AND a.{} IS NULL AND {} =",
-      after: "WHERE a.{} = {} AND a.{} = {} AND (a.{} IS NULL OR TRUE) AND {} =",
+      before: `SELECT {identity} AS identity FROM {}.{} a, {}, {}
+             WHERE a.{} = {} AND a.{} = {} AND a.{} IS NULL AND {} =`,
+      after: `SELECT {identity} AS identity FROM {}.{} a, {}, {}
+             WHERE a.{} = {} AND a.{} = {} AND (a.{} IS NULL OR TRUE) AND {} =`,
     }],
     assertions: [{
       anchor: `assert_eq!(
@@ -405,8 +445,8 @@ const mutants: Mutant[] = [
     test: "assignment_access_test::selective_shared_reads_have_real_rls_plans_over_two_hundred_thousand_rows",
     edits: [{
       file: SHARING,
-      before: 'Ok((format!("{} IN (SELECT {signature})", quote_ident(column)), resolver))',
-      after: 'Ok((format!("{} = ANY (ARRAY(SELECT {signature}))", quote_ident(column)), resolver))',
+      before: 'Ok((format!("{} IN (SELECT {signature})", quote_ident(&column)), resolver))',
+      after: 'Ok((format!("{} = ANY (ARRAY(SELECT {signature}))", quote_ident(&column)), resolver))',
     }],
     assertions: [{
       anchor: `assert!(

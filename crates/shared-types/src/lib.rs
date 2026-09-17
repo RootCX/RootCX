@@ -253,9 +253,9 @@ fn default_version() -> String {
 pub struct EntityContract {
     pub entity_name: String,
     pub fields: Vec<FieldContract>,
-    /// An active row in this entity shares the subject's ownership with the
-    /// grantee. Both fields link to locally owned entities. Core generates only
-    /// `.read.shared` permissions; this never grants authority to write a relation.
+    /// An active row shares the subject's ownership (legacy default) or the
+    /// exact resource and declared related rows. Core generates read-only
+    /// `.read.shared` permissions, never authority to manage the relation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share: Option<ShareContract>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -280,6 +280,34 @@ pub struct ShareContract {
     pub grantee: String,
     pub subject: String,
     pub active_when: ShareCondition,
+    #[serde(default, skip_serializing_if = "ShareScope::is_identity")]
+    pub scope: ShareScope,
+    /// Resource mode only: paths from each readable target to the subject.
+    /// The subject itself is always a target; other entities must opt in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<ShareTarget>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ShareScope {
+    #[default]
+    Identity,
+    Resource,
+}
+
+impl ShareScope {
+    fn is_identity(&self) -> bool {
+        *self == Self::Identity
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ShareTarget {
+    pub entity: String,
+    /// Local entity_link fields, traversed from this entity to the subject.
+    pub via: Vec<String>,
 }
 
 /// Deliberately bounded: authorization expressions never contain app SQL.

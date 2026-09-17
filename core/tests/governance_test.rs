@@ -40,6 +40,9 @@ mod workflows_integration;
 #[path = "governance/assignment_access_test.rs"]
 mod assignment_access_test;
 
+#[path = "governance/resource_sharing_test.rs"]
+mod resource_sharing_test;
+
 #[path = "governance/manifest_sql_admission_test.rs"]
 mod manifest_sql_admission_test;
 

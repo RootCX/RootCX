@@ -17,7 +17,88 @@ must end in a direct owner. A NULL owner belongs to nobody.
 caller's own rows. Assignment sharing does not change owner definitions or
 transfer ownership. Unscoped permissions remain separate broader grants.
 
-## Declare an assignment
+## Share an exact resource
+
+Use `scope: "resource"` when access should stop at a particular project, ticket
+or other app row. The subject needs no Owner or Core identity. For example:
+
+```json
+{
+  "appId": "projects",
+  "name": "Projects",
+  "dataContract": [
+    { "entityName": "member", "fields": [
+      { "name": "user_id", "type": "entity_link", "owner": true,
+        "references": { "entity": "core:users", "field": "id" } }
+    ] },
+    { "entityName": "project", "fields": [
+      { "name": "name", "type": "text" }
+    ] },
+    { "entityName": "folder", "fields": [
+      { "name": "project_id", "type": "entity_link",
+        "references": { "entity": "project", "field": "id" } }
+    ] },
+    { "entityName": "document", "fields": [
+      { "name": "folder_id", "type": "entity_link",
+        "references": { "entity": "folder", "field": "id" } },
+      { "name": "body", "type": "text" }
+    ] },
+    { "entityName": "assignment", "share": {
+      "scope": "resource",
+      "grantee": "member_id",
+      "subject": "project_id",
+      "activeWhen": { "isNull": "end_date" },
+      "targets": [
+        { "entity": "document", "via": ["folder_id", "project_id"] }
+      ]
+    }, "fields": [
+      { "name": "member_id", "type": "entity_link",
+        "references": { "entity": "member", "field": "id" } },
+      { "name": "project_id", "type": "entity_link",
+        "references": { "entity": "project", "field": "id" } },
+      { "name": "end_date", "type": "date" }
+    ] }
+  ]
+}
+```
+
+An active assignment shares that exact project and its documents. Grant
+`app:projects:project.read.shared` and/or
+`app:projects:document.read.shared` as needed. Granting only document reads works
+without read grants on members, assignments, folders or projects. Folders are
+used for resolution but are not themselves shared. Other projects remain
+private through this declaration even when they have the same Owner.
+
+Each `via` path starts on its target entity and follows one to three local
+primary-key `entity_link` fields to the Subject entity. Paths cannot repeat an
+entity. At most 32 paths are allowed per assignment declaration; distinct paths
+to the same target entity combine. The Subject itself is always a possible
+target, so omit `targets` when sharing only that row. Do not add an empty path
+for the Subject. Keys used in paths and returned target primary keys must be
+nonsensitive.
+
+The Grantee must still link to a locally owned entity. All read authority comes
+from live relationships and exact target permissions. No app data is duplicated,
+no other share is followed, and ownership links do not implicitly add targets.
+Control changes to assignments **and** intermediate relationship fields: moving
+a document into a shared folder changes which readers can access it.
+
+This mode grants row access on every governed read path, including direct HTTP
+and SQL. It does not provide per-reader field redaction, shared writes or a
+worker-only permission. Sensitive fields and independent broader grants retain
+their existing meaning.
+
+For the complete setup with an administrator, a sharing manager and two readers,
+follow [Resource sharing walkthrough](resource-sharing-walkthrough.md). It covers
+Core identities, local members, role grants, initial records, reads and revocation
+using the public HTTP operations.
+
+## Share an identity's records (legacy default)
+
+Omitting `scope`, or explicitly setting `"scope": "identity"`, retains the
+original identity-wide sharing behavior below. Resource `targets` are not
+accepted in identity mode. Changing to resource mode is an explicit contract
+change, never a silent upgrade.
 
 This minimal assignment entity assumes that a local `enrollment` entity already
 has an owner, directly or through a valid ownership chain:
@@ -86,7 +167,7 @@ is a Core-generated scope; do not redeclare it as a custom permission.
 | Permission | Rows or operations it authorizes |
 | --- | --- |
 | `note.read.own` | Notes owned by the caller |
-| `note.read.shared` | Notes owned by active assignments' subject identities |
+| `note.read.shared` | Resource mode: explicitly shared notes or notes reached by declared target paths from active assignments. Identity mode: notes owned by active assignments' subject identities |
 | `note.read` | Broader note reads under the app's normal unscoped policy |
 | `note.update.own` | Updates confined to the caller's own notes |
 
@@ -173,7 +254,10 @@ The Core row-access module owns versioned `row_access_contracts` and the
 `sensitive_fields` projection used by audit and hooks. It atomically reconciles
 these projections with ownership/sharing resolvers, RLS policies, and column
 privileges per app. Legacy manifests are validated before first migration into
-the contract; later boots validate and replay the versioned contract.
+the contract; later boots validate and replay the versioned contract. Resource
+sharing uses version 2; identity-only and nonsharing contracts remain version 1.
+Core refuses a resource declaration stored as version 1. Old Core binaries do
+not support version 2.
 
 Ownership validation lives in `core/src/governance/row_access/ownership.rs`.
 The old ownership names in `manifest.rs` are compatibility aliases into that

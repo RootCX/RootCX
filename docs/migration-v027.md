@@ -14,6 +14,7 @@ can be admitted or started.
 | --- | --- |
 | `owner: true` and `.own` permissions | Existing owner definitions and scoped operations remain intact |
 | Assignment sharing | An explicit `share` declaration enables subject-identity reads, gated by each target's `.read.shared` permission |
+| Exact resource sharing | Opt into `scope: "resource"` with explicit target paths; the subject needs no Owner and app data is not copied |
 | Raw SQL reading a sensitive column | Denied by database column `SELECT` privileges, including expressions, filters, and `RETURNING` |
 | `SELECT *` or `RETURNING *` on a table with sensitive columns | Denied; explicitly select safe columns |
 | Generated reads of sensitive fields | Continue to omit those fields and reject filter/sort references |
@@ -109,6 +110,13 @@ are required, and authorize management of assignment rows separately. Sharing
 resolves the subject's Core identity: sibling enrollments and other owned
 entities can be visible when their target permissions are granted.
 
+That identity scope remains the default for compatibility. Use explicit
+`scope: "resource"` when access must stop at one row and its declared target
+paths. Resource subjects need no Owner or Core identity. Intermediate entities
+do not become shared. Review writes to the path's relationship fields as well
+as assignment management. This is a deliberate access-contract change; it does
+not add field redaction or worker-only reads.
+
 Sharing requires nonsensitive ownership fields. A shared resolver returns
 ownership keys, so Core refuses `owner: true` combined with `sensitive: true`
 in an app declaring sharing. Keep confidential values in separate fields.
@@ -135,7 +143,9 @@ policy contents. Do not rename an unsupported object to resemble a Core object.
 
 Without an existing `rootcx_system.row_access_contracts` entry, Core validates
 the stored manifest and performs SQL admission before migrating it into the
-versioned contract. Current contracts use version 1. Later boots validate and
+versioned contract. Identity-only and nonsharing contracts use version 1;
+resource-sharing contracts use version 2. Core upgrades its metadata version
+constraint without modifying app data. Later boots validate and
 replay that contract through the same governance module.
 
 Core owns both `row_access_contracts` and the `sensitive_fields` projection.

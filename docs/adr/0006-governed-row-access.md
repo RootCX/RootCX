@@ -2,6 +2,9 @@
 
 Status: Accepted for the next release. The release version has not been bumped.
 
+[ADR 0007](0007-resource-sharing.md) adds explicit resource scope. This ADR's
+identity scope remains the default for existing declarations.
+
 ## Context
 
 Applications need to share another person's records through assignments while

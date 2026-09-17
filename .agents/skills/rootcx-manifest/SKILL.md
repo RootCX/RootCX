@@ -68,6 +68,42 @@ version has not been bumped. See [row access](../../../docs/row-access.md) and
 
 ### Assignment sharing
 
+For an exact project, ticket or other resource, opt into resource mode:
+
+```json
+{
+  "grantee": "member_id",
+  "subject": "project_id",
+  "scope": "resource",
+  "activeWhen": { "isNull": "end_date" },
+  "targets": [
+    { "entity": "document", "via": ["folder_id", "project_id"] }
+  ]
+}
+```
+
+This is the assignment entity's `share` value. Its two fields must be local
+`entity_link`s to primary keys. The member must have a valid Owner; the project
+needs no Owner or Core identity. Declare all referenced entities and fields.
+The project itself and the named document target get `.read.shared` keys.
+Grant each key explicitly; intermediate folders do not become readable.
+`via` follows links from document to folder to the exact project.
+
+Paths contain 1–3 links, cannot repeat an entity, and must end at the subject
+entity. At most 32 distinct paths are allowed per declaration. Path keys and
+returned primary keys must be nonsensitive. Omit `targets` to share only the
+subject row. Ownership does not imply additional targets; no records are copied
+and no other sharing relation is followed. Govern modifications to assignment
+rows and intermediate links, since both change access.
+
+This governs rows on HTTP and SQL alike; it does not provide per-reader field
+redaction or shared writes. Resource contracts use version 2 and require the
+next-release Core implementing this mode; the release version is not yet bumped.
+
+**Legacy identity mode:** omitting `scope` (or using `"identity"`) retains the
+behavior below. Nonempty `targets` require resource mode. Never silently change
+an existing app's sharing scope.
+
 Keep existing owner definitions intact. An assignment can separately declare
 shared reads:
 

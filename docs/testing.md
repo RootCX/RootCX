@@ -85,6 +85,7 @@ counts and timings belong in the PR, not in this guide.
 | Metadata is permission-filtered and omits sensitive schema details | `cross_app_metadata_test`, `cross_app_grants_test` |
 | Own-scoped rows follow direct, chained and core-user entity links without widening writes | `row_ownership_test` |
 | Assignment access is many-to-many, non-transitive and revoked on the next statement, including Bun callback transactions | `assignment_access_test` |
+| Resource sharing confines reads to exact roots and explicit targets, including owner-free resources; public role/assignment operations revoke one reader without affecting another; resolver guards and legacy contracts remain intact | `resource_sharing_test` |
 | Sensitive values cannot be read through raw SQL, expressions or predicates; generated responses remain usable | `sensitive_sql_test` |
 | Invalid projections fail visibly and atomically; no-share policies retain historical definitions | `row_access_projection_test` |
 | Untrusted SQL and executable legacy artifacts cannot enter privileged schema operations | `manifest_sql_admission_test`, `app_migrations_test` |

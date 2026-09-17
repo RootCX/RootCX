@@ -2,7 +2,7 @@
 //! boot. Apps supply relationships, never SQL authorization expressions.
 use std::collections::HashMap;
 
-use rootcx_types::{AppManifest, EntityContract};
+use rootcx_types::{AppManifest, EntityContract, ShareScope};
 use sqlx::{PgConnection, PgPool};
 
 use crate::RuntimeError;
@@ -36,19 +36,33 @@ pub(crate) async fn inspect_schema(pool: &PgPool, schema: &str) -> Result<(), Ru
 }
 
 pub(crate) fn shared_entities(manifest: &AppManifest) -> impl Iterator<Item = &EntityContract> {
-    let has_shares = manifest.data_contract.iter().any(|e| e.share.is_some());
-    manifest.data_contract.iter().filter(move |e| has_shares && owner_field(e).is_some())
+    manifest.data_contract.iter().filter(move |e| sharing::is_target(manifest, e))
+}
+
+fn contract_version(manifest: &AppManifest) -> i32 {
+    if manifest.data_contract.iter().any(|e| e.share.as_ref().is_some_and(|s| s.scope == ShareScope::Resource)) {
+        2
+    } else {
+        1
+    }
 }
 
 /// Bootstrap only the projection. Triggers need it before RBAC itself boots.
 pub(crate) async fn bootstrap_projection(pool: &PgPool) -> Result<(), RuntimeError> {
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS rootcx_system.row_access_contracts (
-            app_id TEXT PRIMARY KEY, version INTEGER NOT NULL CHECK (version = 1),
+            app_id TEXT PRIMARY KEY, version INTEGER NOT NULL,
             entities JSONB NOT NULL
         )",
     ).execute(pool).await.map_err(RuntimeError::Schema)?;
-    Ok(())
+    // Version 1 remains readable; resource declarations require version 2.
+    // Upgrade the old Core-owned check without touching app data.
+    let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
+    exec(&mut tx, "ALTER TABLE rootcx_system.row_access_contracts
+        DROP CONSTRAINT IF EXISTS row_access_contracts_version_check").await?;
+    exec(&mut tx, "ALTER TABLE rootcx_system.row_access_contracts
+        ADD CONSTRAINT row_access_contracts_version_check CHECK (version IN (1, 2))").await?;
+    tx.commit().await.map_err(RuntimeError::Schema)
 }
 
 pub(crate) async fn install(pool: &PgPool, manifest: &AppManifest) -> Result<(), RuntimeError> {
@@ -58,10 +72,11 @@ pub(crate) async fn install(pool: &PgPool, manifest: &AppManifest) -> Result<(),
     reconcile(&mut tx, manifest).await?;
     sqlx::query(
         "INSERT INTO rootcx_system.row_access_contracts (app_id, version, entities)
-         VALUES ($1, 1, $2) ON CONFLICT (app_id) DO UPDATE
+         VALUES ($1, $2, $3) ON CONFLICT (app_id) DO UPDATE
          SET version = EXCLUDED.version, entities = EXCLUDED.entities",
     )
     .bind(&manifest.app_id)
+    .bind(contract_version(manifest))
     .bind(serde_json::to_value(&manifest.data_contract).map_err(|e| RuntimeError::Invalid(e.to_string()))?)
     .execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
     tx.commit().await.map_err(RuntimeError::Schema)
@@ -70,7 +85,6 @@ pub(crate) async fn install(pool: &PgPool, manifest: &AppManifest) -> Result<(),
 async fn reconcile(conn: &mut PgConnection, manifest: &AppManifest) -> Result<(), RuntimeError> {
     let schema = &manifest.app_id;
     let owners = owner_map(&manifest.data_contract);
-    let has_shares = manifest.data_contract.iter().any(|e| e.share.is_some());
     let entities: HashMap<_, _> = manifest.data_contract.iter()
         .map(|e| (e.entity_name.as_str(), e)).collect();
     let tables: Vec<String> = sqlx::query_scalar(
@@ -89,7 +103,7 @@ async fn reconcile(conn: &mut PgConnection, manifest: &AppManifest) -> Result<()
     for table in &tables {
         let sensitive: Vec<String> = entities.get(table.as_str()).into_iter()
             .flat_map(|e| &e.fields).filter(|f| f.sensitive).map(|f| f.name.clone()).collect();
-        let shared = if has_shares && owners.contains_key(table) {
+        let shared = if entities.get(table.as_str()).is_some_and(|e| sharing::is_target(manifest, e)) {
             let (predicate, resolver) = sharing::declare(conn, manifest, table, &owners).await?;
             shared_resolvers.push(resolver);
             Some(predicate)
@@ -142,11 +156,16 @@ pub(crate) async fn govern_schema_tables(pool: &PgPool, only: Option<&str>) -> R
         let mut manifest: AppManifest = serde_json::from_value(json)
             .map_err(|e| RuntimeError::Invalid(format!("governance for '{app}': invalid stored manifest: {e}")))?;
         if let Some(version) = version {
-            if version != 1 {
+            if !matches!(version, 1 | 2) {
                 return Err(RuntimeError::Invalid(format!("governance for '{app}': unsupported contract version {version}")));
             }
             manifest.data_contract = serde_json::from_value(entities.unwrap_or_default())
                 .map_err(|e| RuntimeError::Invalid(format!("governance for '{app}': invalid projection: {e}")))?;
+            if version < contract_version(&manifest) {
+                return Err(RuntimeError::Invalid(format!(
+                    "governance for '{app}': resource sharing requires contract version 2"
+                )));
+            }
         }
         crate::manifest::validate_manifest(&manifest)?;
         install(pool, &manifest).await?;

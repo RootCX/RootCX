@@ -59,6 +59,39 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
 
 ### Assignment sharing
 
+Use resource mode for an exact project, ticket or other app row:
+
+```json
+{
+  "grantee": "member_id",
+  "subject": "project_id",
+  "scope": "resource",
+  "activeWhen": { "isNull": "end_date" },
+  "targets": [
+    { "entity": "document", "via": ["folder_id", "project_id"] }
+  ]
+}
+```
+
+This is the assignment entity's `share` value. Its endpoints must be distinct
+local primary-key `entity_link`s. The member must have a valid Owner; the project
+needs no Owner or Core identity. Declare all referenced entities and fields.
+The project and explicit document target receive `.read.shared` keys, which
+must be granted separately. Folders are traversed without becoming readable.
+Each `via` path starts on its target and ends at the subject entity, contains
+1–3 local links and never repeats an entity. At most 32 distinct paths are
+accepted; path keys and returned primary keys must be nonsensitive.
+
+Omit `targets` for a subject-only share. Ownership never adds implicit targets;
+no app data is copied and no other share is followed. Changes to assignments
+and intermediate links change authorization and require controlled writes.
+Resource sharing applies equally to HTTP and SQL. It grants no writes or
+per-reader field redaction. It uses row-access contract version 2 and requires
+the next-release Core implementing this mode; no release version is bumped yet.
+
+**Legacy identity mode:** omit `scope` or specify `"identity"` for the existing
+behavior below; nonempty `targets` are refused in that mode.
+
 An assignment can separately share a subject's records. This example assumes
 `enrollment` is a local entity with a valid owner:
 
