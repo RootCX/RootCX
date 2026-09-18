@@ -126,11 +126,16 @@ RootCX Core also includes an [official inbound MCP server](docs/mcp.md) for
 tenant context, manifest validation, and governed data actions. Application
 source, builds, tests, and deployment remain local through the RootCX CLI.
 
+## Documentation
+
+- [Docs](https://rootcx.com/docs) - Guides, references, API docs
+- [docs/](docs/README.md) - Governance guides, migration steps, decision records
+- [CHANGELOG.md](CHANGELOG.md) - Release history and breaking changes
+
 ## Community
 
 - [Discord](https://discord.gg/W7sqMYtdws) - Questions, discussion, support
 - [GitHub Issues](https://github.com/rootcx/rootcx/issues) - Bug reports and feature requests
-- [Docs](https://rootcx.com/docs) - Guides, references, API docs
 
 ## License
 

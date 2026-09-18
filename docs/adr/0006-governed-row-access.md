@@ -194,7 +194,7 @@ New-declaration admission is not a substitute for that recovery.
 See [row-access usage](../row-access.md), the
 [next-release migration guide](../migration-v027.md), and
 [ADR 0002](0002-governed-worker-transactions.md). This decision preserves the
-owner definitions in [ADR 0003](0003-delegated-row-ownership.md) while superseding
+owner definitions in [ADR 0009](0009-delegated-row-ownership.md) while superseding
 its historical projection-replay and implementation-location details. Its
 ownership-index discussion is not a target-scan guarantee for the combined
 read policies described here. Earlier lifecycle bypass and generated-read-only

@@ -1,6 +1,9 @@
-# ADR 0003: Delegated row ownership
+# ADR 0009: Delegated row ownership
 
-Status: Proposed (2026-08-28)
+Status: Accepted (2026-08-28), shipped in Core v0.23.0.
+Renumbered from 0003, which was already taken.
+[ADR 0006](0006-governed-row-access.md) supersedes its projection-replay and
+implementation-location details; the ownership model below still holds.
 
 ## Context
 
