@@ -137,12 +137,8 @@ export function useAuth(): UseAuthResult {
   const oidcLogin = useCallback(
     async (providerId: string) => {
       await client.oidcLogin(providerId);
-      // Tauri path: tokens set on client, fetch user
-      persistTokens();
-      const me = await client.me();
-      setUser(me);
     },
-    [client, persistTokens],
+    [client],
   );
 
   const magicLinkConsume = useCallback(

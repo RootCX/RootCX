@@ -1,60 +1,51 @@
-# RootCX UI Components
+# RootCX UI components
 
-## Primitives
+`@rootcx/ui` exports the components of the RootCX design repository, using
+shadcn/Radix composition. Inspect the installed types/source for exact props.
+Components are also available from `@rootcx/ui/components/<name>`.
 
-| Component | Notes |
-|-----------|-------|
-| `Button` | variants: default/destructive/outline/secondary/ghost/link; sizes: default/sm/lg/icon |
-| `Input` | standard text input |
-| `Label` | Radix-accessible form label |
-| `Card` (+Header/Title/Description/Content) | card container |
-| `Badge` | variants: default/secondary/destructive/outline |
-| `Select` (+Trigger/Content/Item/Value) | Radix dropdown |
-| `Dialog` (+Content/Header/Footer/Title/Description) | modal |
-| `Tabs` (+List/Trigger/Content) | tab nav |
-| `Table` (+Header/Body/Row/Head/Cell) | styled HTML table |
-| `Separator` | divider |
-| `ScrollArea` | custom scrollbar |
-| `Tooltip` (+Trigger/Content/Provider) | hover tooltip |
-| `DropdownMenu` (+Trigger/Content/Item) | action menu |
-| `Popover` (+Trigger/Content) | floating panel |
-| `Switch` | toggle |
-| `Textarea` | multi-line input |
+| Area | Components |
+| --- | --- |
+| Actions | `Button`, `ButtonGroup`, `Toggle`, `ToggleGroup` |
+| Fields | `Input`, `Textarea`, `Label`, `Field`, `FieldGroup`, `FieldLabel`, `FieldDescription`, `FieldError`, `FieldSet`, `FieldLegend`, `InputGroup`, `NativeSelect`, `Select`, `Checkbox`, `Switch` |
+| Surfaces | `Card`, `CardHeader`, `CardTitle`, `CardDescription`, `CardContent`, `CardFooter` |
+| Overlays | `Dialog`, `AlertDialog`, `Sheet`, `Popover`, `Tooltip`, with their trigger/content/title parts |
+| Navigation | `SidebarProvider`, `Sidebar` and its composition parts, `Breadcrumb`, `Tabs` |
+| Menus | `DropdownMenu` and its groups, items and submenus |
+| Display | `Badge`, `BadgeDot`, `ColorSwatch`, `Avatar`, `Table`, `Kbd` |
+| Feedback | `Alert`, `Empty`, `Skeleton`, `Spinner`, `Progress`, `Toaster` |
+| Layout | `Separator`, `ScrollArea` |
+| RootCX visual compositions | `PageFrame`, `PagePanel`, `PageTopbar`, `PageTopbarActions`, `Page`, `PageHeader`, `PageHeading`, `PageTitle`, `PageDescription`, `PageActions`, `PageToolbar`, `IconTile`, `MetricCard`, `MetricStrip`, `Metric`, `PropertyList`, `PropertyRow`, `PropertyLabel`, `PropertyValue`, `PropertySection` |
 
-## Layout
+## Theme variants
 
-| Component | Key props |
-|-----------|-----------|
-| `AppShell` | `defaultOpen`, `sidebarWidth` — wraps `AppShellSidebar` + `AppShellMain` |
-| `Sidebar` | `header`, `footer` |
-| `SidebarSection` | `title`, `collapsible`, `defaultOpen` |
-| `SidebarItem` | `icon`, `label`, `badge`, `active`, `onClick` |
-| `PageHeader` | `title`, `description`, `breadcrumbs`, `actions`, `onBack` |
-| `EmptyState` | `icon`, `title`, `description`, `action` |
-| `useSidebar()` | returns `{ open, setOpen, toggle }` |
+- `Button`: `default`, `outline`, `secondary`, `ghost`, `toolbar`, `soft`,
+  `destructive`, `link`. Sizes: `default`, `xs`, `sm`, `lg`, `icon`, `icon-xs`,
+  `icon-sm`, `icon-lg`.
+- `Badge`: `default`, `neutral`, `info`, `success`, `warning`, `destructive`,
+  `violet`, `secondary`, and pastel `mint`, `teal`, `lavender`, `pink`, `yellow`, `blue`.
+- `TabsList`: `default`, `segmented`, `line`.
+- `ToggleGroup`: `default`, `outline`, `segmented`.
+- `Card`: `default`, `raised`.
+- `SelectTrigger`: `default`, `filled`.
 
-## Data
+Use full compositions: a dialog needs a title; select items belong in a group;
+tabs triggers belong in a tabs list. Pass `asChild` for custom Radix triggers.
 
-| Component | Key props |
-|-----------|-----------|
-| `DataTable` | `data`, `columns` (ColumnDef[]), `loading`, `searchable`, `pageSize`, `rowCount`, `onPaginationChange(PaginationState)`, `onSortingChange(SortingState)`, `selectable`, `resizable`, `rowActions` [{label,icon,onClick,destructive}], `bulkActions`, `emptyState`, `onRowClick`. Server-side: pass `rowCount`+`onPaginationChange` for pagination, `onSortingChange` for sorting — tanstack `manualPagination`/`manualSorting` enabled automatically. Types `SortingState`, `PaginationState` re-exported from `@rootcx/ui`. |
-| `KPICard` | `label`, `value`, `trend`, `icon` |
-| `StatusBadge` | `status` — auto-colors: active→green, pending→yellow, error→red |
+## Application-owned behavior
 
-## Forms
+Build status displays with `Badge`, forms with `Field` and controls, confirmations
+with `AlertDialog`, and loading/empty/error views with the matching primitives.
+Define their content and behavior in the app. Table sorting/pagination, navigation
+structure and form validation are not UI package responsibilities.
 
-| Component | Key props |
-|-----------|-----------|
-| `FormDialog` | `open`, `onOpenChange`, `title`, `description`, `fields` [{name,label,type,required,options}], `defaultValues`, `onSubmit`, `submitLabel`, `destructive` |
-| `FormField` | `field`, `value`, `onChange`, `error` |
-| `SearchInput` | `value`, `onChange`, `placeholder`, `debounceMs` |
-| `FilterBar` | `children` |
+Removed APIs include `AppShell*`, `SidebarItem`, `SidebarSection`, `StatusBadge`,
+`KPICard`, `DataTable`, `FormField`, `FormDialog`, `FilterBar`, `SearchInput`,
+`ConfirmDialog`, `LoadingState`, `ErrorState`, `EmptyState`, `ThemeProvider`,
+`useTheme`, `ChatScrollArea`, `useAutoScroll` and `Markdown`.
+Do not generate imports of these from `@rootcx/ui`.
 
-## Feedback
-
-| Component | Usage |
-|-----------|-------|
-| `toast.success/error/info/warning()` | place `<Toaster />` at app root |
-| `ConfirmDialog` | destructive confirmation dialog |
-| `LoadingState` | `variant="spinner"` or `variant="skeleton"` |
-| `ErrorState` | error message + optional retry button |
+`PageHeader` now takes children, and `Sidebar`/`useSidebar` follow the new
+`SidebarProvider` composition. They are not compatible aliases for the old API.
+Use `React.ComponentProps<typeof Button>` or the corresponding component for prop
+types. Import `toast` from `sonner`; import TanStack types from TanStack if installed.

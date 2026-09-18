@@ -4,9 +4,6 @@ use std::sync::Arc;
 use rootcx_types::{AppManifest, InstalledApp, OsStatus, SchemaVerification};
 use serde_json::Value as JsonValue;
 
-#[cfg(feature = "tauri")]
-pub mod oidc;
-
 mod action_approvals;
 pub use action_approvals::{
     ActionApproval, ActionApprovalRequest, ActionApprovalStatus, ActionApprovals,
@@ -204,11 +201,6 @@ impl RuntimeClient {
 
     pub async fn list_integrations(&self) -> Result<Vec<JsonValue>, ClientError> {
         let resp = self.authed(self.client.get(self.api("/integrations"))).send().await?;
-        check_response(resp).await?.json().await.map_err(Into::into)
-    }
-
-    pub async fn get_forge_config(&self) -> Result<JsonValue, ClientError> {
-        let resp = self.authed(self.client.get(self.api("/config/ai/forge"))).send().await?;
         check_response(resp).await?.json().await.map_err(Into::into)
     }
 

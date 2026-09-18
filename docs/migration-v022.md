@@ -17,7 +17,7 @@ Nothing to do. The upgrade is additive:
 - No manifest declares `owner` yet, so no `.own` key and no row-scoped policy
   exists until one does. Every table's SQL is unchanged.
 
-Nothing in Studio, the SDK, the Rust client or the CLI calls the newly-gated
+Nothing in the SDK, the Rust client or the CLI calls the newly-gated
 endpoints, so no first-party client breaks. If you drive these endpoints from
 your own scripts, read on.
 

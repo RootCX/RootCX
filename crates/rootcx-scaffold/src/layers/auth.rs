@@ -1,6 +1,9 @@
 use crate::emitter::Emitter;
 use crate::types::{Layer, LayerFuture, ScaffoldContext};
 
+pub(super) const TPL_AUTH_FORM: &str =
+    include_str!("../../templates/scaffold/components/auth-form.tsx");
+
 pub struct AuthLayer {
     pub include_auth: bool,
 }
@@ -9,86 +12,18 @@ impl Layer for AuthLayer {
     fn emit<'a>(&'a self, ctx: &'a ScaffoldContext, e: &'a Emitter) -> LayerFuture<'a> {
         Box::pin(async move {
             let content = if self.include_auth { auth_app(&ctx.app_id) } else { simple_app(&ctx.app_id) };
+            if self.include_auth {
+                e.write("src/components/auth-form.tsx", TPL_AUTH_FORM).await?;
+            }
             e.write("src/App.tsx", &content).await
         })
     }
 }
 
 fn simple_app(name: &str) -> String {
-    format!(
-        r#"import {{ PageHeader }} from "@rootcx/ui";
-
-export default function App() {{
-  return (
-    <div className="mx-auto w-full max-w-5xl p-4 sm:p-6 lg:p-8">
-      <PageHeader title="{name}" description="Get started by editing src/App.tsx" />
-    </div>
-  );
-}}
-"#
-    )
+    include_str!("../../templates/scaffold/simple-app.tsx").replace("__APP_ID__", name)
 }
 
 fn auth_app(name: &str) -> String {
-    format!(
-        r#"import {{ NavLink, useLocation, Routes, Route }} from "react-router-dom";
-import {{ AuthGate }} from "@rootcx/sdk";
-import {{
-  AppShell,
-  AppShellSidebar,
-  AppShellMain,
-  AppShellHeader,
-  SidebarTrigger,
-  Sidebar,
-  SidebarItem,
-  PageHeader,
-  Button,
-}} from "@rootcx/ui";
-import {{ IconLogout, IconHome }} from "@tabler/icons-react";
-
-export default function App() {{
-  return (
-    <AuthGate appTitle="{name}">
-      {{({{ user, logout }}) => {{
-        const {{ pathname }} = useLocation();
-        return (
-          <AppShell>
-            <AppShellSidebar>
-              <Sidebar
-                header={{<span className="text-sm font-semibold">{name}</span>}}
-                footer={{
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="truncate text-sm text-muted-foreground">{{user.email}}</span>
-                    <Button variant="ghost" size="icon" onClick={{() => logout()}} aria-label="Sign out">
-                      <IconLogout className="h-4 w-4" />
-                    </Button>
-                  </div>
-                }}
-              >
-                <SidebarItem asChild isActive={{pathname === "/"}}>
-                  <NavLink to="/"><IconHome /><span>Home</span></NavLink>
-                </SidebarItem>
-              </Sidebar>
-            </AppShellSidebar>
-            <AppShellMain>
-              <AppShellHeader>
-                <SidebarTrigger />
-                <span className="text-sm font-semibold">{name}</span>
-              </AppShellHeader>
-              <Routes>
-                <Route path="/" element={{
-                  <div className="mx-auto w-full max-w-5xl p-4 sm:p-6 lg:p-8">
-                    <PageHeader title="Home" description="Welcome to {name}" />
-                  </div>
-                }} />
-              </Routes>
-            </AppShellMain>
-          </AppShell>
-        );
-      }}}}
-    </AuthGate>
-  );
-}}
-"#
-    )
+    include_str!("../../templates/scaffold/auth-app.tsx").replace("__APP_ID__", name)
 }

@@ -10,8 +10,6 @@ repository = "https://github.com/rootcx/rootcx"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
-tar = "0.4"
-flate2 = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -21,7 +21,7 @@ fn sanitize_name(name: &str) -> String {
         .replace(' ', "_")
 }
 
-/// Scaffold a project using a preset + optional extra layers (e.g. TauriLayer).
+/// Scaffold a project using a preset and optional application layers.
 pub async fn create(
     root: &std::path::Path,
     name: &str,

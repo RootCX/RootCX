@@ -34,7 +34,6 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .route("/api/v1/llm-models", get(routes::llm_models::list_llm_models).post(routes::llm_models::create_llm_model))
         .route("/api/v1/llm-models/{id}", axum::routing::put(routes::llm_models::update_llm_model).delete(routes::llm_models::delete_llm_model))
         .route("/api/v1/llm-models/{id}/default", axum::routing::put(routes::llm_models::set_default_llm_model))
-        .route("/api/v1/config/ai/forge", get(routes::llm_models::get_forge_model))
         .route("/api/v1/platform/secrets", get(routes::list_platform_secrets).post(routes::set_platform_secret))
         .route("/api/v1/platform/secrets/env", get(routes::get_platform_env))
         .route("/api/v1/platform/secrets/{key_name}", delete(routes::delete_platform_secret))
@@ -81,7 +80,6 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .allow_origin(AllowOrigin::predicate(|origin, _| {
             let o = origin.as_bytes();
             o.starts_with(b"http://localhost:") || o.starts_with(b"http://127.0.0.1:")
-                || o.starts_with(b"tauri://") || o == b"http://tauri.localhost"
                 || o.ends_with(b".rootcx.com") || o == b"https://rootcx.com"
         }))
         .allow_methods(tower_http::cors::Any)

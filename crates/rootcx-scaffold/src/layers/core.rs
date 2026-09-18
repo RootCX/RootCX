@@ -5,6 +5,7 @@ const TPL_TSCONFIG: &str = include_str!("../../templates/scaffold/tsconfig.json"
 const TPL_MAIN_TSX: &str = include_str!("../../templates/scaffold/main.tsx");
 const TPL_GLOBALS_CSS: &str = include_str!("../../templates/scaffold/globals.css");
 const TPL_UTILS_TS: &str = include_str!("../../templates/scaffold/utils.ts");
+const TPL_COMPONENTS_JSON: &str = include_str!("../../templates/scaffold/components.json");
 
 pub struct CoreLayer;
 
@@ -33,15 +34,16 @@ impl Layer for CoreLayer {
   "type": "module",
   "scripts": {{ "dev": "vite", "build": "vite build" }},
   "dependencies": {{
-    "@rootcx/sdk": "^0.10.0",
-    "@rootcx/ui": "^0.8.0",
+    "@rootcx/sdk": "^0.19.0",
+    "@rootcx/ui": "^0.9.0",
     "@tabler/icons-react": "^3.30.0",
     "@tailwindcss/vite": "^4.0.0",
     "clsx": "^2.1.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-router-dom": "^7.0.0",
-    "tailwind-merge": "^2.5.0",
+    "tailwind-merge": "^3.0.0",
+    "sonner": "^2.0.8",
     "tailwindcss": "^4.0.0",
     "tw-animate-css": "^1.4.0"
   }},
@@ -89,12 +91,13 @@ export default defineConfig({{
             )
             .await?;
 
-            e.write(".gitignore", "node_modules/\ndist/\ntarget/\n.bundle/\n").await?;
+            e.write(".gitignore", "node_modules/\ndist/\n").await?;
 
             e.write("tsconfig.json", TPL_TSCONFIG).await?;
             e.write("src/main.tsx", TPL_MAIN_TSX).await?;
             e.write("src/globals.css", TPL_GLOBALS_CSS).await?;
             e.write("src/lib/utils.ts", TPL_UTILS_TS).await?;
+            e.write("components.json", TPL_COMPONENTS_JSON).await?;
 
             Ok(())
         })

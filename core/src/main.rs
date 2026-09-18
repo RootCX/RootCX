@@ -97,15 +97,6 @@ async fn main() {
             handle_service(args.get(2).map(String::as_str).unwrap_or("status"));
             return;
         }
-        Some("bundle") => {
-            let app_dir = args.get(2).map(PathBuf::from)
-                .unwrap_or_else(|| die("usage: rootcx-core bundle <app-dir>"));
-            match rootcx_platform::bundle::run(app_dir, &|msg| eprintln!("{msg}")) {
-                Ok(p) => eprintln!("[bundle] done → {}", p.display()),
-                Err(e) => die(e),
-            }
-            return;
-        }
         Some("pack-runtime") => {
             pack_runtime::run(
                 std::env::current_exe().unwrap_or_else(|e| die(e)),

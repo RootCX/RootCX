@@ -1,6 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { AuthGate, useRuntimeClient } from "@rootcx/sdk";
-import { Button, ChatScrollArea, Markdown } from "@rootcx/ui";
+import { Alert, AlertDescription, AlertTitle, Button, Textarea } from "@rootcx/ui";
+import { ChatScrollArea } from "@/components/chat/chat-scroll-area";
+import { Markdown } from "@/components/chat/markdown";
+import { cn } from "@/lib/utils";
+import { AuthForm, AuthLoading } from "@/components/auth-form";
 import { IconLogout, IconArrowUp, IconSquareFilled, IconChevronDown } from "@tabler/icons-react";
 
 const APP_ID = "__APP_ID__";
@@ -64,9 +68,13 @@ const TOOL_LABELS: Record<string, string> = {
   query_data: "Querying", mutate_data: "Saving",
   web_search: "Searching", web_fetch: "Fetching",
 };
+const TOOL_STATUS_CLASSES: Record<ToolActivity["status"], string> = {
+  running: "bg-warning animate-pulse",
+  completed: "bg-success",
+  error: "bg-destructive",
+};
 
 const FADE_MASK = "linear-gradient(to bottom, transparent 0%, black 12px, black calc(100% - 12px), transparent 100%)";
-const PERM_BTN = "h-8 rounded-lg text-xs";
 
 function toolTitle(tc: ToolActivity) {
   const label = TOOL_LABELS[tc.name] ?? tc.name;
@@ -77,7 +85,7 @@ function toolTitle(tc: ToolActivity) {
 
 export default function App() {
   return (
-    <AuthGate appTitle={APP_ID}>
+    <AuthGate appTitle={APP_ID} renderForm={(props) => <AuthForm {...props} />} renderLoading={AuthLoading}>
       {({ user, logout }) => <Chat user={user} onLogout={logout} />}
     </AuthGate>
   );
@@ -121,8 +129,8 @@ function Composer({
   useCinematicScroll(scrollRef, live, [liveTools.length, lastTool?.status]);
 
   return (
-    <div className={`mx-auto w-full max-w-3xl ${className ?? ""}`}>
-      <div className={`flex flex-col rounded-2xl border bg-card shadow-lg shadow-black/5 dark:shadow-black/20 transition-colors ${live ? "border-primary/30" : "border-border/60 focus-within:border-border"}`}>
+    <div className={cn("mx-auto w-full max-w-3xl", className)}>
+      <div className={cn("flex flex-col gap-3 rounded-xl border bg-card p-3 shadow-md transition-colors", live ? "border-ring" : "border-border")}>
         {live ? (
           <div
             ref={scrollRef}
@@ -132,18 +140,18 @@ function Composer({
             {liveTools.map((tool, i) => (
               <div
                 key={tool.id}
-                className={`px-5 py-1 text-xs truncate text-muted-foreground transition-opacity duration-700 ${
-                  tool.status === "completed" && i !== liveTools.length - 1 ? "opacity-40" : ""
-                }`}
+                className={cn("px-5 py-1 text-xs truncate text-muted-foreground transition-opacity duration-700",
+                  tool.status === "completed" && i !== liveTools.length - 1 && "opacity-40")}
               >
                 {toolTitle(tool)}
               </div>
             ))}
           </div>
         ) : (
-          <textarea
+          <Textarea
             rows={3}
-            className="w-full resize-none bg-transparent px-5 pt-4 pb-1 text-[14px] leading-relaxed text-foreground placeholder:text-muted-foreground/40 focus:outline-none"
+            className="resize-none"
+            aria-label="Message"
             placeholder={streaming ? "Thinking…" : "Ask anything…"}
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -153,24 +161,25 @@ function Composer({
             }}
           />
         )}
-        <div className="flex items-center justify-end px-3 pb-3">
+        <div className="flex items-center justify-end">
           {streaming ? (
-            <button
-              className="flex h-8 w-8 items-center justify-center rounded-full bg-muted text-foreground transition-colors hover:bg-muted-foreground/20"
+            <Button
+              size="icon"
+              variant="secondary"
+              aria-label="Stop response"
               onClick={onAbort}
             >
-              <IconSquareFilled className="h-3 w-3" />
-            </button>
+              <IconSquareFilled />
+            </Button>
           ) : (
-            <button
-              className={`flex h-8 w-8 items-center justify-center rounded-full transition-all ${
-                input.trim() ? "bg-primary text-primary-foreground hover:bg-primary/90" : "bg-muted text-muted-foreground/30"
-              }`}
+            <Button
+              size="icon"
+              aria-label="Send message"
               disabled={!input.trim()}
               onClick={onSubmit}
             >
-              <IconArrowUp className="h-4 w-4" />
-            </button>
+              <IconArrowUp />
+            </Button>
           )}
         </div>
       </div>
@@ -349,9 +358,9 @@ function Chat({ user, onLogout }: { user: { email: string }; onLogout: () => voi
           <div key={msg.id} className="w-full">
             {msg.content && <Markdown>{msg.content}</Markdown>}
             {msg.error && (
-              <div className="mt-2 rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-2.5 text-sm text-destructive/80">
-                {msg.error}
-              </div>
+              <Alert variant="destructive" className="mt-2">
+                <AlertDescription>{msg.error}</AlertDescription>
+              </Alert>
             )}
           </div>,
         );
@@ -359,7 +368,7 @@ function Chat({ user, onLogout }: { user: { email: string }; onLogout: () => voi
 
       if (msg.approvals.length > 0) {
         items.push(
-          <div key={`approvals-${msg.id}`} className="space-y-2">
+          <div key={`approvals-${msg.id}`} className="flex flex-col gap-2">
             {msg.approvals.map((a) => (
               <ApprovalCard key={a.approvalId} approval={a} onRespond={respondApproval} />
             ))}
@@ -377,7 +386,7 @@ function Chat({ user, onLogout }: { user: { email: string }; onLogout: () => voi
           <div className="flex w-full max-w-3xl flex-col items-center gap-8">
             <div className="flex flex-col items-center gap-3">
               <h1 className="text-2xl font-medium tracking-tight text-foreground/80">What can I help you with?</h1>
-              <p className="text-sm text-muted-foreground/50">Describe what you need. The agent will use its tools to get it done.</p>
+              <p className="text-sm text-muted-foreground">Describe what you need. The agent will use its tools to get it done.</p>
             </div>
             <Composer input={input} setInput={setInput} onSubmit={sendMessage} onAbort={abort} streaming={streaming} liveTools={[]} />
           </div>
@@ -389,7 +398,7 @@ function Chat({ user, onLogout }: { user: { email: string }; onLogout: () => voi
   return (
     <div className="flex h-[100dvh] flex-col bg-background text-foreground">
       <Header user={user} onLogout={onLogout} />
-      <ChatScrollArea className="flex-1" contentClassName="mx-auto w-full max-w-3xl space-y-5 px-4 py-4 sm:px-6 sm:py-6">
+      <ChatScrollArea className="flex-1" contentClassName="mx-auto flex w-full max-w-3xl flex-col gap-5 px-4 py-4 sm:px-6 sm:py-6">
         {items}
       </ChatScrollArea>
       <div className="shrink-0 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-2 sm:px-6 sm:pb-5">
@@ -405,12 +414,14 @@ function Header({ user, onLogout }: { user: { email: string }; onLogout: () => v
       <span className="text-sm font-semibold tracking-tight">{APP_ID}</span>
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <span>{user.email}</span>
-        <button
-          className="flex h-7 w-7 items-center justify-center rounded-lg text-muted-foreground/50 transition-colors hover:bg-muted hover:text-foreground"
+        <Button
+          size="icon-sm"
+          variant="toolbar"
+          aria-label="Sign out"
           onClick={onLogout}
         >
-          <IconLogout className="h-3.5 w-3.5" />
-        </button>
+          <IconLogout />
+        </Button>
       </div>
     </div>
   );
@@ -425,13 +436,13 @@ function MiniToolCard({ tools }: { tools: ToolActivity[] }) {
       <button
         type="button"
         onClick={() => setExpanded((e) => !e)}
-        className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs transition-colors ${
-          errored ? "text-destructive/60 hover:text-destructive/80" : "text-muted-foreground/50 hover:text-muted-foreground/70"
-        }`}
+        aria-expanded={expanded}
+        className={cn("flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs transition-colors",
+          errored ? "text-destructive" : "text-muted-foreground hover:text-foreground")}
       >
-        <span className={`h-1.5 w-1.5 rounded-full ${errored ? "bg-destructive" : "bg-emerald-500"}`} />
+        <span className={cn("size-1.5 rounded-full", errored ? "bg-destructive" : "bg-success")} />
         {tools.length} {tools.length === 1 ? "operation" : "operations"}
-        <IconChevronDown className={`h-3 w-3 transition-transform duration-200 ${expanded ? "rotate-180" : ""}`} />
+        <IconChevronDown className={cn("size-3 transition-transform duration-200", expanded && "rotate-180")} />
       </button>
       {expanded && (
         <div className="mt-1 max-h-[300px] overflow-y-auto rounded-xl border border-border/30 bg-card/50 py-0.5">
@@ -470,15 +481,13 @@ function ToolDetailView({ tool }: { tool: ToolActivity }) {
 
   return (
     <div>
-      <div className="px-3 py-1 text-xs truncate text-muted-foreground/60 flex items-center gap-2">
-        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-          tool.status === "running" ? "bg-yellow-500 animate-pulse" : tool.status === "completed" ? "bg-emerald-500" : "bg-destructive"
-        }`} />
+      <div className="px-3 py-1 text-xs truncate text-muted-foreground flex items-center gap-2">
+        <span className={cn("size-1.5 shrink-0 rounded-full", TOOL_STATUS_CLASSES[tool.status])} />
         {toolTitle(tool)}
-        {tool.durationMs != null && <span className="ml-auto text-muted-foreground/40">{tool.durationMs}ms</span>}
+        {tool.durationMs != null && <span className="ml-auto text-muted-foreground">{tool.durationMs}ms</span>}
       </div>
       {summary && (
-        <div className="mx-3 mb-1.5 rounded-lg bg-muted/50 px-3 py-2 text-[11px] font-mono text-muted-foreground/60">
+        <div className="mx-3 mb-1.5 rounded-lg bg-muted/50 px-3 py-2 text-[11px] font-mono text-muted-foreground">
           <div className="max-h-[120px] overflow-y-auto whitespace-pre-wrap break-all leading-relaxed truncate">{summary}</div>
         </div>
       )}
@@ -497,29 +506,28 @@ function ApprovalCard({
 
   if (resolved) {
     return (
-      <div className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs text-muted-foreground/50">
-        <span className={`h-1.5 w-1.5 rounded-full ${resolved === "approved" ? "bg-emerald-500" : "bg-destructive"}`} />
+      <div className="flex items-center gap-2 rounded-lg px-3 py-1.5 text-xs text-muted-foreground">
+        <span className={cn("size-1.5 rounded-full", resolved === "approved" ? "bg-success" : "bg-destructive")} />
         {approval.toolName} — {resolved}
       </div>
     );
   }
 
   return (
-    <div className="rounded-xl border border-yellow-500/20 bg-yellow-500/5 px-5 py-4">
-      <div className="mb-2 text-sm font-medium text-yellow-700 dark:text-yellow-200/90">
+    <Alert>
+      <AlertTitle>
         {approval.toolName}
-      </div>
+      </AlertTitle>
       {approval.reason && (
-        <div className="mb-2 text-xs text-muted-foreground/60">{approval.reason}</div>
+        <AlertDescription>{approval.reason}</AlertDescription>
       )}
-      <pre className="mb-3 max-h-[120px] overflow-auto rounded-lg bg-muted/50 px-3 py-2 font-mono text-[11px] text-muted-foreground/60">
+      <pre className="mb-3 max-h-[120px] overflow-auto rounded-lg bg-muted/50 px-3 py-2 font-mono text-[11px] text-muted-foreground">
         {stringify(approval.args)}
       </pre>
       <div className="flex gap-2">
         <Button
           size="sm"
           variant="outline"
-          className={`${PERM_BTN} border-yellow-500/20 hover:bg-yellow-500/10`}
           onClick={() => onRespond(approval.approvalId, true)}
         >
           Approve
@@ -527,12 +535,11 @@ function ApprovalCard({
         <Button
           size="sm"
           variant="ghost"
-          className={`${PERM_BTN} text-muted-foreground hover:text-foreground`}
           onClick={() => onRespond(approval.approvalId, false)}
         >
           Deny
         </Button>
       </div>
-    </div>
+    </Alert>
   );
 }

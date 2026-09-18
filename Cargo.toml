@@ -3,13 +3,10 @@ resolver = "2"
 members = [
     "core",
     "runtime/client",
-    "crates/browser",
-    "crates/forge",
     "crates/platform",
     "crates/rootcx-cli",
     "crates/rootcx-scaffold",
     "crates/shared-types",
-    "studio/src-tauri",
 ]
 
 [workspace.package]
@@ -40,8 +37,6 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 
 # Internal crates
-rootcx-forge = { path = "crates/forge" }
-rootcx-browser = { path = "crates/browser" }
 rootcx-core = { path = "core" }
 rootcx-platform = { path = "crates/platform" }
 rootcx-client = { path = "runtime/client" }

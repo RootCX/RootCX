@@ -6,7 +6,6 @@ COPY Cargo.toml Cargo.lock ./
 COPY core ./core
 COPY crates ./crates
 COPY runtime/client ./runtime/client
-COPY studio/src-tauri ./studio/src-tauri
 
 RUN cargo build --locked --release --package rootcx-core
 

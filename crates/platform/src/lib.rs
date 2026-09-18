@@ -1,5 +1,4 @@
 pub mod bin;
-pub mod bundle;
 pub mod dirs;
 pub mod env;
 pub mod fs;

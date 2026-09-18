@@ -3,15 +3,6 @@ import { useRuntimeClient } from "../components/RuntimeProvider";
 import type { IntegrationConnection } from "../client";
 
 async function openExternal(url: string): Promise<boolean> {
-  const t = (window as any).__TAURI_INTERNALS__;
-  if (t?.invoke) {
-    try {
-      await t.invoke("plugin:shell|open", { path: url });
-      return true;
-    } catch (e) {
-      console.warn("[useIntegration] Tauri shell open failed:", e);
-    }
-  }
   const w = window.open(url, "_blank");
   return w !== null;
 }

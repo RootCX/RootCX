@@ -107,21 +107,3 @@ pub async fn fetch_default_llm(pool: &sqlx::PgPool) -> Result<Option<(String, St
     )
     .fetch_optional(pool).await
 }
-
-pub async fn get_forge_model(
-    _identity: Identity,
-    State(rt): State<SharedRuntime>,
-) -> Result<Json<JsonValue>, ApiError> {
-    let pool = pool(&rt);
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT provider, model FROM rootcx_system.llm_models WHERE is_default = TRUE LIMIT 1",
-    )
-    .fetch_optional(&pool).await.map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    let model_str = match row {
-        Some((ref provider, ref model)) if provider == "bedrock" => format!("amazon-bedrock/{model}"),
-        Some((provider, model)) => format!("{provider}/{model}"),
-        None => "anthropic/claude-sonnet-4-6".to_string(),
-    };
-    Ok(Json(serde_json::json!({ "model": model_str })))
-}

@@ -1,99 +1,99 @@
 ---
 name: rootcx-ui
-description: Building RootCX app frontends with @rootcx/ui components, Tailwind v4 styling, AppShell/Sidebar layout, forms, data tables, dark mode, and the AuthGate entry pattern. Load references/components.md for the full component catalogue.
-version: 0.1.0
+description: Build RootCX app interfaces with the external RootCX UI theme, composable shadcn/Radix components and Tailwind CSS 4. Forms, navigation, status meanings and table behavior belong to each app.
 ---
 
 # RootCX UI & Styling
 
-Stack: **Tailwind CSS v4** + **`@rootcx/ui`** (pre-configured).
+Stack: React 19, Tailwind CSS v4, shadcn/ui with Radix, Tabler icons.
+`@rootcx/ui` is published from the separate `rootcx-ui` repository and distributes its components and light theme.
 
-## Rules
+Before editing a generated app, check `package.json` and `src/globals.css`.
+This scaffold requires `@rootcx/ui` 0.9 and `@rootcx/sdk` 0.19. An older CLI can
+still generate the previous dependencies and theme. Use the updated scaffold and
+verify that the required releases are published; a local package archive only
+verifies local development. Do not fall back to the old UI or copy its theme.
 
-- Import all UI from `@rootcx/ui` — never duplicate library components
-- `cn()` from `@/lib/utils` for conditional classes — never string concatenation
-- Tailwind utilities for layout/spacing — never inline `style={{}}`
-- Icons: `@tabler/icons-react`
-- Custom components in `src/components/` only when `@rootcx/ui` doesn't cover the need
-- Prefer semantic color tokens (`bg-background`, `text-foreground`, `bg-card`, `border-border`, `text-muted-foreground`, `bg-accent`, `bg-primary`) over hardcoded colors. Avoid `dark:` prefix — CSS variables switch automatically.
-- Dark mode: `ThemeProvider` wraps app in `main.tsx` (scaffold does this). Use `useTheme()` for toggle: `const { theme, setTheme } = useTheme()`. Values: `"dark"`, `"light"`, `"system"`.
+## Theme and components
 
-## Imports
+- The scaffold imports `@rootcx/ui/theme.css` in `src/globals.css`. This includes
+  Tailwind, animations, Inter, the theme, and source detection for package components.
+- Keep the supplied theme's typography, colors, materials, sizes and variants.
+  Use semantic tokens (`bg-background`, `text-foreground`, `border-border`,
+  `text-muted-foreground`) and Tailwind for layout.
+- There is no `ThemeProvider`, `useTheme`, or dark mode in this theme.
+- Use the themed components from `@rootcx/ui`, or individual entry points such as
+  `@rootcx/ui/components/button`. These are composable shadcn components, not an
+  application framework.
+- Create application-specific components in `src/components/`. The application owns
+  routes, page composition, form state and validation, status meanings, data queries,
+  sorting, pagination, selection and actions.
+- `components.json` is configured for Radix Nova and Tabler. Additional shadcn
+  components can be installed into the app when needed. Use the existing theme and
+  check the generated component's styling; upstream defaults may need alignment
+  with the RootCX variants.
+- Use `cn()` from `@/lib/utils` for conditional classes.
+- `TooltipProvider` and `Toaster` are mounted in the generated entry point.
+  Import `toast` directly from `sonner`.
+
+## Composition
+
+See [UI components](./references/components.md) for the available building blocks.
 
 ```tsx
-import { Button, Input, Label, Card, CardHeader, CardTitle, CardContent, CardDescription,
-  Badge, Select, SelectTrigger, SelectContent, SelectItem, SelectValue,
-  Dialog, DialogContent, DialogHeader, DialogFooter, DialogTitle, DialogDescription,
-  Tabs, TabsList, TabsTrigger, TabsContent,
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-  Separator, ScrollArea, Tooltip, TooltipTrigger, TooltipContent, TooltipProvider,
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
-  Popover, PopoverTrigger, PopoverContent,
-  Switch, Textarea,
-  AppShell, AppShellSidebar, AppShellMain,
-  Sidebar, SidebarItem, SidebarSection,
-  PageHeader, DataTable, FormDialog, StatusBadge, EmptyState,
-  KPICard, FormField, SearchInput, FilterBar,
-  LoadingState, ErrorState, ConfirmDialog,
-  toast, Toaster,
-  ThemeProvider, useTheme,
+import {
+  Badge, Button,
+  Dialog, DialogContent, DialogHeader, DialogTitle,
+  Field, FieldGroup, FieldLabel, FieldError, Input,
 } from "@rootcx/ui";
-import { IconPlus, IconTrash, IconEdit } from "@tabler/icons-react";
-import { cn } from "@/lib/utils";
-import { AuthGate } from "@rootcx/sdk";
-import type { ColumnDef } from "@tanstack/react-table";
+import { toast } from "sonner";
 ```
 
----
+Build forms with `FieldGroup`, `Field`, a label and the appropriate input. Put them
+inside `Dialog` when needed. The app implements validation and submission; there is
+no field-schema renderer. Set `data-invalid` on `Field`, and `aria-invalid` on the
+control, and associate help/errors with the control.
 
-## Component catalogue
+Choose `Badge` variants explicitly according to the app's semantics; no component
+infers a color from a status string.
 
-See `references/components.md` for the full tables of primitives, layout, data, forms, and feedback components. Load it when you need exact prop signatures.
+Build tables with `Table`, `TableHeader`, `TableBody`, `TableRow`, `TableHead` and
+`TableCell`. Add TanStack Table in the app when advanced sorting, pagination or
+selection is needed. There is no universal `DataTable` API.
 
----
-
-## DataTable usage
+Compose navigation with `SidebarProvider`, `Sidebar`, `SidebarHeader`,
+`SidebarContent`, `SidebarGroup`, `SidebarMenu`, `SidebarMenuItem`,
+`SidebarMenuButton`, `SidebarFooter`, `SidebarInset` and `SidebarTrigger`.
+This is one available layout, not a required application shell.
 
 ```tsx
-const columns: ColumnDef<T, unknown>[] = [
-  { accessorKey: "name", header: "Name" },
-  { accessorKey: "status", header: "Status", cell: ({ row }) => <StatusBadge status={row.original.status} /> },
-];
-
-<DataTable data={items} columns={columns} loading={loading} searchable selectable
-  rowCount={totalCount} onPaginationChange={({ pageIndex, pageSize }) => fetchPage(pageIndex, pageSize)}
-  onSortingChange={(s) => s[0] && fetchSorted(s[0].id, s[0].desc ? "desc" : "asc")}
-  rowActions={[
-    { label: "Edit", icon: <IconEdit className="h-4 w-4" />, onClick: (row) => edit(row) },
-    { label: "Delete", icon: <IconTrash className="h-4 w-4" />, onClick: (row) => remove(row.id), destructive: true },
-  ]}
-  bulkActions={[{ label: "Delete selected", onClick: (rows) => rows.forEach(r => remove(r.id)), destructive: true }]}
-  emptyState={<EmptyState title="No items" description="Add your first item" />}
-/>
+<SidebarMenuItem>
+  <SidebarMenuButton asChild isActive={pathname === "/contacts"}>
+    <NavLink to="/contacts"><IconUsers /><span>Contacts</span></NavLink>
+  </SidebarMenuButton>
+</SidebarMenuItem>
 ```
 
-## App entry pattern
+The design repository also provides optional visual compositions (`Page`,
+`PageHeader`, `PageTitle`, `MetricCard`, `PropertyList`). They accept composed
+content; they do not manage data or dictate an app's workflow. In particular,
+`PageHeader` is a container, not the old `title`/`description` wrapper.
 
-```tsx
-<AuthGate appTitle="<Name>">
-  {({ user, logout }) => {
-    const { theme, setTheme } = useTheme();
-    return (
-      <AppShell>
-        <AppShellSidebar>
-          <Sidebar header={...} footer={...}>
-            <SidebarItem icon={...} label="..." active={...} onClick={...} />
-            <SidebarItem
-              icon={theme === "dark" ? <IconSun /> : <IconMoon />}
-              label={theme === "dark" ? "Light mode" : "Dark mode"}
-              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-            />
-          </Sidebar>
-        </AppShellSidebar>
-        <AppShellMain>{/* views */}</AppShellMain>
-        <Toaster />
-      </AppShell>
-    );
-  }}
-</AuthGate>
-```
+## Routing and runtime
+
+`BrowserRouter` in `main.tsx` uses `basename={import.meta.env.BASE_URL}` because apps
+are served under `/apps/<app_id>/`. Keep this basename. Use `react-router-dom` for
+navigation, `useParams()` for record pages and `useSearchParams()` for shareable
+filters, sort and pagination. Include a catch-all route.
+
+Keep runtime/authentication concerns in `@rootcx/sdk`: `RuntimeProvider`,
+`AuthGate`, data hooks and the runtime client. Call React hooks at the top level of
+components, not inside an `AuthGate` render callback.
+
+`AuthGate` in SDK 0.19 requires `renderForm`; it has no styled default form.
+Keep the generated `AuthForm` and `AuthLoading` slots. They compose
+`@rootcx/ui` components for login, registration, SSO and loading; authentication
+state, validation and submission remain in the SDK.
+
+Agent chat presentation and scrolling live in generated app-local components.
+They are editable application code, not exports from `@rootcx/ui`.

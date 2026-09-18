@@ -5,7 +5,6 @@ use serde_json::Value as JsonValue;
 pub struct OsStatus {
     pub runtime: RuntimeStatus,
     pub postgres: PostgresStatus,
-    pub forge: ForgeStatus,
 }
 
 impl OsStatus {
@@ -13,15 +12,8 @@ impl OsStatus {
         Self {
             runtime: RuntimeStatus { version: String::new(), state: ServiceState::Offline },
             postgres: PostgresStatus { state: ServiceState::Offline, port: None, data_dir: None },
-            forge: ForgeStatus { state: ServiceState::Offline, port: None },
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ForgeStatus {
-    pub state: ServiceState,
-    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

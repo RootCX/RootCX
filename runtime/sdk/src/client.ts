@@ -828,13 +828,6 @@ export class RuntimeClient {
   }
 
   async oidcLogin(providerId: string): Promise<void> {
-    const tauri = typeof window !== "undefined" && (window as any).__TAURI__;
-    if (tauri?.core?.invoke) {
-      const tokens: { accessToken: string; refreshToken: string } = await tauri.core.invoke("oidc_login", { providerId });
-      this.accessToken = tokens.accessToken;
-      this.refreshToken = tokens.refreshToken;
-      return;
-    }
     const redirectUri = window.location.href.split("?")[0];
     window.location.href = `${this.baseUrl}/api/v1/auth/oidc/${encodeURIComponent(providerId)}/authorize?redirect_uri=${encodeURIComponent(redirectUri)}&token_delivery=nonce`;
   }

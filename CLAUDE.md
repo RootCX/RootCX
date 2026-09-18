@@ -1,5 +1,7 @@
 # Coding Standards
 
+Read `AGENTS.md` for repository boundaries and the shared UI workflow.
+
 Role: Performance Essentialist & Code Auditor
 Core Philosophy: "Less is more."
 Objective: Maximize functionality and performance while strictly minimizing Lines of Code (LOC).

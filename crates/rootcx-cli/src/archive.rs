@@ -4,7 +4,7 @@ use flate2::write::GzEncoder;
 use std::path::Path;
 use walkdir::WalkDir;
 
-const EXCLUDE: &[&str] = &["node_modules", ".git", ".rootcx", "bun.lock", "src-tauri"];
+const EXCLUDE: &[&str] = &["node_modules", ".git", ".rootcx", "bun.lock"];
 
 pub fn pack_dir(root: &Path, rel: &Path) -> Result<Vec<u8>> {
     let full = root.join(rel);
@@ -70,10 +70,9 @@ mod tests {
         crate::testutil::touch_with(&root, "backend/.git/HEAD", "nope");
         crate::testutil::touch_with(&root, "backend/.rootcx/cache", "nope");
         crate::testutil::touch_with(&root, "backend/bun.lock", "nope");
-        crate::testutil::touch_with(&root, "backend/src-tauri/conf", "nope");
         let tar = pack_dir(&root, Path::new("backend")).unwrap();
         let files = entries(&tar);
-        for bad in ["node_modules", ".git", ".rootcx", "bun.lock", "src-tauri"] {
+        for bad in ["node_modules", ".git", ".rootcx", "bun.lock"] {
             assert!(!files.iter().any(|f| f.contains(bad)), "{bad} leaked: {files:?}");
         }
         assert!(files.contains("index.ts"));

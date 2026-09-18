@@ -3,6 +3,9 @@ use crate::types::{AnswerValue, Layer, LayerFuture, ScaffoldContext};
 
 const TPL_AGENT_APP: &str = include_str!("../../templates/scaffold/agent-app.tsx");
 const TPL_INDEX: &str = include_str!("../../templates/scaffold/agent/index.ts");
+const TPL_CHAT_SCROLL_AREA: &str =
+    include_str!("../../templates/scaffold/components/chat/chat-scroll-area.tsx");
+const TPL_MARKDOWN: &str = include_str!("../../templates/scaffold/components/chat/markdown.tsx");
 
 struct LlmConfig {
     import: &'static str,
@@ -105,6 +108,12 @@ impl Layer for AgentLayer {
             })).await?;
 
             e.write("src/App.tsx", &TPL_AGENT_APP.replace("__APP_ID__", &ctx.app_id)).await?;
+            e.write("src/components/auth-form.tsx", super::auth::TPL_AUTH_FORM).await?;
+            e.write("src/components/chat/chat-scroll-area.tsx", TPL_CHAT_SCROLL_AREA).await?;
+            e.write("src/components/chat/markdown.tsx", TPL_MARKDOWN).await?;
+            e.merge_json("package.json", &serde_json::json!({
+                "dependencies": { "react-markdown": "^10.1.0" }
+            })).await?;
 
             Ok(())
         })

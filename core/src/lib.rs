@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use auth::AuthConfig;
 use extensions::{RuntimeExtension, builtin_extensions};
-use rootcx_types::{ForgeStatus, OsStatus, PostgresStatus, RuntimeStatus, ServiceState};
+use rootcx_types::{OsStatus, PostgresStatus, RuntimeStatus, ServiceState};
 use mcp::McpManager;
 use scheduler::SchedulerHandle;
 use secrets::SecretManager;
@@ -267,7 +267,6 @@ impl ReadyRuntime {
                 port: None,
                 data_dir: None,
             },
-            forge: ForgeStatus { state: ServiceState::Offline, port: None },
         }
     }
 

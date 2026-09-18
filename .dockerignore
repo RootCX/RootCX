@@ -3,8 +3,6 @@ node_modules/
 .git/
 core/resources/bun
 core/resources/bun.exe
-studio/ui/
-runtime/ui/
 *.dmg
 *.app
 *.exe

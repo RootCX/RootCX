@@ -44,7 +44,7 @@ Apps require: `manifest.json` (data contract) + React code using `@rootcx/sdk` h
 
 ## Schema Sync
 
-On install/deploy, Core runs `CREATE SCHEMA IF NOT EXISTS` + `CREATE TABLE IF NOT EXISTS` for each entity in `dataContract`. Then `sync_schema` diffs DB vs manifest and auto-applies all changes (add/drop columns, alter types, nullability, defaults, check constraints). Studio shows a confirmation dialog before applying.
+On install/deploy, Core runs `CREATE SCHEMA IF NOT EXISTS` + `CREATE TABLE IF NOT EXISTS` for each entity in `dataContract`. Then `sync_schema` diffs DB vs manifest and auto-applies all changes (add/drop columns, alter types, nullability, defaults, check constraints). Review schema changes with the CLI before deployment.
 
 ### Manifest ↔ DB contract
 
@@ -160,152 +160,15 @@ When creating/updating, pass only user-defined fields.
 
 ## UI & Styling
 
-Stack: **Tailwind CSS v4** + **`@rootcx/ui`** (pre-configured).
+Use React 19, Tailwind CSS 4 and the composable shadcn/ui Radix components from
+`@rootcx/ui`. The separate `rootcx-ui` repository owns the package and theme.
+Import `@rootcx/ui/theme.css` once. The theme is light.
 
-### Rules
-
-- Import all UI from `@rootcx/ui` — never duplicate library components
-- `cn()` from `@/lib/utils` for conditional classes — never string concatenation
-- Tailwind utilities for layout/spacing — never inline `style={{}}`
-- Icons: `@tabler/icons-react`
-- Custom components in `src/components/` only when `@rootcx/ui` doesn't cover the need
-- Prefer semantic color tokens (`bg-background`, `text-foreground`, `bg-card`, `border-border`, `text-muted-foreground`, `bg-accent`, `bg-primary`) over hardcoded colors. Avoid `dark:` prefix — CSS variables switch automatically.
-- Dark mode: `ThemeProvider` wraps app in `main.tsx` (scaffold does this). Use `useTheme()` for toggle: `const { theme, setTheme } = useTheme()`. Values: `"dark"`, `"light"`, `"system"`.
-
-### Imports
-
-```tsx
-import { Button, Input, Label, Card, CardHeader, CardTitle, CardContent, CardDescription,
-  Badge, Select, SelectTrigger, SelectContent, SelectItem, SelectValue,
-  Dialog, DialogContent, DialogHeader, DialogFooter, DialogTitle, DialogDescription,
-  Tabs, TabsList, TabsTrigger, TabsContent,
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-  Separator, ScrollArea, Tooltip, TooltipTrigger, TooltipContent, TooltipProvider,
-  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger,
-  Popover, PopoverTrigger, PopoverContent,
-  Switch, Textarea,
-  AppShell, AppShellSidebar, AppShellMain,
-  Sidebar, SidebarItem, SidebarSection,
-  PageHeader, DataTable, FormDialog, StatusBadge, EmptyState,
-  KPICard, FormField, SearchInput, FilterBar,
-  LoadingState, ErrorState, ConfirmDialog,
-  toast, Toaster,
-  ThemeProvider, useTheme,
-} from "@rootcx/ui";
-import { IconPlus, IconTrash, IconEdit } from "@tabler/icons-react";
-import { cn } from "@/lib/utils";
-import { AuthGate } from "@rootcx/sdk";
-import type { ColumnDef } from "@tanstack/react-table";
-```
-
----
-
-## UI Components
-
-### Primitives
-
-| Component | Notes |
-|-----------|-------|
-| `Button` | variants: default/destructive/outline/secondary/ghost/link; sizes: default/sm/lg/icon |
-| `Input` | standard text input |
-| `Label` | Radix-accessible form label |
-| `Card` (+Header/Title/Description/Content) | card container |
-| `Badge` | variants: default/secondary/destructive/outline |
-| `Select` (+Trigger/Content/Item/Value) | Radix dropdown |
-| `Dialog` (+Content/Header/Footer/Title/Description) | modal |
-| `Tabs` (+List/Trigger/Content) | tab nav |
-| `Table` (+Header/Body/Row/Head/Cell) | styled HTML table |
-| `Separator` | divider |
-| `ScrollArea` | custom scrollbar |
-| `Tooltip` (+Trigger/Content/Provider) | hover tooltip |
-| `DropdownMenu` (+Trigger/Content/Item) | action menu |
-| `Popover` (+Trigger/Content) | floating panel |
-| `Switch` | toggle |
-| `Textarea` | multi-line input |
-
-### Layout
-
-| Component | Key props |
-|-----------|-----------|
-| `AppShell` | `defaultOpen`, `sidebarWidth` — wraps `AppShellSidebar` + `AppShellMain` |
-| `Sidebar` | `header`, `footer` |
-| `SidebarSection` | `title`, `collapsible`, `defaultOpen` |
-| `SidebarItem` | `icon`, `label`, `badge`, `active`, `onClick` |
-| `PageHeader` | `title`, `description`, `breadcrumbs`, `actions`, `onBack` |
-| `EmptyState` | `icon`, `title`, `description`, `action` |
-| `useSidebar()` | returns `{ open, setOpen, toggle }` |
-
-### Data
-
-| Component | Key props |
-|-----------|-----------|
-| `DataTable` | `data`, `columns` (ColumnDef[]), `loading`, `searchable`, `pageSize`, `rowCount`, `onPaginationChange(PaginationState)`, `onSortingChange(SortingState)`, `selectable`, `resizable`, `rowActions` [{label,icon,onClick,destructive}], `bulkActions`, `emptyState`, `onRowClick`. Server-side: pass `rowCount`+`onPaginationChange` for pagination, `onSortingChange` for sorting — tanstack `manualPagination`/`manualSorting` enabled automatically. Types `SortingState`, `PaginationState` re-exported from `@rootcx/ui`. |
-| `KPICard` | `label`, `value`, `trend`, `icon` |
-| `StatusBadge` | `status` — auto-colors: active→green, pending→yellow, error→red |
-
-### Forms
-
-| Component | Key props |
-|-----------|-----------|
-| `FormDialog` | `open`, `onOpenChange`, `title`, `description`, `fields` [{name,label,type,required,options}], `defaultValues`, `onSubmit`, `submitLabel`, `destructive` |
-| `FormField` | `field`, `value`, `onChange`, `error` |
-| `SearchInput` | `value`, `onChange`, `placeholder`, `debounceMs` |
-| `FilterBar` | `children` |
-
-### Feedback
-
-| Component | Usage |
-|-----------|-------|
-| `toast.success/error/info/warning()` | place `<Toaster />` at app root |
-| `ConfirmDialog` | destructive confirmation dialog |
-| `LoadingState` | `variant="spinner"` or `variant="skeleton"` |
-| `ErrorState` | error message + optional retry button |
-
-### DataTable usage
-
-```tsx
-const columns: ColumnDef<T, unknown>[] = [
-  { accessorKey: "name", header: "Name" },
-  { accessorKey: "status", header: "Status", cell: ({ row }) => <StatusBadge status={row.original.status} /> },
-];
-
-<DataTable data={items} columns={columns} loading={loading} searchable selectable
-  rowCount={totalCount} onPaginationChange={({ pageIndex, pageSize }) => fetchPage(pageIndex, pageSize)}
-  onSortingChange={(s) => s[0] && fetchSorted(s[0].id, s[0].desc ? "desc" : "asc")}
-  rowActions={[
-    { label: "Edit", icon: <IconEdit className="h-4 w-4" />, onClick: (row) => edit(row) },
-    { label: "Delete", icon: <IconTrash className="h-4 w-4" />, onClick: (row) => remove(row.id), destructive: true },
-  ]}
-  bulkActions={[{ label: "Delete selected", onClick: (rows) => rows.forEach(r => remove(r.id)), destructive: true }]}
-  emptyState={<EmptyState title="No items" description="Add your first item" />}
-/>
-```
-
-### App entry pattern
-
-```tsx
-<AuthGate appTitle="<Name>">
-  {({ user, logout }) => {
-    const { theme, setTheme } = useTheme();
-    return (
-      <AppShell>
-        <AppShellSidebar>
-          <Sidebar header={...} footer={...}>
-            <SidebarItem icon={...} label="..." active={...} onClick={...} />
-            <SidebarItem
-              icon={theme === "dark" ? <IconSun /> : <IconMoon />}
-              label={theme === "dark" ? "Light mode" : "Dark mode"}
-              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-            />
-          </Sidebar>
-        </AppShellSidebar>
-        <AppShellMain>{/* views */}</AppShellMain>
-        <Toaster />
-      </AppShell>
-    );
-  }}
-</AuthGate>
-```
+Read [RootCX UI](../skills/rootcx-ui/SKILL.md) and its
+[component catalogue](../skills/rootcx-ui/references/components.md) before
+building or changing app views. These are the canonical UI instructions.
+Apps own routes, form validation, status meanings, table behavior and chat views.
+Use the CLI scaffold and develop in your external editor or coding agent.
 
 ---
 
