@@ -74,7 +74,9 @@ impl Tool for MutateDataTool {
 
         let tbl = table(app, entity);
 
-        let begin = || enforcement::begin_app_tx(&ctx.pool, app, &state, Some(ctx.user_id), ctx.invoker_user_id, "agent_tool", enforcement::TIMEOUT_AGENT_TOOL_MS);
+        let begin = || enforcement::DataAccess::app(app, &state, "agent_tool", enforcement::TIMEOUT_AGENT_TOOL_MS)
+            .audited(enforcement::Audit { actor: Some(ctx.user_id), delegator: ctx.invoker_user_id })
+            .begin(&ctx.pool);
 
         match action {
             "create" => {

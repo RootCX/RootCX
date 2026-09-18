@@ -248,18 +248,12 @@ pub(crate) async fn execute(
             return Err("cross-app collection is not available".into());
         }
     };
-    let mut tx = match super::enforcement::begin_app_tx_with_invocation_and_cross_app(
-        pool,
-        provider_app,
-        &st,
-        &invocation,
-        audit_actor,
-        audit_delegator,
-        trigger_ref,
-        timeout_ms,
-        Some(&authority),
-    )
-    .await
+    let mut tx = match super::enforcement::DataAccess::app(provider_app, &st, trigger_ref, timeout_ms)
+        .invoked_by(&invocation)
+        .audited(super::enforcement::Audit { actor: audit_actor, delegator: audit_delegator })
+        .across_apps(Some(&authority))
+        .begin(pool)
+        .await
     {
         Ok(tx) => tx,
         Err(_) => {

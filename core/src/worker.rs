@@ -2166,16 +2166,15 @@ async fn collection_op(
     } else {
         (state.user_id, None)
     };
-    let mut tx = crate::governance::enforcement::begin_app_tx_with_invocation(
-        pool,
+    let mut tx = crate::governance::enforcement::DataAccess::app(
         app_id,
         &state,
-        invocation,
-        audit_actor,
-        audit_delegator,
         "collection",
         crate::governance::enforcement::TIMEOUT_INTERACTIVE_MS,
     )
+    .invoked_by(invocation)
+    .audited(crate::governance::enforcement::Audit { actor: audit_actor, delegator: audit_delegator })
+    .begin(pool)
     .await
     .map_err(|e| e.to_string())?;
     match collection_exec(&mut tx, &types, app_id, op, entity, data).await {

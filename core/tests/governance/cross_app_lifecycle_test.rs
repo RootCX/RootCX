@@ -378,17 +378,13 @@ async fn revoke_waits_for_governed_read_commit_and_rejects_saved_authority() {
         public_execution: None, approved_action: None,
     };
     let invocation = enforcement::InvocationContext::default();
-    let mut read = enforcement::begin_app_tx_with_invocation_and_cross_app(
-        rt.pool(),
-        "provider",
-        &state,
-        &invocation,
-        Some(actor),
-        None,
-        "concurrent_revoke_test",
-        enforcement::TIMEOUT_INTERACTIVE_MS,
-        Some(&saved),
+    let mut read = enforcement::DataAccess::app(
+        "provider", &state, "concurrent_revoke_test", enforcement::TIMEOUT_INTERACTIVE_MS,
     )
+        .invoked_by(&invocation)
+        .audited(enforcement::Audit { actor: Some(actor), delegator: None })
+        .across_apps(Some(&saved))
+        .begin(rt.pool())
     .await
     .unwrap();
     let read_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -454,17 +450,13 @@ async fn revoke_waits_for_governed_read_commit_and_rejects_saved_authority() {
     assert_eq!(revoked["version"], json!(saved.grant_version + 1));
 
     {
-        let stale = enforcement::begin_app_tx_with_invocation_and_cross_app(
-            rt.pool(),
-            "provider",
-            &state,
-            &invocation,
-            Some(actor),
-            None,
-            "stale_revoke_test",
-            enforcement::TIMEOUT_INTERACTIVE_MS,
-            Some(&saved),
+        let stale = enforcement::DataAccess::app(
+            "provider", &state, "stale_revoke_test", enforcement::TIMEOUT_INTERACTIVE_MS,
         )
+        .invoked_by(&invocation)
+        .audited(enforcement::Audit { actor: Some(actor), delegator: None })
+        .across_apps(Some(&saved))
+        .begin(rt.pool())
         .await;
         let error = match stale {
             Err(error) => error,
@@ -1115,17 +1107,13 @@ async fn governance_fixes_expiry_after_lock_wait_checks_fresh_database_time() {
         audit_delegator_id: None,
         public_execution: None, approved_action: None,
     };
-    let mut blocker = enforcement::begin_app_tx_with_invocation_and_cross_app(
-        rt.pool(),
-        "provider",
-        &state,
-        &enforcement::InvocationContext::default(),
-        Some(actor),
-        None,
-        "expiry_blocker",
-        enforcement::TIMEOUT_INTERACTIVE_MS,
-        Some(&authority),
+    let mut blocker = enforcement::DataAccess::app(
+        "provider", &state, "expiry_blocker", enforcement::TIMEOUT_INTERACTIVE_MS,
     )
+        .invoked_by(&enforcement::InvocationContext::default())
+        .audited(enforcement::Audit { actor: Some(actor), delegator: None })
+        .across_apps(Some(&authority))
+        .begin(rt.pool())
     .await
     .unwrap();
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
@@ -1140,17 +1128,13 @@ async fn governance_fixes_expiry_after_lock_wait_checks_fresh_database_time() {
 
     let pool = rt.pool().clone();
     let waiting = tokio::spawn(async move {
-        match enforcement::begin_app_tx_with_invocation_and_cross_app(
-            &pool,
-            "provider",
-            &state,
-            &enforcement::InvocationContext::default(),
-            Some(actor),
-            None,
-            "expiry_waiter",
-            enforcement::TIMEOUT_INTERACTIVE_MS,
-            Some(&authority),
+        match enforcement::DataAccess::app(
+            "provider", &state, "expiry_waiter", enforcement::TIMEOUT_INTERACTIVE_MS,
         )
+        .invoked_by(&enforcement::InvocationContext::default())
+        .audited(enforcement::Audit { actor: Some(actor), delegator: None })
+        .across_apps(Some(&authority))
+        .begin(&pool)
         .await
         {
             Ok(mut tx) => {

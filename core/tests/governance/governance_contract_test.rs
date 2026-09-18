@@ -1832,7 +1832,11 @@ async fn regression_agent_tool_delegated_context_blocks_excess_perms() {
         audit_delegator_id: Some(jean),
         public_execution: None, approved_action: None,
     };
-    let mut tx = rootcx_core::governance::enforcement::begin_app_tx(pool, "crm", &state, Some(jean), None, "test", rootcx_core::governance::enforcement::TIMEOUT_INTERACTIVE_MS)
+    let mut tx = rootcx_core::governance::enforcement::DataAccess::app(
+        "crm", &state, "test", rootcx_core::governance::enforcement::TIMEOUT_INTERACTIVE_MS,
+    )
+        .audited(rootcx_core::governance::enforcement::Audit { actor: Some(jean), delegator: None })
+        .begin(pool)
         .await.unwrap();
     let contacts: i64 = sqlx::query_scalar("SELECT count(*) FROM crm.contacts")
         .fetch_one(&mut *tx).await.unwrap();
@@ -1965,9 +1969,9 @@ async fn sql_proxy_timeout_kills_long_running_query() {
 
     // Use a 1-second timeout (minimum practical). pg_sleep(5) must be cancelled.
     let err_msg = {
-        let mut tx = rootcx_core::governance::enforcement::begin_app_tx(
-            rt.pool(), "crm", &state, Some(uid), None, "test", 1000,
-        ).await.unwrap();
+        let mut tx = rootcx_core::governance::enforcement::DataAccess::app("crm", &state, "test", 1000)
+        .audited(rootcx_core::governance::enforcement::Audit { actor: Some(uid), delegator: None })
+        .begin(rt.pool()).await.unwrap();
         let result = sqlx::query("SELECT pg_sleep(5)")
             .execute(&mut *tx).await;
         assert!(result.is_err(), "statement_timeout must cancel pg_sleep");

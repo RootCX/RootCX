@@ -6,7 +6,7 @@ use rootcx_core::governance::{
     cross_app::{authorize_cross_app_operation, authorize_cross_app_read},
     enforcement::{
         ContextState, InvocationContext, TIMEOUT_INTERACTIVE_MS,
-        begin_app_tx_with_invocation_and_cross_app,
+        Audit, DataAccess,
     },
 };
 use rootcx_core::tools::{Tool, ToolContext, query_data::QueryDataTool};
@@ -122,17 +122,11 @@ async fn delegated_grants_respect_task_scope_and_own_requires_an_owned_table() {
                 effective_perms: permissions.clone(),
                 ..ContextState::default()
             };
-            let mut tx = begin_app_tx_with_invocation_and_cross_app(
-                rt.pool(),
-                "provider",
-                &state,
-                &InvocationContext::default(),
-                principal,
-                None,
-                "delegation_test",
-                TIMEOUT_INTERACTIVE_MS,
-                Some(&authority),
-            )
+            let mut tx = DataAccess::app("provider", &state, "delegation_test", TIMEOUT_INTERACTIVE_MS)
+        .invoked_by(&InvocationContext::default())
+        .audited(Audit { actor: principal, delegator: None })
+        .across_apps(Some(&authority))
+        .begin(rt.pool())
             .await
             .unwrap();
             let count: i64 = sqlx::query_scalar(&format!("SELECT count(*) FROM provider.{entity}"))
@@ -326,17 +320,11 @@ async fn mutation_only_permissions_allow_returning_without_widening_ownership_or
                     label,
                     "stripped task scope" | "read is not mutation authority"
                 ) || (label == "own operation only" && entity == "unowned");
-                let mut tx = begin_app_tx_with_invocation_and_cross_app(
-                    rt.pool(),
-                    "provider",
-                    &state,
-                    &InvocationContext::default(),
-                    Some(uid),
-                    None,
-                    "crud_delegation_test",
-                    TIMEOUT_INTERACTIVE_MS,
-                    Some(&authority),
-                )
+                let mut tx = DataAccess::app("provider", &state, "crud_delegation_test", TIMEOUT_INTERACTIVE_MS)
+        .invoked_by(&InvocationContext::default())
+        .audited(Audit { actor: Some(uid), delegator: None })
+        .across_apps(Some(&authority))
+        .begin(rt.pool())
                 .await
                 .unwrap();
                 let sql = match action {
@@ -382,17 +370,11 @@ async fn mutation_only_permissions_allow_returning_without_widening_ownership_or
                     && matches!(action, "create" | "update")
                     && matches!(label, "grant only" | "own operation only")
                 {
-                    let mut tx = begin_app_tx_with_invocation_and_cross_app(
-                        rt.pool(),
-                        "provider",
-                        &state,
-                        &InvocationContext::default(),
-                        Some(uid),
-                        None,
-                        "crud_owner_check",
-                        TIMEOUT_INTERACTIVE_MS,
-                        Some(&authority),
-                    )
+                    let mut tx = DataAccess::app("provider", &state, "crud_owner_check", TIMEOUT_INTERACTIVE_MS)
+        .invoked_by(&InvocationContext::default())
+        .audited(Audit { actor: Some(uid), delegator: None })
+        .across_apps(Some(&authority))
+        .begin(rt.pool())
                     .await
                     .unwrap();
                     let sql = if action == "create" {

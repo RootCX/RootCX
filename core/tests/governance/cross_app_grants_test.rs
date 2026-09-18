@@ -330,17 +330,13 @@ async fn provider_ownership_remains_authoritative_for_a_cross_app_read() {
         audit_delegator_id: None,
         public_execution: None, approved_action: None,
     };
-    let mut tx = rootcx_core::governance::enforcement::begin_app_tx_with_invocation_and_cross_app(
-        rt.pool(),
-        "provider",
-        &state,
-        &rootcx_core::governance::enforcement::InvocationContext::default(),
-        Some(plain),
-        None,
-        "cross_app_test",
-        rootcx_core::governance::enforcement::TIMEOUT_INTERACTIVE_MS,
-        Some(&authority),
+    let mut tx = rootcx_core::governance::enforcement::DataAccess::app(
+        "provider", &state, "cross_app_test", rootcx_core::governance::enforcement::TIMEOUT_INTERACTIVE_MS,
     )
+        .invoked_by(&rootcx_core::governance::enforcement::InvocationContext::default())
+        .audited(rootcx_core::governance::enforcement::Audit { actor: Some(plain), delegator: None })
+        .across_apps(Some(&authority))
+        .begin(rt.pool())
     .await
     .unwrap();
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM provider.records")

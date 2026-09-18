@@ -41,15 +41,14 @@ async fn http_tx<'a>(
     identity: &Identity,
 ) -> Result<sqlx::Transaction<'a, sqlx::Postgres>, ApiError> {
     let (actor, delegator) = identity.actor_pair();
-    Ok(enforcement::begin_human_tx(
-        pool,
+    Ok(enforcement::DataAccess::human(
         app_id,
         &http_context(identity),
-        actor,
-        delegator,
         "api",
         enforcement::TIMEOUT_INTERACTIVE_MS,
     )
+    .audited(enforcement::Audit { actor, delegator })
+    .begin(pool)
     .await?)
 }
 
@@ -698,16 +697,10 @@ pub(crate) async fn bulk_insert(
         }
     }
 
-    let mut tx = enforcement::begin_app_tx(
-        pool,
-        app_id,
-        state,
-        actor_uid,
-        delegator_uid,
-        trigger_ref,
-        timeout_ms,
-    )
-    .await?;
+    let mut tx = enforcement::DataAccess::app(app_id, state, trigger_ref, timeout_ms)
+        .audited(enforcement::Audit { actor: actor_uid, delegator: delegator_uid })
+        .begin(pool)
+        .await?;
     let rows: Vec<(JsonValue,)> = query.fetch_all(&mut *tx).await?;
     tx.commit().await?;
     Ok(rows.into_iter().map(|(r,)| r).collect())

@@ -9,6 +9,7 @@ use crate::RuntimeError;
 
 mod admission;
 mod ownership;
+mod plan;
 mod policies;
 mod sharing;
 

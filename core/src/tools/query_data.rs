@@ -130,17 +130,11 @@ impl Tool for QueryDataTool {
         let types = field_type_map(&ctx.pool, app, entity)
             .await
             .map_err(|error| error.to_string())?;
-        let mut tx = enforcement::begin_app_tx(
-            &ctx.pool,
-            app,
-            &state,
-            Some(ctx.user_id),
-            ctx.invoker_user_id,
-            "agent_tool",
-            enforcement::TIMEOUT_AGENT_TOOL_MS,
-        )
-        .await
-        .map_err(|error| error.to_string())?;
+        let mut tx = enforcement::DataAccess::app(app, &state, "agent_tool", enforcement::TIMEOUT_AGENT_TOOL_MS)
+            .audited(enforcement::Audit { actor: Some(ctx.user_id), delegator: ctx.invoker_user_id })
+            .begin(&ctx.pool)
+            .await
+            .map_err(|error| error.to_string())?;
 
         let tbl = table(app, entity);
         // Keep the legacy local tool's permissive pagination normalization.
