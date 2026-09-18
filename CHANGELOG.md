@@ -8,11 +8,18 @@ Releases marked **Breaking** need the matching guide in
 
 ## Unreleased
 
+## 0.28.0 - 2026-09-18 - Breaking
+
+See [docs/migration-v028.md](docs/migration-v028.md). No runtime behavior
+changes and no tenant migration runs.
+
 - Removed the Studio desktop application, the embedded coding engine, and the
   browser crate. Development happens in external editors and coding agents
   through the CLI.
 - `@rootcx/ui` moved to its own repository and is consumed as a dependency.
 - `rootcx-client` dropped its `tauri` feature.
+- The row-access contract is planned as SQL statements before any of it is
+  applied, so a contract that cannot compile leaves the database untouched.
 
 ## 0.27.1 - 2026-09-17
 

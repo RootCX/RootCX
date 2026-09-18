@@ -3649,7 +3649,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-client"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
  "reqwest",
  "rootcx-types",
@@ -3660,7 +3660,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-core"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -3704,7 +3704,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-platform"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
  "libc",
  "thiserror 2.0.18",
@@ -3714,7 +3714,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-scaffold"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3723,7 +3723,7 @@ dependencies = [
 
 [[package]]
 name = "rootcx-types"
-version = "0.27.1"
+version = "0.28.0"
 dependencies = [
  "serde",
  "serde_json",

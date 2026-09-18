@@ -24,6 +24,7 @@ Read the guide for every version you cross. Breaking changes are listed in
 
 | Version | Guide |
 | --- | --- |
+| v0.28 | [migration-v028.md](migration-v028.md) |
 | v0.27 | [migration-v027.md](migration-v027.md) |
 | v0.22 | [migration-v022.md](migration-v022.md) |
 | v0.19 | [migration-v019.md](migration-v019.md) |
