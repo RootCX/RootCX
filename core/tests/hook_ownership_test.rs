@@ -53,7 +53,7 @@ async fn install_chained(rt: &harness::TestRuntime) {
 /// A user holding exactly `perms` — no inherited role, no admin.
 async fn user_with(rt: &harness::TestRuntime, email: &str, perms: &[&str]) -> (String, Uuid) {
     let pool = rt.pool();
-    let token = rt.register_and_login(email).await;
+    let token = rt.create_user(email).await;
     let uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = $1")
         .bind(email).fetch_one(pool).await.unwrap();
     sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1")

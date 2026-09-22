@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 /// Register a non-admin human and return their token + uid.
 async fn employee(rt: &harness::TestRuntime, email: &str) -> (String, Uuid) {
-    let tok = rt.register_and_login(email).await;
+    let tok = rt.create_user(email).await;
     let uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = $1")
         .bind(email).fetch_one(rt.pool()).await.unwrap();
     // Explicitly strip any admin role to prove this user is NOT a platform admin.

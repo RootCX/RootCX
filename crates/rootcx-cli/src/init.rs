@@ -1,8 +1,7 @@
 use anyhow::{Result, Context, bail};
 use std::path::Path;
-use std::time::Duration;
 
-use crate::{archive, bun, config, deploy, docker, logo, oidc};
+use crate::{archive, bun, config, deploy, docker, logo};
 
 fn cloud_url() -> String {
     std::env::var("ROOTCX_CLOUD_URL").unwrap_or_else(|_| "https://rootcx.com".into())
@@ -49,87 +48,23 @@ pub async fn run() -> Result<()> {
 }
 
 async fn setup_cloud() -> Result<(String, String, Option<String>)> {
-    let email: String = cliclack::input("Email").interact()?;
-    let password: String = cliclack::password("Password").mask('▪').interact()?;
-    let name = email.split('@').next().unwrap_or("user").to_string();
-    let website = cloud_url();
-
-    let http = reqwest::Client::builder().cookie_store(true).build()?;
-
-    let reg_resp = http.post(format!("{website}/api/auth/register"))
-        .json(&serde_json::json!({ "email": email, "password": password, "name": name }))
-        .send().await.context("register")?;
-    let is_new = reg_resp.status().is_success();
-
-    let csrf_resp = http.get(format!("{website}/api/auth/csrf"))
-        .send().await.context("csrf")?;
-    let csrf: serde_json::Value = csrf_resp.json().await?;
-    let csrf_token = csrf["csrfToken"].as_str().context("no csrfToken")?;
-
-    let login_resp = http.post(format!("{website}/api/auth/callback/credentials"))
-        .form(&[
-            ("email", email.as_str()),
-            ("password", password.as_str()),
-            ("csrfToken", csrf_token),
-            ("redirect", "false"),
-            ("json", "true"),
-        ])
-        .send().await.context("sign in")?;
-    if !login_resp.status().is_success() {
-        bail!("login failed: {}", login_resp.text().await.unwrap_or_default());
+    let url = format!("{}/app/projects", cloud_url().trim_end_matches('/'));
+    cliclack::log::step("Create or select your workspace in the browser")?;
+    if webbrowser::open(&url).is_err() {
+        cliclack::log::info(format!("Open {url}"))?;
     }
-
-    if is_new { cliclack::log::success("Account created")?; }
-    cliclack::log::success(format!("Logged in as {email}"))?;
-
-    let ws_name = name.to_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>();
-    let proj_resp = http.post(format!("{website}/api/projects"))
-        .json(&serde_json::json!({ "name": ws_name, "plan": "free" }))
-        .send().await.context("create project")?;
-    if !proj_resp.status().is_success() {
-        bail!("create project: {}", proj_resp.text().await.unwrap_or_default());
-    }
-    let project: serde_json::Value = proj_resp.json().await?;
-    let project_ref = project["ref"].as_str().context("no ref in response")?.to_string();
-
-    let sp = cliclack::spinner();
-    sp.start("Provisioning workspace (database, networking, DNS)... this may take a few minutes");
-    let api_url = poll_project(&http, &website, &project_ref).await?;
-    sp.stop("Workspace ready");
-
-    let mode_resp = reqwest::get(format!("{api_url}/api/v1/auth/mode"))
-        .await.context("Core unreachable")?;
-    let mode: serde_json::Value = mode_resp.json().await?;
-    let provider_id = mode["providers"].as_array()
-        .and_then(|p| p.first())
-        .and_then(|p| p["id"].as_str())
-        .context("Core has no OIDC provider")?;
-    let tokens = oidc::login(&api_url, provider_id).await?;
-
-    Ok((api_url, tokens.access_token, Some(tokens.refresh_token)))
+    let workspace: String = cliclack::input("Workspace URL")
+        .placeholder("https://your-workspace.rootcx.com")
+        .validate(|value: &String| validate_workspace_url(value))
+        .interact()?;
+    connect_workspace(&workspace).await
 }
 
-async fn poll_project(http: &reqwest::Client, website: &str, project_ref: &str) -> Result<String> {
-    for _ in 0..120 {
-        if let Ok(resp) = http.get(format!("{website}/api/projects")).send().await {
-            if resp.status().is_success() {
-                if let Ok(list) = resp.json::<Vec<serde_json::Value>>().await {
-                    if let Some(p) = list.iter().find(|p| p["ref"].as_str() == Some(project_ref)) {
-                        match p["status"].as_str() {
-                            Some("active") => {
-                                return p["apiUrl"].as_str()
-                                    .context("project active but no apiUrl").map(String::from);
-                            }
-                            Some("error") => bail!("workspace provisioning failed"),
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-        tokio::time::sleep(Duration::from_secs(3)).await;
-    }
-    bail!("provisioning timed out (6 min)")
+async fn connect_workspace(base: &str) -> Result<(String, String, Option<String>)> {
+    crate::auth::connect(base, None).await?;
+    let cfg = config::load()?;
+    let token = cfg.token.context("workspace authentication did not complete")?;
+    Ok((cfg.url, token, cfg.refresh_token))
 }
 
 async fn setup_selfhost() -> Result<(String, String, Option<String>)> {
@@ -146,36 +81,7 @@ async fn setup_selfhost() -> Result<(String, String, Option<String>)> {
     docker::start_core().await?;
     sp.stop(format!("Core running at {}", docker::LOCAL_URL));
 
-    let base = docker::LOCAL_URL;
-    let http = reqwest::Client::new();
-
-    let email: String = cliclack::input("Email").interact()?;
-    let password: String = cliclack::password("Password").mask('▪').interact()?;
-
-    let (is_new, access_token, refresh_token) = selfhost_auth(&http, base, &email, &password).await?;
-    if is_new { cliclack::log::success("Account created")?; }
-    cliclack::log::success(format!("Logged in as {email}"))?;
-    Ok((base.into(), access_token, Some(refresh_token)))
-}
-
-async fn selfhost_auth(http: &reqwest::Client, base: &str, email: &str, password: &str) -> Result<(bool, String, String)> {
-    let is_new = http.post(format!("{base}/api/v1/auth/register"))
-        .json(&serde_json::json!({ "email": email, "password": password }))
-        .send().await.context("register")?
-        .status().is_success();
-
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct LoginResp { access_token: String, refresh_token: String }
-
-    let resp = http.post(format!("{base}/api/v1/auth/login"))
-        .json(&serde_json::json!({ "email": email, "password": password }))
-        .send().await.context("login")?;
-    if !resp.status().is_success() {
-        bail!("Invalid email or password");
-    }
-    let r: LoginResp = resp.json().await?;
-    Ok((is_new, r.access_token, r.refresh_token))
+    connect_workspace(docker::LOCAL_URL).await
 }
 
 async fn try_existing_session() -> Option<(String, String, Option<String>)> {
@@ -191,6 +97,14 @@ fn validate_app_name(name: &str) -> Result<(), &'static str> {
         return Err("letters, numbers, _ or -");
     }
     Ok(())
+}
+
+fn validate_workspace_url(value: &str) -> Result<(), &'static str> {
+    match reqwest::Url::parse(value) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+            && url.username().is_empty() && url.password().is_none() => Ok(()),
+        _ => Err("Enter a workspace HTTP(S) URL"),
+    }
 }
 
 async fn scaffold(dir: &Path, name: &str) -> Result<()> {
@@ -230,9 +144,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn workspace_url_requires_http_without_embedded_credentials() {
+        for (input, valid) in [
+            ("https://kova.rootcx.com", true),
+            ("http://localhost:9100", true),
+            ("", false),
+            ("/app/projects", false),
+            ("not a URL", false),
+            ("javascript:alert(1)", false),
+            ("file:///tmp/core", false),
+            ("https://user:secret@kova.rootcx.com", false),
+        ] {
+            assert_eq!(validate_workspace_url(input).is_ok(), valid, "{input:?}");
+        }
+    }
+
     struct TestCore {
         base_url: String,
-        http: reqwest::Client,
         _container: ContainerAsync<GenericImage>,
         _tmp: tempfile::TempDir,
         _rt: Arc<rootcx_core::ReadyRuntime>,
@@ -274,44 +203,13 @@ mod tests {
             if http.get(format!("{base_url}/health")).send().await.is_ok() { break; }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        TestCore { base_url, http, _container: container, _tmp: tmp, _rt: rt }
-    }
-
-    #[tokio::test]
-    async fn selfhost_auth_new_user_registers_then_logs_in() {
-        let c = boot_core().await;
-        let (is_new, at, rt) = selfhost_auth(&c.http, &c.base_url, "new@test.local", "Str0ngPass1").await.unwrap();
-        assert!(is_new);
-        assert!(!at.is_empty());
-        assert!(!rt.is_empty());
-    }
-
-    #[tokio::test]
-    async fn selfhost_auth_existing_user_skips_register() {
-        let c = boot_core().await;
-        selfhost_auth(&c.http, &c.base_url, "twice@test.local", "Str0ngPass1").await.unwrap();
-        let (is_new, at, _) = selfhost_auth(&c.http, &c.base_url, "twice@test.local", "Str0ngPass1").await.unwrap();
-        assert!(!is_new);
-        assert!(!at.is_empty());
-    }
-
-    #[tokio::test]
-    async fn selfhost_auth_bad_password_fails() {
-        let c = boot_core().await;
-        selfhost_auth(&c.http, &c.base_url, "bad@test.local", "Str0ngPass1").await.unwrap();
-        let err = selfhost_auth(&c.http, &c.base_url, "bad@test.local", "WrongPass99").await.unwrap_err();
-        assert!(err.to_string().contains("Invalid email or password"), "got: {err}");
-    }
-
-    #[tokio::test]
-    async fn selfhost_auth_short_password_fails() {
-        let c = boot_core().await;
-        let err = selfhost_auth(&c.http, &c.base_url, "short@test.local", "abc").await.unwrap_err();
-        assert!(err.to_string().contains("Invalid email or password"), "got: {err}");
+        TestCore { base_url, _container: container, _tmp: tmp, _rt: rt }
     }
 
     async fn authed_client(c: &TestCore, email: &str) -> rootcx_client::RuntimeClient {
-        let (_, access, _) = selfhost_auth(&c.http, &c.base_url, email, "Str0ngPass1").await.unwrap();
+        let id = sqlx::query_scalar("INSERT INTO rootcx_system.users (email) VALUES ($1) RETURNING id")
+            .bind(email).fetch_one(c._rt.pool()).await.unwrap();
+        let access = rootcx_core::auth::jwt::encode_access(c._rt.auth_config(), id, email).unwrap();
         let client = rootcx_client::RuntimeClient::new(&c.base_url);
         client.set_token(Some(access));
         client

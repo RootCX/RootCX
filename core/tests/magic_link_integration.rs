@@ -42,7 +42,7 @@ async fn assign_role(rt: &TestRuntime, user_email: &str, role: &str) {
     .unwrap();
 }
 
-/// The first-user-admin conditional in /auth/register no-ops because
+/// First-user provisioning is already complete because
 /// seed_assistant claims it during boot. Tests bypass via direct SQL.
 async fn promote_harness_admin(rt: &TestRuntime) {
     assign_role(rt, "admin@test.local", "admin").await;
@@ -163,7 +163,7 @@ async fn consume_reuses_existing_user_by_email() {
     create_role_with_perms(&rt, "volunteer", &[]).await;
 
     // Pre-create the user
-    rt.post_unauthed("/api/v1/auth/register", &json!({"email": "existing@x.com", "password": "Str0ngPass1"})).await;
+    rt.create_user("existing@x.com").await;
     let (existing_id,): (uuid::Uuid,) = sqlx::query_as("SELECT id FROM rootcx_system.users WHERE email = $1")
         .bind("existing@x.com").fetch_one(rt.pool()).await.unwrap();
 
@@ -255,7 +255,7 @@ async fn generate_rejects_caller_without_auth_invite() {
     create_role_with_perms(&rt, "viewer", &["app:demo:read"]).await;
     create_role_with_perms(&rt, "volunteer", &[]).await;
 
-    let token = rt.register_and_login("nobody@x.com").await;
+    let token = rt.create_user("nobody@x.com").await;
     // Give them a non-admin role without auth.invite
     assign_role(&rt, "nobody@x.com", "viewer").await;
 
@@ -278,7 +278,7 @@ async fn generate_prevents_role_escalation_for_non_admin() {
     create_role_with_perms(&rt, "volunteer", &[]).await;
     create_role_with_perms(&rt, "manager", &["app:secret:*"]).await;
 
-    let token = rt.register_and_login("inviter@x.com").await;
+    let token = rt.create_user("inviter@x.com").await;
     assign_role(&rt, "inviter@x.com", "inviter").await;
     assign_role(&rt, "inviter@x.com", "volunteer").await;
 

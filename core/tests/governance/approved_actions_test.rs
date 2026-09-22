@@ -287,7 +287,7 @@ fn key(action: &str) -> String {
 }
 
 async fn actor(rt: &TestRuntime, name: &str) -> Actor {
-    let token = rt.register_and_login(&format!("{name}@support.test")).await;
+    let token = rt.create_user(&format!("{name}@support.test")).await;
     let (status, me) = rt
         .request_as(Method::GET, "/api/v1/auth/me", &token, None)
         .await;

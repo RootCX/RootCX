@@ -49,7 +49,7 @@ async fn http_rejects_agent_tools_after_auth_checks_but_executes_data_tools() {
     let rt = TestRuntime::boot().await;
     rt.install("tooldata", "contacts").await;
     let record = rt.create("tooldata", "contacts", &json!({"first_name": "Ada", "last_name": "L"})).await;
-    let restricted = rt.register_and_login("restricted-tools@test.local").await;
+    let restricted = rt.create_user("restricted-tools@test.local").await;
     sqlx::query(
         "DELETE FROM rootcx_system.rbac_assignments WHERE user_id = (
             SELECT id FROM rootcx_system.users WHERE email = 'restricted-tools@test.local'

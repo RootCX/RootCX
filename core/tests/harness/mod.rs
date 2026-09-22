@@ -89,24 +89,7 @@ impl TestRuntime {
         timing("http readiness", started);
         let started = Instant::now();
 
-        let creds = json!({"email":"admin@test.local","password":"Str0ngPass1"});
-        client
-            .post(format!("{base_url}/api/v1/auth/register"))
-            .json(&creds)
-            .send()
-            .await
-            .expect("register harness admin")
-            .error_for_status()
-            .expect("register harness admin status");
-        timing("admin registration", started);
-        let started = Instant::now();
-        let res = client
-            .post(format!("{base_url}/api/v1/auth/login"))
-            .json(&creds)
-            .send()
-            .await
-            .unwrap();
-        let body: Value = res.json().await.unwrap();
+        let body = fixture_session(&runtime, "admin@test.local").await;
         let token = body["accessToken"].as_str().unwrap().to_string();
 
         // The seeded assistant takes the first admin slot. This human fixture
@@ -283,22 +266,12 @@ impl TestRuntime {
         .await
     }
 
-    pub async fn register_and_login(&self, email: &str) -> String {
-        self.post_unauthed(
-            "/api/v1/auth/register",
-            &json!({"email": email, "password": "Str0ngPass1"}),
-        )
-        .await;
-        let (_, body) = self
-            .post_unauthed(
-                "/api/v1/auth/login",
-                &json!({"email": email, "password": "Str0ngPass1"}),
-            )
-            .await;
-        body["accessToken"]
-            .as_str()
-            .expect("login must return accessToken")
-            .to_string()
+    pub async fn create_user(&self, email: &str) -> String {
+        self.user_session(email).await["accessToken"].as_str().unwrap().to_string()
+    }
+
+    pub async fn user_session(&self, email: &str) -> Value {
+        fixture_session(&self.runtime, email).await
     }
 
     pub async fn request_as(
@@ -327,6 +300,23 @@ impl TestRuntime {
         self.runtime.shutdown().await;
         timing("shutdown", started);
     }
+}
+
+async fn fixture_session(runtime: &ReadyRuntime, email: &str) -> Value {
+    let user_id: uuid::Uuid = sqlx::query_scalar(
+        "INSERT INTO rootcx_system.users (email) VALUES ($1)
+         ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id",
+    ).bind(email).fetch_one(runtime.pool()).await.unwrap();
+    let session_id = uuid::Uuid::new_v4();
+    let config = runtime.auth_config();
+    sqlx::query("INSERT INTO rootcx_system.sessions (id, user_id, expires_at) VALUES ($1, $2, $3)")
+        .bind(session_id).bind(user_id).bind(chrono::Utc::now() + config.refresh_ttl)
+        .execute(runtime.pool()).await.unwrap();
+    json!({
+        "accessToken": rootcx_core::auth::jwt::encode_access(config, user_id, email).unwrap(),
+        "refreshToken": rootcx_core::auth::jwt::encode_refresh(config, user_id, session_id).unwrap(),
+        "expiresIn": config.access_ttl.as_secs(),
+    })
 }
 
 fn timing(phase: &str, started: Instant) {

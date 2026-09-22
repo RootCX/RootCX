@@ -276,7 +276,7 @@ async fn provider_ownership_remains_authoritative_for_a_cross_app_read() {
         }]
     }))
     .await;
-    let _ = rt.register_and_login("plain@t.local").await;
+    let _ = rt.create_user("plain@t.local").await;
     let plain: Uuid =
         sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'plain@t.local'")
             .fetch_one(rt.pool())
@@ -386,7 +386,7 @@ serve({ rpc: {
         "consumer", &harness::make_tar_gz(&[("index.ts", backend)]),
     ).await;
     assert_eq!(status, StatusCode::OK, "{deployed}");
-    let token = rt.register_and_login("consumer@test.local").await;
+    let token = rt.create_user("consumer@test.local").await;
     sqlx::query(
         "INSERT INTO rootcx_system.rbac_roles (name, permissions)
          VALUES ('consumer_only', ARRAY['app:consumer:invoke'])",

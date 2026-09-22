@@ -39,7 +39,7 @@ fn manifest(sensitive: bool) -> Value {
 async fn fixture(manifest: &Value) -> (TestRuntime, String) {
     let rt = TestRuntime::boot().await;
     rt.install_manifest(manifest).await;
-    let token = rt.register_and_login("sensitive-sql@test.local").await;
+    let token = rt.create_user("sensitive-sql@test.local").await;
     let user: Uuid = sqlx::query_scalar(
         "SELECT id FROM rootcx_system.users WHERE email = 'sensitive-sql@test.local'",
     )
@@ -606,7 +606,7 @@ async fn shared_sensitive_rows_revoke_without_hiding_the_subjects_own_safe_rows(
         ("outsider", "own"),
     ] {
         let email = format!("{label}@sensitive-sharing.test");
-        let token = rt.register_and_login(&email).await;
+        let token = rt.create_user(&email).await;
         let user: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = $1")
             .bind(&email)
             .fetch_one(rt.pool())

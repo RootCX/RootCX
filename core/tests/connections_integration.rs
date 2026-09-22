@@ -83,7 +83,7 @@ async fn connection_ownership_enforced() {
     let conn_id = create_connection(&rt, &rt.token, "test_integ", "User A account").await;
 
     // User B tries to delete it
-    let user_b_token = rt.register_and_login("userb@test.local").await;
+    let user_b_token = rt.create_user("userb@test.local").await;
     let (s, _) = rt.request_as(
         Method::DELETE,
         &format!("/api/v1/integrations/test_integ/connections/{conn_id}"),
@@ -222,7 +222,7 @@ async fn app_wide_binding_requires_manage_permission() {
     rt.install("shared_app", "items").await;
 
     // A non-admin user with their own connection, holding no elevated permission.
-    let user_b_token = rt.register_and_login("userb@test.local").await;
+    let user_b_token = rt.create_user("userb@test.local").await;
     let conn_b = create_connection(&rt, &user_b_token, "test_integ", "userb@example.com").await;
 
     // App-wide (shared) binding is refused without integration:<id>:manage.
@@ -283,7 +283,7 @@ async fn bind_rejects_connection_not_owned_by_caller() {
     let conn_a = create_connection(&rt, &rt.token, "test_integ", "admin account").await;
 
     // User B tries to bind their app using User A's connection
-    let user_b_token = rt.register_and_login("userb@test.local").await;
+    let user_b_token = rt.create_user("userb@test.local").await;
     let (s, body) = rt.request_as(
         Method::POST,
         "/api/v1/apps/my_app/integrations",

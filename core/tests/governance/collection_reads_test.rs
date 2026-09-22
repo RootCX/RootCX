@@ -30,7 +30,7 @@ async fn fixture() -> Fixture {
         }))
         .await;
     }
-    let token = rt.register_and_login("collection-reader@test.local").await;
+    let token = rt.create_user("collection-reader@test.local").await;
     let user: Uuid = sqlx::query_scalar(
         "SELECT id FROM rootcx_system.users WHERE email = 'collection-reader@test.local'",
     )

@@ -27,7 +27,7 @@ async fn install_owned(rt: &harness::TestRuntime) {
 
 async fn user_with(rt: &harness::TestRuntime, email: &str, perms: &[&str]) -> (String, Uuid) {
     let pool = rt.pool();
-    let token = rt.register_and_login(email).await;
+    let token = rt.create_user(email).await;
     let uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = $1")
         .bind(email).fetch_one(pool).await.unwrap();
     sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1")
@@ -812,7 +812,7 @@ async fn entity_link_owner_lets_a_caller_read_its_own_app_user_row() {
 
     // A caller with only .own sees its linked row, not another user's.
     let email = "ownprobe@test.local";
-    let token = rt.register_and_login(email).await;
+    let token = rt.create_user(email).await;
     let uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = $1")
         .bind(email).fetch_one(rt.pool()).await.unwrap();
     sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1")
@@ -830,7 +830,7 @@ async fn entity_link_owner_lets_a_caller_read_its_own_app_user_row() {
     // A second REAL core user: `entity_link -> core:users` earns a foreign key,
     // so a synthetic uuid is rejected before RLS is ever reached.
     let other_email = "otherprobe@test.local";
-    let _ = rt.register_and_login(other_email).await;
+    let _ = rt.create_user(other_email).await;
     let other: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = $1")
         .bind(other_email).fetch_one(rt.pool()).await.unwrap();
     for (label, owner) in [("mine", uid), ("theirs", other)] {

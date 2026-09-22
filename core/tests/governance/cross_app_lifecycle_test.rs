@@ -361,7 +361,7 @@ async fn revoke_waits_for_governed_read_commit_and_rejects_saved_authority() {
     )
     .await
     .unwrap();
-    rt.register_and_login("reader@test.local").await;
+    rt.create_user("reader@test.local").await;
     let actor: Uuid =
         sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'reader@test.local'")
             .fetch_one(rt.pool())
@@ -582,7 +582,7 @@ async fn cosmetic_manifest_updates_preserve_approved_authority_and_history() {
     let saved = cross_app::authorize_cross_app_read(
         rt.pool(), "consumer", "provider", "records", "list", &["name".into()],
     ).await.unwrap();
-    let editor_token = rt.register_and_login("cosmetic-editor@test.local").await;
+    let editor_token = rt.create_user("cosmetic-editor@test.local").await;
     let editor: Uuid = sqlx::query_scalar(
         "SELECT id FROM rootcx_system.users WHERE email = 'cosmetic-editor@test.local'",
     ).fetch_one(rt.pool()).await.unwrap();
@@ -1091,7 +1091,7 @@ async fn governance_fixes_expiry_after_lock_wait_checks_fresh_database_time() {
     )
     .await
     .unwrap();
-    rt.register_and_login("expiry-reader@test.local").await;
+    rt.create_user("expiry-reader@test.local").await;
     let actor: Uuid = sqlx::query_scalar(
         "SELECT id FROM rootcx_system.users WHERE email = 'expiry-reader@test.local'",
     )
@@ -1331,7 +1331,7 @@ async fn governance_fixes_uninstall_attributes_revocation_to_the_initiating_admi
         .await;
     assert_eq!(status, StatusCode::CREATED, "{grant}");
     let id = Uuid::parse_str(grant["id"].as_str().unwrap()).unwrap();
-    let token = rt.register_and_login("remover@test.local").await;
+    let token = rt.create_user("remover@test.local").await;
     let remover: Uuid =
         sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'remover@test.local'")
             .fetch_one(rt.pool())

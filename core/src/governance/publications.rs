@@ -606,7 +606,7 @@ async fn principal_tx(
     let valid: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM rootcx_system.users
          WHERE id = $1 AND kind = 'service' AND is_system
-           AND password_hash IS NULL AND disabled_at IS NULL)",
+           AND disabled_at IS NULL)",
     )
     .bind(id)
     .fetch_one(&mut **tx)

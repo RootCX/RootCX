@@ -26,7 +26,7 @@ async fn worker_crud_confines_ownership_fields_and_rolls_back_when_audit_fails()
             {"name": "secret", "type": "text", "sensitive": true}
         ]}]
     })).await;
-    let token = rt.register_and_login("writer@test.local").await;
+    let token = rt.create_user("writer@test.local").await;
     let uid: Uuid = sqlx::query_scalar(
         "SELECT id FROM rootcx_system.users WHERE email = 'writer@test.local'",
     ).fetch_one(rt.pool()).await.unwrap();

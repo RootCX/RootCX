@@ -27,7 +27,6 @@ pub(crate) async fn bootstrap_users_table(pool: &PgPool) -> Result<(), RuntimeEr
             id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             email          TEXT NOT NULL UNIQUE,
             display_name   TEXT,
-            password_hash  TEXT,
             is_system      BOOLEAN NOT NULL DEFAULT false,
             created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
             updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -86,8 +85,6 @@ impl RuntimeExtension for AuthExtension {
     fn routes(&self) -> Option<Router<SharedRuntime>> {
         Some(
             Router::new()
-                .route("/api/v1/auth/register", post(crate::routes::auth::register))
-                .route("/api/v1/auth/login", post(crate::routes::auth::login))
                 .route("/api/v1/auth/refresh", post(crate::routes::auth::refresh))
                 .route("/api/v1/auth/logout", post(crate::routes::auth::logout))
                 .route("/api/v1/auth/me", get(crate::routes::auth::me))

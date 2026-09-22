@@ -120,7 +120,7 @@ struct Fixture {
 
 async fn user(rt: &TestRuntime, name: &str) -> (String, Uuid) {
     let email = format!("{name}@assignment.test");
-    let token = rt.register_and_login(&email).await;
+    let token = rt.create_user(&email).await;
     let id: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = $1")
         .bind(email)
         .fetch_one(rt.pool())

@@ -92,7 +92,7 @@ components, not inside an `AuthGate` render callback.
 
 `AuthGate` in SDK 0.19 requires `renderForm`; it has no styled default form.
 Keep the generated `AuthForm` and `AuthLoading` slots. They compose
-`@rootcx/ui` components for login, registration, SSO and loading; authentication
+`@rootcx/ui` components for SSO selection, retry and loading; authentication
 state, validation and submission remain in the SDK.
 
 Agent chat presentation and scrolling live in generated app-local components.

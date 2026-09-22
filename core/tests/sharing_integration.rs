@@ -201,7 +201,7 @@ async fn revoke_only_works_for_creator() {
     let share_id = body["id"].as_str().unwrap();
 
     // Register another user
-    let other_token = rt.register_and_login("other@test.local").await;
+    let other_token = rt.create_user("other@test.local").await;
 
     // Other user tries to revoke → 404 (not 403, to avoid leaking share existence)
     let (s, _) = rt.request_as(
@@ -449,7 +449,7 @@ async fn share_dies_when_creator_loses_access() {
     let board_id = board["id"].as_str().unwrap();
 
     // A non-admin creator with just enough permission to read and share.
-    let creator_token = rt.register_and_login("creator@t.local").await;
+    let creator_token = rt.create_user("creator@t.local").await;
     let uid: uuid::Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'creator@t.local'")
         .fetch_one(rt.pool()).await.unwrap();
     sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, inherits, permissions) VALUES ('sharer', '{}', $1)")

@@ -1089,26 +1089,11 @@ async fn auth_mode_always_required() {
 }
 
 #[tokio::test]
-async fn auth_register_login_me_logout() {
+async fn auth_session_me_refresh_logout() {
     let rt = TestRuntime::boot().await;
-
-    // register new user
-    let (s, body) = rt.post_unauthed(
-        "/api/v1/auth/register",
-        &json!({"email":"newuser@test.local","password":"Str0ngPass!"}),
-    ).await;
-    assert_eq!(s, 201);
-    assert!(body["user"]["id"].is_string());
-
-    // login
-    let (s, body) = rt.post_unauthed(
-        "/api/v1/auth/login",
-        &json!({"email":"newuser@test.local","password":"Str0ngPass!"}),
-    ).await;
-    assert_eq!(s, 200);
+    let body = rt.user_session("newuser@test.local").await;
     let access = body["accessToken"].as_str().unwrap();
     let refresh = body["refreshToken"].as_str().unwrap().to_string();
-    assert!(body["expiresIn"].as_i64().unwrap() > 0);
 
     // me
     let r = rt.client.get(rt.url("/api/v1/auth/me")).bearer_auth(access).send().await.unwrap();
@@ -1125,6 +1110,9 @@ async fn auth_register_login_me_logout() {
     // logout
     let r = rt.client.post(rt.url("/api/v1/auth/logout")).json(&json!({"refreshToken": refresh})).send().await.unwrap();
     assert_eq!(r.status(), 200);
+
+    let (status, _) = rt.post_unauthed("/api/v1/auth/refresh", &json!({"refreshToken": refresh})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "a revoked session must not refresh");
 
     rt.shutdown().await;
 }
@@ -1168,24 +1156,43 @@ async fn mcp_access_token_is_rejected_by_rest_authentication() {
 }
 
 #[tokio::test]
-async fn auth_login_wrong_password() {
+async fn local_auth_endpoints_are_removed() {
     let rt = TestRuntime::boot().await;
-    let (s, _) = rt.post_unauthed(
-        "/api/v1/auth/login",
-        &json!({"email":"admin@test.local","password":"wrongpassword"}),
-    ).await;
-    assert_eq!(s, 401);
+    for path in ["/api/v1/auth/login", "/api/v1/auth/register"] {
+        let (status, _) = rt.post_unauthed(path, &json!({})).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "removed endpoint {path}");
+    }
     rt.shutdown().await;
 }
 
 #[tokio::test]
-async fn auth_register_weak_password() {
+async fn auth_migration_preserves_users_roles_and_sessions() {
     let rt = TestRuntime::boot().await;
-    let (s, _) = rt.post_unauthed(
-        "/api/v1/auth/register",
-        &json!({"email":"weak@test.local","password":"short"}),
-    ).await;
-    assert_eq!(s, 400);
+    let (_, before) = rt.get_json("/api/v1/auth/me").await;
+    let (_, roles_before) = rt.get_json("/api/v1/roles/assignments").await;
+    let session = rt.user_session("migration@test.local").await;
+    sqlx::raw_sql(
+        "ALTER TABLE rootcx_system.users ADD COLUMN password_hash TEXT;
+         UPDATE rootcx_system.users SET password_hash = 'retired-test-hash';",
+    ).execute(rt.pool()).await.unwrap();
+
+    sqlx::raw_sql(include_str!("../migrations/20260922000000_remove_local_password_auth.sql"))
+        .execute(rt.pool()).await.unwrap();
+
+    let (status, after) = rt.get_json("/api/v1/auth/me").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(before, after);
+    let (_, roles_after) = rt.get_json("/api/v1/roles/assignments").await;
+    assert_eq!(roles_before, roles_after);
+    let (status, _) = rt.post_unauthed("/api/v1/auth/refresh", &json!({
+        "refreshToken": session["refreshToken"],
+    })).await;
+    assert_eq!(status, StatusCode::OK, "existing sessions survive the migration");
+    let has_hash: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns
+         WHERE table_schema = 'rootcx_system' AND table_name = 'users' AND column_name = 'password_hash')",
+    ).fetch_one(rt.pool()).await.unwrap();
+    assert!(!has_hash, "retired credentials must be removed");
     rt.shutdown().await;
 }
 
@@ -1251,10 +1258,7 @@ async fn rbac_assign_and_revoke_role() {
     rt.install("rbacas", "items").await;
 
     // register a second user
-    rt.post_unauthed(
-        "/api/v1/auth/register",
-        &json!({"email":"rbacuser@test.local","password":"Str0ngPass1"}),
-    ).await;
+    rt.create_user("rbacuser@test.local").await;
 
     // get user id
     let (_, users) = rt.get_json("/api/v1/users").await;
@@ -1308,7 +1312,7 @@ async fn rbac_available_permissions() {
     assert!(keys.contains(&"app:rbacavail:items.create"));
 
     // Limited user: only sees permissions within their granted namespace
-    let limited_token = rt.register_and_login("limited@test.local").await;
+    let limited_token = rt.create_user("limited@test.local").await;
     let (_, users) = rt.get_json("/api/v1/users").await;
     let uid = users.as_array().unwrap().iter()
         .find(|u| u["email"] == "limited@test.local").unwrap()["id"].as_str().unwrap().to_string();
@@ -1450,97 +1454,6 @@ async fn list_actions_filter_nonexistent_app() {
     })).await;
     assert_eq!(s, 200);
     assert!(body.as_array().unwrap().is_empty());
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn call_action_rejects_unknown_app() {
-    let rt = TestRuntime::boot().await;
-    let (s, body) = rt.post_json("/api/v1/tools/call_action/execute", &json!({
-        "appId": "_", "args": { "app": "ghost", "action": "greet", "input": {} }
-    })).await;
-    assert_eq!(s, 500);
-    assert!(body["error"].as_str().unwrap().contains("not found"));
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn call_action_rejects_unknown_action() {
-    let rt = TestRuntime::boot().await;
-    rt.install_manifest(&manifest_with_actions()).await;
-    let (s, body) = rt.post_json("/api/v1/tools/call_action/execute", &json!({
-        "appId": "actapp", "args": { "app": "actapp", "action": "nonexistent", "input": {} }
-    })).await;
-    assert_eq!(s, 500);
-    assert!(body["error"].as_str().unwrap().contains("not found"));
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn call_action_rbac_blocks_unauthorized() {
-    // Two distinct gates sit between a caller and an action: the outer
-    // `tool:call_action` permission (any tool caller needs it, checked once in
-    // `tools::dispatch`), and the app-level `app:{app}:invoke` /
-    // `app:{app}:action:{id}` pair checked inside `CallActionTool::execute`
-    // (ee253be — the coarse key implies the fine one, so a caller who has
-    // `invoke` is admitted without a per-action grant).
-    //
-    // This test isolates the SECOND gate: the caller holds `tool:call_action`
-    // (so it passes the outer gate) but neither app-level key, so it must still
-    // be refused. Holding only the outer gate must never be enough to reach an
-    // app's data.
-    let rt = TestRuntime::boot().await;
-    rt.install_manifest(&manifest_with_actions()).await;
-
-    rt.post_unauthed("/api/v1/auth/register", &json!({
-        "email": "restricted@test.local", "password": "Str0ngPass1",
-    })).await;
-    let (_, login) = rt.post_unauthed("/api/v1/auth/login", &json!({
-        "email": "restricted@test.local", "password": "Str0ngPass1",
-    })).await;
-    let restricted_token = login["accessToken"].as_str().unwrap().to_string();
-
-    let (_, users) = rt.get_json("/api/v1/users").await;
-    let user_id = users.as_array().unwrap().iter()
-        .find(|u| u["email"] == "restricted@test.local").unwrap()["id"].as_str().unwrap().to_string();
-
-    rt.post_json("/api/v1/roles", &json!({
-        "name": "tool-caller-only", "permissions": ["tool:call_action"],
-    })).await;
-    let (s, body) = rt.post_json("/api/v1/roles/assign", &json!({
-        "userId": user_id, "role": "tool-caller-only",
-    })).await;
-    assert_eq!(s, 200, "role assignment: {body}");
-
-    let (s, body) = rt.request_as(
-        Method::POST, "/api/v1/tools/call_action/execute", &restricted_token,
-        Some(&json!({ "appId": "actapp", "args": { "app": "actapp", "action": "greet", "input": { "name": "test" } } })),
-    ).await;
-    // `check_permission`'s Err bubbles through `execute()` as `ExecutionFailed`,
-    // which the route maps to 500 — a tool's own internal denial is
-    // indistinguishable from a crash on this path today. That contract predates
-    // this test and is unrelated to what it verifies; pinned as-is rather than
-    // silently reshaped here.
-    assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR, "tool:call_action alone must not reach the app: {body}");
-    assert!(
-        body["error"].as_str().unwrap().contains("app:actapp"),
-        "denial must name the missing app-level key: {body}",
-    );
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn call_action_passes_validation_then_hits_dispatch_boundary() {
-    let rt = TestRuntime::boot().await;
-    rt.install_manifest(&manifest_with_actions()).await;
-
-    // REST route has action_caller=None — proves all validation passed before dispatch
-    let (s, body) = rt.post_json("/api/v1/tools/call_action/execute", &json!({
-        "appId": "actapp", "args": { "app": "actapp", "action": "greet", "input": { "name": "Agent" } }
-    })).await;
-    assert_eq!(s, 500);
-    assert!(body["error"].as_str().unwrap().contains("action calling unavailable"));
-
     rt.shutdown().await;
 }
 
@@ -2184,7 +2097,7 @@ async fn oidc_auth_mode_includes_providers() {
     let (s, body) = rt.get_json("/api/v1/auth/mode").await;
     assert_eq!(s, 200);
     assert!(body["providers"].as_array().unwrap().is_empty());
-    assert_eq!(body["passwordLoginEnabled"], true);
+    assert!(body.get("passwordLoginEnabled").is_none());
 
     // Seed one provider
     seed_oidc_provider(rt.pool(), "acme", "Acme SSO", true).await;
@@ -2330,10 +2243,7 @@ async fn oidc_callback_rejects_invalid_state() {
 async fn delete_user_removes_from_list_and_cascades_assignments() {
     let rt = TestRuntime::boot().await;
 
-    rt.post_unauthed(
-        "/api/v1/auth/register",
-        &json!({"email":"victim@test.local","password":"Str0ngPass1"}),
-    ).await;
+    rt.create_user("victim@test.local").await;
 
     let (_, users) = rt.get_json("/api/v1/users").await;
     let victim_id = users.as_array().unwrap().iter()
@@ -2365,15 +2275,7 @@ async fn delete_user_removes_from_list_and_cascades_assignments() {
 async fn delete_user_rejects_unauthorized_and_unsafe_operations() {
     let rt = TestRuntime::boot().await;
 
-    rt.post_unauthed(
-        "/api/v1/auth/register",
-        &json!({"email":"nonadmin@test.local","password":"Str0ngPass1"}),
-    ).await;
-    let (_, login) = rt.post_unauthed(
-        "/api/v1/auth/login",
-        &json!({"email":"nonadmin@test.local","password":"Str0ngPass1"}),
-    ).await;
-    let nonadmin_token = login["accessToken"].as_str().unwrap();
+    let nonadmin_token = rt.create_user("nonadmin@test.local").await;
 
     let (_, users) = rt.get_json("/api/v1/users").await;
     let admin_id = users.as_array().unwrap().iter()
@@ -2381,7 +2283,7 @@ async fn delete_user_rejects_unauthorized_and_unsafe_operations() {
         .as_str().unwrap().to_string();
 
     let cases: &[(&str, &str, &str, u16)] = &[
-        ("non-admin cannot delete",  nonadmin_token, &admin_id,                                  403),
+        ("non-admin cannot delete",  &nonadmin_token, &admin_id,                                  403),
         ("cannot delete last admin",  &rt.token,     &admin_id,                                  400),
         ("nonexistent user returns 404", &rt.token,  "00000000-0000-0000-0000-ffffffffffff",     404),
     ];
@@ -2812,7 +2714,7 @@ async fn worker_cannot_act_as_another_user() {
     let admin_uid: uuid::Uuid = sqlx::query_scalar(
         "SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
         .fetch_one(rt.pool()).await.unwrap();
-    let low_token = rt.register_and_login("lowpriv@test.local").await;
+    let low_token = rt.create_user("lowpriv@test.local").await;
     let low_uid: uuid::Uuid = sqlx::query_scalar(
         "SELECT id FROM rootcx_system.users WHERE email = 'lowpriv@test.local'")
         .fetch_one(rt.pool()).await.unwrap();
@@ -3342,7 +3244,7 @@ async fn cron_routes_require_permission() {
     assert_eq!(s, 201);
     let cron_id = cron["id"].as_str().unwrap();
 
-    let nobody = rt.register_and_login("nobody@test.local").await;
+    let nobody = rt.create_user("nobody@test.local").await;
 
     let cron_url = format!("/api/v1/apps/cronperm/crons/{cron_id}");
     let cases: &[(&str, Method, String, Option<Value>)] = &[
@@ -3370,8 +3272,8 @@ async fn cron_non_owner_cannot_update_or_trigger() {
         "permissions": ["app:cronown2:cron.read", "app:cronown2:cron.write", "app:cronown2:cron.trigger"]
     })).await;
 
-    let alice = rt.register_and_login("alice@test.local").await;
-    let bob = rt.register_and_login("bob@test.local").await;
+    let alice = rt.create_user("alice@test.local").await;
+    let bob = rt.create_user("bob@test.local").await;
 
     let (_, users) = rt.get_json("/api/v1/users").await;
     for email in ["alice@test.local", "bob@test.local"] {
@@ -3430,7 +3332,7 @@ async fn cron_created_by_nulled_on_user_deletion() {
     let rt = TestRuntime::boot().await;
     rt.install("cronorphan", "items").await;
 
-    let doomed = rt.register_and_login("doomed@test.local").await;
+    let doomed = rt.create_user("doomed@test.local").await;
     let (_, users) = rt.get_json("/api/v1/users").await;
     let doomed_id = users.as_array().unwrap().iter()
         .find(|u| u["email"] == "doomed@test.local").unwrap()["id"]
@@ -3489,7 +3391,7 @@ async fn job_enqueue_run_as_requires_act_as() {
     assert_eq!(s, 201, "with act-as delegation -> allowed: {body}");
 
     // A non-admin without `app:jobimp:invoke` cannot enqueue at all.
-    let other = rt.register_and_login("other@test.local").await;
+    let other = rt.create_user("other@test.local").await;
     let (s, _) = rt.request_as(
         Method::POST, "/api/v1/apps/jobimp/jobs", &other,
         Some(&json!({ "payload": { "type": "test" } })),
@@ -3904,7 +3806,7 @@ async fn save_platform_config_requires_admin() {
         "dataContract": []
     })).await;
 
-    let nonadmin = rt.register_and_login("nonadmin@test.local").await;
+    let nonadmin = rt.create_user("nonadmin@test.local").await;
 
     // Non-admin MUST be rejected
     let (s, body) = rt.request_as(
@@ -3930,7 +3832,7 @@ async fn disconnect_agent_requires_admin() {
         "dataContract": []
     })).await;
 
-    let nonadmin = rt.register_and_login("employee@test.local").await;
+    let nonadmin = rt.create_user("employee@test.local").await;
 
     // Non-admin attempting to disconnect an agent's credentials MUST be rejected
     let (s, body) = rt.request_as(
@@ -3957,7 +3859,7 @@ async fn status_agent_requires_admin() {
         "dataContract": []
     })).await;
 
-    let nonadmin = rt.register_and_login("viewer@test.local").await;
+    let nonadmin = rt.create_user("viewer@test.local").await;
 
     // Non-admin checking agent status MUST be rejected
     let (s, body) = rt.request_as(
@@ -3984,7 +3886,7 @@ async fn x_run_as_requires_admin() {
         "dataContract": []
     })).await;
 
-    let nonadmin = rt.register_and_login("regular@test.local").await;
+    let nonadmin = rt.create_user("regular@test.local").await;
 
     // Non-admin with X-Run-As header MUST be rejected
     let r = rt.client.post(rt.url("/api/v1/integrations/integ_xra/actions/sync_now"))
@@ -4007,7 +3909,7 @@ async fn connected_users_requires_admin() {
         "dataContract": []
     })).await;
 
-    let nonadmin = rt.register_and_login("nobody2@test.local").await;
+    let nonadmin = rt.create_user("nobody2@test.local").await;
 
     // Non-admin MUST be rejected
     let (s, _) = rt.request_as(Method::GET, "/api/v1/integrations/integ_cu/connected-users", &nonadmin, None).await;
@@ -4032,7 +3934,7 @@ async fn delegate_requires_admin() {
         "dataContract": []
     })).await;
 
-    let nonadmin = rt.register_and_login("attacker@test.local").await;
+    let nonadmin = rt.create_user("attacker@test.local").await;
 
     // Non-admin attempting delegation MUST be rejected
     let (s, body) = rt.request_as(

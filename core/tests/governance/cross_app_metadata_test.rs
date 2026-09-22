@@ -24,7 +24,7 @@ async fn human_metadata_uses_entity_permissions_instead_of_claimed_app_identity(
     }))
     .await;
     rt.install("unrelated", "hidden").await;
-    let token = rt.register_and_login("metadata@test.local").await;
+    let token = rt.create_user("metadata@test.local").await;
     let uid: uuid::Uuid = sqlx::query_scalar(
         "SELECT id FROM rootcx_system.users WHERE email = 'metadata@test.local'",
     )

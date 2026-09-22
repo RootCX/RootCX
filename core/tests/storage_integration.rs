@@ -634,7 +634,7 @@ async fn resumable_session_is_private_to_its_creator() {
     let upload_url = rt.url(&format!(
         "/api/v1/apps/private_files/storage/uploads/{upload_id}"
     ));
-    let other_token = rt.register_and_login("other@test.local").await;
+    let other_token = rt.create_user("other@test.local").await;
 
     let forbidden = rt
         .client

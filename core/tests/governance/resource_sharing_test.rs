@@ -126,7 +126,7 @@ struct Fixture {
 
 async fn scoped_user(rt: &TestRuntime, label: &str) -> (String, Uuid) {
     let email = format!("{label}@resource-sharing.test");
-    let token = rt.register_and_login(&email).await;
+    let token = rt.create_user(&email).await;
     let id: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = $1")
         .bind(email)
         .fetch_one(rt.pool())
@@ -941,7 +941,7 @@ async fn public_resource_revocation_removes_only_one_of_two_readers() {
         ("reader_a", "resource_reader", &reader_keys),
         ("reader_b", "resource_reader", &reader_keys),
     ] {
-        let token = rt.register_and_login(&format!("{label}@public-resource.test")).await;
+        let token = rt.create_user(&format!("{label}@public-resource.test")).await;
         let (status, me) = rt.request_as(Method::GET, "/api/v1/auth/me", &token, None).await;
         assert_eq!(status, StatusCode::OK, "{label}: {me}");
         let user = Uuid::parse_str(me["id"].as_str().unwrap()).unwrap();

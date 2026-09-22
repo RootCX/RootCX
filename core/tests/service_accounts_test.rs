@@ -59,7 +59,7 @@ async fn grant_perms(pool: &sqlx::PgPool, uid: Uuid, perms: &[&str]) {
 
 /// Register a human, log in, and give them exactly `perms`.
 async fn human_with(rt: &harness::TestRuntime, email: &str, perms: &[&str]) -> (String, Uuid) {
-    let tok = rt.register_and_login(email).await;
+    let tok = rt.create_user(email).await;
     let uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = $1")
         .bind(email).fetch_one(rt.pool()).await.unwrap();
     grant_perms(rt.pool(), uid, perms).await;
@@ -126,17 +126,6 @@ async fn disabled_sa_token_refused() {
     assert_eq!(s, StatusCode::OK);
 
     assert_eq!(token_status(&rt, sa, &key).await, StatusCode::UNAUTHORIZED, "disabled SA must not get a token");
-    rt.shutdown().await;
-}
-
-// ── No interactive login for non-humans ──────────────────────────────
-
-#[tokio::test]
-async fn sa_cannot_login_interactively() {
-    let rt = harness::TestRuntime::boot().await;
-    let (_, email) = create_sa(&rt, "loginless").await;
-    let (s, _) = rt.post_unauthed("/api/v1/auth/login", &json!({ "email": email, "password": "anything" })).await;
-    assert_eq!(s, StatusCode::UNAUTHORIZED, "service accounts have no interactive login");
     rt.shutdown().await;
 }
 

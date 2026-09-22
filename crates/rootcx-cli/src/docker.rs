@@ -25,6 +25,10 @@ const COMPOSE_YAML: &str = r#"services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://rootcx:rootcx@postgres:5432/rootcx
+      ROOTCX_PUBLIC_URL: http://localhost:9100
+      ROOTCX_OIDC_ISSUER: ${ROOTCX_OIDC_ISSUER:?Set your OIDC issuer}
+      ROOTCX_OIDC_CLIENT_ID: ${ROOTCX_OIDC_CLIENT_ID:?Set your OIDC client ID}
+      ROOTCX_OIDC_CLIENT_SECRET: ${ROOTCX_OIDC_CLIENT_SECRET:?Set your OIDC client secret}
     ports:
       - "9100:9100"
     volumes:
@@ -48,6 +52,12 @@ pub async fn check() -> bool {
 
 pub async fn start_core() -> Result<()> {
     if is_healthy(LOCAL_URL).await { return Ok(()); }
+
+    for name in ["ROOTCX_OIDC_ISSUER", "ROOTCX_OIDC_CLIENT_ID", "ROOTCX_OIDC_CLIENT_SECRET"] {
+        if std::env::var(name).map_or(true, |value| value.trim().is_empty()) {
+            bail!("Set {name} before starting a self-hosted Core. Register http://localhost:9100/api/v1/auth/oidc/callback with your identity provider.");
+        }
+    }
 
     let dir = std::env::temp_dir().join("rootcx-compose");
     std::fs::create_dir_all(&dir)?;

@@ -663,7 +663,7 @@ async fn find_or_create_user(
         return Ok(user_id);
     }
 
-    // 2. Try linking existing user by email (one-time migration from password to OIDC)
+    // 2. Link a provisioned identity by email
     let by_email: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM rootcx_system.users WHERE email = $1 AND oidc_provider IS NULL",
     )
@@ -870,33 +870,5 @@ mod tests {
         assert!(result.is_err(), "invalid JSON should return Err");
     }
 
-    // ── password_login_disabled ────────────────────────────────────────
 
-    #[test]
-    fn password_login_disabled_checks_env() {
-        use crate::routes::auth::password_login_disabled;
-
-        unsafe {
-            // Baseline: unset → enabled
-            std::env::remove_var("ROOTCX_DISABLE_PASSWORD_LOGIN");
-            assert!(!password_login_disabled());
-
-            for (val, expected) in [
-                ("true", true),
-                ("1", true),
-                ("false", false),
-                ("0", false),
-                ("yes", false),
-                ("", false),
-            ] {
-                std::env::set_var("ROOTCX_DISABLE_PASSWORD_LOGIN", val);
-                assert_eq!(
-                    password_login_disabled(), expected,
-                    "ROOTCX_DISABLE_PASSWORD_LOGIN={val:?} should be {expected}"
-                );
-            }
-
-            std::env::remove_var("ROOTCX_DISABLE_PASSWORD_LOGIN");
-        }
-    }
 }

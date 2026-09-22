@@ -23,7 +23,7 @@ async fn admin(rt: &harness::TestRuntime) {
 /// Register a user and give them a fresh role carrying exactly `perms`.
 async fn user_with(rt: &harness::TestRuntime, email: &str, perms: &[&str]) -> (String, Uuid) {
     let pool = rt.pool();
-    let token = rt.register_and_login(email).await;
+    let token = rt.create_user(email).await;
     let uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = $1")
         .bind(email).fetch_one(pool).await.unwrap();
     sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1")
@@ -375,9 +375,7 @@ async fn t7_5_cross_app_action_propagates_intersection_perms() {
 }
 
 #[tokio::test]
-async fn t7_5b_call_action_tool_passes_effective_perms_to_caller() {
-    // Verify CallActionTool propagates ctx.permissions to the ActionCaller.
-    // This is the Rust-level assertion that the intersection flows through.
+async fn call_action_dispatches_only_declared_authorized_actions() {
     use std::sync::{Arc, Mutex};
 
     struct SpyActionCaller {
@@ -406,18 +404,13 @@ async fn t7_5b_call_action_tool_passes_effective_perms_to_caller() {
         .execute(pool).await.unwrap();
 
     let spy = Arc::new(SpyActionCaller { captured_perms: Mutex::new(None) });
-    let intersection = vec![
-        "app:billing:action:createInvoice".to_string(),
-        "app:billing:invoices.create".to_string(),
-    ];
-
-    let ctx = rootcx_core::tools::ToolContext {
+    let mut ctx = rootcx_core::tools::ToolContext {
         pool: pool.clone(),
-        core_bound_app_id: None,
+        core_bound_app_id: Some("crm".into()),
         app_id: "crm".into(),
         user_id: Uuid::new_v4(),
         invoker_user_id: Some(Uuid::new_v4()),
-        permissions: intersection.clone(),
+        permissions: vec![],
         task_scope: None,
         args: json!({"app": "billing", "action": "createInvoice", "input": {}}),
         agent_dispatch: None,
@@ -428,12 +421,34 @@ async fn t7_5b_call_action_tool_passes_effective_perms_to_caller() {
     };
 
     let tool = rootcx_core::tools::call_action::CallActionTool;
-    let result = rootcx_core::tools::Tool::execute(&tool, &ctx).await;
-    assert!(result.is_ok(), "call_action should succeed: {result:?}");
-
-    let captured = spy.captured_perms.lock().unwrap().clone();
-    assert_eq!(captured, Some(Some(intersection)),
-        "CallActionTool must propagate ctx.permissions as effective_perms to the target");
+    for (label, args, permissions, expected_error) in [
+        ("missing app", json!({}), vec!["*"], Some("app")),
+        ("invalid app", json!({"app": 7, "action": "createInvoice"}), vec!["*"], Some("app")),
+        ("empty app", json!({"app": "", "action": "createInvoice"}), vec!["*"], Some("app")),
+        ("unknown app", json!({"app": "ghost", "action": "createInvoice"}), vec!["*"], Some("not found")),
+        ("missing action", json!({"app": "billing"}), vec!["*"], Some("action")),
+        ("invalid action", json!({"app": "billing", "action": 7}), vec!["*"], Some("action")),
+        ("empty action", json!({"app": "billing", "action": ""}), vec!["*"], Some("action")),
+        ("unknown action", json!({"app": "billing", "action": "unknown"}), vec!["*"], Some("not found")),
+        ("tool permission alone", json!({"app": "billing", "action": "createInvoice"}), vec!["tool:call_action"], Some("permission denied")),
+        ("wrong action permission", json!({"app": "billing", "action": "createInvoice"}), vec!["app:billing:action:other"], Some("permission denied")),
+        ("specific action permission", json!({"app": "billing", "action": "createInvoice"}), vec!["app:billing:action:createInvoice", "app:billing:invoices.create"], None),
+        ("coarse invoke permission", json!({"app": "billing", "action": "createInvoice"}), vec!["app:billing:invoke"], None),
+    ] {
+        ctx.args = args;
+        ctx.permissions = permissions.into_iter().map(String::from).collect();
+        let result = rootcx_core::tools::Tool::execute(&tool, &ctx).await;
+        let captured = spy.captured_perms.lock().unwrap().take();
+        if let Some(expected) = expected_error {
+            let error = result.expect_err(label);
+            assert!(error.contains(expected), "{label}: {error}");
+            assert!(captured.is_none(), "{label}: rejected calls must not reach the action");
+        } else {
+            assert!(result.is_ok(), "{label}: {result:?}");
+            assert_eq!(captured, Some(Some(ctx.permissions.clone())),
+                "{label}: the target must receive exactly the delegated permission ceiling");
+        }
+    }
     rt.shutdown().await;
 }
 

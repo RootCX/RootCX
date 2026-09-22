@@ -44,7 +44,7 @@ async fn deploy_stub(rt: &harness::TestRuntime, app_id: &str) {
 
 async fn create_user_with_perms(rt: &harness::TestRuntime, email: &str, perms: &[&str]) -> String {
     let pool = rt.pool();
-    let token = rt.register_and_login(email).await;
+    let token = rt.create_user(email).await;
 
     let uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = $1")
         .bind(email).fetch_one(pool).await.unwrap();
@@ -80,7 +80,7 @@ async fn invoke_agent_denied_without_permission() {
     let app_id = setup_agent_app(&rt).await;
 
     // Register a user with NO invoke permission for this app
-    let token = rt.register_and_login("noinvoke@test.local").await;
+    let token = rt.create_user("noinvoke@test.local").await;
     // Remove admin role to make them unprivileged
     let uid: Uuid = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'noinvoke@test.local'")
         .fetch_one(rt.pool()).await.unwrap();

@@ -79,7 +79,7 @@ async fn transfer_ownership_works() {
     let (sa_id, _) = create_sa(&rt, "transfer-bot").await;
 
     // Create a second human
-    rt.post_unauthed("/api/v1/auth/register", &json!({"email": "new-owner@test.local", "password": "Str0ngPass1"})).await;
+    rt.create_user("new-owner@test.local").await;
     let new_owner_id: Uuid = sqlx::query_scalar(
         "SELECT id FROM rootcx_system.users WHERE email = 'new-owner@test.local'",
     ).fetch_one(rt.pool()).await.unwrap();

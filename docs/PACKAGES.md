@@ -94,6 +94,24 @@ The authentication layer composes `AuthGate` from `@rootcx/sdk` with an app-loca
 apps and agents use that form and the package's loading indicator. The SDK owns
 authentication state and submission; the app owns presentation.
 SDK 0.19 requires the form slot and no longer embeds a styled fallback form.
+`AuthGate` redirects automatically when a single SSO provider is configured. The form remains the
+recovery path after interrupted SSO or explicit sign-out. Apps can disable
+automatic navigation with `autoOidcLogin={false}`. Existing deployed frontends
+must update their SDK dependency and be rebuilt to receive this behavior.
 
 The agent layer adds app-local chat components and a provider-specific backend.
 No Rust or desktop wrapper is required in generated apps.
+
+## Authentication provisioning
+
+Core authenticates people through OIDC SSO and governed magic links. It has no
+local account registration or password login. The SDK and CLI use the same SSO
+providers; the app fallback only offers provider selection and retry.
+
+`rootcx init` opens RootCX Cloud in the browser to create or select a workspace,
+then connects to the workspace URL through SSO. The CLI never collects the
+RootCX account password. Self-hosted Docker setup requires
+`ROOTCX_OIDC_ISSUER`, `ROOTCX_OIDC_CLIENT_ID` and `ROOTCX_OIDC_CLIENT_SECRET`.
+Register `http://localhost:9100/api/v1/auth/oidc/callback` with the provider for
+local Docker setup. Existing standalone installations must configure SSO before
+upgrading: the migration removes local hashes while retaining users and rights.

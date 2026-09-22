@@ -65,17 +65,11 @@ export interface AuthUser {
   createdAt: string;
 }
 
-export interface LoginResponse {
+export interface AuthSession {
   accessToken: string;
   refreshToken: string;
   expiresIn: number;
   user: AuthUser;
-}
-
-export interface RegisterInput {
-  email: string;
-  password: string;
-  displayName?: string;
 }
 
 export interface OidcProvider {
@@ -85,8 +79,6 @@ export interface OidcProvider {
 
 export interface AuthMode {
   authRequired: boolean;
-  setupRequired: boolean;
-  passwordLoginEnabled: boolean;
   magicLinkEnabled: boolean;
   providers: OidcProvider[];
 }
@@ -828,8 +820,13 @@ export class RuntimeClient {
   }
 
   async oidcLogin(providerId: string): Promise<void> {
-    const redirectUri = window.location.href.split("?")[0];
-    window.location.href = `${this.baseUrl}/api/v1/auth/oidc/${encodeURIComponent(providerId)}/authorize?redirect_uri=${encodeURIComponent(redirectUri)}&token_delivery=nonce`;
+    const redirectUri = new URL(window.location.href);
+    for (const key of ["auth_nonce", "access_token", "refresh_token", "expires_in"]) {
+      redirectUri.searchParams.delete(key);
+    }
+    const fragment = new URLSearchParams(redirectUri.hash.slice(1));
+    if (fragment.has("access_token") || fragment.has("refresh_token")) redirectUri.hash = "";
+    window.location.href = `${this.baseUrl}/api/v1/auth/oidc/${encodeURIComponent(providerId)}/authorize?redirect_uri=${encodeURIComponent(redirectUri.toString())}&token_delivery=nonce`;
   }
 
   async exchangeNonce(nonce: string): Promise<{ accessToken: string; refreshToken: string }> {
@@ -842,37 +839,14 @@ export class RuntimeClient {
     return res.json();
   }
 
-  async magicLinkConsume(token: string): Promise<LoginResponse> {
+  async magicLinkConsume(token: string): Promise<AuthSession> {
     const res = await fetch(`${this.baseUrl}/api/v1/auth/magic-link/consume`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ token }),
     });
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
-    const data: LoginResponse = await res.json();
-    this.accessToken = data.accessToken;
-    this.refreshToken = data.refreshToken;
-    return data;
-  }
-
-  async register(data: RegisterInput): Promise<{ user: AuthUser }> {
-    const res = await fetch(`${this.baseUrl}/api/v1/auth/register`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
-    });
-    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
-    return res.json();
-  }
-
-  async login(email: string, password: string): Promise<LoginResponse> {
-    const res = await fetch(`${this.baseUrl}/api/v1/auth/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    });
-    if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
-    const data: LoginResponse = await res.json();
+    const data: AuthSession = await res.json();
     this.accessToken = data.accessToken;
     this.refreshToken = data.refreshToken;
     return data;

@@ -34,7 +34,7 @@ async fn delegated_grants_respect_task_scope_and_own_requires_an_owned_table() {
         ]
     }))
     .await;
-    rt.register_and_login("delegated@test.local").await;
+    rt.create_user("delegated@test.local").await;
     let uid: Uuid = sqlx::query_scalar(
         "SELECT id FROM rootcx_system.users WHERE email = 'delegated@test.local'",
     )
@@ -223,7 +223,7 @@ async fn mutation_only_permissions_allow_returning_without_widening_ownership_or
         ]
     }))
     .await;
-    rt.register_and_login("mutator@test.local").await;
+    rt.create_user("mutator@test.local").await;
     let uid: Uuid =
         sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'mutator@test.local'")
             .fetch_one(rt.pool())

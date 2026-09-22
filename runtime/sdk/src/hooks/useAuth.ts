@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { type AuthUser, type AuthMode, type RegisterInput } from "../client";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { AuthMode, AuthUser, RuntimeClient } from "../client";
 import { useRuntimeClient, REFRESH_KEY } from "../components/RuntimeProvider";
 
 export interface UseAuthResult {
@@ -7,41 +7,44 @@ export interface UseAuthResult {
   loading: boolean;
   isAuthenticated: boolean;
   authMode: AuthMode | null;
-  login: (email: string, password: string) => Promise<void>;
-  register: (data: RegisterInput) => Promise<void>;
+  authError: string | null;
   logout: () => Promise<void>;
   oidcLogin: (providerId: string) => Promise<void>;
   magicLinkConsume: (token: string) => Promise<void>;
 }
 
+interface AuthInitialization {
+  mode: AuthMode | null;
+  user: AuthUser | null;
+  error: string | null;
+}
+
+function replaceUrlQuery(params: URLSearchParams, hash = window.location.hash): void {
+  const query = params.toString();
+  window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : "") + hash);
+}
+
 function consumeCallbackTokensFromUrl(): { accessToken: string; refreshToken: string } | null {
   if (typeof window === "undefined") return null;
 
-  // Try query params first (new Core), fall back to hash fragment (old Core)
-  let params = new URLSearchParams(window.location.search);
-  let accessToken = params.get("access_token");
-  let refreshToken = params.get("refresh_token");
-  let fromHash = false;
+  const query = new URLSearchParams(window.location.search);
+  const fragment = new URLSearchParams(window.location.hash.slice(1));
+  let accessToken = query.get("access_token");
+  let refreshToken = query.get("refresh_token");
 
   if (!accessToken || !refreshToken) {
-    const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
-    params = new URLSearchParams(hash);
-    accessToken = params.get("access_token");
-    refreshToken = params.get("refresh_token");
-    fromHash = true;
+    accessToken = fragment.get("access_token");
+    refreshToken = fragment.get("refresh_token");
   }
 
   if (!accessToken || !refreshToken) return null;
 
-  if (fromHash) {
-    window.history.replaceState({}, "", window.location.pathname + window.location.search);
-  } else {
-    params.delete("access_token");
-    params.delete("refresh_token");
-    params.delete("expires_in");
-    const clean = params.toString();
-    window.history.replaceState({}, "", window.location.pathname + (clean ? `?${clean}` : ""));
-  }
+  // Legacy callbacks can carry credentials in both locations.
+  query.delete("access_token");
+  query.delete("refresh_token");
+  query.delete("expires_in");
+  const hash = fragment.has("access_token") || fragment.has("refresh_token") ? "" : window.location.hash;
+  replaceUrlQuery(query, hash);
   return { accessToken, refreshToken };
 }
 
@@ -53,8 +56,38 @@ function getAuthNonce(): string | null {
 function clearAuthNonce(): void {
   const params = new URLSearchParams(window.location.search);
   params.delete("auth_nonce");
-  const clean = params.toString();
-  window.history.replaceState({}, "", window.location.pathname + (clean ? `?${clean}` : ""));
+  replaceUrlQuery(params);
+}
+
+async function initializeAuth(client: RuntimeClient): Promise<AuthInitialization> {
+  let error: string | null = null;
+  const callbackTokens = consumeCallbackTokensFromUrl();
+  if (callbackTokens) {
+    client.setTokens(callbackTokens.accessToken, callbackTokens.refreshToken);
+    localStorage.setItem(REFRESH_KEY, callbackTokens.refreshToken);
+  }
+
+  const authNonce = callbackTokens ? null : getAuthNonce();
+  if (authNonce) {
+    try {
+      const tokens = await client.exchangeNonce(authNonce);
+      client.setTokens(tokens.accessToken, tokens.refreshToken);
+      localStorage.setItem(REFRESH_KEY, tokens.refreshToken);
+    } catch {
+      error = "Sign-in did not complete. Please try again.";
+    } finally {
+      clearAuthNonce();
+    }
+  }
+
+  const [mode, user] = await Promise.all([
+    client.authMode().catch(() => null),
+    client.me().catch(() => {
+      localStorage.removeItem(REFRESH_KEY);
+      return null;
+    }),
+  ]);
+  return { mode, user, error };
 }
 
 export function useAuth(): UseAuthResult {
@@ -62,43 +95,26 @@ export function useAuth(): UseAuthResult {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
   const [authMode, setAuthMode] = useState<AuthMode | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const initialization = useRef<{
+    client: RuntimeClient;
+    promise: Promise<AuthInitialization>;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
-    const callbackTokens = consumeCallbackTokensFromUrl();
-    if (callbackTokens) {
-      client.setTokens(callbackTokens.accessToken, callbackTokens.refreshToken);
-      localStorage.setItem(REFRESH_KEY, callbackTokens.refreshToken);
+    // StrictMode replays effects; a single-use callback nonce must only be exchanged once.
+    if (initialization.current?.client !== client) {
+      initialization.current = { client, promise: initializeAuth(client) };
     }
-
-    const authNonce = !callbackTokens ? getAuthNonce() : null;
-
-    const init = async () => {
-      if (authNonce) {
-        try {
-          const tokens = await client.exchangeNonce(authNonce);
-          if (cancelled) return;
-          client.setTokens(tokens.accessToken, tokens.refreshToken);
-          localStorage.setItem(REFRESH_KEY, tokens.refreshToken);
-          clearAuthNonce();
-        } catch {
-          if (cancelled) return;
-        }
-      }
-      if (cancelled) return;
-      const [mode] = await Promise.all([
-        client.authMode().catch(() => null),
-        client.me().then(setUser).catch(() => {
-          setUser(null);
-          localStorage.removeItem(REFRESH_KEY);
-        }),
-      ]);
+    initialization.current.promise.then(({ mode, user: currentUser, error }) => {
       if (cancelled) return;
       setAuthMode(mode);
+      setUser(currentUser);
+      setAuthError(currentUser ? null : error);
       setLoading(false);
-    };
-    init();
+    });
 
     return () => { cancelled = true; };
   }, [client]);
@@ -108,25 +124,6 @@ export function useAuth(): UseAuthResult {
     if (refresh) localStorage.setItem(REFRESH_KEY, refresh);
     else localStorage.removeItem(REFRESH_KEY);
   }, [client]);
-
-  const login = useCallback(
-    async (email: string, password: string) => {
-      const res = await client.login(email, password);
-      persistTokens();
-      setUser(res.user);
-    },
-    [client, persistTokens],
-  );
-
-  const register = useCallback(
-    async (data: RegisterInput) => {
-      await client.register(data);
-      const res = await client.login(data.email, data.password);
-      persistTokens();
-      setUser(res.user);
-    },
-    [client, persistTokens],
-  );
 
   const logout = useCallback(async () => {
     await client.logout();
@@ -145,6 +142,7 @@ export function useAuth(): UseAuthResult {
     async (token: string) => {
       const res = await client.magicLinkConsume(token);
       persistTokens();
+      setAuthError(null);
       setUser(res.user);
     },
     [client, persistTokens],
@@ -155,8 +153,7 @@ export function useAuth(): UseAuthResult {
     loading,
     isAuthenticated: user !== null,
     authMode,
-    login,
-    register,
+    authError,
     logout,
     oidcLogin,
     magicLinkConsume,

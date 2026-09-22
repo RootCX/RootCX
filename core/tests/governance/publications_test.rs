@@ -249,7 +249,7 @@ async fn provider_review_is_confined_to_its_own_publications() {
         assert_eq!(s, StatusCode::OK, "{declarations}");
         let declarations = declarations.as_array().unwrap();
         // A consumer's approval permission cannot approve the provider's disclosure.
-        let token = rt.register_and_login("consumer-approver@test.local").await;
+        let token = rt.create_user("consumer-approver@test.local").await;
         let uid: Uuid = sqlx::query_scalar(
             "SELECT id FROM rootcx_system.users WHERE email = 'consumer-approver@test.local'",
         ).fetch_one(rt.pool()).await.unwrap();

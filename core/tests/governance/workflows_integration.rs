@@ -785,7 +785,7 @@ async fn workflow_access_is_owner_scoped() {
     let exec = run["executionId"].as_str().unwrap();
 
     // A separate, non-admin user is denied (NotFound, so existence isn't leaked).
-    let intruder = rt.register_and_login("intruder@test.local").await;
+    let intruder = rt.create_user("intruder@test.local").await;
     for path in [
         format!("/api/v1/workflows/{wf_id}"),
         format!("/api/v1/workflows/{wf_id}/executions"),

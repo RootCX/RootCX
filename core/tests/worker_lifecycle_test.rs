@@ -25,7 +25,7 @@ async fn bun_lifecycle_and_anonymous_workers_cannot_read_or_fabricate_assignment
     let record = rt
         .create("lifecycle", "records", &json!({"name": "private"}))
         .await;
-    rt.register_and_login("lifecycle-attacker@test.local").await;
+    rt.create_user("lifecycle-attacker@test.local").await;
     let user: Uuid = sqlx::query_scalar(
         "SELECT id FROM rootcx_system.users WHERE email = 'lifecycle-attacker@test.local'",
     )
