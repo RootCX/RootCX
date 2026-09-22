@@ -1,7 +1,7 @@
 pub mod auth;
 mod crons;
 pub(crate) mod crud;
-mod deploy;
+pub(crate) mod deploy;
 mod icon;
 pub(crate) mod introspection;
 mod jobs;
@@ -196,6 +196,7 @@ pub async fn install_app(
             return Err(ApiError::Forbidden("permission denied: admin:apps.install or platform:apps.create".into()));
         }
     }
+    crate::builder::guard_external_mutation(&rt, &manifest.app_id).await?;
     crate::manifest::install_app(&pool, &manifest, rt.extensions(), identity.user_id, &secrets).await?;
     Ok(Json(json!({ "message": format!("app '{}' installed", manifest.app_id) })))
 }

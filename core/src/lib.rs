@@ -1,4 +1,5 @@
 mod api_error;
+mod builder;
 pub mod app_migrations;
 pub mod auth;
 mod crons;
@@ -272,6 +273,7 @@ impl ReadyRuntime {
 
     pub fn auth_config(&self) -> &Arc<auth::AuthConfig> { &self.auth_config }
     pub fn pool(&self) -> &PgPool { &self.pool }
+    pub(crate) fn shutdown_token(&self) -> &tokio_util::sync::CancellationToken { &self.scheduler.cancel }
     pub fn workflow_events(&self) -> &extensions::workflows::events::WorkflowEvents { &self.workflow_events }
     /// Nudge the scheduler to poll now instead of waiting for the next tick.
     pub fn wake_scheduler(&self) { self.scheduler.wake.notify_one(); }

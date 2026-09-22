@@ -369,6 +369,23 @@ function resolveBaseUrl(): string {
 
 export const DEFAULT_BASE_URL = resolveBaseUrl();
 
+export interface ApplicationSources {
+  appId: string;
+  headCommit: string;
+  deployedCommit: string | null;
+}
+
+export interface ApplicationChange {
+  id: string;
+  appId: string;
+  baseCommit: string;
+  status: "queued" | "coding" | "publishing" | "succeeded" | "failed" | "interrupted" | "needs_recovery";
+  commitId: string | null;
+  message: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export class RuntimeClient {
   private baseUrl: string;
   private accessToken: string | null = null;
@@ -1250,6 +1267,46 @@ export class RuntimeClient {
     const res = await this.authFetch(`${this.baseUrl}/api/v1/public/share/info`);
     if (!res.ok) throw new RuntimeApiError(res.status, await res.text());
     return res.json();
+  }
+
+  /** Import a template's full sources once. Values are base64, including binary assets. */
+  async importApplicationSources(appId: string, files: Record<string, string>): Promise<ApplicationSources> {
+    return this.fetchJson(`${this.baseUrl}/api/v1/apps/${enc(appId)}/sources`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ files }),
+    });
+  }
+
+  async getApplicationSources(appId: string): Promise<ApplicationSources> {
+    return this.fetchJson(`${this.baseUrl}/api/v1/apps/${enc(appId)}/sources`);
+  }
+
+  /** Keep requestId when retrying an uncertain network response. */
+  async changeApplication(appId: string, input: { requestId: string; baseCommit: string; prompt: string }): Promise<ApplicationChange> {
+    return this.fetchJson(`${this.baseUrl}/api/v1/apps/${enc(appId)}/changes`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input),
+    });
+  }
+
+  async getApplicationChange(appId: string, id: string, signal?: AbortSignal): Promise<ApplicationChange> {
+    return this.fetchJson(`${this.baseUrl}/api/v1/apps/${enc(appId)}/changes/${enc(id)}`, { signal });
+  }
+
+  /** Waiting can be aborted without cancelling the durable server-side change. */
+  async waitForApplicationChange(appId: string, id: string, onProgress?: (change: ApplicationChange) => void, signal?: AbortSignal): Promise<ApplicationChange> {
+    let previous = "";
+    for (;;) {
+      signal?.throwIfAborted();
+      const change = await this.getApplicationChange(appId, id, signal);
+      if (change.updatedAt !== previous) { onProgress?.(change); previous = change.updatedAt; }
+      if (!["queued", "coding", "publishing"].includes(change.status)) return change;
+      await new Promise<void>((resolve, reject) => {
+        const done = () => { signal?.removeEventListener("abort", abort); resolve(); };
+        const timer = setTimeout(done, 750);
+        const abort = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); reject(signal?.reason ?? new DOMException("Aborted", "AbortError")); };
+        signal?.addEventListener("abort", abort, { once: true });
+        if (signal?.aborted) abort();
+      });
+    }
   }
 
   core(): CoreNamespace {

@@ -1,0 +1,124 @@
+# Render TENANT_NAME and BUILDER_IMAGE before applying to an existing tenant.
+# Secret app-builder-config contains only the builder variables documented in docs/hosted-builder.md.
+# Requires user-namespace support and an operator-installed seccomp profile allowing nested bubblewrap.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-builder
+  namespace: tenant-${TENANT_NAME}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: app-builder
+  template:
+    metadata:
+      labels:
+        app: app-builder
+    spec:
+      hostUsers: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 20
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: builder
+          image: ${BUILDER_IMAGE}
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: app-builder-config
+          ports:
+            - name: http
+              containerPort: 9201
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+            procMount: Unmasked
+            seccompProfile:
+              type: Localhost
+              localhostProfile: profiles/rootcx-builder.json
+          resources:
+            requests:
+              cpu: '500m'
+              memory: 512Mi
+              ephemeral-storage: 1Gi
+            limits:
+              cpu: '2'
+              memory: 2Gi
+              ephemeral-storage: 8Gi
+          volumeMounts:
+            - name: workspaces
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 15
+      volumes:
+        - name: workspaces
+          emptyDir:
+            sizeLimit: 8Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app-builder
+  namespace: tenant-${TENANT_NAME}
+spec:
+  selector:
+    app: app-builder
+  ports:
+    - name: http
+      port: 9201
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: app-builder
+  namespace: tenant-${TENANT_NAME}
+spec:
+  podSelector:
+    matchLabels:
+      app: app-builder
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: core-${TENANT_NAME}
+      ports:
+        - protocol: TCP
+          port: 9201
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8]
+      ports:
+        - protocol: TCP
+          port: 443

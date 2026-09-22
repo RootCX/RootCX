@@ -14,7 +14,7 @@ FROM oven/bun:1.3.10@sha256:b86c67b531d87b4db11470d9b2bd0c519b1976eee6fcd71634e7
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/target/release/rootcx-core /usr/local/bin/rootcx-core
