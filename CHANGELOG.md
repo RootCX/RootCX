@@ -8,6 +8,28 @@ Releases marked **Breaking** need the matching guide in
 
 ## Unreleased
 
+## 0.30.0 - 2026-09-23 - Breaking
+
+See [ADR 0010](docs/adr/0010-governed-declarative-rules.md) and the updated
+[docs/migration-v027.md](docs/migration-v027.md).
+
+- Manifest `checks`, index `where` and index expressions are accepted again,
+  written in a governed rule language that Core parses, type-checks and
+  compiles itself; raw SQL is never executed.
+- Field shorthands for single-field rules: `minimum`, `maximum`,
+  `exclusive_minimum`, `exclusive_maximum`, `integer`, `max_scale`,
+  `min_length`, `max_length`, `not_blank`, `format`, `pattern`, `json_type`,
+  `max_items`.
+- `using: "trigram"` declares trigram search indexes; `ops` and `with` remain
+  refused.
+- Existing rules and indexes are adopted in place when unchanged; changed rules
+  are replaced without a window where they are not enforced.
+- Rule and unique violations return 422 `rule_violation` and 409
+  `unique_violation` instead of 500.
+- **Breaking:** new submissions refuse unknown manifest keys (such as
+  `onDelete` for `on_delete`, previously ignored), names longer than 63 bytes,
+  and non-finite or unparsable numbers. Stored manifests still boot.
+
 ## 0.28.0 - 2026-09-18 - Breaking
 
 See [docs/migration-v028.md](docs/migration-v028.md). No runtime behavior
