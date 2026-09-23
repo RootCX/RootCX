@@ -36,3 +36,6 @@ Thumbs.db
 *.key
 *.p12
 *.pfx
+
+# Private manifests used as local test corpora (never committed)
+core/tests/fixtures/private/

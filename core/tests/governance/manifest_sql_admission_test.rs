@@ -19,14 +19,23 @@ fn manifest(app: &str) -> Value {
 async fn raw_manifest_sql_is_refused_before_creating_a_schema() {
     let rt = TestRuntime::boot().await;
     let cases = [
-        ("check", json!({"checks": [{"expr": "true"}]})),
+        (
+            "breakout",
+            json!({"checks": [{"name": "c", "expr": "true), NO FORCE ROW LEVEL SECURITY, DISABLE ROW LEVEL SECURITY, ADD CONSTRAINT zz CHECK (true"}]}),
+        ),
+        (
+            "owner_function",
+            json!({"checks": [{"name": "c", "expr": "pg_read_file('/etc/passwd') IS NOT NULL"}]}),
+        ),
+        ("cast", json!({"checks": [{"name": "c", "expr": "status::int > 0"}]})),
+        ("unnamed_check", json!({"checks": [{"expr": "status IS NOT NULL"}]})),
         (
             "expression",
-            json!({"indexes": [{"columns": [{"expr": "lower(status)"}]}]}),
+            json!({"indexes": [{"columns": [{"expr": "query_to_xml(status, true, true, '')"}]}]}),
         ),
         (
             "predicate",
-            json!({"indexes": [{"columns": ["status"], "where": "true"}]}),
+            json!({"indexes": [{"columns": ["status"], "where": "true) WITH (fillfactor=10"}]}),
         ),
         (
             "operator",
@@ -185,7 +194,7 @@ async fn legacy_schema_declarations_survive_bootstrap_without_losing_constraints
     RbacExtension.bootstrap(rt.pool()).await.expect("legacy partial indexes must not prevent boot");
     RbacExtension.bootstrap(rt.pool()).await.expect("the saved projection must also survive restart");
     let (status, body) = rt.post_json("/api/v1/apps", &historical).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "historical SQL must not be resubmittable as new DDL: {body}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "a stored type alias is not a new declaration: {body}");
 
     let after: Vec<(String, String)> = sqlx::query_as(
         "SELECT indexname::text, indexdef::text FROM pg_indexes
