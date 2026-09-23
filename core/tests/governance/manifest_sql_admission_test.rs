@@ -181,6 +181,8 @@ async fn legacy_schema_declarations_survive_bootstrap_without_losing_constraints
     let mut historical = request.clone();
     // Old manifests also used type aliases; replay must not recreate columns.
     historical["dataContract"][0]["fields"][2]["type"] = json!("string");
+    // Keys older Cores silently ignored are only refused on new submissions.
+    historical["dataContract"][0]["fields"][0]["onDelete"] = json!("cascade");
     historical["dataContract"][0]["checks"] = json!([{"name": "valid_position", "expr": "position >= 0"}]);
     historical["dataContract"][0]["indexes"] = json!([{
         "name": "idx_gcal_attach_unique", "columns": ["event_id", "file_id"], "unique": true,
