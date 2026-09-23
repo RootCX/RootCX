@@ -664,7 +664,7 @@ mod tests {
                     on_delete: None,
                     sensitive: *sensitive,
                     owner: false,
-                unknown: Default::default(),
+                rules: Default::default(), unknown: Default::default(),
                 })
                 .collect(),
             identity_kind: None,

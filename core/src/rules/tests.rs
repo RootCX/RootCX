@@ -347,6 +347,12 @@ async fn every_emitted_rule_is_immutable_and_valid_sql() {
         .execute(&mut *conn).await.unwrap();
     let rules: Vec<String> = GOLDENS.iter().map(|(source, _)| sql_of(source))
         .chain(["length(secret) > 8", "t2 - t1 <= interval '5 hours'", "d2 - d1 > 3"].map(sql_of))
+        .chain([
+            json!({"name": "qty", "type": "decimal", "minimum": "0", "exclusive_maximum": "9.5", "integer": true, "max_scale": 1}),
+            json!({"name": "n", "type": "number", "exclusive_minimum": -1}),
+            json!({"name": "name", "type": "text", "not_blank": true, "format": "email", "max_length": 9}),
+            json!({"name": "meta", "type": "json", "json_type": "array", "max_items": 3}),
+        ].into_iter().flat_map(|field| shorthand_checks(field).unwrap().into_iter().map(|(_, sql)| sql)))
         .collect();
     for (i, rule) in rules.iter().enumerate() {
         sqlx::raw_sql(&format!("CREATE INDEX rule_{i} ON sample ((CASE WHEN {rule} THEN 1 END))"))
@@ -476,4 +482,83 @@ fn private_corpus_is_admitted_after_trigram_migration() {
         indexes += compile_entity(entity).unwrap().indexes.len();
     }
     eprintln!("corpus: {checks} checks, {indexes} indexes admitted; {trigram} trigram indexes migrated; removed {dropped:?}");
+}
+
+fn shorthand_checks(field: serde_json::Value) -> Result<Vec<(String, String)>, String> {
+    let rules = compile_entity(&serde_json::from_value(json!({"entityName": "t", "fields": [field]})).unwrap())?;
+    Ok(rules.checks.into_iter().map(|c| (c.name, c.sql)).collect())
+}
+
+#[test]
+fn shorthands_compile_to_named_null_tolerant_checks() {
+    let checks = shorthand_checks(json!({"name": "amount", "type": "decimal", "precision": 12, "scale": 2,
+        "exclusive_minimum": "0", "maximum": "-0.5", "max_scale": 2, "integer": true})).unwrap();
+    let finite = r#"("amount" < 'Infinity'::pg_catalog.numeric AND "amount" > '-Infinity'::pg_catalog.numeric)"#;
+    assert_eq!(checks, vec![
+        ("chk_t_amount_max".into(), format!(r#"(("amount" <= (- 0.5)) AND {finite})"#)),
+        ("chk_t_amount_xmin".into(), format!(r#"(("amount" > 0) AND {finite})"#)),
+        ("chk_t_amount_int".into(), format!(r#"(("amount" = pg_catalog.trunc("amount")) AND {finite})"#)),
+        ("chk_t_amount_scale".into(), format!(r#"((pg_catalog.scale("amount") <= 2) AND {finite})"#)),
+    ]);
+    let checks = shorthand_checks(json!({"name": "attempts", "type": "number", "minimum": 0, "maximum": 5.5})).unwrap();
+    assert_eq!(checks[0].1, r#"(("attempts" >= 0) AND ("attempts" < 'Infinity'::pg_catalog.float8 AND "attempts" > '-Infinity'::pg_catalog.float8))"#);
+    assert!(checks[1].1.starts_with(r#"(("attempts" <= 5.5)"#), "{}", checks[1].1);
+    let checks = shorthand_checks(json!({"name": "email", "type": "text", "format": "email",
+        "not_blank": true, "min_length": 3, "max_length": 320, "pattern": "^[a-z@.]+$"})).unwrap();
+    let names: Vec<&str> = checks.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["chk_t_email_minlen", "chk_t_email_maxlen", "chk_t_email_notblank", "chk_t_email_format", "chk_t_email_pattern"]);
+    assert_eq!(checks[2].1, r#"(pg_catalog.length(pg_catalog.btrim("email")) > 0)"#);
+    assert_eq!(checks[3].1, format!(r#"("email" ~ '{}')"#, shorthand::EMAIL_PATTERN));
+    let checks = shorthand_checks(json!({"name": "reminders", "type": "json", "json_type": "array", "max_items": 5})).unwrap();
+    assert_eq!(checks[0].1, r#"(pg_catalog.jsonb_typeof("reminders") = 'array')"#);
+    assert!(checks[1].1.contains("CASE WHEN pg_catalog.jsonb_typeof"), "{}", checks[1].1);
+}
+
+#[test]
+fn shorthands_are_refused_where_they_do_not_apply() {
+    for (field, fragment) in [
+        (json!({"name": "x", "type": "decimal", "minimum": 0}), "JSON string"),
+        (json!({"name": "x", "type": "number", "minimum": "0"}), "JSON number"),
+        (json!({"name": "x", "type": "decimal", "minimum": "1e5"}), "written in digits"),
+        (json!({"name": "x", "type": "decimal", "minimum": "NaN"}), "written in digits"),
+        (json!({"name": "x", "type": "text", "minimum": 0}), "number and decimal"),
+        (json!({"name": "x", "type": "number", "max_scale": 2}), "decimal"),
+        (json!({"name": "x", "type": "number", "max_length": 2}), "text"),
+        (json!({"name": "x", "type": "text", "min_length": 5, "max_length": 2}), "exceeds"),
+        (json!({"name": "x", "type": "text", "format": "url"}), "unknown format"),
+        (json!({"name": "x", "type": "text", "pattern": "(a+)+"}), "quantifier"),
+        (json!({"name": "x", "type": "json", "json_type": "list"}), "json_type must be"),
+        (json!({"name": "x", "type": "text", "max_items": 3}), "json"),
+    ] {
+        let error = shorthand_checks(field.clone()).unwrap_err();
+        assert!(error.contains(fragment), "{field}: {error}");
+    }
+}
+
+/// NaN and Infinity are ordered above every number by PostgreSQL, so a plain
+/// `x > 0` accepts them; the shorthand's finiteness guard does not.
+#[tokio::test]
+async fn shorthand_bounds_reject_nan_and_infinity_in_postgresql() {
+    let Some(pool) = pool().await else { return };
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::raw_sql("DROP SCHEMA IF EXISTS rules_finite CASCADE; CREATE SCHEMA rules_finite;
+        SET search_path = rules_finite; CREATE TABLE t (f double precision, d numeric);")
+        .execute(&mut *conn).await.unwrap();
+    for field in [json!({"name": "f", "type": "number", "exclusive_minimum": 0}),
+                  json!({"name": "d", "type": "decimal", "maximum": "10", "max_scale": 2})] {
+        for (name, sql) in shorthand_checks(field).unwrap() {
+            sqlx::raw_sql(&format!("ALTER TABLE t ADD CONSTRAINT {name} CHECK ({sql})"))
+                .execute(&mut *conn).await.unwrap();
+        }
+    }
+    for ok in ["(1, 1.25)", "(NULL, NULL)", "(0.5, -3)"] {
+        sqlx::raw_sql(&format!("INSERT INTO t VALUES {ok}")).execute(&mut *conn).await
+            .unwrap_or_else(|e| panic!("{ok}: {e}"));
+    }
+    for bad in ["('NaN', NULL)", "('Infinity', NULL)", "(0, NULL)", "(NULL, 'NaN')", "(NULL, 'Infinity')", "(NULL, 1.234)", "(NULL, 11)"] {
+        let error = sqlx::raw_sql(&format!("INSERT INTO t VALUES {bad}")).execute(&mut *conn).await
+            .expect_err(bad);
+        assert_eq!(error.as_database_error().and_then(|e| e.code()).as_deref(), Some("23514"), "{bad}");
+    }
+    sqlx::raw_sql("RESET search_path; DROP SCHEMA rules_finite CASCADE").execute(&mut *conn).await.unwrap();
 }

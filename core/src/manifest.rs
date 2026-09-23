@@ -871,7 +871,7 @@ mod tests {
             is_primary_key: None,
             on_delete: None,
             sensitive: false, owner: false,
-        unknown: Default::default(),
+        rules: Default::default(), unknown: Default::default(),
         }
     }
 
@@ -1237,6 +1237,12 @@ mod tests {
         let error = validate_manifest(&manifest).unwrap_err().to_string();
         assert!(error.contains("unknown key 'onDelete'") && error.contains("did you mean 'on_delete'"), "{error}");
         validate_stored_manifest(&manifest).expect("stored manifests stay readable at boot");
+        let shorthand: AppManifest = serde_json::from_value(json!({
+            "appId": "app", "name": "app",
+            "dataContract": [{"entityName": "items", "fields": [{"name": "label", "type": "text", "maxLength": 20}]}]
+        })).unwrap();
+        let error = validate_manifest(&shorthand).unwrap_err().to_string();
+        assert!(error.contains("did you mean 'max_length'"), "a misspelled rule is never silently dropped: {error}");
 
         for patch in [
             json!({"indexz": []}),

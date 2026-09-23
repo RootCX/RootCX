@@ -16,7 +16,7 @@ fn field(name: &str, required: bool) -> FieldContract {
         precision: None, scale: None,
         default_value: None, enum_values: None, references: None,
         is_primary_key: None, on_delete: None, sensitive: false, owner: false,
-    unknown: Default::default(),
+    rules: Default::default(), unknown: Default::default(),
     }
 }
 

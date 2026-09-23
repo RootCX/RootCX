@@ -9,6 +9,7 @@ mod ast;
 mod emit;
 mod parser;
 mod pattern;
+mod shorthand;
 mod typing;
 
 #[cfg(test)]
@@ -26,6 +27,8 @@ use typing::{Checker, Field, Fields, Ty};
 pub(crate) const FIELD_KEYS: &[&str] = &[
     "name", "type", "precision", "scale", "required", "default_value", "enum_values",
     "references", "is_primary_key", "on_delete", "sensitive", "owner",
+    "minimum", "maximum", "exclusive_minimum", "exclusive_maximum", "integer", "max_scale",
+    "min_length", "max_length", "not_blank", "format", "pattern", "json_type", "max_items",
 ];
 
 /// Bumped whenever emission changes meaning, so every rule is recompiled.
@@ -115,6 +118,15 @@ pub(crate) fn compile_entity(entity: &EntityContract) -> Result<EntityRules, Str
     for field in &entity.fields {
         if let Some(check) = enum_check(entity, field)? {
             rules.checks.push(check);
+        }
+        for rule in shorthand::compile(field, fields[&field.name].ty, &checker)? {
+            rules.checks.push(CompiledCheck {
+                name: fit_ident(&format!("chk_{}_{}_{}", entity.entity_name, field.name, rule.kind)),
+                sql: emit::sql(&rule.tree),
+                tag: tag("chk", &rule.tree, &fields),
+                legacy_tag: None,
+                origin: Origin::Shorthand,
+            });
         }
     }
     for (i, check) in entity.checks.iter().enumerate() {
