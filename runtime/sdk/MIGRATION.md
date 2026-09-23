@@ -1,4 +1,4 @@
-# Migrating to @rootcx/sdk 0.19
+# Migrating to @rootcx/sdk 0.20
 
 This release removes desktop integration and makes authentication presentation
 an application responsibility.
@@ -38,4 +38,4 @@ an application responsibility.
 </AuthGate>
 ```
 
-Publish SDK 0.19 and UI 0.9 before releasing the CLI with this scaffold.
+Publish SDK 0.20 and UI 0.9 before releasing the CLI with this scaffold.

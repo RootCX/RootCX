@@ -34,7 +34,7 @@ This repository consumes the published package; it does not contain a second UI
 library. Apps import `@rootcx/ui/theme.css` and compose the package's components.
 Routes, form validation, status meanings and table behavior belong to the app.
 
-The new scaffold requires `@rootcx/ui` 0.9 and the browser-only `@rootcx/sdk` 0.19.
+The new scaffold requires `@rootcx/ui` 0.9 and the browser-only `@rootcx/sdk` 0.20.
 Publish the UI from `rootcx-ui` and the SDK from `runtime/sdk` before releasing the
 CLI that generates these apps. For local verification, pack the UI repository and run:
 
