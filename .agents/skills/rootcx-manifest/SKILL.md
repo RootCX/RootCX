@@ -115,7 +115,7 @@ waits for admitted database transactions.
 - `id`, `created_at`, `updated_at` are auto-generated — omit from `fields`
 - `entity_link` requires `"references": { "entity": "<target>", "field": "id" }`. `<target>` is `"<entity>"` (same app) or `"core:users"` (FK → `rootcx_system.users`, `ON DELETE SET NULL`). Cross-app refs not yet supported.
 - `"required": true` = mandatory on create; omit key for optional
-- `"enum_values": [...]` restricts text fields to fixed values
+- `"enum_values": [...]` restricts text fields to fixed values; see **Database rules** for bounds, lengths, patterns and multi-field checks
 - `"sensitive": true` omits a column from generated reads and rejects generated filter/sort references. Core also withholds the worker executor's PostgreSQL column `SELECT` privilege, so raw SQL references, expressions, filters, and `RETURNING` cannot read it. `SELECT *` and `RETURNING *` fail on tables containing sensitive columns; explicitly project safe columns. Writes may set sensitive values subject to RLS, but cannot read their existing values or return them. Broad app RBAC grants do not override column privileges.
 - `"owner": true` marks the column deciding which user a row belongs to. Core then mints `{entity}.{action}.own` permissions next to the unscoped ones, and a role holding only those reaches that user's own rows. One column per entity. Rows whose owner is NULL belong to nobody, so adopting this on an existing table needs no backfill. It scopes rows, not columns: a confined caller reads its own row whole, so mark credential columns `"sensitive": true` too.
   - **Direct** — a `uuid`, `text`, or `entity_link` to `core:users` column holding the user id itself.
@@ -257,11 +257,66 @@ Ownership interpretation and validation live in
 `core/src/governance/row_access/ownership.rs`; old `manifest.rs` ownership names
 are compatibility aliases into governance, not a second validation module.
 
-Raw manifest `checks`, index expressions (`expr`), partial-index predicates
-(`where`), operator classes (`ops`), and index storage parameters (`with`) are
-refused for now. Use field enums and supported column-based indexes.
+Database rules are declared in a closed rule language that Core parses,
+type-checks and compiles itself (ADR 0010); no manifest string reaches SQL.
+`checks[].expr`, index `where` and index `columns[].expr` use that language.
+Index `ops` and `with` stay refused; use `"using": "trigram"` for trigram search.
 Core-generated indexes remain supported, including active-assignment indexes;
 do not copy their SQL into a manifest or backend migration file.
+
+### Database rules
+
+Prefer field shorthands for single-field rules (snake_case, pass on NULL; add
+`"required": true` to forbid NULL):
+
+```json
+{ "name": "amount", "type": "decimal", "precision": 12, "scale": 2, "exclusive_minimum": "0", "max_scale": 2 }
+{ "name": "attempts", "type": "number", "minimum": 0, "maximum": 5, "integer": true }
+{ "name": "email", "type": "text", "format": "email" }
+{ "name": "reason", "type": "text", "not_blank": true, "max_length": 500 }
+{ "name": "reminders", "type": "json", "json_type": "array", "max_items": 5 }
+```
+
+Also available: `exclusive_maximum`, `min_length`, `pattern` (text). Decimal
+bounds are JSON strings; number bounds are JSON numbers. Numeric shorthands also
+reject NaN and ±Infinity.
+
+Use named `checks` for multi-field rules. `name` is required, snake_case, at most
+63 bytes:
+
+```json
+"checks": [
+  { "name": "ck_line_quantities", "expr": "received_quantity <= ordered_quantity AND ordered_quantity > 0" },
+  { "name": "ck_quote_refusal", "expr": "(status = 'refused') = (refusal_reason IS NOT NULL AND length(btrim(refusal_reason)) > 0)" },
+  { "name": "ck_period", "expr": "valid_until IS NULL OR valid_until > valid_from" }
+],
+"indexes": [
+  { "name": "uq_invoice_reference", "columns": ["supplier_id", "reference"], "unique": true, "where": "status <> 'cancelled'" },
+  { "name": "uq_pos_name", "columns": [{ "expr": "lower(btrim(name))" }], "unique": true },
+  { "name": "ix_customer_name_trgm", "using": "trigram", "columns": ["display_name"] }
+]
+```
+
+Language: declared fields and `id`/`created_at`/`updated_at`; literals `'text'`,
+numbers, `TRUE`/`FALSE`, `interval '62 days'` (days, hours, minutes, seconds);
+`AND OR NOT`, `IS [NOT] NULL`, `= <> != < <= > >=`, `[NOT] BETWEEN`, `[NOT] IN
+(literals)`, `+ - *`, `~ 'pattern'`; functions `length btrim trim upper lower
+coalesce scale trunc abs jsonb_typeof jsonb_array_length`. Refused: casts,
+`COLLATE`, subqueries, other tables, quoted/qualified names, comments, `/ % ^`,
+`now()`/`CURRENT_*`, `'today'`/`'NaN'`-style literals, other functions. Text has no
+ordering comparisons; dates never compare with timestamps; a rule touching a
+`sensitive` field may touch no other field, and index `where`/`expr` may not
+touch sensitive fields. Limits: 2 KiB, depth 24, 256 nodes, 100 `IN` items, 64
+checks and 64 indexes per entity. Patterns: no backreferences, lookaround,
+inline flags or nested quantifiers.
+
+Deploy behaviour: unchanged rules are kept; legacy Core-created rules adopt
+without a table scan; new or changed rules are checked against existing rows
+first (the install fails, changing nothing, if rows violate them) and replaced
+without a window where no version is enforced. Violations at runtime return
+`422 {"error":"rule_violation","entity","rule"}`; unique violations return
+`409 {"error":"unique_violation","entity","index"}`. Unknown keys on fields,
+checks, indexes and entities are refused at install.
 
 Unexpected legacy routines, views, triggers, rules, or other unsupported SQL
 artifacts require an independently controlled administrator migration. App
