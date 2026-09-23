@@ -664,12 +664,14 @@ mod tests {
                     on_delete: None,
                     sensitive: *sensitive,
                     owner: false,
+                unknown: Default::default(),
                 })
                 .collect(),
             identity_kind: None,
             identity_key: None,
             indexes: vec![],
             checks: vec![],
+        unknown: Default::default(),
         };
         rootcx_types::AppManifest {
             app_id: "crm".into(),

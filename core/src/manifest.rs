@@ -537,8 +537,12 @@ pub fn quote_literal(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
+/// PostgreSQL's identifier limit (NAMEDATALEN - 1). Longer names are silently
+/// truncated, so a name Core compares against the catalog would never match.
+pub(crate) const MAX_IDENT_BYTES: usize = 63;
+
 /// Reject identifiers that aren't valid unquoted PostgreSQL names.
-fn validate_ident(value: &str, label: &str) -> Result<(), RuntimeError> {
+pub(crate) fn validate_ident(value: &str, label: &str) -> Result<(), RuntimeError> {
     if !value.is_empty()
         && value.as_bytes()[0].is_ascii_lowercase()
         && value.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
@@ -548,6 +552,75 @@ fn validate_ident(value: &str, label: &str) -> Result<(), RuntimeError> {
     Err(RuntimeError::Invalid(format!(
         "{label} '{value}' must be snake_case (lowercase letters, digits, underscores; start with a letter)"
     )))
+}
+
+/// A new name must fit PostgreSQL's limit. Installation only: a stored manifest
+/// whose names PostgreSQL once truncated must still boot.
+pub(crate) fn validate_new_ident(value: &str, label: &str) -> Result<(), RuntimeError> {
+    validate_ident(value, label)?;
+    if value.len() > MAX_IDENT_BYTES {
+        return Err(RuntimeError::Invalid(format!(
+            "{label} '{value}' is {} bytes; PostgreSQL names are limited to {MAX_IDENT_BYTES}",
+            value.len()
+        )));
+    }
+    Ok(())
+}
+
+/// A Core-generated name within PostgreSQL's limit. Short names are returned
+/// unchanged so existing objects keep their names; longer ones keep a readable
+/// prefix and end with a hash of the full name, so two long names never collide.
+pub(crate) fn fit_ident(name: &str) -> String {
+    if name.len() <= MAX_IDENT_BYTES {
+        return name.to_string();
+    }
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(name.as_bytes());
+    let mut prefix = name[..54].to_string();
+    while !name.is_char_boundary(prefix.len()) {
+        prefix.pop();
+    }
+    format!("{prefix}_{}", hex::encode(&digest[..4]))
+}
+
+/// Installation refuses keys this Core does not understand. The types capture
+/// them instead of failing to parse, so stored manifests still load at boot.
+fn refuse_unknown_keys(manifest: &AppManifest) -> Result<(), RuntimeError> {
+    const ENTITY: &[&str] = &["entityName", "fields", "share", "identityKind", "identityKey", "indexes", "checks"];
+    const INDEX: &[&str] = &["name", "columns", "unique", "using", "where", "with"];
+    const INDEX_COLUMN: &[&str] = &["column", "expr", "sort", "nulls", "ops"];
+    const CHECK: &[&str] = &["name", "expr"];
+    let refuse = |at: String, unknown: &rootcx_types::UnknownKeys, known: &[&str]| {
+        let Some(key) = unknown.keys().next() else { return Ok(()) };
+        // Field keys are snake_case and entity keys camelCase; the most common
+        // mistake is the other spelling of a real key.
+        let loose = |k: &str| k.replace('_', "").to_ascii_lowercase();
+        let hint = known.iter().find(|k| loose(k) == loose(key))
+            .map(|k| format!(" (did you mean '{k}'?)"))
+            .unwrap_or_default();
+        Err(RuntimeError::Invalid(format!("{at}: unknown key '{key}'{hint}")))
+    };
+    for entity in &manifest.data_contract {
+        let at = format!("entity '{}'", entity.entity_name);
+        refuse(at.clone(), &entity.unknown, ENTITY)?;
+        for field in &entity.fields {
+            refuse(format!("{at} field '{}'", field.name), &field.unknown, crate::rules::FIELD_KEYS)?;
+        }
+        for (i, index) in entity.indexes.iter().enumerate() {
+            let label = index.name.clone().unwrap_or_else(|| i.to_string());
+            refuse(format!("{at} indexes[{label}]"), &index.unknown, INDEX)?;
+            for column in &index.columns {
+                if let rootcx_types::IndexColumn::Spec(spec) = column {
+                    refuse(format!("{at} indexes[{label}].columns"), &spec.unknown, INDEX_COLUMN)?;
+                }
+            }
+        }
+        for (i, check) in entity.checks.iter().enumerate() {
+            let label = check.name.clone().unwrap_or_else(|| i.to_string());
+            refuse(format!("{at} checks[{label}]"), &check.unknown, CHECK)?;
+        }
+    }
+    Ok(())
 }
 
 /// Permission keys are CSV-encoded into the `rootcx.effective_perms` GUC
@@ -610,6 +683,25 @@ fn validate_perm_key_schema(key: &str) -> Result<(), RuntimeError> {
 }
 
 pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
+    refuse_unknown_keys(manifest)?;
+    validate_new_ident(&manifest.app_id, "appId")?;
+    for entity in &manifest.data_contract {
+        validate_new_ident(&entity.entity_name, "entity name")?;
+        for field in &entity.fields {
+            validate_new_ident(&field.name, "field name")?;
+        }
+        for check in &entity.checks {
+            let name = check.name.as_deref().ok_or_else(|| RuntimeError::Invalid(format!(
+                "entity '{}': every check needs a 'name'", entity.entity_name
+            )))?;
+            validate_new_ident(name, "check name")?;
+        }
+        for index in &entity.indexes {
+            if let Some(name) = &index.name {
+                validate_new_ident(name, "index name")?;
+            }
+        }
+    }
     validate_stored_manifest(manifest)?;
     for entity in &manifest.data_contract {
         for field in &entity.fields {
@@ -790,11 +882,12 @@ mod tests {
             is_primary_key: None,
             on_delete: None,
             sensitive: false, owner: false,
+        unknown: Default::default(),
         }
     }
 
     fn entity(name: &str, fields: Vec<FieldContract>) -> EntityContract {
-        EntityContract { entity_name: name.to_string(), fields, share: None, identity_kind: None, identity_key: None, indexes: vec![], checks: vec![] }
+        EntityContract { entity_name: name.to_string(), fields, share: None, identity_kind: None, identity_key: None, indexes: vec![], checks: vec![], unknown: Default::default() }
     }
 
     /// Every reserved suffix is refused on the action segment, whole, and nowhere
@@ -1139,6 +1232,60 @@ mod tests {
             validate_manifest(&manifest)
                 .unwrap_or_else(|e| panic!("{}: manifest would be refused at install: {e}", path.display()));
         }
+    }
+
+    /// A misspelled key used to be dropped silently at parse time, disabling
+    /// what it declared. Installation names it and the real spelling.
+    #[test]
+    fn installation_refuses_unknown_keys_and_suggests_the_real_one() {
+        let manifest: AppManifest = serde_json::from_value(json!({
+            "appId": "app", "name": "app",
+            "dataContract": [{"entityName": "items", "fields": [
+                {"name": "parent_id", "type": "entity_link", "onDelete": "cascade",
+                 "references": {"entity": "items", "field": "id"}}
+            ]}]
+        })).unwrap();
+        let error = validate_manifest(&manifest).unwrap_err().to_string();
+        assert!(error.contains("unknown key 'onDelete'") && error.contains("did you mean 'on_delete'"), "{error}");
+        validate_stored_manifest(&manifest).expect("stored manifests stay readable at boot");
+
+        for patch in [
+            json!({"indexz": []}),
+            json!({"checks": [{"name": "c", "expr": "true", "message": "x"}]}),
+            json!({"indexes": [{"columns": ["parent_id"], "unqiue": true}]}),
+            json!({"indexes": [{"columns": [{"column": "parent_id", "collate": "C"}]}]}),
+        ] {
+            let mut value = serde_json::to_value(&manifest).unwrap();
+            value["dataContract"][0]["fields"][0].as_object_mut().unwrap().remove("onDelete");
+            value["dataContract"][0].as_object_mut().unwrap().extend(patch.as_object().unwrap().clone());
+            let candidate: AppManifest = serde_json::from_value(value).unwrap();
+            let error = validate_manifest(&candidate).unwrap_err().to_string();
+            assert!(error.contains("unknown key"), "{patch}: {error}");
+        }
+    }
+
+    /// PostgreSQL truncates longer names, so Core would never find the object it
+    /// created. New names are refused; stored ones must still boot.
+    #[test]
+    fn names_beyond_the_postgres_limit_are_refused_at_install_only() {
+        let long = format!("f{}", "x".repeat(MAX_IDENT_BYTES));
+        let manifest = AppManifest {
+            data_contract: vec![entity("items", vec![field(&long, "text")])],
+            ..serde_json::from_value(json!({"appId": "app", "name": "app"})).unwrap()
+        };
+        let error = validate_manifest(&manifest).unwrap_err().to_string();
+        assert!(error.contains("limited to 63"), "{error}");
+        validate_stored_manifest(&manifest).expect("a truncated legacy name must not block boot");
+    }
+
+    #[test]
+    fn generated_names_fit_postgres_without_colliding() {
+        assert_eq!(fit_ident("chk_orders_status"), "chk_orders_status", "short names never change");
+        let a = fit_ident(&format!("chk_{}_a", "e".repeat(70)));
+        let b = fit_ident(&format!("chk_{}_b", "e".repeat(70)));
+        assert!(a.len() <= MAX_IDENT_BYTES && b.len() <= MAX_IDENT_BYTES);
+        assert_ne!(a, b, "the hash suffix keeps long names distinct");
+        assert_eq!(a, fit_ident(&format!("chk_{}_a", "e".repeat(70))), "deterministic");
     }
 
     #[test]

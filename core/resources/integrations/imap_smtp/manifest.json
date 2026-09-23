@@ -94,9 +94,9 @@
     {
       "entityName": "messages",
       "fields": [
-        { "name": "external_id",        "type": "text", "unique": true },
+        { "name": "external_id",        "type": "text" },
         { "name": "thread_external_id",  "type": "text" },
-        { "name": "header_message_id",   "type": "text", "unique": true },
+        { "name": "header_message_id",   "type": "text" },
         { "name": "user_id",            "type": "text", "required": true },
         { "name": "folder",             "type": "text" },
         { "name": "subject",            "type": "text" },
@@ -112,7 +112,7 @@
     {
       "entityName": "threads",
       "fields": [
-        { "name": "external_id",        "type": "text", "unique": true },
+        { "name": "external_id",        "type": "text" },
         { "name": "user_id",            "type": "text", "required": true },
         { "name": "subject",            "type": "text" },
         { "name": "last_message_at",    "type": "timestamp" },
@@ -122,7 +122,7 @@
     {
       "entityName": "participants",
       "fields": [
-        { "name": "message_id",  "type": "entity_link", "onDelete": "cascade", "references": { "entity": "messages", "field": "id" }, "required": true },
+        { "name": "message_id",  "type": "entity_link", "references": { "entity": "messages", "field": "id" }, "required": true },
         { "name": "address",     "type": "text", "required": true },
         { "name": "name",        "type": "text" },
         { "name": "role",        "type": "text", "required": true, "enum_values": ["from", "to", "cc", "bcc"] }
@@ -131,7 +131,7 @@
     {
       "entityName": "attachments",
       "fields": [
-        { "name": "message_id",   "type": "entity_link", "onDelete": "cascade", "references": { "entity": "messages", "field": "id" }, "required": true },
+        { "name": "message_id",   "type": "entity_link", "references": { "entity": "messages", "field": "id" }, "required": true },
         { "name": "filename",     "type": "text" },
         { "name": "mime_type",    "type": "text" },
         { "name": "size",         "type": "number" },

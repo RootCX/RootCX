@@ -16,6 +16,7 @@ fn field(name: &str, required: bool) -> FieldContract {
         precision: None, scale: None,
         default_value: None, enum_values: None, references: None,
         is_primary_key: None, on_delete: None, sensitive: false, owner: false,
+    unknown: Default::default(),
     }
 }
 
@@ -31,6 +32,7 @@ fn contacts(indexes: Vec<IndexContract>) -> Vec<EntityContract> {
             field("company", false), field("notes", false),
         ],
         identity_kind: None, identity_key: None, indexes, checks: vec![],
+    unknown: Default::default(),
     }]
 }
 
@@ -48,7 +50,7 @@ fn idx(name: &str, columns: &[&str], unique: bool) -> IndexContract {
     IndexContract {
         name: Some(name.into()),
         columns: columns.iter().map(|c| IndexColumn::Name((*c).into())).collect(),
-        unique, using: None, where_clause: None, with: Default::default(),
+        unique, ..Default::default()
     }
 }
 

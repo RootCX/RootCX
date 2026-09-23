@@ -1,5 +1,15 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+
+/// Keys a manifest object carries that this Core does not understand.
+///
+/// Installation refuses them: a misspelled key (`maxLength`, `onDelete`) would
+/// otherwise disable what it was meant to declare without any error. Stored
+/// manifests and access projections keep being read leniently, so a document
+/// written by another Core version never prevents boot.
+pub type UnknownKeys = BTreeMap<String, JsonValue>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OsStatus {
@@ -269,7 +279,7 @@ fn default_version() -> String {
     "0.0.1".to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntityContract {
     pub entity_name: String,
@@ -293,6 +303,8 @@ pub struct EntityContract {
     /// installation rejects them; field enums generate Core-controlled checks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckContract>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unknown: UnknownKeys,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -338,10 +350,10 @@ pub struct ShareCondition {
     pub is_null: String,
 }
 
-/// A declarative index. Mirrors what Prisma/Drizzle let you declare for
-/// PostgreSQL. `where`/`expr`/`ops` are SQL fragments (bounded, not full
-/// statements); `name` is auto-derived when omitted.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A declarative index. `where` and column `expr` are written in the governed
+/// rule language (ADR 0010), never SQL; `ops` and `with` are legacy SQL
+/// fragments that installation refuses. `name` is auto-derived when omitted.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexContract {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -349,7 +361,8 @@ pub struct IndexContract {
     pub columns: Vec<IndexColumn>,
     #[serde(default)]
     pub unique: bool,
-    /// Index method: btree (default) | hash | gist | gin | spgist | brin.
+    /// Index method: btree (default) | hash | gist | gin | spgist | brin, or
+    /// `trigram` for a Core-owned trigram GIN index.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub using: Option<String>,
     /// Partial-index predicate (the `WHERE ...` clause).
@@ -358,6 +371,8 @@ pub struct IndexContract {
     /// Storage parameters, e.g. {"fillfactor":"70"}.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub with: std::collections::BTreeMap<String, String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unknown: UnknownKeys,
 }
 
 /// An index element: either a bare column name, or a spec carrying a column OR
@@ -369,18 +384,19 @@ pub enum IndexColumn {
     Spec(IndexColumnSpec),
 }
 
-/// A declarative table-level CHECK. `expr` is an arbitrary SQL boolean fragment
-/// (bounded, not a full statement); `name` is auto-derived when omitted. The
-/// core reconciles it by a hash of this DECLARED spec — never by comparing to
-/// Postgres's normalized stored definition — so there is no rewrite-churn.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A declarative table-level CHECK. `expr` is a boolean expression in the
+/// governed rule language (ADR 0010), which Core parses and compiles — never
+/// SQL. Installation requires `name`; stored legacy checks may lack one.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CheckContract {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub expr: String,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unknown: UnknownKeys,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexColumnSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -394,16 +410,18 @@ pub struct IndexColumnSpec {
     /// first | last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nulls: Option<String>,
-    /// Operator class, e.g. gin_trgm_ops.
+    /// Legacy operator class, e.g. gin_trgm_ops. Refused at installation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ops: Option<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unknown: UnknownKeys,
 }
 
 // NOTE: no `rename_all = "camelCase"` here — at the FIELD level the manifest
 // format is snake_case (`enum_values`, `on_delete`, …). camelCase silently
 // dropped those keys at deser (→ null), so no enum CHECK constraints or FK
 // delete rules were ever generated. Snake_case mirrors the real format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FieldContract {
     pub name: String,
     #[serde(rename = "type")]
@@ -457,6 +475,8 @@ pub struct FieldContract {
     /// [`sensitive`]: FieldContract::sensitive
     #[serde(default)]
     pub owner: bool,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unknown: UnknownKeys,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -826,5 +846,29 @@ mod tests {
         assert_eq!(e.checks[0].name.as_deref(), Some("enrollment_dates_chk"));
         assert_eq!(e.checks[1].name, None, "unnamed check keeps name None (auto-derived later)");
         assert_eq!(e.checks[1].expr, "x <> y");
+    }
+
+    // Unknown keys are captured rather than refused here: installation rejects
+    // them, but a stored manifest from another Core version must still load.
+    #[test]
+    fn unknown_keys_are_captured_and_round_trip() {
+        let json = serde_json::json!({
+            "entityName": "e", "chekcs": [],
+            "fields": [{"name": "a", "type": "text", "maxLength": 3, "required": true}],
+            "indexes": [{"columns": [{"column": "a", "colation": "C"}], "unqiue": true}],
+            "checks": [{"name": "c", "expr": "a IS NULL", "mesage": "x"}]
+        });
+        let e: EntityContract = serde_json::from_value(json.clone()).expect("lenient parse");
+        assert!(e.unknown.contains_key("chekcs"));
+        assert!(e.fields[0].unknown.contains_key("maxLength"));
+        assert!(e.fields[0].required, "known keys still parse next to unknown ones");
+        assert!(e.indexes[0].unknown.contains_key("unqiue"));
+        match &e.indexes[0].columns[0] {
+            IndexColumn::Spec(spec) => assert!(spec.unknown.contains_key("colation")),
+            other => panic!("expected a spec, got {other:?}"),
+        }
+        assert!(e.checks[0].unknown.contains_key("mesage"));
+        let round: EntityContract = serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap();
+        assert_eq!(round.fields[0].unknown, e.fields[0].unknown);
     }
 }
