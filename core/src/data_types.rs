@@ -296,7 +296,7 @@ pub(crate) fn bind_typed<'q>(
     }
 
     Ok(match field_type {
-        Some(FieldType::Number) => query.bind(coerce_f64(value)),
+        Some(FieldType::Number) => query.bind(coerce_f64(value)?),
         Some(FieldType::Decimal(_)) => {
             let literal = value
                 .as_str()
@@ -315,7 +315,7 @@ pub(crate) fn bind_typed<'q>(
         }
         Some(FieldType::Json) => query.bind(value),
         Some(FieldType::TextArray) => query.bind(coerce_str_vec(value)),
-        Some(FieldType::NumberArray) => query.bind(coerce_f64_vec(value)),
+        Some(FieldType::NumberArray) => query.bind(coerce_f64_vec(value)?),
         _ => match value {
             JsonValue::String(value) => query.bind(value.as_str()),
             _ => query.bind(json_value_to_string(value)),
@@ -339,13 +339,19 @@ pub(crate) fn json_value_to_string(value: &JsonValue) -> String {
     }
 }
 
-fn coerce_f64(value: &JsonValue) -> f64 {
-    match value {
-        JsonValue::Number(value) => value.as_f64().unwrap_or(0.0),
-        JsonValue::String(value) => value.parse().unwrap_or(0.0),
-        JsonValue::Bool(value) => i32::from(*value) as f64,
-        _ => 0.0,
-    }
+/// A finite number, or an error. Unparsable input used to become `0`, and Rust
+/// parses `"NaN"` and `"inf"`, which PostgreSQL orders above every number: both
+/// slipped past range rules such as `x > 0`.
+fn coerce_f64(value: &JsonValue) -> Result<f64, String> {
+    let number = match value {
+        JsonValue::Number(value) => value.as_f64(),
+        JsonValue::String(value) => value.trim().parse::<f64>().ok(),
+        JsonValue::Bool(value) => Some(i32::from(*value) as f64),
+        _ => None,
+    };
+    number
+        .filter(|number| number.is_finite())
+        .ok_or_else(|| format!("invalid number value: {value}"))
 }
 
 fn coerce_bool(value: &JsonValue) -> bool {
@@ -368,10 +374,10 @@ fn coerce_str_vec(value: &JsonValue) -> Vec<&str> {
     }
 }
 
-fn coerce_f64_vec(value: &JsonValue) -> Vec<f64> {
+fn coerce_f64_vec(value: &JsonValue) -> Result<Vec<f64>, String> {
     match value {
-        JsonValue::Array(values) => values.iter().filter_map(JsonValue::as_f64).collect(),
-        _ => Vec::new(),
+        JsonValue::Array(values) => values.iter().map(coerce_f64).collect(),
+        _ => Err(format!("invalid number array value: {value}")),
     }
 }
 
@@ -411,6 +417,7 @@ mod tests {
             on_delete: None,
             sensitive: false,
             owner: false,
+        unknown: Default::default(),
         }
     }
 
@@ -433,12 +440,14 @@ mod tests {
                     on_delete: None,
                     sensitive: *sensitive,
                     owner: false,
+                unknown: Default::default(),
                 })
                 .collect(),
             identity_kind: None,
             identity_key: None,
             indexes: vec![],
             checks: vec![],
+        unknown: Default::default(),
         };
         field_types(&entity).expect("valid entity")
     }
@@ -589,5 +598,20 @@ mod tests {
             enum_check_expr(&with("e", "text", &[])).is_none(),
             "an empty list must not emit the invalid `col IN ()`",
         );
+    }
+
+    /// Unparsable numbers used to be stored as 0 and `"NaN"`/`"inf"` parsed,
+    /// both slipping past range rules. Only finite numbers bind.
+    #[test]
+    fn number_coercion_refuses_non_finite_and_unparsable_values() {
+        for ok in [serde_json::json!(1.5), serde_json::json!("2"), serde_json::json!(" -3.25 "), serde_json::json!(true)] {
+            assert!(coerce_f64(&ok).is_ok(), "{ok} must bind");
+        }
+        for bad in ["NaN", "nan", "inf", "-Infinity", "", "abc", "1e999"] {
+            assert!(coerce_f64(&serde_json::json!(bad)).is_err(), "{bad:?} must be refused");
+        }
+        assert!(coerce_f64(&serde_json::json!({"a": 1})).is_err());
+        assert_eq!(coerce_f64_vec(&serde_json::json!([1, "2"])).unwrap(), vec![1.0, 2.0]);
+        assert!(coerce_f64_vec(&serde_json::json!([1, "x"])).is_err(), "no element is silently dropped");
     }
 }

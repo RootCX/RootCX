@@ -446,6 +446,8 @@ fn api_error_message(error: ApiError) -> String {
         | ApiError::Unavailable(message)
         | ApiError::Internal(message) => message,
         ApiError::NotReady => "runtime not ready".into(),
+        ApiError::RuleViolation { entity, rule } => format!("rule '{rule}' rejected the write to '{entity}'"),
+        ApiError::UniqueViolation { entity, index } => format!("unique index '{index}' rejected the write to '{entity}'"),
     }
 }
 

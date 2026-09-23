@@ -14,11 +14,42 @@ pub enum ApiError {
     /// which is boot state, and from `Internal`, which is a fault.
     Unavailable(String),
     Internal(String),
+    /// A write an app's declared database rule rejected. Carries schema names
+    /// only: PostgreSQL's DETAIL contains row values the caller may not read.
+    RuleViolation { entity: String, rule: String },
+    /// A write a unique index rejected; same disclosure boundary.
+    UniqueViolation { entity: String, index: String },
+}
+
+/// Schemas the Core owns. Rule and uniqueness failures there are Core faults,
+/// never an app's declared rule, and keep the opaque internal error.
+const CORE_SCHEMAS: &[&str] = &["rootcx_system", "rootcx_ext", "pgmq", "cron", "public"];
+
+fn app_rule_violation(db_err: &dyn sqlx::error::DatabaseError) -> Option<ApiError> {
+    let pg = db_err.try_downcast_ref::<sqlx::postgres::PgDatabaseError>()?;
+    let (schema, table, name) = (pg.schema()?, pg.table()?, pg.constraint()?);
+    if CORE_SCHEMAS.contains(&schema) || schema.starts_with("pg_") {
+        return None;
+    }
+    let (entity, name) = (table.to_string(), name.to_string());
+    match pg.code() {
+        "23514" => Some(ApiError::RuleViolation { entity, rule: name }),
+        "23505" => Some(ApiError::UniqueViolation { entity, index: name }),
+        _ => None,
+    }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
+            Self::RuleViolation { entity, rule } => return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                axum::Json(json!({ "error": "rule_violation", "entity": entity, "rule": rule })),
+            ).into_response(),
+            Self::UniqueViolation { entity, index } => return (
+                StatusCode::CONFLICT,
+                axum::Json(json!({ "error": "unique_violation", "entity": entity, "index": index })),
+            ).into_response(),
             Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
             Self::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg),
@@ -50,6 +81,11 @@ impl From<sqlx::Error> for ApiError {
                 Some("23503") => {
                     let detail = db_err.message();
                     return Self::Conflict(format!("foreign key constraint violated: {detail}"));
+                }
+                Some("23514" | "23505") => {
+                    if let Some(error) = app_rule_violation(db_err.as_ref()) {
+                        return error;
+                    }
                 }
                 _ => {}
             }

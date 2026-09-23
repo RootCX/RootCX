@@ -268,7 +268,7 @@
     {
       "entityName": "channel_event_associations",
       "fields": [
-        { "name": "event_id",                "type": "entity_link", "onDelete": "cascade", "references": { "entity": "events", "field": "id" }, "required": true },
+        { "name": "event_id",                "type": "entity_link", "references": { "entity": "events", "field": "id" }, "required": true },
         { "name": "user_id",                 "type": "text", "required": true },
         { "name": "calendar_external_id",    "type": "text", "required": true },
         { "name": "event_external_id",       "type": "text", "required": true },
@@ -278,7 +278,7 @@
     {
       "entityName": "attendees",
       "fields": [
-        { "name": "event_id",        "type": "entity_link", "onDelete": "cascade", "references": { "entity": "events", "field": "id" }, "required": true },
+        { "name": "event_id",        "type": "entity_link", "references": { "entity": "events", "field": "id" }, "required": true },
         { "name": "address",         "type": "text", "required": true },
         { "name": "display_name",    "type": "text" },
         { "name": "response_status", "type": "text", "enum_values": ["needs_action", "declined", "tentative", "accepted"] },
@@ -289,7 +289,7 @@
     {
       "entityName": "event_attachments",
       "fields": [
-        { "name": "event_id",   "type": "entity_link", "onDelete": "cascade", "references": { "entity": "events", "field": "id" }, "required": true },
+        { "name": "event_id",   "type": "entity_link", "references": { "entity": "events", "field": "id" }, "required": true },
         { "name": "file_id",    "type": "text" },
         { "name": "file_url",   "type": "text" },
         { "name": "title",      "type": "text" },

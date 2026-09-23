@@ -13,6 +13,7 @@ pub mod mcp;
 mod mcp_server;
 mod principal;
 mod routes;
+mod rules;
 mod scheduler;
 mod schema;
 pub mod schema_sync;

@@ -663,7 +663,7 @@ fn desired_checks(entity: &EntityContract) -> Result<HashMap<String, String>, St
     let mut by_name: HashMap<String, String> = HashMap::new();
     for f in &entity.fields {
         if let Some(expr) = crate::data_types::enum_check_expr(f) {
-            let name = format!("chk_{}_{}", entity.entity_name, f.name);
+            let name = crate::manifest::fit_ident(&format!("chk_{}_{}", entity.entity_name, f.name));
             if by_name.insert(name.clone(), expr).is_some() {
                 return Err(format!("duplicate check name '{name}' on '{}'", entity.entity_name));
             }
@@ -991,6 +991,7 @@ mod tests {
             on_delete: None,
             sensitive: false,
             owner: false,
+        unknown: Default::default(),
         }
     }
 
@@ -1003,7 +1004,7 @@ mod tests {
     }
 
     fn mentity(name: &str, fields: Vec<FieldContract>) -> EntityContract {
-        EntityContract { entity_name: name.to_string(), fields, share: None, identity_kind: None, identity_key: None, indexes: vec![], checks: vec![] }
+        EntityContract { entity_name: name.to_string(), fields, share: None, identity_kind: None, identity_key: None, indexes: vec![], checks: vec![], unknown: Default::default() }
     }
 
     // ── normalize / defaults ─────────────────────────────────────────
@@ -1176,7 +1177,7 @@ mod tests {
         let mut gender = mfield("gender", "text");
         gender.enum_values = Some(vec!["m".into(), "f".into()]);
         let mut e = mentity("person", vec![gender]);
-        e.checks = vec![CheckContract { name: Some("person_dates_chk".into()), expr: "a >= b".into() }];
+        e.checks = vec![CheckContract { name: Some("person_dates_chk".into()), expr: "a >= b".into(), ..Default::default() }];
         let d = desired_checks(&e).unwrap();
         assert!(d.contains_key("chk_person_gender"), "enum-derived check present");
         assert!(d.contains_key("person_dates_chk"), "explicit check present by name");
@@ -1187,7 +1188,7 @@ mod tests {
     fn desired_checks_auto_names_unnamed() {
         // An explicit check with no name gets a deterministic chk_<entity>_<hash>.
         let mut e = mentity("person", vec![]);
-        e.checks = vec![CheckContract { name: None, expr: "x > 0".into() }];
+        e.checks = vec![CheckContract { name: None, expr: "x > 0".into(), ..Default::default() }];
         let d = desired_checks(&e).unwrap();
         let name = d.keys().next().unwrap();
         assert_eq!(name, &format!("chk_person_{}", check_spec_hash("x > 0")));
@@ -1197,8 +1198,8 @@ mod tests {
     fn desired_checks_rejects_duplicate_names() {
         let mut e = mentity("t", vec![]);
         e.checks = vec![
-            CheckContract { name: Some("dup".into()), expr: "x".into() },
-            CheckContract { name: Some("dup".into()), expr: "y".into() },
+            CheckContract { name: Some("dup".into()), expr: "x".into(), ..Default::default() },
+            CheckContract { name: Some("dup".into()), expr: "y".into(), ..Default::default() },
         ];
         assert!(desired_checks(&e).is_err(), "duplicate check names must be rejected");
     }
@@ -1460,6 +1461,7 @@ mod tests {
             owner: false,
             is_primary_key: None,
             on_delete,
+            unknown: Default::default(),
         }
     }
 
@@ -1538,12 +1540,12 @@ mod tests {
     use rootcx_types::{IndexColumn, IndexColumnSpec, IndexContract};
 
     fn idx(columns: Vec<IndexColumn>) -> IndexContract {
-        IndexContract { name: None, columns, unique: false, using: None, where_clause: None, with: Default::default() }
+        IndexContract { columns, ..Default::default() }
     }
     fn col(name: &str) -> IndexColumn { IndexColumn::Name(name.into()) }
     fn spec(s: IndexColumnSpec) -> IndexColumn { IndexColumn::Spec(s) }
     fn blank_spec() -> IndexColumnSpec {
-        IndexColumnSpec { column: None, expr: None, sort: None, nulls: None, ops: None }
+        IndexColumnSpec::default()
     }
 
     #[test]
