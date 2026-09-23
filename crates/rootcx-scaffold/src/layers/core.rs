@@ -34,7 +34,7 @@ impl Layer for CoreLayer {
   "type": "module",
   "scripts": {{ "dev": "vite", "build": "vite build" }},
   "dependencies": {{
-    "@rootcx/sdk": "^0.19.0",
+    "@rootcx/sdk": "^0.20.0",
     "@rootcx/ui": "^0.9.0",
     "@tabler/icons-react": "^3.30.0",
     "@tailwindcss/vite": "^4.0.0",
