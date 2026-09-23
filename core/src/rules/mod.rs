@@ -9,11 +9,14 @@ mod ast;
 mod emit;
 mod parser;
 mod pattern;
+mod reconcile;
 mod shorthand;
 mod typing;
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) use reconcile::{preflight, reconcile, verify};
 
 use rootcx_types::{EntityContract, FieldContract, IndexColumn, IndexContract};
 use sha2::{Digest, Sha256};
