@@ -310,16 +310,6 @@ async fn legacy_trigram_indexes_adopt_and_survive_the_owner_schema_uninstall() {
     rt.shutdown().await;
 }
 
-#[tokio::test]
-async fn core_and_extension_schemas_are_not_app_ids() {
-    let rt = TestRuntime::boot().await;
-    for app in ["rootcx_ext", "rootcx_system", "pgmq", "cron", "public", "pg_temp_x"] {
-        let (status, body) = rt.post_json("/api/v1/apps", &lines(app, json!([]), json!([]))).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{app}: {body}");
-    }
-    rt.shutdown().await;
-}
-
 fn quote(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }

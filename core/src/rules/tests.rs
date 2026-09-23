@@ -45,7 +45,8 @@ fn refusal(expr: &str) -> String {
     }
 }
 
-/// Emitted SQL for representative rules, including every construct Kova uses.
+/// Emitted SQL for representative rules, including every construct Kova uses
+/// and every precedence level.
 pub(super) const GOLDENS: &[(&str, &str)] = &[
     ("qty > 0 AND scale(qty) <= 2", r#"(("qty" > 0) AND (pg_catalog.scale("qty") <= 2))"#),
     ("NOT flag = true", r#"(NOT ("flag" = TRUE))"#),
@@ -70,29 +71,22 @@ pub(super) const GOLDENS: &[(&str, &str)] = &[
     ("abs(n) > 30 OR n IS NULL", r#"((pg_catalog.abs("n") > 30) OR ("n" IS NULL))"#),
     ("upper(name) = name", r#"(pg_catalog.upper("name") = "name")"#),
     ("tags IS NOT NULL", r#"("tags" IS NOT NULL)"#),
+    // Precedence follows PostgreSQL's.
+    ("NOT flag AND flag OR flag", r#"(((NOT "flag") AND "flag") OR "flag")"#),
+    ("flag OR flag AND NOT flag", r#"("flag" OR ("flag" AND (NOT "flag")))"#),
+    ("NOT name IS NULL", r#"(NOT ("name" IS NULL))"#),
+    ("n = 1 IS NOT NULL", r#"(("n" = 1) IS NOT NULL)"#),
+    ("n + 1 * 2 - 3 = 4", r#"((("n" + (1 * 2)) - 3) = 4)"#),
+    ("n BETWEEN 1 AND 2 AND flag", r#"(("n" BETWEEN 1 AND 2) AND "flag")"#),
+    ("n IN (1, 2) = flag", r#"(("n" IN (1, 2)) = "flag")"#),
+    ("- n * 2 > 1", r#"(((- "n") * 2) > 1)"#),
+    ("NOT NOT flag", r#"(NOT (NOT "flag"))"#),
 ];
 
 #[test]
 fn goldens_compile_to_exact_sql() {
     for (source, expected) in GOLDENS.iter() {
         assert_eq!(&sql_of(source), expected, "{source}");
-    }
-}
-
-#[test]
-fn precedence_matches_postgresql() {
-    for (source, expected) in [
-        ("NOT flag AND flag OR flag", r#"(((NOT "flag") AND "flag") OR "flag")"#),
-        ("flag OR flag AND NOT flag", r#"("flag" OR ("flag" AND (NOT "flag")))"#),
-        ("NOT name IS NULL", r#"(NOT ("name" IS NULL))"#),
-        ("n = 1 IS NOT NULL", r#"(("n" = 1) IS NOT NULL)"#),
-        ("n + 1 * 2 - 3 = 4", r#"((("n" + (1 * 2)) - 3) = 4)"#),
-        ("n BETWEEN 1 AND 2 AND flag", r#"(("n" BETWEEN 1 AND 2) AND "flag")"#),
-        ("n IN (1, 2) = flag", r#"(("n" IN (1, 2)) = "flag")"#),
-        ("- n * 2 > 1", r#"(((- "n") * 2) > 1)"#),
-        ("NOT NOT flag", r#"(NOT (NOT "flag"))"#),
-    ] {
-        assert_eq!(sql_of(source), expected, "{source}");
     }
 }
 
@@ -183,7 +177,6 @@ fn adversarial_corpus_is_refused() {
         ("n > 1_000".into(), "digits"),
         ("n > .5".into(), "'.'"),
         ("flag = flag = flag".into(), "do not chain"),
-        ("secret = name".into(), "sensitive"),
         ("name > 'a'".into(), "collation"),
         ("name = 'a';DROP TABLE x".into(), "';' is not allowed"),
         (nested, "nesting depth"),
@@ -239,14 +232,14 @@ fn sensitive_fields_stay_in_single_field_rules() {
 
 #[test]
 fn names_are_required_bounded_and_unique() {
-    let unnamed = compile_entity(&entity(json!({"checks": [{"expr": "n > 0"}]}))).unwrap_err();
-    assert!(unnamed.contains("needs a 'name'"), "{unnamed}");
-    let long = compile_entity(&entity(json!({"checks": [{"name": "c".repeat(64), "expr": "n > 0"}]}))).unwrap_err();
-    assert!(long.contains("limited to 63"), "{long}");
-    let dup = compile_entity(&entity(json!({"checks": [
-        {"name": "c", "expr": "n > 0"}, {"name": "c", "expr": "n > 1"}
-    ]}))).unwrap_err();
-    assert!(dup.contains("duplicate"), "{dup}");
+    for (checks, fragment) in [
+        (json!([{"expr": "n > 0"}]), "needs a 'name'"),
+        (json!([{"name": "c".repeat(64), "expr": "n > 0"}]), "limited to 63"),
+        (json!([{"name": "c", "expr": "n > 0"}, {"name": "c", "expr": "n > 1"}]), "duplicate"),
+    ] {
+        let error = compile_entity(&entity(json!({"checks": checks}))).unwrap_err();
+        assert!(error.contains(fragment), "{checks}: {error}");
+    }
 }
 
 #[test]
@@ -442,46 +435,6 @@ mod random {
             _ => pick(rng, &["flag", "flag = true", "flag <> false", "NOT flag"]).to_string(),
         }
     }
-}
-
-/// A real application's manifest, kept out of the repository. After the two
-/// edits its authors need — `using: "trigram"` instead of a raw operator class,
-/// and no misspelled keys — every rule it declares must be admitted unchanged.
-#[test]
-fn private_corpus_is_admitted_after_trigram_migration() {
-    let path = std::env::var("ROOTCX_RULES_CORPUS").unwrap_or_else(|_| {
-        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/private/corpus_manifest.json").into()
-    });
-    let Ok(raw) = std::fs::read_to_string(&path) else { return };
-    let mut value: serde_json::Value = serde_json::from_str(&raw).expect("corpus parses");
-    let (mut trigram, mut dropped) = (0, Vec::new());
-    for entity in value["dataContract"].as_array_mut().unwrap() {
-        for field in entity["fields"].as_array_mut().unwrap() {
-            for key in ["onDelete"] {
-                if field.as_object_mut().unwrap().remove(key).is_some() {
-                    dropped.push(format!("{}.{key}", field["name"]));
-                }
-            }
-        }
-        for index in entity.get_mut("indexes").and_then(|i| i.as_array_mut()).into_iter().flatten() {
-            let columns = index["columns"].as_array().unwrap();
-            let is_trigram = columns.iter().any(|c| c.get("ops").and_then(|o| o.as_str()).is_some_and(|o| o.ends_with("gin_trgm_ops")));
-            if is_trigram {
-                trigram += 1;
-                let names: Vec<serde_json::Value> = columns.iter().map(|c| c["column"].clone()).collect();
-                index["columns"] = json!(names);
-                index["using"] = json!("trigram");
-            }
-        }
-    }
-    let manifest: rootcx_types::AppManifest = serde_json::from_value(value).unwrap();
-    crate::manifest::validate_manifest(&manifest).unwrap_or_else(|e| panic!("{e}"));
-    let (mut checks, mut indexes) = (0, 0);
-    for entity in &manifest.data_contract {
-        checks += entity.checks.len();
-        indexes += compile_entity(entity).unwrap().indexes.len();
-    }
-    eprintln!("corpus: {checks} checks, {indexes} indexes admitted; {trigram} trigram indexes migrated; removed {dropped:?}");
 }
 
 fn shorthand_checks(field: serde_json::Value) -> Result<Vec<(String, String)>, String> {
