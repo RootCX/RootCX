@@ -21,14 +21,11 @@ pub enum ApiError {
     UniqueViolation { entity: String, index: String },
 }
 
-/// Schemas the Core owns. Rule and uniqueness failures there are Core faults,
-/// never an app's declared rule, and keep the opaque internal error.
-const CORE_SCHEMAS: &[&str] = &["rootcx_system", "rootcx_ext", "pgmq", "cron", "public"];
-
 fn app_rule_violation(db_err: &dyn sqlx::error::DatabaseError) -> Option<ApiError> {
     let pg = db_err.try_downcast_ref::<sqlx::postgres::PgDatabaseError>()?;
     let (schema, table, name) = (pg.schema()?, pg.table()?, pg.constraint()?);
-    if CORE_SCHEMAS.contains(&schema) || schema.starts_with("pg_") {
+    // Failures in Core schemas are Core faults and keep the opaque error.
+    if crate::manifest::RESERVED_SCHEMAS.contains(&schema) || schema.starts_with("pg_") {
         return None;
     }
     let (entity, name) = (table.to_string(), name.to_string());

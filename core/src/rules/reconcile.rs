@@ -47,6 +47,18 @@ enum Plan {
     Replace,
 }
 
+impl Plan {
+    /// How the verify endpoint names this change; `None` when nothing changes.
+    fn verb(&self) -> Option<&'static str> {
+        match self {
+            Plan::Keep => None,
+            Plan::Adopt => Some("adopt"),
+            Plan::Create => Some("add"),
+            Plan::Replace => Some("replace"),
+        }
+    }
+}
+
 struct Existing {
     comment: Option<String>,
     valid: bool,
@@ -71,10 +83,6 @@ impl Table<'_> {
     }
 }
 
-fn schema_error(e: sqlx::Error) -> RuntimeError {
-    RuntimeError::Schema(e)
-}
-
 /// The manifest stored before this install. Its declarations decide whether an
 /// object an older Core created may be adopted without a scan.
 async fn previous_entities(pool: &PgPool, app_id: &str) -> Result<Vec<EntityContract>, RuntimeError> {
@@ -91,7 +99,7 @@ async fn existing_checks(conn: &mut PgConnection, schema: &str, table: &str) -> 
          FROM pg_constraint con JOIN pg_class t ON t.oid = con.conrelid
          JOIN pg_namespace n ON n.oid = t.relnamespace
          WHERE n.nspname = $1 AND t.relname = $2 AND con.contype = 'c'",
-    ).bind(schema).bind(table).fetch_all(&mut *conn).await.map_err(schema_error)?;
+    ).bind(schema).bind(table).fetch_all(&mut *conn).await.map_err(RuntimeError::Schema)?;
     Ok(rows.into_iter().map(|(name, comment, valid)| (name, Existing { comment, valid })).collect())
 }
 
@@ -101,7 +109,7 @@ async fn existing_indexes(conn: &mut PgConnection, schema: &str, table: &str) ->
          FROM pg_index x JOIN pg_class c ON c.oid = x.indexrelid
          JOIN pg_class t ON t.oid = x.indrelid JOIN pg_namespace n ON n.oid = t.relnamespace
          WHERE n.nspname = $1 AND t.relname = $2",
-    ).bind(schema).bind(table).fetch_all(&mut *conn).await.map_err(schema_error)?;
+    ).bind(schema).bind(table).fetch_all(&mut *conn).await.map_err(RuntimeError::Schema)?;
     Ok(rows.into_iter().map(|(name, comment, valid)| (name, Existing { comment, valid })).collect())
 }
 
@@ -120,7 +128,7 @@ async fn trigram_matches(conn: &mut PgConnection, schema: &str, name: &str, colu
          FROM pg_index x JOIN pg_class c ON c.oid = x.indexrelid JOIN pg_am am ON am.oid = c.relam
          JOIN pg_namespace n ON n.oid = c.relnamespace
          WHERE n.nspname = $1 AND c.relname = $2 AND x.indisvalid AND x.indexprs IS NULL",
-    ).bind(schema).bind(name).fetch_optional(&mut *conn).await.map_err(schema_error)?;
+    ).bind(schema).bind(name).fetch_optional(&mut *conn).await.map_err(RuntimeError::Schema)?;
     Ok(shape.is_some_and(|(am, no_predicate, keys, opclasses, namespaces)| {
         am == "gin" && no_predicate && keys == columns
             && opclasses.iter().all(|o| o == "gin_trgm_ops")
@@ -142,7 +150,8 @@ fn check_was_declared(previous: Option<&EntityContract>, current: &EntityContrac
         Origin::Enum { field } => {
             let find = |e: &EntityContract| e.fields.iter().find(|f| &f.name == field)
                 .map(|f| (f.field_type.clone(), f.enum_values.clone()));
-            find(previous).is_some() && find(previous) == find(current)
+            let before = find(previous);
+            before.is_some() && before == find(current)
         }
         Origin::Shorthand => false,
     }
@@ -168,7 +177,7 @@ async fn trigram_schema(conn: &mut PgConnection) -> Result<Option<String>, Runti
     sqlx::query_scalar(
         "SELECT n.nspname::text FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
          WHERE e.extname = 'pg_trgm'",
-    ).fetch_optional(&mut *conn).await.map_err(schema_error)
+    ).fetch_optional(&mut *conn).await.map_err(RuntimeError::Schema)
 }
 
 /// Install pg_trgm into the Core-owned schema when no app has installed it.
@@ -281,7 +290,7 @@ async fn preflight_table(conn: &mut PgConnection, table: &Table<'_>, early: bool
         )).fetch_one(&mut *conn).await;
         let (count, ids) = match found {
             Err(error) if early && not_evaluable_yet(&error) => continue,
-            found => found.map_err(schema_error)?,
+            found => found.map_err(RuntimeError::Schema)?,
         };
         if count > 0 {
             return Err(RuntimeError::Invalid(format!(
@@ -304,7 +313,7 @@ async fn preflight_table(conn: &mut PgConnection, table: &Table<'_>, early: bool
         )).fetch_one(&mut *conn).await;
         let groups = match found {
             Err(error) if early && not_evaluable_yet(&error) => continue,
-            found => found.map_err(schema_error)?,
+            found => found.map_err(RuntimeError::Schema)?,
         };
         if groups > 0 {
             return Err(RuntimeError::Invalid(format!(
@@ -322,11 +331,11 @@ fn not_evaluable_yet(error: &sqlx::Error) -> bool {
 }
 
 async fn execute(conn: &mut PgConnection, statements: &[String]) -> Result<(), RuntimeError> {
-    let mut tx = conn.begin().await.map_err(schema_error)?;
+    let mut tx = conn.begin().await.map_err(RuntimeError::Schema)?;
     for statement in statements {
-        sqlx::query(statement).execute(&mut *tx).await.map_err(schema_error)?;
+        sqlx::query(statement).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
     }
-    tx.commit().await.map_err(schema_error)
+    tx.commit().await.map_err(RuntimeError::Schema)
 }
 
 fn comment_check(fq: &str, name: &str, tag: &str) -> String {
@@ -354,7 +363,7 @@ async fn add_validated_check(conn: &mut PgConnection, fq: &str, name: &str, chec
             Some("23514") => RuntimeError::Invalid(format!(
                 "rule '{}' is violated by rows written during the install; nothing was changed", check.name
             )),
-            _ => schema_error(error),
+            _ => RuntimeError::Schema(error),
         });
     }
     Ok(())
@@ -365,7 +374,7 @@ async fn add_validated_check(conn: &mut PgConnection, fq: &str, name: &str, chec
 /// dropped here and would otherwise be cleaned by the next install.
 async fn build_index(conn: &mut PgConnection, table: &Table<'_>, index: &CompiledIndex, name: &str) -> Result<(), RuntimeError> {
     let has_rows: bool = sqlx::query_scalar(&format!("SELECT EXISTS (SELECT 1 FROM {})", table.fq()))
-        .fetch_one(&mut *conn).await.map_err(schema_error)?;
+        .fetch_one(&mut *conn).await.map_err(RuntimeError::Schema)?;
     let trigram = table.trigram.as_deref().unwrap_or(super::EXTENSION_SCHEMA);
     let sql = index.create_sql(table.schema, &table.entity.entity_name, name, has_rows, trigram);
     let built = sqlx::query(&sql).execute(&mut *conn).await;
@@ -376,7 +385,7 @@ async fn build_index(conn: &mut PgConnection, table: &Table<'_>, index: &Compile
             Some("23505") => RuntimeError::Invalid(format!(
                 "unique index '{}' is violated by rows written during the install; nothing was changed", index.name
             )),
-            _ => schema_error(error),
+            _ => RuntimeError::Schema(error),
         });
     }
     Ok(())
@@ -446,7 +455,7 @@ pub(crate) async fn evacuate_extensions(pool: &PgPool, app_id: &str) -> Result<(
     let extensions: Vec<(String, bool)> = sqlx::query_as(
         "SELECT e.extname::text, e.extrelocatable FROM pg_extension e
          JOIN pg_namespace n ON n.oid = e.extnamespace WHERE n.nspname = $1",
-    ).bind(app_id).fetch_all(pool).await.map_err(schema_error)?;
+    ).bind(app_id).fetch_all(pool).await.map_err(RuntimeError::Schema)?;
     for (name, relocatable) in extensions {
         if !relocatable {
             return Err(RuntimeError::Conflict(format!(
@@ -454,12 +463,12 @@ pub(crate) async fn evacuate_extensions(pool: &PgPool, app_id: &str) -> Result<(
                  an operator must relocate or drop it before uninstalling"
             )));
         }
-        let mut tx = pool.begin().await.map_err(schema_error)?;
+        let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
         sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(super::EXTENSION_SCHEMA)))
-            .execute(&mut *tx).await.map_err(schema_error)?;
+            .execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
         sqlx::query(&format!("ALTER EXTENSION {} SET SCHEMA {}", quote_ident(&name), quote_ident(super::EXTENSION_SCHEMA)))
-            .execute(&mut *tx).await.map_err(schema_error)?;
-        tx.commit().await.map_err(schema_error)?;
+            .execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
+        tx.commit().await.map_err(RuntimeError::Schema)?;
         info!(app = %app_id, extension = %name, "extension moved out of the app schema before uninstall");
     }
     Ok(())
@@ -468,7 +477,7 @@ pub(crate) async fn evacuate_extensions(pool: &PgPool, app_id: &str) -> Result<(
 /// Reconcile every entity's rules for one install, on one dedicated session.
 pub(crate) async fn reconcile(pool: &PgPool, app_id: &str, entities: &[EntityContract]) -> Result<(), RuntimeError> {
     let previous = previous_entities(pool, app_id).await?;
-    let mut conn = pool.acquire().await.map_err(schema_error)?.detach();
+    let mut conn = pool.acquire().await.map_err(RuntimeError::Schema)?.detach();
     let result = reconcile_on(&mut conn, app_id, entities, &previous).await;
     let _ = conn.close().await;
     result
@@ -481,12 +490,9 @@ async fn reconcile_on(
     previous: &[EntityContract],
 ) -> Result<(), RuntimeError> {
     for setting in SESSION {
-        sqlx::query(setting).execute(&mut *conn).await.map_err(schema_error)?;
+        sqlx::query(setting).execute(&mut *conn).await.map_err(RuntimeError::Schema)?;
     }
-    let trigram = match declares_trigram(entities) {
-        true => Some(ensure_trigram(conn).await?),
-        false => None,
-    };
+    let trigram = if declares_trigram(entities) { Some(ensure_trigram(conn).await?) } else { None };
     let mut tables = Vec::with_capacity(entities.len());
     for entity in entities {
         let before = previous.iter().find(|e| e.entity_name == entity.entity_name);
@@ -524,10 +530,10 @@ async fn reconcile_on(
 /// touching the running installation.
 pub(crate) async fn preflight(pool: &PgPool, app_id: &str, entities: &[EntityContract]) -> Result<(), RuntimeError> {
     let previous = previous_entities(pool, app_id).await?;
-    let mut conn = pool.acquire().await.map_err(schema_error)?;
+    let mut conn = pool.acquire().await.map_err(RuntimeError::Schema)?;
     let conn = &mut *conn;
     let tables: Vec<String> = sqlx::query_scalar("SELECT tablename::text FROM pg_tables WHERE schemaname = $1")
-        .bind(app_id).fetch_all(&mut *conn).await.map_err(schema_error)?;
+        .bind(app_id).fetch_all(&mut *conn).await.map_err(RuntimeError::Schema)?;
     let trigram = trigram_schema(conn).await?;
     for entity in entities.iter().filter(|e| tables.contains(&e.entity_name)) {
         let before = previous.iter().find(|e| e.entity_name == entity.entity_name);
@@ -540,7 +546,7 @@ pub(crate) async fn preflight(pool: &PgPool, app_id: &str, entities: &[EntityCon
 /// What an install of `entities` would change, for the verify endpoint.
 pub(crate) async fn verify(pool: &PgPool, app_id: &str, entities: &[EntityContract]) -> Result<Vec<SchemaChange>, RuntimeError> {
     let previous = previous_entities(pool, app_id).await?;
-    let mut conn = pool.acquire().await.map_err(schema_error)?;
+    let mut conn = pool.acquire().await.map_err(RuntimeError::Schema)?;
     let conn = &mut *conn;
     let trigram = trigram_schema(conn).await?;
     let mut changes = Vec::new();
@@ -551,19 +557,13 @@ pub(crate) async fn verify(pool: &PgPool, app_id: &str, entities: &[EntityContra
             entity: entity.entity_name.clone(), change_type: kind.into(), column: name.into(), detail: None,
         };
         for (check, plan) in &table.checks {
-            match plan {
-                Plan::Keep => {}
-                Plan::Adopt => changes.push(change("adopt_check", &check.name)),
-                Plan::Create => changes.push(change("add_check", &check.name)),
-                Plan::Replace => changes.push(change("replace_check", &check.name)),
+            if let Some(verb) = plan.verb() {
+                changes.push(change(&format!("{verb}_check"), &check.name));
             }
         }
         for (index, plan) in &table.indexes {
-            match plan {
-                Plan::Keep => {}
-                Plan::Adopt => changes.push(change("adopt_index", &index.name)),
-                Plan::Create => changes.push(change("add_index", &index.name)),
-                Plan::Replace => changes.push(change("replace_index", &index.name)),
+            if let Some(verb) = plan.verb() {
+                changes.push(change(&format!("{verb}_index"), &index.name));
             }
         }
         changes.extend(table.drop_checks.iter().chain(&table.leftover_checks).map(|n| change("drop_check", n)));

@@ -301,12 +301,10 @@ fn arithmetic(a: Ty, b: Ty) -> Ty {
     }
 }
 
-fn same_family(a: Ty, b: Ty) -> bool {
-    (a.numeric() && b.numeric()) || (a.text() && b.text()) || a == b
-}
-
+/// Same type family, and never two literals: `'a' = 'b'` constrains nothing.
 fn compatible(a: Ty, b: Ty) -> bool {
-    same_family(a, b) && !(a == Ty::TextLit && b == Ty::TextLit)
+    let same_family = (a.numeric() && b.numeric()) || (a.text() && b.text()) || a == b;
+    same_family && !(a == Ty::TextLit && b == Ty::TextLit)
 }
 
 /// Only unambiguous spellings: special values such as 'today', 'now', 'epoch'

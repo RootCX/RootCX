@@ -558,7 +558,8 @@ pub(crate) fn validate_ident(value: &str, label: &str) -> Result<(), RuntimeErro
     )))
 }
 
-const RESERVED_SCHEMAS: &[&str] = &["rootcx_system", "rootcx_ext", "pgmq", "cron", "public", "information_schema"];
+/// Schemas the Core or its extensions own; never an app's.
+pub(crate) const RESERVED_SCHEMAS: &[&str] = &["rootcx_system", "rootcx_ext", "pgmq", "cron", "public", "information_schema"];
 
 /// A new name must fit PostgreSQL's limit. Installation only: a stored manifest
 /// whose names PostgreSQL once truncated must still boot.
