@@ -266,8 +266,13 @@ The old ownership names in `manifest.rs` are compatibility aliases into that
 module; owner declarations and `.own` behavior have not changed.
 
 Use declarative fields, enums, supported column-based indexes, and ownership or
-sharing declarations. Raw manifest checks, index expressions, partial-index
-`where`, operator-class `ops`, and index `with` parameters are refused for now.
+sharing declarations. Checks, index expressions and partial-index `where` are
+written in the governed rule language of
+[ADR 0010](adr/0010-governed-declarative-rules.md): Core parses, type-checks and
+compiles them, so no manifest string reaches SQL. Operator-class `ops` and index
+`with` parameters remain refused; trigram search uses `"using": "trigram"`.
+A rule referencing a sensitive field may reference no other field, and index
+predicates and expressions may not reference sensitive fields.
 Core-generated indexes remain supported, including the partial index generated
 from `activeWhen.isNull`.
 
@@ -275,8 +280,8 @@ Existing database objects remain under operator control. Boot validates the
 stored access contract and reconciles Core governance without auditing historical
 SQL objects or reapplying stored column, check, or index declarations. Legacy
 partial indexes, constraints, and non-access field type aliases therefore do not
-block startup. New manifest submissions still reject the raw SQL forms listed
-above before DDL, including on reinstall.
+block startup. New manifest submissions are admitted only through the rule
+language before DDL, including on reinstall.
 This boundary assumes a trusted existing database; it does not neutralize
 dangerous SQL installed by earlier owner-authorized migrations.
 

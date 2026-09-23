@@ -28,7 +28,7 @@ can be admitted or started.
 | Pending backend `migrations/*.sql` files | Deployment/start refused; SQL is not executed or marked applied |
 | No pending migration files | Deployment remains supported, subject to normal admission |
 | Package lifecycle scripts during backend upload | Never executed, including root-package scripts and trusted dependency scripts; build required artifacts before upload |
-| Raw manifest `checks`, expression/partial/opclass/index `with` specifications | Refused on new submissions, including reinstall; stored declarations are not executed during boot |
+| Raw manifest `checks`, expression/partial/opclass/index `with` specifications | Raw SQL refused on new submissions, including reinstall; stored declarations are not executed during boot. Since ADR 0010, checks, `where` and index expressions are admitted in the governed rule language; `ops`/`with` stay refused |
 | Supported column-based indexes and Core-generated indexes | Remain supported |
 | Existing SQL objects, including partial indexes | Remain operator-managed; no retroactive catalog audit at boot |
 
@@ -100,11 +100,13 @@ declaration admission to repair a compromised Core database.
 
 ### 3. Prepare manifests and backend code
 
-Use field enums and supported declarative structures instead of raw `checks`.
-Before submitting a manifest again, remove expression indexes (`expr`),
-partial-index predicates (`where`), operator-class specifications (`ops`), and
-index storage parameters (`with`). Simple supported column-based indexes remain
-available. Do not reproduce Core's generated sharing indexes as app-supplied SQL.
+Use field enums, field shorthands and the governed rule language
+([ADR 0010](adr/0010-governed-declarative-rules.md)) for `checks`, partial-index
+predicates (`where`) and expression indexes (`expr`). Remove operator-class
+specifications (`ops`) and index storage parameters (`with`); trigram search uses
+`"using": "trigram"`. Do not remove Core-managed checks or indexes to pass
+admission (see step 4). Do not reproduce Core's generated sharing indexes as
+app-supplied SQL.
 
 Replace sensitive wildcard reads with explicit safe columns. Audit SQL
 expressions, filters, sorting, and write `RETURNING` lists as well as SELECT
@@ -148,8 +150,16 @@ in an app declaring sharing. Keep confidential values in separate fields.
 Existing partial indexes, constraints, routines, and other SQL objects no longer
 require removal to pass boot. They remain under operator control. When an
 artifact needs changing, use a reviewed administrator migration that preserves
-application data and invariants. Removing a declaration from a manifest does not
-by itself migrate the existing database object.
+application data and invariants.
+
+Removing a declaration from a manifest is **not** neutral for objects Core
+created from a manifest. Constraints and indexes carrying a `rootcx:chk:` or
+`rootcx:idx:` comment are Core-managed: the next install drops every managed
+object the manifest no longer declares. Never strip checks or partial indexes to
+pass admission. Since [ADR 0010](adr/0010-governed-declarative-rules.md), keep
+them and express them in the governed rule language; unchanged Core-created
+declarations are adopted without a table scan. Untagged objects are not touched
+by installs.
 
 App deployments do not execute that migration for you. Prefer the declarative
 manifest where it expresses the change. After independently completing and
