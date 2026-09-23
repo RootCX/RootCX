@@ -128,7 +128,7 @@ pub(crate) fn compile_entity(entity: &EntityContract) -> Result<EntityRules, Str
     }
 
     for field in &entity.fields {
-        if let Some(check) = enum_check(entity, field)? {
+        if let Some(check) = enum_check(entity, field, &fields)? {
             rules.checks.push(check);
         }
         for rule in shorthand::compile(field, fields[&field.name].ty, &checker)? {
@@ -147,8 +147,8 @@ pub(crate) fn compile_entity(entity: &EntityContract) -> Result<EntityRules, Str
         let name = check.name.clone().ok_or_else(|| format!("checks[{i}]: every check needs a 'name'"))?;
         crate::manifest::validate_new_ident(&name, "check name").map_err(|e| e.to_string())?;
         let parsed = parser::parse(&check.expr).map_err(|e| at(e.to_string()))?;
-        let resolved = checker.boolean(&parsed).map_err(|e| at(e))?;
-        sensitive_scope(&resolved, &fields, false).map_err(|e| at(e))?;
+        let resolved = checker.boolean(&parsed).map_err(at)?;
+        sensitive_scope(&resolved, &fields, false).map_err(at)?;
         rules.checks.push(CompiledCheck {
             tag: tag("chk", &resolved, &fields),
             sql: emit::sql(&resolved),
@@ -212,7 +212,11 @@ fn tag(kind: &str, resolved: &Expr, fields: &Fields) -> String {
     resolved.fields(&mut used);
     used.sort_unstable();
     let types: Vec<(&str, &str)> = used.iter().map(|name| (*name, fields[*name].pg.as_str())).collect();
-    let canonical = serde_json::json!([GRAMMAR_VERSION, kind, resolved, types]);
+    digest_tag(serde_json::json!([GRAMMAR_VERSION, kind, resolved, types]))
+}
+
+/// `r1-<hash>` over a canonical JSON identity.
+fn digest_tag(canonical: serde_json::Value) -> String {
     let digest = Sha256::digest(canonical.to_string().as_bytes());
     format!("{GRAMMAR_VERSION}-{}", hex::encode(&digest[..8]))
 }
@@ -232,7 +236,7 @@ pub(crate) fn fnv1a_hex(s: &str) -> String {
     format!("{h:016x}")
 }
 
-fn enum_check(entity: &EntityContract, field: &FieldContract) -> Result<Option<CompiledCheck>, String> {
+fn enum_check(entity: &EntityContract, field: &FieldContract, fields: &Fields) -> Result<Option<CompiledCheck>, String> {
     let Some(values) = field.enum_values.as_ref().filter(|values| !values.is_empty()) else {
         return Ok(None);
     };
@@ -246,11 +250,10 @@ fn enum_check(entity: &EntityContract, field: &FieldContract) -> Result<Option<C
             negated: false,
         },
     };
-    let fields = field_types(entity)?;
     Ok(Some(CompiledCheck {
         name: fit_ident(&format!("chk_{}_{}", entity.entity_name, field.name)),
         sql: emit::sql(&resolved),
-        tag: tag("chk", &resolved, &fields),
+        tag: tag("chk", &resolved, fields),
         legacy_tag: enum_check_expr(field).map(|expr| legacy_check_tag(&expr)),
         origin: Origin::Enum { field: field.name.clone() },
     }))
@@ -366,8 +369,6 @@ fn compile_index(
     used.sort_unstable();
     used.dedup();
     let types: Vec<(&str, &str)> = used.iter().filter_map(|n| fields.get(n).map(|f| (n.as_str(), f.pg.as_str()))).collect();
-    let canonical = serde_json::json!([GRAMMAR_VERSION, "idx", index.unique, using, key_trees, predicate, types]);
-    let digest = Sha256::digest(canonical.to_string().as_bytes());
 
     Ok(CompiledIndex {
         name,
@@ -377,7 +378,7 @@ fn compile_index(
         keys,
         key_values,
         predicate: predicate.as_ref().map(emit::sql),
-        tag: format!("{GRAMMAR_VERSION}-{}", hex::encode(&digest[..8])),
+        tag: digest_tag(serde_json::json!([GRAMMAR_VERSION, "idx", index.unique, using, key_trees, predicate, types])),
         legacy_tag: crate::schema_sync::index_spec_hash(index),
         declared: index.clone(),
         columns,
