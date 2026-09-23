@@ -66,8 +66,10 @@ test-integration: core-governance
 
 # ── Development ───────────────────────────────────────────────────────────────
 
-DEV_DB := postgres://rootcx:rootcx@localhost:5480/rootcx
-DEV_COMPOSE := docker compose -f docker-compose.dev.yml
+DEV_DB ?= postgres://rootcx:rootcx@localhost:5480/rootcx
+DEV_COMPOSE ?= docker compose -f docker-compose.dev.yml
+DEV_MANAGE_DB ?= true
+export DEV_DB
 DEV_POSTGRES_READY := $(DEV_COMPOSE) exec -T postgres pg_isready -h 127.0.0.1 -U rootcx -d rootcx
 
 CLAUDE_SETTINGS := $(HOME)/.claude/settings.json
@@ -100,6 +102,7 @@ prod-mode:
 dev: dev-core
 
 dev-core:
+ifeq ($(DEV_MANAGE_DB),true)
 	$(DEV_COMPOSE) up -d
 	@echo "Waiting for Postgres..."; \
 	attempts=0; \
@@ -117,7 +120,8 @@ dev-core:
 		fi; \
 		sleep 0.5; \
 	done
-	DATABASE_URL=$(DEV_DB) \
+endif
+	@DATABASE_URL="$$DEV_DB" \
 	ROOTCX_TENANT_REF=$${ROOTCX_TENANT_REF:-local} \
 	ROOTCX_OIDC_ISSUER=$${ROOTCX_OIDC_ISSUER:-http://localhost:3000} \
 	ROOTCX_OIDC_CLIENT_ID=$${ROOTCX_OIDC_CLIENT_ID:-rootcx-local} \

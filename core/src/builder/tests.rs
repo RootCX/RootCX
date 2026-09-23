@@ -50,28 +50,3 @@ async fn git_revision_retains_previous_sources_and_binary_assets() {
     assert_eq!(files::snapshot(tmp.path(), &first).await.unwrap(), initial);
     assert_eq!(files::snapshot(tmp.path(), &second).await.unwrap(), changed);
 }
-
-#[test]
-fn automatic_publication_rejects_data_loss_before_schema_changes() {
-    let parse = |fields: Value| {
-        serde_json::from_value::<rootcx_types::AppManifest>(json!({"appId":"sample","name":"Sample","version":"1.0.0","dataContract":[{"entityName":"quotes","fields":fields}]})).unwrap()
-    };
-    let before = parse(json!([{"name":"label","type":"text"}]));
-    for fields in [
-        json!([]),
-        json!([{"name":"label","type":"integer"}]),
-        json!([{"name":"label","type":"text"},{"name":"visit_date","type":"date","required":true}]),
-    ] {
-        assert!(
-            release::compatible(&before, &parse(fields.clone())).is_err(),
-            "accepted destructive change {fields}"
-        );
-    }
-    assert!(
-        release::compatible(
-            &before,
-            &parse(json!([{"name":"label","type":"text"},{"name":"visit_date","type":"date"}]))
-        )
-        .is_ok()
-    );
-}

@@ -13,6 +13,7 @@ mod manifest;
 pub mod mcp;
 mod mcp_server;
 mod principal;
+mod platform_frontend;
 mod routes;
 mod scheduler;
 mod schema;

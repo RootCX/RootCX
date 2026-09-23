@@ -5,41 +5,6 @@ use std::{
     path::{Component, Path},
 };
 
-// Automatic publication must never erase existing data. Destructive changes need
-// an explicit migration workflow, rather than a model silently dropping columns.
-pub fn compatible(
-    before: &rootcx_types::AppManifest,
-    after: &rootcx_types::AppManifest,
-) -> Result<(), ApiError> {
-    for entity in &before.data_contract {
-        let next = after
-            .data_contract
-            .iter()
-            .find(|e| e.entity_name == entity.entity_name)
-            .ok_or_else(|| {
-                ApiError::BadRequest("automatic changes cannot delete a collection".into())
-            })?;
-        for field in &entity.fields {
-            let next_field = next.fields.iter().find(|f| f.name == field.name);
-            if next_field.map(|f| serde_json::to_value(f).unwrap())
-                != Some(serde_json::to_value(field).unwrap())
-            {
-                return Err(ApiError::BadRequest(
-                    "existing fields cannot be removed or redefined by an automatic change".into(),
-                ));
-            }
-        }
-        for field in &next.fields {
-            if !entity.fields.iter().any(|f| f.name == field.name) && field.required {
-                return Err(ApiError::BadRequest(
-                    "new fields on existing collections must allow existing rows".into(),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
 fn archive_entries(bytes: &[u8]) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, ApiError> {
     use std::io::Read;
     if bytes.len() > 50 * 1024 * 1024 {

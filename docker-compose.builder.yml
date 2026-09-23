@@ -1,0 +1,38 @@
+# Same builder image/entrypoint as EKS. Only Linux sandbox policy and local transport differ.
+services:
+  builder:
+    image: ${ROOTCX_BUILDER_IMAGE:-rootcx-app-builder:dev}
+    build:
+      context: .
+      dockerfile: services/app-builder/Dockerfile
+      additional_contexts:
+        rootcx-skills: ${ROOTCX_SKILLS_DIR:-../rootcx-skills}
+    init: true
+    command: [node, server.mjs, --config-stdin]
+    stdin_open: true
+    environment:
+      ROOTCX_BUILDER_ALLOW_LOCAL_HTTP: 'true'
+      ROOTCX_BUILDER_STATE_DIR: /var/lib/rootcx-builder
+    extra_hosts: ['host.docker.internal:host-gateway']
+    ports: ['127.0.0.1:${SHAPP_BUILDER_PORT:-9201}:9201']
+    volumes: ['builder-state:/var/lib/rootcx-builder']
+    security_opt: [seccomp=unconfined, systempaths=unconfined]
+    mem_limit: 3g
+    cpus: 2
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://localhost:9201/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 6
+  backup:
+    image: ${ROOTCX_BUILDER_IMAGE:-rootcx-app-builder:dev}
+    init: true
+    command: [node, backup-receiver.mjs]
+    environment:
+      ROOTCX_BUILDER_BACKUP_TOKEN: ${ROOTCX_BUILDER_BACKUP_TOKEN:?Started by dev:shapp}
+      ROOTCX_BACKUP_DIRECTORY: /var/lib/rootcx-backups
+    ports: ['127.0.0.1:${SHAPP_BACKUP_PORT:-9202}:9202']
+    volumes: ['source-backups:/var/lib/rootcx-backups']
+volumes:
+  builder-state:
+  source-backups:

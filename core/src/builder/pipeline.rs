@@ -51,7 +51,7 @@ pub async fn execute(
     id: Uuid,
     app: String,
     user: Uuid,
-    base: String,
+    _base: String,
     prompt: String,
 ) {
     // The transaction owns a cross-process lease; cancellation/connection loss releases it.
@@ -62,14 +62,23 @@ pub async fn execute(
             return;
         }
     };
-    if sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,73422))")
-        .bind(id.to_string())
-        .execute(&mut *lease)
-        .await
-        .is_err()
-    {
+    let claimed: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1,73422))")
+            .bind(id.to_string())
+            .fetch_one(&mut *lease)
+            .await
+            .unwrap_or(false);
+    if !claimed {
         return;
     }
+    let base = match super::conversations::claim(&rt, id, &app).await {
+        Ok(Some(base)) => base,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::error!(run_id=%id, error=?error,"builder admission failed");
+            return;
+        }
+    };
     let result = tokio::select! {
         result = tokio::time::timeout(
         Duration::from_secs(1200),
@@ -85,13 +94,73 @@ pub async fn execute(
         Err(_) => "application change timed out".into(),
     };
     tracing::error!(run_id=%id, app_id=%app, error=%error, "application change failed");
-    let message = if error.contains("AI_CREDITS_EXHAUSTED") {
-        "Votre réserve de crédits IA est insuffisante pour terminer cette modification. Rechargez-la puis réessayez. Votre application n’a pas été modifiée."
-    } else {
-        "La modification n’a pas pu être terminée. Votre version publiée est conservée."
-    };
+    let message = failure_message(&error);
     let _ = sqlx::query("UPDATE rootcx_system.source_runs SET status=CASE WHEN status='publishing' THEN 'needs_recovery' ELSE 'failed' END,error=$2,message=CASE WHEN status='publishing' THEN 'La mise à jour nécessite une intervention avant de continuer.' ELSE $3 END,updated_at=now() WHERE id=$1 AND status<>'succeeded'")
         .bind(id).bind(error).bind(message).execute(rt.pool()).await;
+}
+
+fn progress_message(phase: &str) -> Option<&'static str> {
+    match phase {
+        "understanding" => {
+            Some("Je regarde comment votre application fonctionne pour préparer votre demande.")
+        }
+        "editing" => Some("J’adapte votre application à votre demande."),
+        "checking" => {
+            Some("Je prépare et vérifie les changements pour qu’ils fonctionnent ensemble.")
+        }
+        "repairing" => Some("J’ai repéré un point à ajuster. Je le corrige avant de continuer."),
+        "waiting" => Some(
+            "Le service répond plus lentement que prévu. Je patiente et reprends automatiquement.",
+        ),
+        _ => None,
+    }
+}
+
+pub(super) fn failure_message(error: &str) -> &'static str {
+    let cases = [
+        (
+            "AI_CREDITS_EXHAUSTED",
+            "Votre réserve de crédits IA est insuffisante. Rechargez-la puis relancez votre demande. Votre application n’a pas été modifiée.",
+        ),
+        (
+            "AI_CONFIGURATION",
+            "Shappy ne peut pas se connecter au service IA. La connexion doit être rétablie avant de relancer votre demande.",
+        ),
+        (
+            "AI_UNAVAILABLE",
+            "Le service IA est momentanément indisponible. Réessayez dans un instant. Votre application n’a pas été modifiée.",
+        ),
+        (
+            "BUILDER_BUSY",
+            "Shappy traite déjà d’autres modifications. Réessayez dans un instant.",
+        ),
+        (
+            "AI_LIMIT_REACHED",
+            "Shappy n’a pas réussi à terminer cette demande en une seule fois. Essayez de la décomposer en étapes.",
+        ),
+        (
+            "BUILD_TIMEOUT",
+            "La modification a pris trop de temps et a été interrompue. Vous pouvez relancer votre demande.",
+        ),
+        (
+            "timed out",
+            "La modification a pris trop de temps et a été interrompue. Vous pouvez relancer votre demande.",
+        ),
+        (
+            "builder transport",
+            "Le service de modification est momentanément injoignable. Réessayez dans un instant.",
+        ),
+        (
+            "BUILD_FAILED",
+            "La modification proposée contient une erreur et n’a pas passé les vérifications. Votre application n’a pas été modifiée. Vous pouvez relancer votre demande pour que Shappy la corrige.",
+        ),
+        (
+            "agent produced no source change",
+            "Shappy n’a apporté aucun changement à l’application. Précisez le résultat attendu et réessayez.",
+        ),
+    ];
+    cases.iter().find_map(|(code, message)| error.contains(code).then_some(*message))
+        .unwrap_or("Une erreur interne a empêché de terminer la modification. Votre application n’a pas été modifiée. Vous pouvez relancer votre demande ; le diagnostic a été enregistré.")
 }
 
 async fn watch_lease(lease: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> ApiError {
@@ -111,7 +180,7 @@ async fn watch_lease(lease: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> ApiEr
 
 async fn state(rt: &SharedRuntime, id: Uuid, status: &str, message: &str) -> Result<(), ApiError> {
     sqlx::query(
-        "UPDATE rootcx_system.source_runs SET status=$2,message=$3,updated_at=now() WHERE id=$1",
+        "UPDATE rootcx_system.source_runs SET status=$2,phase=$2,message=$3,updated_at=now() WHERE id=$1",
     )
     .bind(id)
     .bind(status)
@@ -138,10 +207,16 @@ async fn process(
         .timeout(Duration::from_secs(1000))
         .build()
         .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let conversation: Option<Uuid> =
+        sqlx::query_scalar("SELECT conversation_id FROM rootcx_system.source_runs WHERE id=$1")
+            .bind(id)
+            .fetch_one(rt.pool())
+            .await?;
     let mut response = client
         .post(format!("{}/build", runner.url.trim_end_matches('/')))
         .bearer_auth(&runner.token)
-        .json(&json!({"runId":id,"appId":app,"baseCommit":base,"prompt":prompt,"files":before}))
+        .header("accept", "application/x-ndjson")
+        .json(&json!({"runId":id,"appId":app,"baseCommit":base,"prompt":prompt,"conversationId":conversation,"files":before}))
         .send()
         .await
         .map_err(|e| ApiError::Unavailable(format!("builder transport: {e}")))?;
@@ -149,30 +224,108 @@ async fn process(
         return Err(ApiError::Unavailable("AI_CREDITS_EXHAUSTED".into()));
     }
     if !response.status().is_success() {
-        return Err(ApiError::Unavailable(format!(
-            "builder returned {}",
-            response.status()
-        )));
+        let status = response.status();
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|e| ApiError::Unavailable(e.to_string()))?
+        {
+            if body.len() + chunk.len() > 4096 {
+                break;
+            }
+            body.extend_from_slice(&chunk);
+        }
+        // Keep only known codes; runner diagnostics may contain source or credentials.
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+        let code = match payload["error"].as_str().unwrap_or("") {
+            code @ ("AI_UNAVAILABLE" | "AI_CONFIGURATION" | "AI_LIMIT_REACHED" | "BUILD_FAILED"
+            | "BUILD_TIMEOUT") => code,
+            _ if status == reqwest::StatusCode::SERVICE_UNAVAILABLE => "BUILDER_BUSY",
+            _ if status == reqwest::StatusCode::GATEWAY_TIMEOUT => "BUILD_TIMEOUT",
+            _ => "BUILD_FAILED",
+        };
+        return Err(ApiError::Unavailable(code.into()));
     }
+    let streaming = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/x-ndjson"));
     let mut bytes = Vec::new();
+    let mut scanned = 0;
+    let mut completed = None;
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|e| ApiError::Unavailable(e.to_string()))?
+        .map_err(|e| ApiError::Unavailable(format!("builder transport: {e}")))?
     {
         if bytes.len() + chunk.len() > 160 * 1024 * 1024 {
             return Err(ApiError::BadRequest("build output too large".into()));
         }
         bytes.extend_from_slice(&chunk);
+        if streaming {
+            while let Some(offset) = bytes[scanned..].iter().position(|b| *b == b'\n') {
+                let end = scanned + offset;
+                let event: serde_json::Value = serde_json::from_slice(&bytes[..end])
+                    .map_err(|e| ApiError::BadRequest(format!("invalid builder event: {e}")))?;
+                match event["type"].as_str() {
+                    Some("progress") if completed.is_none() => {
+                        if let Some(fallback) =
+                            progress_message(event["phase"].as_str().unwrap_or(""))
+                        {
+                            let message = event["message"]
+                                .as_str()
+                                .filter(|s| !s.is_empty() && s.len() <= 1200)
+                                .unwrap_or(fallback);
+                            sqlx::query("UPDATE rootcx_system.source_runs SET phase=$2,message=$3,updated_at=now() WHERE id=$1 AND status='coding'")
+                                .bind(id).bind(event["phase"].as_str()).bind(message).execute(rt.pool()).await?;
+                        }
+                    }
+                    Some("result") if completed.is_none() => {
+                        let mut result = event;
+                        result.as_object_mut().unwrap().remove("type");
+                        completed = Some(serde_json::from_value::<Built>(result).map_err(|e| {
+                            ApiError::BadRequest(format!("invalid builder result: {e}"))
+                        })?);
+                    }
+                    Some("error") => {
+                        let code = match event["error"].as_str().unwrap_or("") {
+                            code @ ("AI_CREDITS_EXHAUSTED"
+                            | "AI_UNAVAILABLE"
+                            | "AI_CONFIGURATION"
+                            | "AI_LIMIT_REACHED"
+                            | "BUILD_FAILED"
+                            | "BUILD_TIMEOUT") => code,
+                            _ => "BUILD_FAILED",
+                        };
+                        return Err(ApiError::Unavailable(code.into()));
+                    }
+                    _ => return Err(ApiError::BadRequest("invalid builder event order".into())),
+                }
+                bytes.drain(..=end);
+                scanned = 0;
+            }
+            scanned = bytes.len();
+        }
     }
-    let built: Built = serde_json::from_slice(&bytes)
-        .map_err(|e| ApiError::BadRequest(format!("invalid builder response: {e}")))?;
-    let next = files::manifest(&built.files, app)?;
-    release::compatible(&files::manifest(&before, app)?, &next)?;
+    let built: Built = if streaming {
+        if !bytes.is_empty() {
+            return Err(ApiError::Unavailable(
+                "builder transport ended mid-event".into(),
+            ));
+        }
+        completed
+            .ok_or_else(|| ApiError::Unavailable("builder transport ended without result".into()))?
+    } else {
+        serde_json::from_slice(&bytes)
+            .map_err(|e| ApiError::BadRequest(format!("invalid builder response: {e}")))?
+    };
+    files::manifest(&built.files, app)?;
     if before == built.files {
-        return Err(ApiError::BadRequest(
-            "agent produced no source change".into(),
-        ));
+        sqlx::query("UPDATE rootcx_system.source_runs SET status='succeeded',phase='answered',message=$2,updated_at=now() WHERE id=$1")
+            .bind(id).bind(built.summary.chars().take(2000).collect::<String>()).execute(rt.pool()).await?;
+        return Ok(());
     }
     let frontend = STANDARD
         .decode(&built.frontend)
@@ -358,7 +511,10 @@ pub(super) async fn backup(
     };
     let url =
         url::Url::parse(&url).map_err(|_| ApiError::Unavailable("invalid backup URL".into()))?;
-    if url.scheme() != "https"
+    let local_http = std::env::var("ROOTCX_BUILDER_ALLOW_LOCAL_HTTP").as_deref() == Ok("true")
+        && url.scheme() == "http"
+        && matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"));
+    if (url.scheme() != "https" && !local_http)
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()

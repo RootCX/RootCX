@@ -1,81 +1,98 @@
-import { setTimeout as delay } from 'node:timers/promises';
-import { readFile } from 'node:fs/promises';
-import { collect, confined, edit, remove, validateFiles } from './workspace.mjs';
+import { businessText, narrator } from './narrator.mjs';
+import { isDeepStrictEqual } from 'node:util';
+import { collect, validateFiles } from './workspace.mjs';
 import { build } from './sandbox.mjs';
+import { closeEngine, engine, events, progressFor, providerError } from './opencode.mjs';
 
-const string = { type: 'string' };
-const tools = [
-  ['list_files', 'List application source files. Dependencies and build outputs are excluded.', {}, []],
-  ['read_file', 'Read an application source file as text. Read existing files before editing them.', { path: string }, ['path']],
-  ['write_file', 'Create or replace an application source file with complete UTF-8 contents. Keep changes focused on the request.', { path: string, content: string }, ['path', 'content']],
-  ['replace_text', 'Replace exactly one occurrence in an existing source file. Fails if the text is missing or ambiguous.', { path: string, before: string, after: string }, ['path', 'before', 'after']],
-  ['delete_file', 'Delete one source file. Does not allow removing directories or dependencies.', { path: string }, ['path']],
-  ['check', 'Typecheck and build the real application in an isolated environment. Fix reported failures before finishing.', {}, []],
-].map(([name, description, properties, required]) => ({ name, description, input_schema: { type: 'object', properties, required, additionalProperties: false } }));
-
-export async function code({ root, appId, prompt, signal, config, request = fetch, compile = build }) {
-  const instructions = await readFile(new URL('./instructions.md', import.meta.url), 'utf8');
-  const messages = [{ role: 'user', content: `Application: ${appId}\nRequest: ${prompt}` }];
-  let tokens = 0;
-  for (let turn = 0; turn < 40; turn++) {
-    let response;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      response = await request(config.endpoint, {
-      method: 'POST', redirect: 'error', signal: AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(90_000)]),
-      headers: { 'content-type': 'application/json', 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: config.model, max_tokens: 8192, system: instructions, tools, messages }),
-    });
-      if (![429, 502, 503, 504, 529].includes(response.status) || attempt === 2) break;
-      await response.body?.cancel();
-      await delay(500 * 2 ** attempt, undefined, { signal });
+export async function code({ root, appId, prompt, conversationId, signal, config, onProgress = () => {}, compile = build }) {
+  const initial = await collect(root);
+  onProgress('understanding');
+  const runtime = await engine(root, config);
+  const session = await runtime.conversation(conversationId);
+  const streamController = new AbortController();
+  const combined = AbortSignal.any([signal, streamController.signal]);
+  const response = await fetch(`${runtime.url}/event`, { headers: runtime.headers, signal: combined });
+  if (!response.ok) throw new Error('OpenCode events unavailable');
+  const voice = narrator({ config, prompt, signal, onProgress });
+  let skillLoaded = false;
+  async function observeProgress() {
+    for await (const event of events(response.body)) {
+      const part = event.properties?.part;
+      if ((part?.sessionID ?? event.properties?.sessionID) !== session) continue;
+      if (part?.type === 'tool' && part.tool === 'skill' && part.state?.input?.name === 'rootcx' && part.state.status === 'completed') skillLoaded = true;
+      const phase = progressFor(event);
+      if (phase) onProgress(phase);
+      voice.observe(event, phase);
     }
-    if (!response.ok) {
-      const error = new Error(`Coding provider returned ${response.status}`);
-      if (response.status === 402) error.code = 'AI_CREDITS_EXHAUSTED';
-      throw error;
-    }
-    const result = await response.json();
-    tokens += (result.usage?.input_tokens ?? 0) + (result.usage?.output_tokens ?? 0);
-    if (tokens > 500_000) throw new Error('Coding budget exhausted');
-    if (!Array.isArray(result.content) || result.stop_reason === 'max_tokens') throw new Error('Incomplete model response');
-    messages.push({ role: 'assistant', content: result.content });
-    const calls = result.content.filter(block => block.type === 'tool_use');
-    if (!calls.length) {
-      // Completion always rebuilds the final files; an earlier successful check
-      // must not authorize files edited afterwards.
-      const before = await collect(root); validateFiles(before);
-      const frontend = await compile(root, appId, signal);
-      const files = await collect(root); validateFiles(files);
-      if (JSON.stringify(before) !== JSON.stringify(files)) throw new Error('Build modified source files; refusing an unverified source revision');
-      return { files, frontend, summary: result.content.filter(block => block.type === 'text').map(block => block.text).join('\n').slice(0, 2000) };
-    }
-    const results = [];
-    for (const call of calls) {
-      try {
-        const input = call.input ?? {};
-        let content;
-        switch (call.name) {
-          case 'list_files': content = Object.keys(await collect(root)).join('\n'); break;
-          case 'read_file': {
-            const bytes = await readFile(await confined(root, input.path));
-            if (bytes.length > 256_000) throw new Error('File exceeds read limit');
-            content = bytes.toString('utf8'); break;
-          }
-          case 'write_file': await edit(root, input.path, input.content); content = 'Saved'; break;
-          case 'replace_text': {
-            const text = await readFile(await confined(root, input.path), 'utf8');
-            if (typeof input.before !== 'string' || !input.before || typeof input.after !== 'string' || text.split(input.before).length !== 2) throw new Error('Expected one exact match');
-            await edit(root, input.path, text.replace(input.before, () => input.after)); content = 'Saved'; break;
-          }
-          case 'delete_file': await remove(root, input.path); content = 'Removed'; break;
-          case 'check': await compile(root, appId, signal); content = 'Typecheck and frontend build passed'; break;
-          default: throw new Error('Unknown tool');
-        }
-        results.push({ type: 'tool_result', tool_use_id: call.id, content });
-      } catch (error) { results.push({ type: 'tool_result', tool_use_id: call.id, content: String(error.message).slice(-24000), is_error: true }); }
-    }
-    messages.push({ role: 'user', content: results });
-    if (JSON.stringify(messages).length > 2_000_000) throw new Error('Conversation context limit exceeded');
+    throw new Error('OpenCode event stream disconnected');
   }
-  throw new Error('Coding turn limit exceeded');
+  const observing = observeProgress();
+  // A disconnected event stream must not become an unhandled rejection.
+  observing.catch(() => {});
+  let aborting;
+  function abort() {
+    // Finish cancellation before the workspace/session can accept the next request.
+    aborting ??= runtime.api(`/session/${session}/abort`, {}, AbortSignal.timeout(3000)).catch(() => closeEngine(root));
+    return aborting;
+  }
+  signal.addEventListener('abort', abort, { once: true });
+  try {
+    let request = `Use the rootcx skill for this request. The files in /workspace are the current published sources; they supersede previous session edits. Application: ${appId}. User request: ${prompt}`;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const result = await Promise.race([
+        runtime.api(`/session/${session}/message`, {
+          agent: 'build',
+          model: { providerID: 'anthropic', modelID: config.model },
+          parts: [{ type: 'text', text: request }],
+        }, signal),
+        observing,
+      ]);
+      if (result.info?.error) {
+        const error = new Error(`OpenCode: ${JSON.stringify(result.info.error)}`);
+        error.code = providerError(result.info.error);
+        throw error;
+      }
+      if (result.info?.finish === 'length') throw Object.assign(new Error('OpenCode output limit reached'), { code: 'AI_LIMIT_REACHED' });
+      const current = await collect(root);
+      const answer = (result.parts ?? []).filter(part => part.type === 'text').map(part => part.text).join('\n');
+      if (isDeepStrictEqual(initial, current)) {
+        return { files: current, frontend: '', summary: businessReply(answer) };
+      }
+      // The native engine owns all coding/tool/reasoning loops. Publication verifies
+      // the final revision and returns concrete failures to that same session.
+      onProgress('checking');
+      voice.observe({}, 'checking');
+      try {
+        const before = await collect(root);
+        validateFiles(before);
+        const frontend = await compile(root, appId, signal);
+        const files = await collect(root);
+        validateFiles(files);
+        if (!isDeepStrictEqual(before, files)) throw new Error('Build modified source files; rebuild the final revision');
+        console.info(JSON.stringify({ event: 'opencode.completed', appId, skillLoaded }));
+        // Core emits this business summary only after successful publication.
+        return { files, frontend, summary: businessText(answer) || 'Votre modification est disponible dans votre application.' };
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (attempt === 2) { error.code = 'BUILD_FAILED'; throw error; }
+        onProgress('repairing');
+        voice.observe({}, 'repairing');
+        request = `The publication verification failed. Correct the real source files and run the checks again. Do not claim success until fixed. Diagnostic:\n${String(error.message).slice(-24000)}`;
+      }
+    }
+  } finally {
+    voice.close();
+    await abort();
+    signal.removeEventListener('abort', abort);
+    streamController.abort();
+    await observing.catch(() => {});
+  }
+}
+
+export function businessReply(text) {
+  const clean = text.replace(/```[\s\S]*?```/g, '').trim();
+  if (!clean || /`|https?:|\b(?:rootcx|opencode|sql|postgres|typescript|javascript|npm|bun|vite|backend|frontend|migration|api|sdk|git|terminal)\b|(?:src|public|backend)\//i.test(clean)) {
+    return 'Je suis là pour vous aider à faire évoluer votre application. Dites-moi ce que vous souhaitez changer.';
+  }
+  return clean.slice(0, 2000);
 }

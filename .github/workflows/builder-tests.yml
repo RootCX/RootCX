@@ -1,0 +1,36 @@
+name: Hosted builder image
+on:
+  pull_request:
+    paths:
+      - 'services/app-builder/**'
+      - 'docker-compose.builder.yml'
+      - '.github/workflows/builder-tests.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-22.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: RootCX/skills
+          ref: 6a01c7e43cede4ad2f5af0f5388f404859f2b5ee
+          path: .builder-skills
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: services/app-builder/Dockerfile
+          build-contexts: rootcx-skills=.builder-skills
+          load: true
+          tags: rootcx-app-builder:verify
+          cache-from: type=gha,scope=builder-${{ matrix.runner }}
+          cache-to: type=gha,scope=builder-${{ matrix.runner }},mode=max
+      - run: bash services/app-builder/scripts/verify-image.sh rootcx-app-builder:verify

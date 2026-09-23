@@ -30,6 +30,9 @@ spec:
         - name: builder
           image: ${BUILDER_IMAGE}
           imagePullPolicy: IfNotPresent
+          env:
+            - name: ROOTCX_BUILDER_STATE_DIR
+              value: /var/lib/rootcx-builder
           envFrom:
             - secretRef:
                 name: app-builder-config
@@ -55,6 +58,8 @@ spec:
               memory: 2Gi
               ephemeral-storage: 8Gi
           volumeMounts:
+            - name: agent-state
+              mountPath: /var/lib/rootcx-builder
             - name: workspaces
               mountPath: /tmp
           readinessProbe:
@@ -69,6 +74,9 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 15
       volumes:
+        - name: agent-state
+          persistentVolumeClaim:
+            claimName: app-builder-state
         - name: workspaces
           emptyDir:
             sizeLimit: 8Gi
@@ -122,3 +130,15 @@ spec:
       ports:
         - protocol: TCP
           port: 443
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: app-builder-state
+  namespace: tenant-${TENANT_NAME}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 8Gi

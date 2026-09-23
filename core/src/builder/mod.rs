@@ -1,4 +1,5 @@
 //! Durable source ownership belongs to Core. Coding and builds run out of process.
+mod conversations;
 mod files;
 mod pipeline;
 mod release;
@@ -27,10 +28,19 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), crate::RuntimeError> {
 
 pub fn routes() -> Router<SharedRuntime> {
     Router::new()
+        .route(
+            "/api/v1/apps/{app_id}/conversations",
+            get(conversations::list),
+        )
+        .route(
+            "/api/v1/apps/{app_id}/conversations/{id}",
+            get(conversations::messages),
+        )
         .route("/api/v1/apps/{app_id}/sources", get(sources).post(import))
         .route("/api/v1/apps/{app_id}/sources/bundle", get(bundle))
         .route("/api/v1/apps/{app_id}/changes", get(history).post(start))
         .route("/api/v1/apps/{app_id}/changes/{id}", get(run))
+        .route("/api/v1/apps/{app_id}/changes/{id}/events", get(events))
         .route(
             "/api/v1/apps/{app_id}/changes/{id}/retry-publication",
             post(retry_publication),
@@ -213,6 +223,7 @@ async fn bundle(
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Change {
     request_id: Uuid,
+    conversation_id: Option<Uuid>,
     base_commit: String,
     prompt: String,
 }
@@ -226,10 +237,14 @@ struct Run {
     status: String,
     commit_id: Option<String>,
     message: String,
+    phase: String,
+    conversation_id: Option<Uuid>,
+    prompt: String,
+    activity: Value,
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
 }
-const RUN_COLUMNS: &str = "id,app_id,base_commit,status,commit_id,message,created_at,updated_at";
+const RUN_COLUMNS: &str = "id,app_id,base_commit,status,commit_id,message,phase,conversation_id,prompt,activity,created_at,updated_at";
 
 async fn start(
     identity: Identity,
@@ -256,11 +271,14 @@ async fn start(
     .bind(&app)
     .fetch_optional(&mut *tx)
     .await?;
-    let existing = sqlx::query(&format!("SELECT {RUN_COLUMNS},prompt,requested_by FROM rootcx_system.source_runs WHERE app_id=$1 AND requested_by=$2 AND request_id=$3"))
+    let existing = sqlx::query(&format!("SELECT {RUN_COLUMNS},requested_by FROM rootcx_system.source_runs WHERE app_id=$1 AND requested_by=$2 AND request_id=$3"))
         .bind(&app).bind(identity.user_id).bind(input.request_id).fetch_optional(&mut *tx).await?;
     if let Some(row) = existing {
         if row.get::<String, _>("prompt") != input.prompt
             || row.get::<String, _>("base_commit") != input.base_commit
+                && input.conversation_id.is_none()
+            || input.conversation_id.is_some()
+                && row.get::<Option<Uuid>, _>("conversation_id") != input.conversation_id
         {
             return Err(ApiError::Conflict(
                 "request ID already used for a different change".into(),
@@ -275,18 +293,27 @@ async fn start(
     }
     let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rootcx_system.source_runs WHERE app_id=$1 AND status IN ('queued','coding','publishing','needs_recovery'))")
         .bind(&app).fetch_one(&mut *tx).await?;
-    if blocked {
+    if blocked && input.conversation_id.is_none() {
         return Err(ApiError::Conflict(
             "an application change is already active or needs recovery".into(),
         ));
     }
     let active:i64=sqlx::query_scalar("SELECT count(*) FROM rootcx_system.source_runs WHERE status IN ('queued','coding','publishing')").fetch_one(&mut *tx).await?;
-    if active >= 4 {
+    if active >= 32 {
         return Err(ApiError::Unavailable("builder capacity reached".into()));
     }
+    if let Some(conversation) = input.conversation_id {
+        sqlx::query("INSERT INTO rootcx_system.source_conversations(id,app_id,user_id,title) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING")
+            .bind(conversation).bind(&app).bind(identity.user_id).bind(input.prompt.chars().take(90).collect::<String>()).execute(&mut *tx).await?;
+        let owned: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rootcx_system.source_conversations WHERE id=$1 AND app_id=$2 AND user_id=$3)")
+            .bind(conversation).bind(&app).bind(identity.user_id).fetch_one(&mut *tx).await?;
+        if !owned {
+            return Err(ApiError::NotFound("conversation not found".into()));
+        }
+    }
     let id = Uuid::new_v4();
-    let run: Run = sqlx::query_as(&format!("INSERT INTO rootcx_system.source_runs(id,app_id,requested_by,request_id,base_commit,prompt,status,message) VALUES($1,$2,$3,$4,$5,$6,'queued','Je prépare votre modification.') RETURNING {RUN_COLUMNS}"))
-        .bind(id).bind(&app).bind(identity.user_id).bind(input.request_id).bind(&input.base_commit).bind(&input.prompt).fetch_one(&mut *tx).await?;
+    let run: Run = sqlx::query_as(&format!("INSERT INTO rootcx_system.source_runs(id,app_id,requested_by,request_id,base_commit,prompt,conversation_id,status,message) VALUES($1,$2,$3,$4,$5,$6,$7,'queued','Votre demande est enregistrée. Je la prends en charge dès que possible.') RETURNING {RUN_COLUMNS}"))
+        .bind(id).bind(&app).bind(identity.user_id).bind(input.request_id).bind(&input.base_commit).bind(&input.prompt).bind(input.conversation_id).fetch_one(&mut *tx).await?;
     tx.commit().await?;
     tokio::spawn(pipeline::execute(
         rt,
@@ -308,14 +335,70 @@ async fn run(
     authorize(&rt, &identity, &app).await?;
     Ok(Json(
         sqlx::query_as(&format!(
-            "SELECT {RUN_COLUMNS} FROM rootcx_system.source_runs WHERE app_id=$1 AND id=$2"
+            "SELECT {RUN_COLUMNS} FROM rootcx_system.source_runs WHERE app_id=$1 AND id=$2 AND (conversation_id IS NULL OR requested_by=$3)"
         ))
         .bind(&app)
         .bind(id)
+        .bind(identity.user_id)
         .fetch_optional(rt.pool())
         .await?
         .ok_or_else(|| ApiError::NotFound("change not found".into()))?,
     ))
+}
+
+async fn events(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path((app, id)): Path<(String, Uuid)>,
+) -> Result<
+    axum::response::Sse<
+        impl futures::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    ApiError,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    authorize(&rt, &identity, &app).await?;
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.source_runs WHERE app_id=$1 AND id=$2 AND (conversation_id IS NULL OR requested_by=$3))",
+    )
+    .bind(&app)
+    .bind(id)
+    .bind(identity.user_id)
+    .fetch_one(rt.pool())
+    .await?;
+    if !exists {
+        return Err(ApiError::NotFound("change not found".into()));
+    }
+    // Persisted state is replayed on every connection. Dropping the stream does
+    // not cancel the job, and reconnects cannot accidentally start another run.
+    let user_id = identity.user_id;
+    let stream = futures::stream::unfold(
+        (rt, app, id, false, None),
+        move |(rt, app, id, done, mut previous)| async move {
+            if done {
+                return None;
+            }
+            loop {
+                let row: Run = sqlx::query_as(&format!(
+                    "SELECT {RUN_COLUMNS} FROM rootcx_system.source_runs WHERE app_id=$1 AND id=$2 AND (conversation_id IS NULL OR requested_by=$3)"
+                ))
+                .bind(&app)
+                .bind(id)
+                .bind(user_id)
+                .fetch_optional(rt.pool())
+                .await
+                .ok()??;
+                let done = !matches!(row.status.as_str(), "queued" | "coding" | "publishing");
+                if previous != Some(row.updated_at) || done {
+                    previous = Some(row.updated_at);
+                    let event = Event::default().event("change").json_data(row).ok()?;
+                    return Some((Ok(event), (rt, app, id, done, previous)));
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            }
+        },
+    );
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(10))))
 }
 
 async fn history(
@@ -324,8 +407,8 @@ async fn history(
     Path(app): Path<String>,
 ) -> Result<Json<Vec<Run>>, ApiError> {
     authorize(&rt, &identity, &app).await?;
-    Ok(Json(sqlx::query_as(&format!("SELECT {RUN_COLUMNS} FROM rootcx_system.source_runs WHERE app_id=$1 ORDER BY created_at DESC LIMIT 100"))
-        .bind(&app).fetch_all(rt.pool()).await?))
+    Ok(Json(sqlx::query_as(&format!("SELECT {RUN_COLUMNS} FROM rootcx_system.source_runs WHERE app_id=$1 AND (conversation_id IS NULL OR requested_by=$2) ORDER BY created_at DESC LIMIT 100"))
+        .bind(&app).bind(identity.user_id).fetch_all(rt.pool()).await?))
 }
 
 pub async fn recover_interrupted(rt: &SharedRuntime) {
@@ -336,7 +419,7 @@ pub async fn recover_interrupted(rt: &SharedRuntime) {
                 tracing::error!(error=?e,"source recovery scan failed");
             }
             tokio::select! {
-                _=tokio::time::sleep(std::time::Duration::from_secs(30))=>{},
+                _=tokio::time::sleep(std::time::Duration::from_secs(2))=>{},
                 _=rt.shutdown_token().cancelled()=>break,
             }
         }
@@ -344,7 +427,8 @@ pub async fn recover_interrupted(rt: &SharedRuntime) {
 }
 
 async fn recover_once(rt: &SharedRuntime) -> Result<(), ApiError> {
-    let ids:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM rootcx_system.source_runs WHERE status IN ('queued','coding','publishing') AND updated_at<now()-interval '2 minutes'")
+    conversations::dispatch(rt).await?;
+    let ids:Vec<Uuid>=sqlx::query_scalar("SELECT id FROM rootcx_system.source_runs WHERE status IN ('coding','publishing') AND updated_at<now()-interval '2 minutes'")
         .fetch_all(rt.pool()).await?;
     for id in ids {
         let mut tx = rt.pool().begin().await?;

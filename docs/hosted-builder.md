@@ -23,22 +23,35 @@ dependency directories and build outputs are not source inputs. Git runs without
 host configuration, hooks, filters or signing. Git attributes are not accepted,
 so `git archive` cannot silently transform or omit committed inputs.
 
-The agent can list/read/write/replace/delete source files and request checks.
-Generated code only executes inside bubblewrap with an empty environment, its
-own PID/mount/user/network namespaces and the current workspace. Build execution
-has no network; dependency installation allows network but disables lifecycle
-scripts. Build checks mount installed dependencies read-only; Vite gets a separate
-temporary directory. Pin dependencies with `bun.lock` or `package-lock.json`,
-including a separate lockfile when `backend/package.json` exists. The runner
-refuses readiness if this isolation is unavailable. There is no unsafe fallback.
+The coding engine is OpenCode 1.18.32, not an in-house tool loop. It runs a
+private authenticated HTTP server inside bubblewrap with the app workspace and
+its own persisted home. Native tools, skill loading, context compaction and
+sessions belong to OpenCode. The official RootCX skill is copied from the separate
+`rootcx-skills` build context without rewriting its references; the hosted prompt
+only replaces local onboarding/manual publication with the existing Core pipeline.
+The official RootCX CLI 0.17.2 is installed using its checksum-verifying installer.
+
+A loopback proxy injects the model credential outside the agent namespace. The
+agent only sees its scoped proxy credential, not the real provider key. Coding
+commands can use the network; the deployment's network policy isolates tenants.
+The final publication build runs with no network and read-only dependencies;
+dependency installation uses frozen lockfiles and disables lifecycle scripts.
+When final verification fails, its diagnostics return to the same OpenCode session
+for correction (up to two repair turns). Core still performs normal manifest
+validation and schema reconciliation, including explicitly requested deletions.
 
 ## Configuration
 
 Build Core with Git installed (the Core Dockerfile includes it) and the runner:
 
 ```sh
-docker build -f services/app-builder/Dockerfile -t rootcx-app-builder:<release> .
+docker build --build-context rootcx-skills=../rootcx-skills \
+  -f services/app-builder/Dockerfile -t rootcx-app-builder:<release> .
 ```
+
+Use a reviewed, pinned checkout for the skill context (initial integration:
+`6a01c7e43cede4ad2f5af0f5388f404859f2b5ee`, skill version 0.7.0).
+The skill remains owned by that repository; updates rebuild the runner image.
 
 Core environment:
 
@@ -68,6 +81,7 @@ Runner environment:
 | `ROOTCX_BUILDER_LLM_KEY` | Server-side provider credential, never passed to builds |
 | `ROOTCX_BUILDER_MODEL` | Explicit model ID supported by that endpoint |
 | `ROOTCX_BUILDER_CONCURRENCY` | 1 by default, bounded to 1–4 |
+| `ROOTCX_BUILDER_STATE_DIR` | Dedicated runner PVC directory; defaults to `/tmp/rootcx-builder` for disposable development |
 | `PORT` | 9201 by default |
 
 The provider/model is explicit; the service does not select or purchase one.
@@ -119,7 +133,8 @@ Browser SDK methods:
 
 1. `getApplicationSources(appId)` obtains `headCommit`.
 2. `changeApplication(appId, { requestId, baseCommit, prompt })` starts a durable run.
-3. `waitForApplicationChange(appId, id, onProgress, signal)` follows it.
+3. `GET /api/v1/apps/<appId>/changes/<id>/events` streams authenticated SSE state.
+   The SDK polling helper remains compatible for other consumers.
 4. Refresh the application only when `status === "succeeded"`.
 
 Persist the request ID before submitting. A transport retry with the same ID and
@@ -134,12 +149,10 @@ the runner and backup storage are configured. Template releases must include the
 after initial publication; retrying an already managed installation preserves its
 customized sources instead of redeploying the template.
 
-The SHAPP companion integration preserves its conversation in session storage,
-resumes an outstanding request and refreshes only after confirmed publication.
-Applications with unsaved forms can cancel `rootcx:before-application-refresh`
-and refresh when their pending saves complete. Platform companion assets must be
-included in template sources; otherwise rebuilding an app would remove Shappy.
-The SHAPP packaging integration includes these assets in `sources.json`.
+The SHAPP platform companion persists conversations in Core. Applications can veto
+its refresh action with a cancelable `rootcx:before-application-refresh` event while
+saving forms. Platform assets and the companion version belong to SHAPP; do not
+include them in template sources or frontend archives.
 
 ## Recovery and operational limits
 
@@ -163,11 +176,11 @@ activation and the database completion record. Failed source branches remain in
 Git under `refs/changes/<runId>` for diagnosis.
 
 This is a staged publication protocol, not a transaction across PostgreSQL,
-files and worker processes. A failure after schema application can leave an
-additive schema change with the old UI. Such a run explicitly requires recovery.
-Automatic publication rejects removed/redefined existing fields and required new
-fields on existing collections. It does not claim that Git revert rolls back data.
-Plan destructive/data-rewriting migrations separately before broadening this gate.
+files and worker processes. A failure after schema application can leave a
+schema change with the old UI. Such a run explicitly requires recovery.
+Hosted changes use the standard RootCX manifest installation and schema reconciliation,
+including explicitly requested field removals. There is no builder-specific additive-only
+schema policy. Git revisions record source changes; they do not restore deleted database values.
 
 Frontend artifacts are versioned and activated through a symlink rename on Unix.
 Old asset files remain available for already-open clients. Backend dependencies
@@ -201,3 +214,100 @@ uses the explicit unbacked-sources switch; it does not validate external backup.
 Insufficient AI credits now produce a specific user-facing explanation.
 No cloud rollout has been performed. Target-cluster isolation validation and an
 external backup/restore drill remain release gates for production.
+
+## Live feedback and reconnection
+
+Runner-to-Core NDJSON reports allowlisted activity categories only. Core translates
+these into business language and persists the latest phase/message. Ten-second
+runner heartbeats refresh liveness; raw reasoning, model prose, tool arguments,
+paths and outputs never enter the public progress stream. Failures use known codes
+and business messages; diagnostics remain in service logs and the private run row.
+
+The authenticated browser SSE endpoint replays the persisted state and observes
+changes every 750 ms, with connection keepalives. Terminal replay closes immediately.
+Shappy reconnects with bounded backoff to the same run ID; it never resubmits a
+change when a stream drops. The UI shows actual activity, elapsed time (no invented
+percentage), a connection notice, and a retry action for failed/interrupted requests.
+The client refreshes the app only after confirmed publication, and offers an explicit
+refresh button when an app vetoes automatic refresh because of unsaved work.
+
+Mount a dedicated runner PVC at `ROOTCX_BUILDER_STATE_DIR` for OpenCode session
+continuity across pod restarts. It contains source working copies and conversation
+history, never the provider secret. It is distinct from Core's authoritative sources.
+Warm processes and dependencies are reused per application. At most four processes
+are retained; evicted sessions can resume from their persisted home. Apply a retention
+policy for inactive session homes. The Node entrypoint must close engines on shutdown.
+
+Additional verification:
+- `node --test services/app-builder/test/opencode.integration.test.mjs` inside the Linux image runs the real pinned OpenCode against a deterministic Messages server, verifies native skill loading and file edits, without paid calls.
+- The Core integration test verifies streamed failures, terminal replay, authorization and actual column deletion with existing records.
+
+## Repeatable development and image verification
+
+The supported website launcher is `npm run dev:shapp`; see the website's
+`docs/shapp-development.md`. It uses `make dev-core` and
+`docker-compose.builder.yml`, with the production builder entrypoint. The old
+manual `/tmp` launchers and Vite gateway are not needed. `DEV_DB` and
+`DEV_MANAGE_DB=false` let the Core Makefile reuse an existing local database.
+
+Development explicitly permits HTTP only to local hosts using
+`ROOTCX_BUILDER_ALLOW_LOCAL_HTTP=true`; production configuration retains HTTPS.
+This transport option never skips source backups. The builder accepts trusted
+configuration on stdin with `--config-stdin` so local provider credentials do not
+need to appear in Docker environment or temporary files.
+
+`bash services/app-builder/scripts/verify-image.sh IMAGE` executes native engine,
+sandbox, startup/authentication and Git backup restoration checks from the image,
+with no source mount or external network. The image includes ripgrep so native
+skill loading does not require a first-use download. CI runs the same check on
+AMD64 and ARM64 with the pinned official skill revision.
+
+`smoke-release.mjs` runs the real source-to-publication path against a selected
+test instance using `ROOTCX_SMOKE_URL`, `ROOTCX_SMOKE_TOKEN` and an exported
+template source file. It creates a separate application and checks idempotency,
+actual schema persistence and served frontend assets. It consumes normal model
+credits and retains its test application for inspection. Run it against the
+candidate image digests on an EKS test tenant before promoting them. The local
+image tests do not validate EKS policies or external backup disaster recovery.
+
+To restore a source bundle, clone it into an empty directory and explicitly
+`git checkout <commit-from-the-bundle-filename>`. Backup runs before activation,
+so bundle HEAD can still identify the previous published revision; the prepared
+revision is retained under `refs/changes/`. Verify the expected manifest after
+checkout. The backup integration test covers this pre-activation state.
+
+
+### Persistent Shappy conversations
+
+`POST /api/v1/apps/:app/changes` accepts an optional `conversationId` UUID.
+Core creates that conversation atomically on its first request and scopes it to
+its app and requesting user. `GET /api/v1/apps/:app/conversations` lists the 100
+most recent conversations; `GET /api/v1/apps/:app/conversations/:id` returns its
+100 most recent requests in chronological order, including business activity.
+Other users cannot retrieve a private conversation, even with deployment rights.
+Existing server-side requests are grouped into a previous conversation at boot.
+
+Conversational requests enter a bounded durable queue (32 outstanding requests
+per Core). One request executes at a time, matching the default builder worker.
+Queued requests use the latest published sources when admitted; uncertain HTTP
+retries retain their request ID, including after the base revision changes.
+The dispatcher resumes unstarted requests after restart. Interrupted execution
+is reported, not silently replayed. A publication requiring recovery blocks that
+application. Requests without a conversation retain the previous conflict behavior.
+
+Each conversation selects a persisted native OpenCode session. The independent
+narrator uses the configured provider with at most 20 short calls per run,
+8 seconds between calls and a 6-second deadline. Narration failure never blocks
+coding. Only completed explanatory text and activity categories are summarized;
+tool outputs and private reasoning are excluded. Core alone confirms publication.
+The UI retrieves persisted updates while active and backs off when idle; unchanged
+conversation histories are not transferred again. No browser connection owns a job.
+
+Shappy is provided by the SHAPP platform, never packaged in App sources or releases.
+Configure `ROOTCX_FRONTEND_COMPANION_URL` with the trusted absolute platform loader
+URL. Core adds it to normal App HTML and removes precisely recognized legacy
+embedded Shappy tags from the served response. Public sharing does not load the
+companion. No App files or source commits are rewritten to adopt a newer platform
+version. The website builds the same platform assets for development and production;
+its CORS policy permits public modules/assets to load on tenant origins. Authenticated
+conversation requests remain on the tenant Core origin.

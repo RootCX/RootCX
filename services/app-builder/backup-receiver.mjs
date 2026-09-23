@@ -8,6 +8,7 @@ export function backupReceiver({ token, directory }) {
   if (!token || token.length < 32 || !directory) throw new Error('Backup receiver configuration incomplete');
   return createServer(async (req, res) => {
     const reply = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+    if (req.method === 'GET' && req.url === '/health') return reply(200, { ready: true });
     const actual = Buffer.from(req.headers.authorization ?? '');
     const expected = Buffer.from(`Bearer ${token}`);
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return reply(401, { error: 'Unauthorized' });

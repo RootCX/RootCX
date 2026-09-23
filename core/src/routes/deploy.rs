@@ -287,7 +287,7 @@ pub async fn serve_share_frontend(
         Ok(bytes) => {
             headers.insert(header::CONTENT_TYPE, "text/html; charset=utf-8".parse().unwrap());
             headers.insert(header::CACHE_CONTROL, "private, no-store".parse().unwrap());
-            (StatusCode::OK, headers, bytes)
+            (StatusCode::OK, headers, crate::platform_frontend::without_legacy(bytes, &app_id))
         }
         Err(_) => {
             headers.insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
@@ -314,6 +314,7 @@ pub async fn serve_frontend(
     match tokio::fs::read(&file_path).await {
         Ok(bytes) => {
             let ct = content_type(&file_path).to_string();
+            let bytes = if file_path == frontend_dir.join("index.html") { crate::platform_frontend::configured(bytes, &app_id) } else { bytes };
             // Hashed asset filenames are immutable; HTML needs revalidation
             let cache = if file_path.extension().is_some_and(|ext| ext == "html") { "no-store" }
                 else if is_asset { "public, max-age=31536000, immutable" } else { "no-cache" };
