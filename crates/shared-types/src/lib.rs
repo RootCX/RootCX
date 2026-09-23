@@ -475,8 +475,45 @@ pub struct FieldContract {
     /// [`sensitive`]: FieldContract::sensitive
     #[serde(default)]
     pub owner: bool,
+    /// Rule shorthands (ADR 0010). Each compiles to a Core-named database check
+    /// that passes on NULL; combine with `required` to forbid NULL. Numeric
+    /// bounds are JSON numbers for `number` and JSON strings for `decimal`.
+    #[serde(flatten)]
+    pub rules: FieldRules,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unknown: UnknownKeys,
+}
+
+/// Single-field database rules declared next to the field. Unset rules are not
+/// serialized, so adding this vocabulary leaves stored manifests unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FieldRules {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minimum: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maximum: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusive_minimum: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclusive_maximum: Option<JsonValue>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub integer: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_scale: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_length: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub not_blank: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_items: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -868,6 +905,14 @@ mod tests {
             other => panic!("expected a spec, got {other:?}"),
         }
         assert!(e.checks[0].unknown.contains_key("mesage"));
+        let shorthands: FieldContract = serde_json::from_value(serde_json::json!({
+            "name": "q", "type": "decimal", "minimum": "0", "integer": true, "max_lenght": 3
+        })).unwrap();
+        assert_eq!(shorthands.rules.minimum, Some(serde_json::json!("0")));
+        assert!(shorthands.rules.integer);
+        assert!(shorthands.unknown.contains_key("max_lenght"), "rule keys are captured before unknown ones");
+        let plain = serde_json::to_value(FieldContract { name: "q".into(), field_type: "text".into(), ..Default::default() }).unwrap();
+        assert!(plain.get("integer").is_none() && plain.get("minimum").is_none(), "unset rules are not serialized: {plain}");
         let round: EntityContract = serde_json::from_value(serde_json::to_value(&e).unwrap()).unwrap();
         assert_eq!(round.fields[0].unknown, e.fields[0].unknown);
     }

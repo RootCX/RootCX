@@ -890,7 +890,7 @@ mod tests {
             on_delete: None,
             sensitive: false,
             owner: false,
-        unknown: Default::default(),
+        rules: Default::default(), unknown: Default::default(),
         }
     }
 
@@ -1319,7 +1319,7 @@ mod tests {
             owner: false,
             is_primary_key: None,
             on_delete,
-            unknown: Default::default(),
+            rules: Default::default(), unknown: Default::default(),
         }
     }
 
