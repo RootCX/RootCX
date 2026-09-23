@@ -1283,6 +1283,21 @@ mod tests {
         validate_stored_manifest(&manifest).expect("a truncated legacy name must not block boot");
     }
 
+    /// An app's schema is named after its id; Core and extension schemas must
+    /// never be installed into, nor dropped with, an app.
+    #[test]
+    fn core_and_extension_schemas_are_not_app_ids() {
+        let manifest = |app: &str| -> AppManifest {
+            serde_json::from_value(json!({"appId": app, "name": app})).unwrap()
+        };
+        for app in ["rootcx_ext", "rootcx_system", "pgmq", "cron", "public", "information_schema", "pg_temp_x"] {
+            assert!(validate_manifest(&manifest(app)).is_err(), "{app} must be refused");
+        }
+        for app in ["public_notes", "cron_jobs", "rootcx_extras"] {
+            validate_manifest(&manifest(app)).unwrap_or_else(|e| panic!("{app}: {e}"));
+        }
+    }
+
     #[test]
     fn generated_names_fit_postgres_without_colliding() {
         assert_eq!(fit_ident("chk_orders_status"), "chk_orders_status", "short names never change");
