@@ -54,6 +54,8 @@ struct Existing {
 
 struct Table<'a> {
     schema: &'a str,
+    /// Where pg_trgm lives, when the app declares trigram indexes.
+    trigram: Option<String>,
     entity: &'a EntityContract,
     checks: Vec<(CompiledCheck, Plan)>,
     indexes: Vec<(CompiledIndex, Plan)>,
@@ -104,9 +106,9 @@ async fn existing_indexes(conn: &mut PgConnection, schema: &str, table: &str) ->
 }
 
 /// Whether an existing trigram index already has exactly the declared shape:
-/// valid GIN over the same plain columns with pg_trgm's operator class in the
-/// Core-owned schema, and no predicate.
-async fn trigram_matches(conn: &mut PgConnection, schema: &str, name: &str, columns: &[String]) -> Result<bool, RuntimeError> {
+/// valid GIN over the same plain columns with the installed pg_trgm's operator
+/// class, and no predicate.
+async fn trigram_matches(conn: &mut PgConnection, schema: &str, name: &str, columns: &[String], trigram: &str) -> Result<bool, RuntimeError> {
     let shape: Option<(String, bool, Vec<String>, Vec<String>, Vec<String>)> = sqlx::query_as(
         "SELECT am.amname::text, x.indpred IS NULL,
                 ARRAY(SELECT a.attname::text FROM unnest(x.indkey) WITH ORDINALITY k(attnum, i)
@@ -122,7 +124,7 @@ async fn trigram_matches(conn: &mut PgConnection, schema: &str, name: &str, colu
     Ok(shape.is_some_and(|(am, no_predicate, keys, opclasses, namespaces)| {
         am == "gin" && no_predicate && keys == columns
             && opclasses.iter().all(|o| o == "gin_trgm_ops")
-            && namespaces.iter().all(|n| n == super::EXTENSION_SCHEMA)
+            && namespaces.iter().all(|n| n == trigram)
     }))
 }
 
@@ -155,6 +157,33 @@ fn index_was_declared(previous: Option<&EntityContract>, index: &CompiledIndex) 
     })
 }
 
+fn declares_trigram(entities: &[EntityContract]) -> bool {
+    entities.iter().flat_map(|e| &e.indexes)
+        .any(|i| i.using.as_deref().is_some_and(|u| u.eq_ignore_ascii_case("trigram")))
+}
+
+/// The schema of the installed pg_trgm. Existing installations keep it where
+/// it is: app SQL may call its functions by qualified name.
+async fn trigram_schema(conn: &mut PgConnection) -> Result<Option<String>, RuntimeError> {
+    sqlx::query_scalar(
+        "SELECT n.nspname::text FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+         WHERE e.extname = 'pg_trgm'",
+    ).fetch_optional(&mut *conn).await.map_err(schema_error)
+}
+
+/// Install pg_trgm into the Core-owned schema when no app has installed it.
+async fn ensure_trigram(conn: &mut PgConnection) -> Result<String, RuntimeError> {
+    if let Some(schema) = trigram_schema(conn).await? {
+        return Ok(schema);
+    }
+    let schema = quote_ident(super::EXTENSION_SCHEMA);
+    execute(conn, &[
+        format!("CREATE SCHEMA IF NOT EXISTS {schema}"),
+        format!("CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA {schema}"),
+    ]).await?;
+    Ok(super::EXTENSION_SCHEMA.to_string())
+}
+
 fn next_name(name: &str) -> String {
     format!("{NEXT_PREFIX}{}", hex::encode(&Sha256::digest(name.as_bytes())[..8]))
 }
@@ -164,6 +193,7 @@ async fn plan<'a>(
     schema: &'a str,
     entity: &'a EntityContract,
     previous: Option<&EntityContract>,
+    trigram: Option<&str>,
 ) -> Result<Table<'a>, RuntimeError> {
     let rules = compile_entity(entity).map_err(|e| RuntimeError::Invalid(format!(
         "rules for '{schema}.{}': {e}", entity.entity_name
@@ -171,7 +201,7 @@ async fn plan<'a>(
     let checks_now = existing_checks(conn, schema, &entity.entity_name).await?;
     let indexes_now = existing_indexes(conn, schema, &entity.entity_name).await?;
     let mut table = Table {
-        schema, entity, checks: vec![], indexes: vec![],
+        schema, trigram: trigram.map(str::to_string), entity, checks: vec![], indexes: vec![],
         drop_checks: vec![], drop_indexes: vec![], leftover_checks: vec![], leftover_indexes: vec![],
     };
 
@@ -209,7 +239,10 @@ async fn plan<'a>(
             Some(Some(tag)) if tag == index.tag => Plan::Keep,
             Some(Some(tag)) if tag == index.legacy_tag && index_was_declared(previous, &index) => Plan::Adopt,
             Some(_) => {
-                let same_shape = index.trigram && trigram_matches(conn, schema, &index.name, &index.columns).await?;
+                let same_shape = match (index.trigram, trigram) {
+                    (true, Some(trigram)) => trigram_matches(conn, schema, &index.name, &index.columns, trigram).await?,
+                    _ => false,
+                };
                 if same_shape { Plan::Adopt } else { Plan::Replace }
             }
         };
@@ -333,7 +366,8 @@ async fn add_validated_check(conn: &mut PgConnection, fq: &str, name: &str, chec
 async fn build_index(conn: &mut PgConnection, table: &Table<'_>, index: &CompiledIndex, name: &str) -> Result<(), RuntimeError> {
     let has_rows: bool = sqlx::query_scalar(&format!("SELECT EXISTS (SELECT 1 FROM {})", table.fq()))
         .fetch_one(&mut *conn).await.map_err(schema_error)?;
-    let sql = index.create_sql(table.schema, &table.entity.entity_name, name, has_rows);
+    let trigram = table.trigram.as_deref().unwrap_or(super::EXTENSION_SCHEMA);
+    let sql = index.create_sql(table.schema, &table.entity.entity_name, name, has_rows, trigram);
     let built = sqlx::query(&sql).execute(&mut *conn).await;
     if let Err(error) = built {
         let _ = sqlx::query(&format!("DROP INDEX IF EXISTS {}.{}", quote_ident(table.schema), quote_ident(name)))
@@ -405,6 +439,32 @@ async fn drop_objects(conn: &mut PgConnection, table: &Table<'_>, checks: &[Stri
     execute(conn, &statements).await
 }
 
+/// Move extensions out of an app schema about to be dropped: `DROP SCHEMA …
+/// CASCADE` would otherwise drop the extension and every other app's index
+/// that uses its operator classes.
+pub(crate) async fn evacuate_extensions(pool: &PgPool, app_id: &str) -> Result<(), RuntimeError> {
+    let extensions: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT e.extname::text, e.extrelocatable FROM pg_extension e
+         JOIN pg_namespace n ON n.oid = e.extnamespace WHERE n.nspname = $1",
+    ).bind(app_id).fetch_all(pool).await.map_err(schema_error)?;
+    for (name, relocatable) in extensions {
+        if !relocatable {
+            return Err(RuntimeError::Conflict(format!(
+                "extension '{name}' is installed in the schema of '{app_id}' and cannot be moved; \
+                 an operator must relocate or drop it before uninstalling"
+            )));
+        }
+        let mut tx = pool.begin().await.map_err(schema_error)?;
+        sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(super::EXTENSION_SCHEMA)))
+            .execute(&mut *tx).await.map_err(schema_error)?;
+        sqlx::query(&format!("ALTER EXTENSION {} SET SCHEMA {}", quote_ident(&name), quote_ident(super::EXTENSION_SCHEMA)))
+            .execute(&mut *tx).await.map_err(schema_error)?;
+        tx.commit().await.map_err(schema_error)?;
+        info!(app = %app_id, extension = %name, "extension moved out of the app schema before uninstall");
+    }
+    Ok(())
+}
+
 /// Reconcile every entity's rules for one install, on one dedicated session.
 pub(crate) async fn reconcile(pool: &PgPool, app_id: &str, entities: &[EntityContract]) -> Result<(), RuntimeError> {
     let previous = previous_entities(pool, app_id).await?;
@@ -423,10 +483,14 @@ async fn reconcile_on(
     for setting in SESSION {
         sqlx::query(setting).execute(&mut *conn).await.map_err(schema_error)?;
     }
+    let trigram = match declares_trigram(entities) {
+        true => Some(ensure_trigram(conn).await?),
+        false => None,
+    };
     let mut tables = Vec::with_capacity(entities.len());
     for entity in entities {
         let before = previous.iter().find(|e| e.entity_name == entity.entity_name);
-        tables.push(plan(conn, app_id, entity, before).await?);
+        tables.push(plan(conn, app_id, entity, before, trigram.as_deref()).await?);
     }
     for table in &tables {
         drop_objects(conn, table, &table.leftover_checks, &table.leftover_indexes).await?;
@@ -464,9 +528,10 @@ pub(crate) async fn preflight(pool: &PgPool, app_id: &str, entities: &[EntityCon
     let conn = &mut *conn;
     let tables: Vec<String> = sqlx::query_scalar("SELECT tablename::text FROM pg_tables WHERE schemaname = $1")
         .bind(app_id).fetch_all(&mut *conn).await.map_err(schema_error)?;
+    let trigram = trigram_schema(conn).await?;
     for entity in entities.iter().filter(|e| tables.contains(&e.entity_name)) {
         let before = previous.iter().find(|e| e.entity_name == entity.entity_name);
-        let table = plan(conn, app_id, entity, before).await?;
+        let table = plan(conn, app_id, entity, before, trigram.as_deref()).await?;
         preflight_table(conn, &table, true).await?;
     }
     Ok(())
@@ -477,10 +542,11 @@ pub(crate) async fn verify(pool: &PgPool, app_id: &str, entities: &[EntityContra
     let previous = previous_entities(pool, app_id).await?;
     let mut conn = pool.acquire().await.map_err(schema_error)?;
     let conn = &mut *conn;
+    let trigram = trigram_schema(conn).await?;
     let mut changes = Vec::new();
     for entity in entities {
         let before = previous.iter().find(|e| e.entity_name == entity.entity_name);
-        let table = plan(conn, app_id, entity, before).await?;
+        let table = plan(conn, app_id, entity, before, trigram.as_deref()).await?;
         let change = |kind: &str, name: &str| SchemaChange {
             entity: entity.entity_name.clone(), change_type: kind.into(), column: name.into(), detail: None,
         };

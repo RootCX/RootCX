@@ -247,3 +247,75 @@ async fn rule_violations_are_422_and_duplicates_409_without_values() {
     assert!(!body.to_string().contains("secret-ref"), "no value leaks: {body}");
     rt.shutdown().await;
 }
+
+async fn trigram_namespace(rt: &TestRuntime) -> Option<String> {
+    sqlx::query_scalar("SELECT n.nspname::text FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'pg_trgm'")
+        .fetch_optional(rt.pool()).await.unwrap()
+}
+
+fn with_trigram(app: &str, index: Value) -> Value {
+    lines(app, json!([]), json!([index]))
+}
+
+/// A fresh installation gets pg_trgm in the Core-owned schema, never in an app
+/// schema another app's index would then depend on.
+#[tokio::test]
+async fn trigram_indexes_install_pg_trgm_in_the_core_schema() {
+    let rt = TestRuntime::boot().await;
+    assert_eq!(trigram_namespace(&rt).await, None, "fixture starts without pg_trgm");
+    let app = "rules_trgm_fresh";
+    rt.install_manifest(&with_trigram(app, json!({"name": "ix_lines_ref_trgm", "using": "trigram", "columns": ["ref"]}))).await;
+    assert_eq!(trigram_namespace(&rt).await.as_deref(), Some("rootcx_ext"));
+    let definition: String = sqlx::query_scalar("SELECT pg_get_indexdef('rules_trgm_fresh.ix_lines_ref_trgm'::regclass)")
+        .fetch_one(rt.pool()).await.unwrap();
+    assert!(definition.contains("USING gin (ref rootcx_ext.gin_trgm_ops)"), "{definition}");
+    rt.shutdown().await;
+}
+
+/// An index an older Core built with a raw `ops` is adopted by catalog
+/// structure; uninstalling the app whose schema holds pg_trgm moves the
+/// extension out first, so another app's trigram index survives.
+#[tokio::test]
+async fn legacy_trigram_indexes_adopt_and_survive_the_owner_schema_uninstall() {
+    let rt = TestRuntime::boot().await;
+    let (owner, other) = ("rules_trgm_owner", "rules_trgm_other");
+    let legacy = json!({"name": "ix_lines_ref_trgm", "using": "gin", "columns": [{"column": "ref", "ops": format!("{owner}.gin_trgm_ops")}]});
+    let declared = json!({"name": "ix_lines_ref_trgm", "using": "trigram", "columns": ["ref"]});
+    rt.install_manifest(&lines(owner, json!([]), json!([]))).await;
+    sqlx::raw_sql(&format!(r#"
+        CREATE EXTENSION pg_trgm WITH SCHEMA {owner};
+        CREATE INDEX ix_lines_ref_trgm ON {owner}.lines USING gin ("ref" {owner}.gin_trgm_ops);
+        COMMENT ON INDEX {owner}.ix_lines_ref_trgm IS 'rootcx:idx:{}';
+    "#, fnv(&format!("_|gin|ref:::::{owner}.gin_trgm_ops:,||")))).execute(rt.pool()).await.unwrap();
+    sqlx::query("UPDATE rootcx_system.apps SET manifest = $2 WHERE id = $1")
+        .bind(owner).bind(with_trigram(owner, legacy)).execute(rt.pool()).await.unwrap();
+
+    let before = index(&rt, owner, "ix_lines_ref_trgm").await.unwrap().0;
+    rt.install_manifest(&with_trigram(owner, declared.clone())).await;
+    let (after, comment) = index(&rt, owner, "ix_lines_ref_trgm").await.unwrap();
+    assert_eq!(before, after, "the legacy trigram index is adopted, not rebuilt");
+    assert!(comment.unwrap().starts_with("rootcx:idx:r1-"));
+    assert_eq!(trigram_namespace(&rt).await.as_deref(), Some(owner), "installed extensions are not moved by installs");
+
+    rt.install_manifest(&with_trigram(other, declared)).await;
+    let other_index = index(&rt, other, "ix_lines_ref_trgm").await.unwrap().0;
+    let (status, body) = rt.delete_json(&format!("/api/v1/apps/{owner}")).await;
+    assert!(status.is_success(), "{status} {body}");
+    assert_eq!(trigram_namespace(&rt).await.as_deref(), Some("rootcx_ext"), "moved before the schema was dropped");
+    assert_eq!(index(&rt, other, "ix_lines_ref_trgm").await.map(|i| i.0), Some(other_index), "the other app's index survives");
+    let used: bool = sqlx::query_scalar(&format!(
+        "SELECT count(*) = 0 FROM {other}.lines WHERE ref OPERATOR(rootcx_ext.%) 'abc'"
+    )).fetch_one(rt.pool()).await.unwrap();
+    assert!(used, "the operator class still works from its new schema");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn core_and_extension_schemas_are_not_app_ids() {
+    let rt = TestRuntime::boot().await;
+    for app in ["rootcx_ext", "rootcx_system", "pgmq", "cron", "public", "pg_temp_x"] {
+        let (status, body) = rt.post_json("/api/v1/apps", &lines(app, json!([]), json!([]))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{app}: {body}");
+    }
+    rt.shutdown().await;
+}
