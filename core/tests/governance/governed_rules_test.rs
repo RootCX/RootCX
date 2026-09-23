@@ -319,3 +319,168 @@ async fn core_and_extension_schemas_are_not_app_ids() {
     }
     rt.shutdown().await;
 }
+
+fn quote(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
+/// How an older Core hashed an index declaration (`schema_sync::index_spec_hash`).
+fn legacy_index_tag(index: &Value) -> String {
+    let mut s = String::from(if index["unique"].as_bool().unwrap_or(false) { "u|" } else { "_|" });
+    s.push_str(index["using"].as_str().unwrap_or("btree"));
+    s.push('|');
+    for column in index["columns"].as_array().unwrap() {
+        match column.as_str() {
+            Some(name) => s.push_str(name),
+            None => for key in ["column", "expr", "sort", "nulls", "ops"] {
+                s.push_str(column[key].as_str().unwrap_or(""));
+                s.push(':');
+            },
+        }
+        s.push(',');
+    }
+    s.push('|');
+    s.push_str(index["where"].as_str().unwrap_or(""));
+    s.push('|');
+    fnv(&s)
+}
+
+/// What an older Core executed for an index: the raw declaration.
+fn legacy_index_sql(schema: &str, table: &str, index: &Value) -> String {
+    let columns: Vec<String> = index["columns"].as_array().unwrap().iter().map(|c| match c.as_str() {
+        Some(name) => quote(name),
+        None => {
+            let mut element = match (c["column"].as_str(), c["expr"].as_str()) {
+                (Some(column), _) => quote(column),
+                (None, Some(expr)) => format!("({expr})"),
+                _ => unreachable!(),
+            };
+            if let Some(ops) = c["ops"].as_str() {
+                element.push_str(&format!(" {ops}"));
+            }
+            if let Some(sort) = c["sort"].as_str() {
+                element.push_str(&format!(" {}", sort.to_uppercase()));
+            }
+            if let Some(nulls) = c["nulls"].as_str() {
+                element.push_str(&format!(" NULLS {}", nulls.to_uppercase()));
+            }
+            element
+        }
+    }).collect();
+    let mut sql = format!(
+        "CREATE {}INDEX {} ON {}.{} USING {} ({})",
+        if index["unique"].as_bool().unwrap_or(false) { "UNIQUE " } else { "" },
+        quote(index["name"].as_str().unwrap()), quote(schema), quote(table),
+        index["using"].as_str().unwrap_or("btree"), columns.join(", "),
+    );
+    if let Some(predicate) = index["where"].as_str() {
+        sql.push_str(&format!(" WHERE {predicate}"));
+    }
+    sql
+}
+
+/// A real application's manifest, kept out of the repository
+/// (`core/tests/fixtures/private/corpus_manifest.json`). Its constraints and
+/// indexes are recreated exactly as an older Core built them from raw SQL; the
+/// new Core must adopt every one without rebuilding any.
+#[tokio::test]
+async fn private_corpus_adopts_every_rule_without_rebuilding() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/private/corpus_manifest.json");
+    let Ok(raw) = std::fs::read_to_string(path) else { return };
+    let original: Value = serde_json::from_str(&raw).unwrap();
+    let app = original["appId"].as_str().unwrap().to_string();
+    // The two edits the authors need: trigram indexes, no misspelled keys.
+    let mut declared = original.clone();
+    for entity in declared["dataContract"].as_array_mut().unwrap() {
+        for field in entity["fields"].as_array_mut().unwrap() {
+            field.as_object_mut().unwrap().remove("onDelete");
+        }
+        for index in entity.get_mut("indexes").and_then(|i| i.as_array_mut()).into_iter().flatten() {
+            let trigram = index["columns"].as_array().unwrap().iter()
+                .any(|c| c["ops"].as_str().is_some_and(|o| o.ends_with("gin_trgm_ops")));
+            if trigram {
+                let names: Vec<Value> = index["columns"].as_array().unwrap().iter().map(|c| c["column"].clone()).collect();
+                index["columns"] = json!(names);
+                index["using"] = json!("trigram");
+            }
+        }
+    }
+    for key in ["crons", "actions"] {
+        declared.as_object_mut().unwrap().remove(key);
+    }
+
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&declared).await;
+    let trigram = trigram_namespace(&rt).await.unwrap();
+
+    // Rebuild every rule the way an older Core did.
+    let mut legacy = Vec::new();
+    for entity in original["dataContract"].as_array().unwrap() {
+        let table = entity["entityName"].as_str().unwrap();
+        let fq = format!("{}.{}", quote(&app), quote(table));
+        for check in entity["checks"].as_array().into_iter().flatten() {
+            let (name, expr) = (check["name"].as_str().unwrap(), check["expr"].as_str().unwrap());
+            legacy.push(format!("ALTER TABLE {fq} DROP CONSTRAINT {}", quote(name)));
+            legacy.push(format!("ALTER TABLE {fq} ADD CONSTRAINT {} CHECK ({expr})", quote(name)));
+            legacy.push(format!("COMMENT ON CONSTRAINT {} ON {fq} IS 'rootcx:chk:{}'", quote(name), legacy_check_tag(expr)));
+        }
+        for field in entity["fields"].as_array().unwrap() {
+            let Some(values) = field["enum_values"].as_array().filter(|v| !v.is_empty()) else { continue };
+            let name = format!("chk_{table}_{}", field["name"].as_str().unwrap());
+            if name.len() > 63 { continue }
+            let list = values.iter().map(|v| format!("'{}'", v.as_str().unwrap().replace('\'', "''"))).collect::<Vec<_>>().join(", ");
+            let column = quote(field["name"].as_str().unwrap());
+            let expr = if field["type"] == "[text]" { format!("{column} <@ ARRAY[{list}]::TEXT[]") } else { format!("{column} IN ({list})") };
+            legacy.push(format!("ALTER TABLE {fq} DROP CONSTRAINT {}", quote(&name)));
+            legacy.push(format!("ALTER TABLE {fq} ADD CONSTRAINT {} CHECK ({expr})", quote(&name)));
+            legacy.push(format!("COMMENT ON CONSTRAINT {} ON {fq} IS 'rootcx:chk:{}'", quote(&name), legacy_check_tag(&expr)));
+        }
+        for index in entity["indexes"].as_array().into_iter().flatten() {
+            let name = index["name"].as_str().unwrap();
+            let mut raw = index.clone();
+            for column in raw["columns"].as_array_mut().unwrap() {
+                if let Some(ops) = column.get_mut("ops") {
+                    *ops = json!(format!("{}.gin_trgm_ops", quote(&trigram)));
+                }
+            }
+            legacy.push(format!("DROP INDEX {}.{}", quote(&app), quote(name)));
+            legacy.push(legacy_index_sql(&app, table, &raw));
+            legacy.push(format!("COMMENT ON INDEX {}.{} IS 'rootcx:idx:{}'", quote(&app), quote(name), legacy_index_tag(index)));
+        }
+    }
+    let mut tx = rt.pool().begin().await.unwrap();
+    for statement in &legacy {
+        sqlx::query(statement).execute(&mut *tx).await.unwrap_or_else(|e| panic!("{statement}: {e}"));
+    }
+    tx.commit().await.unwrap();
+    sqlx::query("UPDATE rootcx_system.apps SET manifest = $2 WHERE id = $1")
+        .bind(&app).bind(&original).execute(rt.pool()).await.unwrap();
+
+    let objects = "SELECT kind, name, oid::bigint, comment FROM (
+          SELECT 'check' kind, con.conname::text name, con.oid, obj_description(con.oid, 'pg_constraint') comment
+          FROM pg_constraint con JOIN pg_namespace n ON n.oid = con.connamespace WHERE n.nspname = $1 AND con.contype = 'c'
+          UNION ALL
+          SELECT 'index', c.relname::text, c.oid, obj_description(c.oid, 'pg_class')
+          FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relkind = 'i'
+        ) o WHERE comment LIKE 'rootcx:%' ORDER BY kind, name";
+    let before: Vec<(String, String, i64, String)> = sqlx::query_as(objects).bind(&app).fetch_all(rt.pool()).await.unwrap();
+    assert!(before.iter().all(|(_, _, _, c)| !c.contains(":r1-")), "every rule starts with a legacy tag");
+
+    rt.install_manifest(&declared).await;
+    let after: Vec<(String, String, i64, String)> = sqlx::query_as(objects).bind(&app).fetch_all(rt.pool()).await.unwrap();
+    let rebuilt: Vec<&String> = before.iter().zip(&after)
+        .filter(|((k1, n1, o1, _), (k2, n2, o2, _))| (k1, n1, o1) != (k2, n2, o2))
+        .map(|((_, name, _, _), _)| name).collect();
+    assert_eq!(before.len(), after.len(), "no rule was lost or added");
+    assert!(rebuilt.is_empty(), "rebuilt instead of adopted: {rebuilt:?}");
+    assert!(after.iter().all(|(_, _, _, c)| c.contains(":r1-")), "every rule is now governed");
+    let entities = original["dataContract"].as_array().unwrap();
+    let count = |f: &dyn Fn(&Value) -> usize| entities.iter().map(f).sum::<usize>();
+    let declared_checks = count(&|e| e["checks"].as_array().map_or(0, Vec::len));
+    let enum_checks = count(&|e| e["fields"].as_array().unwrap().iter()
+        .filter(|f| f["enum_values"].as_array().is_some_and(|v| !v.is_empty())).count());
+    let declared_indexes = count(&|e| e["indexes"].as_array().map_or(0, Vec::len));
+    assert_eq!(after.iter().filter(|o| o.0 == "check").count(), declared_checks + enum_checks);
+    assert_eq!(after.iter().filter(|o| o.0 == "index").count(), declared_indexes);
+    rt.shutdown().await;
+}
