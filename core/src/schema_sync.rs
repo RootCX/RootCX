@@ -296,11 +296,11 @@ pub async fn sync_schema(
             apply_ddl(pool, &stmts).await?;
         }
 
-        // Reconcile indexes + CHECKs in the same pass — columns are already
-        // applied above, so anything they reference exists. No re-introspection.
-        reconcile_indexes(pool, app_id, entity).await?;
-        reconcile_checks(pool, app_id, entity).await?;
     }
+
+    // Rules after every column: a rule may read any column of its entity, and
+    // the whole app is preflighted before any constraint or index changes.
+    crate::rules::reconcile(pool, app_id, entities).await?;
 
     // Invalidate sqlx prepared-statement caches after column type changes
     // to prevent stale parameter-type bindings (e.g. f64 sent as TEXT).
@@ -317,15 +317,11 @@ pub async fn sync_schema(
     Ok(())
 }
 
-// ── Declarative secondary indexes ────────────────────────────────────
+// ── Legacy rule identity ─────────────────────────────────────────────
 //
-// Reconciled against pg_indexes. We only ever touch indexes WE own, tagged with
-// a `rootcx:idx:<hash>` comment carrying a hash of the declared spec — so the
-// PK, identity, and FK indexes are never touched, AND a changed definition under
-// the same name is detected (hash differs) and replaced. Add/keep/change/remove
-// are decided by the pure `compute_managed_diff`, then applied.
-
-const MANAGED_INDEX_PREFIX: &str = "rootcx:idx:";
+// Declarative checks and indexes are compiled and reconciled by `crate::rules`
+// (ADR 0010). What stays here is how older Cores named and tagged indexes, so
+// objects they created can be recognized and adopted.
 
 /// Stable hash of an index's DEFINITION (not its name): columns + per-column
 /// sort/nulls/ops/expr, unique, method, partial predicate, storage params.
@@ -370,49 +366,6 @@ fn fnv1a_hex(s: &str) -> String {
     format!("{h:016x}")
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum ManagedOp {
-    /// Declared, not currently managed — create it.
-    Create(String),
-    /// Declared and managed, but the spec changed — drop + recreate.
-    Replace(String),
-    /// Present with the exact declared spec — no churn.
-    Keep(String),
-    /// Managed but no longer declared — drop it.
-    Drop(String),
-}
-
-impl ManagedOp {
-    pub fn name(&self) -> &str {
-        match self {
-            ManagedOp::Create(n) | ManagedOp::Replace(n) | ManagedOp::Keep(n) | ManagedOp::Drop(n) => n,
-        }
-    }
-}
-
-/// Pure add/keep/change/remove decision. `desired` = (name, spec-hash) for each
-/// declared index; `managed` = name → stored spec-hash for indexes we own.
-pub fn compute_managed_diff(
-    desired: &[(String, String)],
-    managed: &HashMap<String, String>,
-) -> Vec<ManagedOp> {
-    let mut ops = Vec::new();
-    let desired_names: HashSet<&str> = desired.iter().map(|(n, _)| n.as_str()).collect();
-    for (name, hash) in desired {
-        match managed.get(name) {
-            None => ops.push(ManagedOp::Create(name.clone())),
-            Some(h) if h == hash => ops.push(ManagedOp::Keep(name.clone())),
-            Some(_) => ops.push(ManagedOp::Replace(name.clone())),
-        }
-    }
-    for name in managed.keys() {
-        if !desired_names.contains(name.as_str()) {
-            ops.push(ManagedOp::Drop(name.clone()));
-        }
-    }
-    ops
-}
-
 /// Deterministic index name when the manifest omits one: `ix_<entity>_<n>` with
 /// a short hash of the full spec so two unnamed indexes never collide. Capped at
 /// Postgres's 63-byte identifier limit.
@@ -433,252 +386,6 @@ pub(crate) fn resolve_index_name(entity: &str, idx: &rootcx_types::IndexContract
     let suffix = format!("_{:x}", hash & 0xffffff);
     let max = 63 - suffix.len();
     format!("{}{}", base.chars().take(max).collect::<String>(), suffix)
-}
-
-/// Resolved name → compiled index. Shared by reconcile and verify so both see
-/// the same desired set; compilation also rejects duplicate names.
-fn desired_indexes(entity: &EntityContract) -> Result<HashMap<String, crate::rules::CompiledIndex>, String> {
-    Ok(crate::rules::compile_entity(entity)?
-        .indexes
-        .into_iter()
-        .map(|index| (index.name.clone(), index))
-        .collect())
-}
-
-/// name → stored spec-hash for the indexes WE manage, read from our
-/// `rootcx:idx:<hash>` comments. PK / identity / FK indexes carry no such
-/// comment, so they never appear here — and are thus never reconciled away.
-async fn read_managed_index_hashes(
-    pool: &PgPool,
-    schema: &str,
-    table: &str,
-) -> Result<HashMap<String, String>, RuntimeError> {
-    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT c.relname, obj_description(c.oid, 'pg_class') \
-         FROM pg_index x \
-         JOIN pg_class c ON c.oid = x.indexrelid \
-         JOIN pg_class t ON t.oid = x.indrelid \
-         JOIN pg_namespace n ON n.oid = t.relnamespace \
-         WHERE n.nspname = $1 AND t.relname = $2 \
-           AND obj_description(c.oid, 'pg_class') LIKE $3",
-    )
-    .bind(schema).bind(table).bind(format!("{MANAGED_INDEX_PREFIX}%"))
-    .fetch_all(pool).await.map_err(RuntimeError::Schema)?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|(name, comment)| {
-            comment.and_then(|c| c.strip_prefix(MANAGED_INDEX_PREFIX).map(|h| (name, h.to_string())))
-        })
-        .collect())
-}
-
-/// Reconcile declared indexes for one entity: add new, replace changed, drop
-/// removed. Idempotent (unchanged indexes are kept untouched).
-async fn reconcile_indexes(
-    pool: &PgPool,
-    schema: &str,
-    entity: &EntityContract,
-) -> Result<(), RuntimeError> {
-    let proto = |m: String| RuntimeError::Schema(sqlx::Error::Protocol(m));
-    let by_name = desired_indexes(entity).map_err(proto)?;
-    let desired: Vec<(String, String)> =
-        by_name.iter().map(|(n, i)| (n.clone(), i.tag.clone())).collect();
-    let managed = read_managed_index_hashes(pool, schema, &entity.entity_name).await?;
-
-    let ops = compute_managed_diff(&desired, &managed);
-    if ops.iter().all(|o| matches!(o, ManagedOp::Keep(_))) {
-        return Ok(());
-    }
-
-    let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
-    for op in &ops {
-        let drop = |name: &str| format!("DROP INDEX IF EXISTS {}.{}", quote_ident(schema), quote_ident(name));
-        match op {
-            ManagedOp::Keep(_) => {}
-            ManagedOp::Drop(name) => {
-                sqlx::query(&drop(name)).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
-            }
-            // Create and Replace both drop-then-create: covers a changed spec and
-            // adoption of a pre-existing same-named (unmanaged) index alike.
-            ManagedOp::Create(name) | ManagedOp::Replace(name) => {
-                let idx = &by_name[name];
-                let create = idx.create_sql(schema, &entity.entity_name, name, false);
-                sqlx::query(&drop(name)).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
-                sqlx::query(&create).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
-                sqlx::query(&format!(
-                    "COMMENT ON INDEX {}.{} IS '{}{}'",
-                    quote_ident(schema), quote_ident(name), MANAGED_INDEX_PREFIX, idx.tag
-                )).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
-            }
-        }
-    }
-    tx.commit().await.map_err(RuntimeError::Schema)?;
-    Ok(())
-}
-
-/// Drift report for declared indexes (the verify counterpart to reconcile).
-/// No introspection needed: `read_managed_index_hashes` returns empty for a
-/// nonexistent table (the pg_index join yields nothing), so missing tables
-/// naturally produce no drift.
-async fn verify_indexes(
-    pool: &PgPool,
-    app_id: &str,
-    entities: &[EntityContract],
-) -> Result<Vec<SchemaChange>, RuntimeError> {
-    let mut changes = Vec::new();
-    for entity in entities {
-        let by_name = desired_indexes(entity)
-            .map_err(|m| RuntimeError::Schema(sqlx::Error::Protocol(m)))?;
-        let desired: Vec<(String, String)> =
-            by_name.iter().map(|(n, i)| (n.clone(), i.tag.clone())).collect();
-        let managed = read_managed_index_hashes(pool, app_id, &entity.entity_name).await?;
-        if desired.is_empty() && managed.is_empty() {
-            continue;
-        }
-        for op in compute_managed_diff(&desired, &managed) {
-            let change_type = match &op {
-                ManagedOp::Keep(_) => continue,
-                ManagedOp::Create(_) => "add_index",
-                ManagedOp::Replace(_) => "replace_index",
-                ManagedOp::Drop(_) => "drop_index",
-            };
-            changes.push(SchemaChange {
-                entity: entity.entity_name.clone(),
-                change_type: change_type.to_string(),
-                column: op.name().to_string(),
-                detail: None,
-            });
-        }
-    }
-    Ok(changes)
-}
-
-// ── Declarative CHECK constraints ────────────────────────────────────
-//
-// Same tag-owned model as indexes: we reconcile ONLY constraints carrying a
-// `rootcx:chk:<hash>` COMMENT, so app/DBA-defined CHECKs (untagged) are never
-// touched. Covers both enum-derived CHECKs (from `enum_values`) and declarative
-// `checks:` expressions, unified under one mechanism. The hash is of the
-// DECLARED expression (whitespace-normalized) — never Postgres's rewritten
-// stored definition — so `a IN (b,c)` → stored `a = ANY(ARRAY[...])` does not
-// churn (the trap that Drizzle/TypeORM hit; Atlas avoids it with a dev-database,
-// which we don't need because we never compare against the stored text).
-
-const MANAGED_CHECK_PREFIX: &str = "rootcx:chk:";
-
-/// Resolved name → compiled check for every CHECK the core owns on an entity:
-/// enum-derived (`chk_<entity>_<field>`) and declared `checks`. Compilation
-/// rejects duplicate names.
-fn desired_checks(entity: &EntityContract) -> Result<HashMap<String, crate::rules::CompiledCheck>, String> {
-    Ok(crate::rules::compile_entity(entity)?
-        .checks
-        .into_iter()
-        .map(|check| (check.name.clone(), check))
-        .collect())
-}
-
-/// name → stored spec-hash for the CHECKs WE manage, from `rootcx:chk:` comments.
-/// App/DBA CHECKs carry no such comment, so they never appear and are untouched.
-async fn read_managed_check_hashes(
-    pool: &PgPool,
-    schema: &str,
-    table: &str,
-) -> Result<HashMap<String, String>, RuntimeError> {
-    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
-        "SELECT con.conname, obj_description(con.oid, 'pg_constraint') \
-         FROM pg_constraint con \
-         JOIN pg_class t ON t.oid = con.conrelid \
-         JOIN pg_namespace n ON n.oid = t.relnamespace \
-         WHERE n.nspname = $1 AND t.relname = $2 AND con.contype = 'c' \
-           AND obj_description(con.oid, 'pg_constraint') LIKE $3",
-    )
-    .bind(schema).bind(table).bind(format!("{MANAGED_CHECK_PREFIX}%"))
-    .fetch_all(pool).await.map_err(RuntimeError::Schema)?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|(name, comment)| {
-            comment.and_then(|c| c.strip_prefix(MANAGED_CHECK_PREFIX).map(|h| (name, h.to_string())))
-        })
-        .collect())
-}
-
-/// Reconcile owned CHECKs for one entity: add new, replace changed (drop-first,
-/// since `ADD CONSTRAINT` has no `IF NOT EXISTS`), drop removed. Idempotent.
-async fn reconcile_checks(
-    pool: &PgPool,
-    schema: &str,
-    entity: &EntityContract,
-) -> Result<(), RuntimeError> {
-    let proto = |m: String| RuntimeError::Schema(sqlx::Error::Protocol(m));
-    let by_name = desired_checks(entity).map_err(proto)?;
-    let desired: Vec<(String, String)> =
-        by_name.iter().map(|(n, check)| (n.clone(), check.tag.clone())).collect();
-    let managed = read_managed_check_hashes(pool, schema, &entity.entity_name).await?;
-
-    let ops = compute_managed_diff(&desired, &managed);
-    if ops.iter().all(|o| matches!(o, ManagedOp::Keep(_))) {
-        return Ok(());
-    }
-
-    let fq = format!("{}.{}", quote_ident(schema), quote_ident(&entity.entity_name));
-    let mut tx = pool.begin().await.map_err(RuntimeError::Schema)?;
-    for op in &ops {
-        let drop = |name: &str| format!("ALTER TABLE {fq} DROP CONSTRAINT IF EXISTS {}", quote_ident(name));
-        match op {
-            ManagedOp::Keep(_) => {}
-            ManagedOp::Drop(name) => {
-                sqlx::query(&drop(name)).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
-            }
-            // Drop-then-add: covers a changed expression AND adoption of a
-            // pre-existing same-named (untagged) CHECK alike.
-            ManagedOp::Create(name) | ManagedOp::Replace(name) => {
-                let check = &by_name[name];
-                sqlx::query(&drop(name)).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
-                sqlx::query(&format!("ALTER TABLE {fq} ADD CONSTRAINT {} CHECK ({})", quote_ident(name), check.sql))
-                    .execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
-                sqlx::query(&format!(
-                    "COMMENT ON CONSTRAINT {} ON {fq} IS '{}{}'",
-                    quote_ident(name), MANAGED_CHECK_PREFIX, check.tag
-                )).execute(&mut *tx).await.map_err(RuntimeError::Schema)?;
-            }
-        }
-    }
-    tx.commit().await.map_err(RuntimeError::Schema)?;
-    Ok(())
-}
-
-/// Drift report for owned CHECKs (the verify counterpart to reconcile).
-async fn verify_checks(
-    pool: &PgPool,
-    app_id: &str,
-    entities: &[EntityContract],
-) -> Result<Vec<SchemaChange>, RuntimeError> {
-    let mut changes = Vec::new();
-    for entity in entities {
-        let by_name = desired_checks(entity)
-            .map_err(|m| RuntimeError::Schema(sqlx::Error::Protocol(m)))?;
-        let desired: Vec<(String, String)> =
-            by_name.iter().map(|(n, check)| (n.clone(), check.tag.clone())).collect();
-        let managed = read_managed_check_hashes(pool, app_id, &entity.entity_name).await?;
-        if desired.is_empty() && managed.is_empty() {
-            continue;
-        }
-        for op in compute_managed_diff(&desired, &managed) {
-            let change_type = match &op {
-                ManagedOp::Keep(_) => continue,
-                ManagedOp::Create(_) => "add_check",
-                ManagedOp::Replace(_) => "replace_check",
-                ManagedOp::Drop(_) => "drop_check",
-            };
-            changes.push(SchemaChange {
-                entity: entity.entity_name.clone(),
-                change_type: change_type.to_string(),
-                column: op.name().to_string(),
-                detail: None,
-            });
-        }
-    }
-    Ok(changes)
 }
 
 pub async fn introspect_table(
@@ -811,8 +518,7 @@ pub async fn verify_all(
     }
 
     changes.extend(verify_identity_indexes(pool, app_id, entities).await?);
-    changes.extend(verify_indexes(pool, app_id, entities).await?);
-    changes.extend(verify_checks(pool, app_id, entities).await?);
+    changes.extend(crate::rules::verify(pool, app_id, entities).await?);
 
     Ok(SchemaVerification { compliant: changes.is_empty(), changes })
 }
@@ -1421,48 +1127,6 @@ mod tests {
         // name is NOT part of the hash (it's the key, not the definition)
         let mut named = base.clone(); named.name = Some("whatever".into());
         assert_eq!(index_spec_hash(&named), h, "name is not part of the spec hash");
-    }
-
-    #[test]
-    fn index_diff_add_keep_change_remove() {
-        let h = |s: &str| s.to_string();
-        // add: desired present, nothing managed
-        assert_eq!(
-            compute_managed_diff(&[("a".into(), h("1"))], &HashMap::new()),
-            vec![ManagedOp::Create("a".into())]
-        );
-        // keep: same name + same hash
-        assert_eq!(
-            compute_managed_diff(&[("a".into(), h("1"))], &HashMap::from([("a".into(), h("1"))])),
-            vec![ManagedOp::Keep("a".into())]
-        );
-        // change: same name, different hash → replace
-        assert_eq!(
-            compute_managed_diff(&[("a".into(), h("2"))], &HashMap::from([("a".into(), h("1"))])),
-            vec![ManagedOp::Replace("a".into())]
-        );
-        // remove: managed, no longer desired
-        assert_eq!(
-            compute_managed_diff(&[], &HashMap::from([("a".into(), h("1"))])),
-            vec![ManagedOp::Drop("a".into())]
-        );
-    }
-
-    #[test]
-    fn index_diff_mixed() {
-        let ops = compute_managed_diff(
-            &[("keep".into(), "h".into()), ("changed".into(), "new".into()), ("added".into(), "h".into())],
-            &HashMap::from([
-                ("keep".into(), "h".into()),
-                ("changed".into(), "old".into()),
-                ("removed".into(), "h".into()),
-            ]),
-        );
-        assert!(ops.contains(&ManagedOp::Keep("keep".into())));
-        assert!(ops.contains(&ManagedOp::Replace("changed".into())));
-        assert!(ops.contains(&ManagedOp::Create("added".into())));
-        assert!(ops.contains(&ManagedOp::Drop("removed".into())));
-        assert_eq!(ops.len(), 4);
     }
 
     #[test]

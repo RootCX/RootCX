@@ -49,5 +49,8 @@ mod approved_actions_test;
 #[path = "governance/manifest_sql_admission_test.rs"]
 mod manifest_sql_admission_test;
 
+#[path = "governance/governed_rules_test.rs"]
+mod governed_rules_test;
+
 #[path = "governance/row_access_projection_test.rs"]
 mod row_access_projection_test;

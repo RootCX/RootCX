@@ -44,6 +44,9 @@ pub async fn install_app(
     let manifest_json = serde_json::to_value(manifest)
         .map_err(|e| RuntimeError::Schema(sqlx::Error::Protocol(e.to_string().into())))?;
     let mut lifecycle = crate::governance::cross_app::lock_app_lifecycle(pool, app_id).await?;
+    // Before anything is revoked or rotated: rows that violate a new rule refuse
+    // the install while the current installation keeps running.
+    crate::rules::preflight(pool, app_id, &manifest.data_contract).await?;
     let previous_manifest = load_manifest_json(pool, app_id).await?;
     if previous_manifest.as_ref().is_some_and(|previous| previous != &manifest_json) {
         let mut tx = lifecycle.begin().await.map_err(RuntimeError::Schema)?;
