@@ -690,17 +690,6 @@ pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
         for field in &entity.fields {
             validate_new_ident(&field.name, "field name")?;
         }
-        for check in &entity.checks {
-            let name = check.name.as_deref().ok_or_else(|| RuntimeError::Invalid(format!(
-                "entity '{}': every check needs a 'name'", entity.entity_name
-            )))?;
-            validate_new_ident(name, "check name")?;
-        }
-        for index in &entity.indexes {
-            if let Some(name) = &index.name {
-                validate_new_ident(name, "index name")?;
-            }
-        }
     }
     validate_stored_manifest(manifest)?;
     for entity in &manifest.data_contract {

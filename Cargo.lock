@@ -3585,6 +3585,7 @@ dependencies = [
  "libc",
  "openidconnect",
  "rand 0.8.5",
+ "regex-syntax",
  "reqwest",
  "rmcp",
  "rootcx-platform",

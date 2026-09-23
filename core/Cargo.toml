@@ -42,6 +42,9 @@ jsonwebtoken = "9"
 hmac = "0.12"
 sha2 = "0.10"
 
+# Governed rules: pattern validation (ADR 0010)
+regex-syntax = "0.8"
+
 # OIDC Relying Party
 openidconnect = { version = "4", features = ["reqwest"] }
 url = "2"
