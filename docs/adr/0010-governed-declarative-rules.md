@@ -130,8 +130,17 @@ orders above every number and which `scale()` maps to NULL.
 
 `where` and `columns[].expr` use the rule language (`where` must be boolean).
 `ops` and `with` remain refused. `using: "trigram"` declares a trigram GIN index
-on text columns; Core owns `pg_trgm` in the `rootcx_ext` schema so no app schema
-holds the operator class another app depends on.
+on plain text columns. Core resolves the operator class from the installed
+`pg_trgm`; when none is installed, Core installs it in its own `rootcx_ext`
+schema so that no app schema holds an operator class another app depends on.
+
+Existing installations keep `pg_trgm` where it is. Moving it would break app SQL
+that calls its functions by qualified name, such as `kova_erp.word_similarity`.
+Uninstalling an app first moves any relocatable extension out of its schema into
+`rootcx_ext`, so `DROP SCHEMA … CASCADE` no longer takes other apps' trigram
+indexes with it; a non-relocatable extension refuses the uninstall. App ids
+cannot name Core or extension schemas (`rootcx_system`, `rootcx_ext`, `pgmq`,
+`cron`, `public`, `information_schema`, `pg_*`).
 
 ### Names, tags and compilation identity
 
@@ -225,5 +234,8 @@ Admission errors name the rule and position, for example
   collation.
 - **Author messages.** `checks[].message` is not accepted yet; clients map rule
   names to messages.
+- **Relocating `pg_trgm` on existing installations** into `rootcx_ext` is left to
+  an operator migration coordinated with each app's qualified references and the
+  executor's `search_path`.
 - **Linting.** Warnings for NaN-tolerant comparisons or three-valued-logic traps
   in `(p) = (q)` are not surfaced yet; shorthands carry the finiteness guard.

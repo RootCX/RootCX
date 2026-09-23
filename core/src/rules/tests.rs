@@ -257,14 +257,14 @@ fn indexes_compile_predicates_expressions_and_trigram() {
         {"name": "ix_trgm", "using": "trigram", "columns": ["name", "email"]},
         {"name": "ix_sorted", "columns": ["status", {"column": "t1", "sort": "desc", "nulls": "last"}], "where": "flag = true"}
     ]}))).unwrap();
-    let sql: Vec<String> = rules.indexes.iter().map(|i| i.create_sql("app", "sample", &i.name, false)).collect();
+    let sql: Vec<String> = rules.indexes.iter().map(|i| i.create_sql("app", "sample", &i.name, false, EXTENSION_SCHEMA)).collect();
     assert_eq!(sql[0], r#"CREATE UNIQUE INDEX "uq_ref" ON "app"."sample" USING btree ("ref_id", "status") WHERE ("status" <> 'cancelled')"#);
     assert_eq!(sql[1], r#"CREATE UNIQUE INDEX "uq_name" ON "app"."sample" USING btree ((pg_catalog.lower(pg_catalog.btrim("name"))))"#);
-    assert_eq!(sql[2], r#"CREATE INDEX "ix_trgm" ON "app"."sample" USING gin ("name" rootcx_ext.gin_trgm_ops, "email" rootcx_ext.gin_trgm_ops)"#);
+    assert_eq!(sql[2], r#"CREATE INDEX "ix_trgm" ON "app"."sample" USING gin ("name" "rootcx_ext".gin_trgm_ops, "email" "rootcx_ext".gin_trgm_ops)"#);
     assert_eq!(sql[3], r#"CREATE INDEX "ix_sorted" ON "app"."sample" USING btree ("status", "t1" DESC NULLS LAST) WHERE ("flag" = TRUE)"#);
     assert_eq!(rules.indexes[2].columns, ["name", "email"]);
     assert_eq!(
-        rules.indexes[1].create_sql("app", "sample", "next", true),
+        rules.indexes[1].create_sql("app", "sample", "next", true, EXTENSION_SCHEMA),
         r#"CREATE UNIQUE INDEX CONCURRENTLY "next" ON "app"."sample" USING btree ((pg_catalog.lower(pg_catalog.btrim("name"))))"#,
     );
 }

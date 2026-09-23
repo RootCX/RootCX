@@ -216,6 +216,7 @@ pub async fn uninstall_app(
     tx.commit().await.map_err(RuntimeError::Schema)?;
     crate::crons::delete_all_for_app(pool, app_id).await?;
 
+    crate::rules::evacuate_extensions(pool, app_id).await?;
     let drop_schema = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(app_id));
     sqlx::query(&drop_schema).execute(pool).await.map_err(RuntimeError::Schema)?;
 
@@ -557,6 +558,8 @@ pub(crate) fn validate_ident(value: &str, label: &str) -> Result<(), RuntimeErro
     )))
 }
 
+const RESERVED_SCHEMAS: &[&str] = &["rootcx_system", "rootcx_ext", "pgmq", "cron", "public", "information_schema"];
+
 /// A new name must fit PostgreSQL's limit. Installation only: a stored manifest
 /// whose names PostgreSQL once truncated must still boot.
 pub(crate) fn validate_new_ident(value: &str, label: &str) -> Result<(), RuntimeError> {
@@ -688,6 +691,10 @@ fn validate_perm_key_schema(key: &str) -> Result<(), RuntimeError> {
 pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
     refuse_unknown_keys(manifest)?;
     validate_new_ident(&manifest.app_id, "appId")?;
+    // An app's id is its schema name; Core and extension schemas are not apps.
+    if RESERVED_SCHEMAS.contains(&manifest.app_id.as_str()) || manifest.app_id.starts_with("pg_") {
+        return Err(RuntimeError::Invalid(format!("appId '{}' is reserved", manifest.app_id)));
+    }
     for entity in &manifest.data_contract {
         validate_new_ident(&entity.entity_name, "entity name")?;
         for field in &entity.fields {

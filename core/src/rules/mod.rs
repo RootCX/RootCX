@@ -16,7 +16,7 @@ mod typing;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use reconcile::{preflight, reconcile, verify};
+pub(crate) use reconcile::{evacuate_extensions, preflight, reconcile, verify};
 
 use rootcx_types::{EntityContract, FieldContract, IndexColumn, IndexContract};
 use sha2::{Digest, Sha256};
@@ -77,7 +77,16 @@ pub(crate) struct CompiledIndex {
 }
 
 impl CompiledIndex {
-    pub(crate) fn create_sql(&self, schema: &str, table: &str, name: &str, concurrently: bool) -> String {
+    /// `trigram` names the schema holding pg_trgm's operator class; it is read
+    /// from the catalog because older installations keep it in an app schema.
+    pub(crate) fn create_sql(&self, schema: &str, table: &str, name: &str, concurrently: bool, trigram: &str) -> String {
+        let keys = if self.trigram {
+            self.columns.iter()
+                .map(|column| format!("{} {}.gin_trgm_ops", quote_ident(column), quote_ident(trigram)))
+                .collect()
+        } else {
+            self.keys.clone()
+        };
         let mut sql = format!(
             "CREATE {}INDEX {}{} ON {}.{} USING {} ({})",
             if self.unique { "UNIQUE " } else { "" },
@@ -86,7 +95,7 @@ impl CompiledIndex {
             quote_ident(schema),
             quote_ident(table),
             self.method,
-            self.keys.join(", "),
+            keys.join(", "),
         );
         if let Some(predicate) = &self.predicate {
             sql.push_str(&format!(" WHERE {predicate}"));
@@ -101,8 +110,8 @@ pub(crate) struct EntityRules {
     pub(crate) indexes: Vec<CompiledIndex>,
 }
 
-/// The schema that owns `pg_trgm`, so no app schema holds an operator class
-/// another app's index depends on.
+/// The Core-owned schema for extensions such as `pg_trgm`, so that no app
+/// schema holds an operator class another app's index depends on.
 pub(crate) const EXTENSION_SCHEMA: &str = "rootcx_ext";
 
 /// Compile every rule an entity declares. Errors name the rule and position.
@@ -308,7 +317,6 @@ fn compile_index(
                 return Err(format!("trigram index column '{name}' must be text"));
             }
             columns.push(name.clone());
-            key.push_str(&format!(" {EXTENSION_SCHEMA}.gin_trgm_ops"));
         }
         if let Some(sort) = sort {
             key.push_str(match sort.to_ascii_lowercase().as_str() {
