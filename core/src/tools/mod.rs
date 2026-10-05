@@ -24,11 +24,9 @@ use rootcx_types::ToolDescriptor;
 #[async_trait]
 pub trait AgentDispatcher: Send + Sync {
     async fn dispatch(
-        &self, pool: &PgPool, caller: &str, target: &str, message: &str,
+        &self, target: &str, message: &str,
+        authority: crate::governance::execution::AgentAuthority,
         parent_tx: Option<tokio::sync::mpsc::Sender<crate::worker::AgentEvent>>,
-        invoker_user_id: Option<Uuid>,
-        parent_perms: Vec<String>,
-        task_scope: Option<Vec<String>>,
     ) -> Result<String, String>;
 }
 
@@ -55,6 +53,8 @@ pub trait ActionCaller: Send + Sync {
 }
 
 pub struct ToolContext {
+    /// Live authority constructed by Core and inherited by child agents, never supplied in tool arguments.
+    pub authority: Option<crate::governance::execution::AgentAuthority>,
     pub pool: PgPool,
     /// Core-bound application identity for governed app-to-app capabilities.
     /// `None` means the context came from the generic human HTTP tool route;
@@ -268,6 +268,7 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://localhost/test").unwrap();
         ToolContext {
+            authority: None,
             pool, core_bound_app_id: None, app_id: "app".into(), user_id: Uuid::nil(), invoker_user_id: None,
             permissions: perms, task_scope: None, args: json!({}),
             agent_dispatch: None, integration_caller: None, action_caller: None, stream_tx: None,

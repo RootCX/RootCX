@@ -23,6 +23,11 @@ impl TelegramProvider {
             .ok_or_else(|| ChannelError::Provider("missing bot_token".into()))
     }
 
+    fn webhook_secret(config: &JsonValue) -> Result<&str, ChannelError> {
+        config["webhook_secret"].as_str().filter(|secret| !secret.is_empty())
+            .ok_or_else(|| ChannelError::Provider("missing webhook_secret".into()))
+    }
+
     async fn sync_commands(&self, config: &JsonValue) {
         let Ok(token) = Self::token(config) else { return };
         let _ = self.http
@@ -37,11 +42,12 @@ impl TelegramProvider {
         let resp = self.http
             .post(Self::bot_url(Self::token(config)?, method))
             .json(body).send().await
-            .map_err(|e| ChannelError::Provider(e.to_string()))?;
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            warn!(method, "telegram API failed: {body}");
-            return Err(ChannelError::Provider(body));
+            .map_err(|_| ChannelError::Provider("Telegram request unavailable".into()))?;
+        let succeeded = resp.status().is_success();
+        let body: JsonValue = resp.json().await.map_err(|_| ChannelError::Provider("invalid Telegram response".into()))?;
+        if !succeeded || body["ok"] != true {
+            warn!(method, "telegram API request failed");
+            return Err(ChannelError::Provider("Telegram request failed".into()));
         }
         Ok(())
     }
@@ -56,6 +62,8 @@ struct Update {
 #[derive(Deserialize)]
 struct Message {
     chat: Chat,
+    from: Option<ChatFrom>,
+    sender_chat: Option<Chat>,
     text: Option<String>,
     caption: Option<String>,
     photo: Option<Vec<PhotoSize>>,
@@ -84,37 +92,63 @@ struct TelegramDocument {
 }
 
 #[derive(Deserialize)]
-struct CallbackQuery { id: String, from: ChatFrom, data: Option<String> }
+struct CallbackQuery { id: String, from: ChatFrom, message: Option<CallbackMessage>, data: Option<String> }
+#[derive(Deserialize)]
+struct CallbackMessage { chat: Chat }
 #[derive(Deserialize)]
 struct Chat { id: i64 }
 #[derive(Deserialize)]
-struct ChatFrom { id: i64 }
+struct ChatFrom { id: i64, is_bot: bool }
+
+fn bound_chat(chat: i64, user: i64) -> Result<String, ChannelError> {
+    if chat == 0 || user <= 0 { return Err(ChannelError::InvalidWebhook("invalid chat or sender".into())); }
+    Ok(format!("telegram:{}", json!([chat, user])))
+}
+
+fn delivery_chat(identity: &str) -> Result<i64, ChannelError> {
+    let pair = identity.strip_prefix("telegram:").and_then(|value| serde_json::from_str::<(i64, i64)>(value).ok());
+    match pair {
+        Some((chat, user)) if chat != 0 && user > 0 => Ok(chat),
+        _ => Err(ChannelError::Provider("channel identity must be relinked".into())),
+    }
+}
 
 #[async_trait]
 impl ChannelProvider for TelegramProvider {
+    fn delivery_id(&self, body: &[u8]) -> Result<String, ChannelError> {
+        let value: JsonValue = serde_json::from_slice(body).map_err(|_| ChannelError::InvalidWebhook("invalid update".into()))?;
+        value["update_id"].as_u64().map(|id| id.to_string())
+            .ok_or_else(|| ChannelError::InvalidWebhook("missing update_id".into()))
+    }
+
     async fn parse_webhook(
         &self, config: &JsonValue, body: Bytes, headers: &HeaderMap,
     ) -> Result<InboundEvent, ChannelError> {
-        if let Some(secret) = config["webhook_secret"].as_str() {
-            let header = headers.get("x-telegram-bot-api-secret-token")
-                .and_then(|v| v.to_str().ok()).unwrap_or("");
-            if header != secret {
-                return Err(ChannelError::InvalidWebhook("secret mismatch".into()));
-            }
+        let secret = Self::webhook_secret(config)?;
+        let header = headers.get("x-telegram-bot-api-secret-token")
+            .and_then(|v| v.to_str().ok()).unwrap_or("");
+        if header != secret {
+            return Err(ChannelError::InvalidWebhook("secret mismatch".into()));
         }
 
         let update: Update = serde_json::from_slice(&body)
             .map_err(|e| ChannelError::InvalidWebhook(e.to_string()))?;
 
         if let Some(cb) = update.callback_query {
+            if cb.from.is_bot { return Ok(InboundEvent::Ignored); }
+            let message = cb.message.ok_or_else(|| ChannelError::InvalidWebhook("callback chat missing".into()))?;
             return Ok(InboundEvent::Callback {
-                chat_id: cb.from.id.to_string(),
+                chat_id: bound_chat(message.chat.id, cb.from.id)?,
                 callback_id: cb.id,
                 data: cb.data.unwrap_or_default(),
             });
         }
 
         let Some(msg) = update.message else { return Ok(InboundEvent::Ignored) };
+        if msg.sender_chat.is_some() { return Ok(InboundEvent::Ignored); }
+        let sender = msg.from.ok_or_else(|| ChannelError::InvalidWebhook("missing sender".into()))?;
+        if sender.is_bot { return Ok(InboundEvent::Ignored); }
+        let chat_id = bound_chat(msg.chat.id, sender.id)?;
 
         // Text: prefer message text, fall back to caption (media with text overlay)
         let text = msg.text.or(msg.caption).unwrap_or_default();
@@ -162,7 +196,7 @@ impl ChannelProvider for TelegramProvider {
             return Ok(InboundEvent::Ignored);
         }
 
-        Ok(InboundEvent::Message { chat_id: msg.chat.id.to_string(), text, media })
+        Ok(InboundEvent::Message { chat_id, text, media })
     }
 
     async fn download_media(
@@ -191,9 +225,14 @@ impl ChannelProvider for TelegramProvider {
     async fn send_response(
         &self, config: &JsonValue, chat_id: &str, text: &str,
     ) -> Result<(), ChannelError> {
-        self.api_post(config, "sendMessage", &json!({
-            "chat_id": chat_id, "text": text, "parse_mode": "Markdown",
-        })).await
+        // Plain text accepts arbitrary model output; split by characters, never UTF-8 bytes.
+        let chars: Vec<char> = text.chars().collect();
+        for chunk in chars.chunks(4096) {
+            self.api_post(config, "sendMessage", &json!({
+                "chat_id": delivery_chat(chat_id)?, "text": chunk.iter().collect::<String>(),
+            })).await?;
+        }
+        Ok(())
     }
 
     async fn send_approval(
@@ -201,9 +240,8 @@ impl ChannelProvider for TelegramProvider {
         tool_name: &str, args: &JsonValue,
     ) -> Result<(), ChannelError> {
         self.api_post(config, "sendMessage", &json!({
-            "chat_id": chat_id,
-            "text": format!("⚙️ *{tool_name}*\n```\n{args}\n```"),
-            "parse_mode": "Markdown",
+            "chat_id": delivery_chat(chat_id)?,
+            "text": format!("Confirm {tool_name}?\n{args}"),
             "reply_markup": { "inline_keyboard": [[
                 { "text": "✅ Approve", "callback_data": format!("approve:{approval_id}") },
                 { "text": "❌ Deny",    "callback_data": format!("deny:{approval_id}") },
@@ -219,7 +257,7 @@ impl ChannelProvider for TelegramProvider {
             .map(|(label, data)| vec![json!({ "text": label, "callback_data": data })])
             .collect();
         self.api_post(config, "sendMessage", &json!({
-            "chat_id": chat_id, "text": text, "parse_mode": "Markdown",
+            "chat_id": delivery_chat(chat_id)?, "text": text,
             "reply_markup": { "inline_keyboard": buttons },
         })).await
     }
@@ -233,10 +271,7 @@ impl ChannelProvider for TelegramProvider {
     async fn register_webhook(
         &self, config: &JsonValue, callback_url: &str,
     ) -> Result<(), ChannelError> {
-        let mut payload = json!({ "url": callback_url });
-        if let Some(secret) = config["webhook_secret"].as_str() {
-            payload["secret_token"] = json!(secret);
-        }
+        let payload = json!({ "url": callback_url, "secret_token": Self::webhook_secret(config)? });
         self.api_post(config, "setWebhook", &payload).await?;
         self.sync_commands(config).await;
         Ok(())
@@ -262,11 +297,10 @@ impl ChannelProvider for TelegramProvider {
 
     async fn on_activate_boot(&self, config: &JsonValue) { self.sync_commands(config).await; }
 
-    fn debounce_ms(&self) -> Option<u64> { Some(2000) }
 
     fn start_typing(&self, config: &JsonValue, chat_id: &str) -> Option<tokio::task::AbortHandle> {
         let url = Self::bot_url(Self::token(config).ok()?, "sendChatAction");
-        let body = json!({ "chat_id": chat_id, "action": "typing" });
+        let body = json!({ "chat_id": delivery_chat(chat_id).ok()?, "action": "typing" });
         let http = self.http.clone();
 
         let handle = tokio::spawn(async move {
@@ -292,13 +326,79 @@ mod tests {
         ).await
     }
 
+    async fn authenticated(body: JsonValue) -> Result<InboundEvent, ChannelError> {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-telegram-bot-api-secret-token", "test-secret".parse().unwrap());
+        parse(json!({"webhook_secret": "test-secret"}), headers, body).await
+    }
+
+    #[tokio::test]
+    async fn group_members_have_distinct_identities_matching_their_callbacks() {
+        let mut identities = Vec::new();
+        for user in [41, 42] {
+            let event = authenticated(json!({"message": {
+                "chat":{"id":-100}, "from":{"id":user,"is_bot":false}, "text":"/link link_token"
+            }})).await.unwrap();
+            let InboundEvent::Message { chat_id, .. } = event else { panic!("expected message"); };
+            let event = authenticated(json!({"callback_query":{
+                "id":"callback", "from":{"id":user,"is_bot":false},
+                "message":{"chat":{"id":-100}}, "data":"approve:pending"
+            }})).await.unwrap();
+            let InboundEvent::Callback { chat_id: replied, .. } = event else { panic!("expected callback"); };
+            assert_eq!(chat_id, replied, "user={user}");
+            assert_eq!(delivery_chat(&chat_id).unwrap(), -100, "user={user}");
+            identities.push(chat_id);
+        }
+        assert_ne!(identities[0], identities[1], "a shared group cannot share a Core identity");
+    }
+
+    #[tokio::test]
+    async fn missing_actor_or_callback_room_is_rejected() {
+        for body in [
+            json!({"message":{"chat":{"id":42},"text":"/link link_token"}}),
+            json!({"callback_query":{"id":"a","message":{"chat":{"id":42}},"data":"approve:a"}}),
+            json!({"callback_query":{"id":"a","from":{"id":42,"is_bot":false},"data":"approve:a"}}),
+        ] {
+            assert!(authenticated(body.clone()).await.is_err(), "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn bot_and_anonymous_room_senders_are_ignored() {
+        for body in [
+            json!({"message":{"chat":{"id":42},"from":{"id":1,"is_bot":true},"text":"hello"}}),
+            json!({"message":{"chat":{"id":-100},"sender_chat":{"id":-100},"text":"hello"}}),
+            json!({"callback_query":{"id":"a","from":{"id":1,"is_bot":true},"message":{"chat":{"id":42}},"data":"approve:a"}}),
+        ] {
+            assert!(matches!(authenticated(body.clone()).await.unwrap(), InboundEvent::Ignored), "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn webhook_authentication_cannot_be_omitted() {
+        for (config, secret) in [(json!({}), Some("s")), (json!({"webhook_secret":""}), None), (json!({"webhook_secret":"s"}), None)] {
+            let mut headers = HeaderMap::new();
+            if let Some(secret) = secret { headers.insert("x-telegram-bot-api-secret-token", secret.parse().unwrap()); }
+            assert!(parse(config.clone(), headers, json!({"message":{
+                "chat":{"id":42},"from":{"id":42,"is_bot":false},"text":"/link link_token"
+            }})).await.is_err(), "config={config}, secret={secret:?}");
+        }
+    }
+
+    #[test]
+    fn delivery_never_falls_back_to_legacy_or_incomplete_identities() {
+        for identity in ["42", "-100", "telegram:42", "telegram:[42]", "telegram:[42,0]", "telegram:[0,42]", "slack:[\"C42\",\"U1\"]"] {
+            assert!(delivery_chat(identity).is_err(), "{identity}");
+        }
+    }
+
     #[tokio::test]
     async fn text_message_returns_message_event() {
-        let event = parse(serde_json::json!({}), HeaderMap::new(), serde_json::json!({
-            "message": { "chat": { "id": 42 }, "text": "hello" }
+        let event = authenticated(serde_json::json!({
+            "message": { "from": { "id": 42, "is_bot": false }, "chat": { "id": 42 }, "text": "hello" }
         })).await.unwrap();
         let InboundEvent::Message { chat_id, text, media } = event else { panic!("expected Message") };
-        assert_eq!(chat_id, "42");
+        assert_eq!(chat_id, "telegram:[42,42]");
         assert_eq!(text, "hello");
         assert!(media.is_empty());
     }
@@ -306,8 +406,8 @@ mod tests {
     #[tokio::test]
     async fn caption_used_when_text_absent() {
         // Media with a caption: text is None, caption is the user's message.
-        let event = parse(serde_json::json!({}), HeaderMap::new(), serde_json::json!({
-            "message": { "chat": { "id": 1 }, "caption": "describe this image",
+        let event = authenticated(serde_json::json!({
+            "message": { "from": { "id": 42, "is_bot": false }, "chat": { "id": 1 }, "caption": "describe this image",
                 "photo": [{ "file_id": "f1", "file_size": 1000 }] }
         })).await.unwrap();
         let InboundEvent::Message { text, media, .. } = event else { panic!("expected Message") };
@@ -318,8 +418,8 @@ mod tests {
     #[tokio::test]
     async fn photo_without_caption_returns_message_not_ignored() {
         // Image with no text — agent must still receive it, not get Ignored.
-        let event = parse(serde_json::json!({}), HeaderMap::new(), serde_json::json!({
-            "message": { "chat": { "id": 1 }, "photo": [{ "file_id": "f1" }] }
+        let event = authenticated(serde_json::json!({
+            "message": { "from": { "id": 42, "is_bot": false }, "chat": { "id": 1 }, "photo": [{ "file_id": "f1" }] }
         })).await.unwrap();
         let InboundEvent::Message { text, media, .. } = event else { panic!("expected Message") };
         assert_eq!(text, "");
@@ -329,8 +429,8 @@ mod tests {
     #[tokio::test]
     async fn photo_largest_size_selected() {
         // Telegram sends multiple resolutions; we must pick the largest by file_size.
-        let event = parse(serde_json::json!({}), HeaderMap::new(), serde_json::json!({
-            "message": { "chat": { "id": 1 }, "photo": [
+        let event = authenticated(serde_json::json!({
+            "message": { "from": { "id": 42, "is_bot": false }, "chat": { "id": 1 }, "photo": [
                 { "file_id": "small", "file_size": 500   },
                 { "file_id": "large", "file_size": 80000 },
                 { "file_id": "mid",   "file_size": 5000  }
@@ -342,8 +442,8 @@ mod tests {
 
     #[tokio::test]
     async fn voice_and_document_extracted() {
-        let event = parse(serde_json::json!({}), HeaderMap::new(), serde_json::json!({
-            "message": { "chat": { "id": 5 },
+        let event = authenticated(serde_json::json!({
+            "message": { "from": { "id": 42, "is_bot": false }, "chat": { "id": 5 },
                 "voice": { "file_id": "v1", "mime_type": "audio/ogg" },
                 "document": { "file_id": "d1", "file_name": "report.pdf", "mime_type": "application/pdf" } }
         })).await.unwrap();
@@ -357,8 +457,8 @@ mod tests {
 
     #[tokio::test]
     async fn empty_message_no_text_no_media_is_ignored() {
-        let event = parse(serde_json::json!({}), HeaderMap::new(), serde_json::json!({
-            "message": { "chat": { "id": 1 } }
+        let event = authenticated(serde_json::json!({
+            "message": { "from": { "id": 42, "is_bot": false }, "chat": { "id": 1 } }
         })).await.unwrap();
         assert!(matches!(event, InboundEvent::Ignored));
     }
@@ -382,7 +482,7 @@ mod tests {
         let result = parse(
             serde_json::json!({ "webhook_secret": "mysecret" }),
             headers,
-            serde_json::json!({ "message": { "chat": { "id": 1 }, "text": "hi" } }),
+            serde_json::json!({ "message": { "from": { "id": 42, "is_bot": false }, "chat": { "id": 1 }, "text": "hi" } }),
         ).await;
         assert!(result.is_ok());
     }

@@ -405,6 +405,7 @@ async fn call_action_dispatches_only_declared_authorized_actions() {
 
     let spy = Arc::new(SpyActionCaller { captured_perms: Mutex::new(None) });
     let mut ctx = rootcx_core::tools::ToolContext {
+        authority: None,
         pool: pool.clone(),
         core_bound_app_id: Some("crm".into()),
         app_id: "crm".into(),
@@ -678,6 +679,7 @@ async fn t3_9_webhook_revoked_delegation_denied() {
 async fn t3_12_sub_agent_invoke_with_perm_succeeds() {
     let rt = harness::TestRuntime::boot().await;
     let ctx = rootcx_core::tools::ToolContext {
+        authority: None,
         pool: rt.pool().clone(),
         core_bound_app_id: None,
         app_id: "crm".into(),
@@ -712,6 +714,7 @@ async fn t3_12_sub_agent_invoke_with_perm_succeeds() {
 async fn sub_agent_invoke_requires_invoke_perm() {
     let rt = harness::TestRuntime::boot().await;
     let ctx = rootcx_core::tools::ToolContext {
+        authority: None,
         pool: rt.pool().clone(),
         core_bound_app_id: None,
         app_id: "crm".into(),
@@ -751,6 +754,7 @@ async fn task_scope_blocks_cross_app_sub_invoke() {
     let narrowed = rootcx_core::governance::authority::intersect_permissions(&full_perms, &scope);
 
     let ctx = rootcx_core::tools::ToolContext {
+        authority: None,
         pool: rt.pool().clone(),
         core_bound_app_id: None,
         app_id: "crm".into(),

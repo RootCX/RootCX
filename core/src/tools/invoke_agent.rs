@@ -39,10 +39,8 @@ impl Tool for InvokeAgentTool {
         // agent they cannot invoke. ctx.permissions is that intersection.
         check_permission(&ctx.permissions, &format!("app:{target}:invoke"))?;
         let dispatch = ctx.agent_dispatch.as_ref().ok_or("sub-agent dispatch unavailable")?;
-        // ctx.permissions is THIS (parent) agent's frozen authority; pass it so
-        // the child narrows against the parent, not the human (the chain stays
-        // monotone non-increasing).
-        let response = dispatch.dispatch(&ctx.pool, &ctx.app_id, target, message, ctx.stream_tx.clone(), ctx.invoker_user_id, ctx.permissions.clone(), ctx.task_scope.clone()).await?;
+        let authority = ctx.authority.clone().ok_or("agent execution authority missing")?;
+        let response = dispatch.dispatch(target, message, authority, ctx.stream_tx.clone()).await?;
         Ok(json!({ "agent": target, "response": response }))
     }
 }

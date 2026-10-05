@@ -283,6 +283,7 @@ async fn execute_tool_node(
         let resolved = expr::resolve(&params_base, &item.json, outputs);
         let args = merge_args(&resolved, &item.json);
         let ctx = ToolContext {
+            authority: None,
             pool: pool.clone(),
             core_bound_app_id: Some(app_id.into()),
             app_id: app_id.into(),

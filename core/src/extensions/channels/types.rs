@@ -30,6 +30,17 @@ pub enum ChannelError {
 
 #[async_trait]
 pub trait ChannelProvider: Send + Sync {
+    /// Called only after webhook authentication. The default handles signed form retries.
+    fn delivery_id(&self, body: &[u8]) -> Result<String, ChannelError> {
+        use sha2::{Digest, Sha256};
+        Ok(hex::encode(Sha256::digest(body)))
+    }
+
+    /// Additional provider-side session validity; Core owns identity/delegation checks.
+    async fn authorize_session(&self, _config: &JsonValue, _chat: &str, _user: uuid::Uuid) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
     async fn parse_webhook(
         &self, config: &JsonValue, body: Bytes, headers: &HeaderMap,
     ) -> Result<InboundEvent, ChannelError>;
@@ -71,7 +82,9 @@ pub trait ChannelProvider: Send + Sync {
 
     async fn resolve_bot_meta(&self, _config: &JsonValue) -> Option<JsonValue> { None }
     fn link_url(&self, _config: &JsonValue, _token: &str) -> Option<String> { None }
-    fn debounce_ms(&self) -> Option<u64> { None }
+    async fn prepare_link(&self, config: &JsonValue, token: &str, _channel_id: &str) -> Result<Option<String>, ChannelError> {
+        Ok(self.link_url(config, token))
+    }
     fn start_typing(&self, _config: &JsonValue, _chat_id: &str) -> Option<tokio::task::AbortHandle> { None }
     async fn on_activate_boot(&self, _config: &JsonValue) {}
 }

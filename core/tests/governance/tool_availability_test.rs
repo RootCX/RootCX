@@ -127,6 +127,7 @@ async fn http_rejects_agent_tools_after_auth_checks_but_executes_data_tools() {
     let actor = sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email = 'admin@test.local'")
         .fetch_one(rt.pool()).await.unwrap();
     let mut bound = ToolContext {
+        authority: None,
         pool: rt.pool().clone(),
         core_bound_app_id: Some("tooldata".into()),
         app_id: "tooldata".into(),

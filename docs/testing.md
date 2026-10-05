@@ -63,6 +63,10 @@ failures are reported before test execution; they are not passing test results.
 
 Run `make core-verify` before publishing a Core release.
 The Core gate also includes lifecycle authority and app migration refusal tests.
+It includes `whatsapp_actions_test`, an isolated binary that exercises channel
+Web/WhatsApp tool parity, configured supervision and delegated child-agent
+execution with real workers and PostgreSQL.
+Only its external WhatsApp gateway is simulated; it never contacts WhatsApp.
 `core-mutations` edits only the disposable image's source copy, restores each
 mutant, and reports compile errors, infrastructure failures and survivors
 separately from killed mutants. `FILTER=mutant-id` selects one mutation and still
@@ -127,3 +131,17 @@ percentage or exhaustive security guarantee is claimed. New tests should name
 the product mistake they catch, parameterize equivalent inputs, and keep
 security outcome assertions visible. Pure validation cases belong in unit
 tests; RLS, transaction races, rollback and IPC belong at real boundaries.
+
+Agent execution authority is covered by `governance::execution_tests` and
+`extensions::channels::origin::tests` (real PostgreSQL, live revocation and frozen
+ceilings), plus `extensions::agents::approvals::tests` (ownership and expiration).
+The confirmation tests also reject requests whose receiver has disappeared:
+removing a pending entry must not be reported as successful delivery when the
+agent is no longer waiting. Cancellation and receiver loss share parameterized
+cases, with visible assertions for listing, replying and replay.
+`whatsapp_actions_test` exercises real Web and signed WhatsApp invocations,
+including confirmation waits, ownership, child calls, current revocation and
+persisted business effects. It also observes distinct worker PIDs across origins,
+reuse within an origin, and cancellation after a Web disconnect. Only the external
+WhatsApp gateway is substituted. Channel Adapter tests bind sender and room.
+These checks do not prove real provider delivery.

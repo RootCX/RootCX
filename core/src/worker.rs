@@ -22,6 +22,7 @@ use crate::ipc::{
     AgentBootConfig, AgentInvokePayload, InboundMessage, IpcEvent, IpcReader, IpcWriter,
     OutboundMessage, PendingRpcs, RpcCaller,
 };
+use crate::governance::execution::AgentAuthority;
 use crate::tools::{AgentDispatcher, ToolRegistry};
 
 const MAX_CRASHES: u32 = 5;
@@ -591,6 +592,7 @@ pub enum SupervisorCommand {
     },
     AgentInvoke {
         payload: AgentInvokePayload,
+        authority: AgentAuthority,
         stream_tx: mpsc::Sender<AgentEvent>,
     },
     GetStatus {
@@ -734,9 +736,10 @@ impl SupervisorHandle {
     pub async fn agent_invoke(
         &self,
         payload: AgentInvokePayload,
+        authority: AgentAuthority,
     ) -> Result<mpsc::Receiver<AgentEvent>, RuntimeError> {
         let (stream_tx, stream_rx) = mpsc::channel(64);
-        self.send(SupervisorCommand::AgentInvoke { payload, stream_tx })
+        self.send(SupervisorCommand::AgentInvoke { payload, authority, stream_tx })
             .await?;
         Ok(stream_rx)
     }
@@ -751,6 +754,17 @@ pub fn spawn_supervisor(config: WorkerConfig) -> SupervisorHandle {
     let (log_tx, _) = broadcast::channel(LOG_CHANNEL_CAPACITY);
     tokio::spawn(supervisor_loop(config, rx, log_tx.clone()));
     SupervisorHandle { tx, log_tx }
+}
+
+// Dropping a run on completion, transport failure or supervisor shutdown also
+// ends pending tool/confirmation authority inherited by its descendants.
+struct AgentRun {
+    authority: AgentAuthority,
+    session_id: String,
+}
+
+impl Drop for AgentRun {
+    fn drop(&mut self) { self.authority.finish(); }
 }
 
 async fn supervisor_loop(
@@ -768,10 +782,7 @@ async fn supervisor_loop(
     let mut pending_rpcs = PendingRpcs::default();
     let mut pending_agent_streams: HashMap<String, mpsc::Sender<AgentEvent>> = HashMap::new();
     let mut policy_evaluators: HashMap<String, Arc<TokioMutex<PolicyEvaluator>>> = HashMap::new();
-    let mut sub_invocations: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut invoker_user_ids: HashMap<String, uuid::Uuid> = HashMap::new();
-    let mut effective_permissions: HashMap<String, Vec<String>> = HashMap::new();
-    let mut task_scopes: HashMap<String, Option<Vec<String>>> = HashMap::new();
+    let mut agent_runs: HashMap<String, AgentRun> = HashMap::new();
     let mut job_leases: HashMap<i64, CancellationToken> = HashMap::new();
     let mut job_payloads: HashMap<i64, JsonValue> = HashMap::new();
     let mut active_invocations = std::collections::HashSet::<String>::new();
@@ -908,11 +919,11 @@ async fn supervisor_loop(
                         ipc_reader = None;
                         for h in output_handles.drain(..) { h.abort(); }
                         kill_child(&mut child).await;
+                        agent_runs.clear();
                         for (_sid, tx) in pending_agent_streams.drain() {
                             let _ = tx.send(AgentEvent::Error { error: "worker stopped".into() }).await;
                         }
                         policy_evaluators.clear();
-                        effective_permissions.clear(); task_scopes.clear();
                         cancel_job_leases(&mut job_leases);
                         job_payloads.clear();
                         active_invocations.clear();
@@ -1027,7 +1038,7 @@ async fn supervisor_loop(
                         }
                     }
 
-                    SupervisorCommand::AgentInvoke { payload, stream_tx } => {
+                    SupervisorCommand::AgentInvoke { payload, authority, stream_tx } => {
                         if status != WorkerStatus::Running {
                             let _ = stream_tx.send(AgentEvent::Error {
                                 error: "worker not running".into(),
@@ -1040,17 +1051,7 @@ async fn supervisor_loop(
                             policy_evaluators.insert(invoke_id.clone(),
                                 Arc::new(TokioMutex::new(PolicyEvaluator::new(supervision.clone()))));
                         }
-                        if payload.is_sub_invoke { sub_invocations.insert(invoke_id.clone()); }
-                        if let Some(uid) = payload.invoker_user_id { invoker_user_ids.insert(invoke_id.clone(), uid); }
-
-                        // Tool authority = this worker's fixed delegated identity,
-                        // optionally narrowed by task_scope (the 3rd intersection operand).
-                        let mut effective = config.identity.effective_perms.clone();
-                        if let Some(ref scope) = payload.task_scope {
-                            effective = crate::governance::authority::intersect_permissions(&effective, scope);
-                        }
-                        effective_permissions.insert(invoke_id.clone(), effective);
-                        task_scopes.insert(invoke_id.clone(), payload.task_scope.clone());
+                        agent_runs.insert(invoke_id.clone(), AgentRun { authority, session_id: payload.session_id.clone() });
 
                         pending_agent_streams.insert(invoke_id.clone(), stream_tx);
                         if let Some(ref mut w) = ipc_writer {
@@ -1059,6 +1060,7 @@ async fn supervisor_loop(
                                     let _ = tx.send(AgentEvent::Error { error: e.to_string() }).await;
                                 }
                                 policy_evaluators.remove(&invoke_id);
+                                agent_runs.remove(&invoke_id);
                             }
                         }
                     }
@@ -1276,28 +1278,29 @@ async fn supervisor_loop(
                             if let Some(tx) = pending_agent_streams.get(&invoke_id) {
                                 if tx.send(AgentEvent::Chunk { delta }).await.is_err() {
                                     pending_agent_streams.remove(&invoke_id);
+                                    agent_runs.remove(&invoke_id);
                                 }
                             }
                         }
                         InboundMessage::AgentDone { invoke_id, response, tokens } => {
                             policy_evaluators.remove(&invoke_id);
-                            sub_invocations.remove(&invoke_id);
-                            invoker_user_ids.remove(&invoke_id);
-                            effective_permissions.remove(&invoke_id); task_scopes.remove(&invoke_id);
+                            agent_runs.remove(&invoke_id);
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Done { response, tokens }).await;
                             }
                         }
                         InboundMessage::AgentError { invoke_id, error } => {
                             policy_evaluators.remove(&invoke_id);
-                            sub_invocations.remove(&invoke_id);
-                            invoker_user_ids.remove(&invoke_id);
-                            effective_permissions.remove(&invoke_id); task_scopes.remove(&invoke_id);
+                            agent_runs.remove(&invoke_id);
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Error { error }).await;
                             }
                         }
                         InboundMessage::AgentToolCall { invoke_id, call_id, tool_name, args } => {
+                            if !pending_agent_streams.contains_key(&invoke_id) { continue; }
+                            let Some(run) = agent_runs.get(&invoke_id) else { continue };
+                            let authority = run.authority.clone();
+                            let session_id = run.session_id.clone();
                             if let Some(tx) = pending_agent_streams.get(&invoke_id) {
                                 let _ = tx.send(AgentEvent::ToolCallStarted {
                                     call_id: call_id.clone(),
@@ -1308,86 +1311,73 @@ async fn supervisor_loop(
 
                             let tool = config.tool_registry.get(&tool_name);
                             let pool = config.pool.clone();
-                            let aid = config.app_id.clone();
                             // Nesting guard: sub-agents cannot spawn sub-agents
-                            let dispatch = if sub_invocations.contains(&invoke_id) { None } else { config.agent_dispatch.clone() };
+                            let dispatch = if authority.is_child() { None } else { config.agent_dispatch.clone() };
                             let int_caller = config.integration_caller.clone();
                             let act_caller = config.action_caller.clone();
-                            let invoker_uid = invoker_user_ids.get(&invoke_id).copied();
-                            let cached_perms = effective_permissions.get(&invoke_id).cloned();
-                            let cached_scope = task_scopes.get(&invoke_id).cloned().flatten();
                             let out_tx = outbound_tx.clone();
                             let evaluator = policy_evaluators.get(&invoke_id).cloned();
                             let approvals_ref = pending_approvals.clone();
                             let stream_tx = pending_agent_streams.get(&invoke_id).cloned();
 
                             tokio::spawn(async move {
-                                if let Some(ref eval) = evaluator {
-                                    match eval.lock().await.evaluate(&tool_name, &args) {
-                                        PolicyDecision::Allow => {}
-                                        PolicyDecision::RateLimited { retry_after_secs } => {
-                                            let err = format!("rate limited: retry after {retry_after_secs}s");
-                                            let _ = out_tx.send(OutboundMessage::AgentToolResult {
-                                                invoke_id, call_id: call_id.clone(), result: None, error: Some(err.clone()),
+                                let decision = if let Some(ref eval) = evaluator {
+                                    eval.lock().await.evaluate(&tool_name, &args)
+                                } else { PolicyDecision::Allow };
+                                match decision {
+                                    PolicyDecision::Allow => {}
+                                    PolicyDecision::RateLimited { retry_after_secs } => {
+                                        let err = format!("rate limited: retry after {retry_after_secs}s");
+                                        crate::tool_executor::send_result(
+                                            &out_tx, &stream_tx, &invoke_id, &call_id, &tool_name,
+                                            None, Some(err), 0,
+                                        ).await;
+                                        return;
+                                    }
+                                    PolicyDecision::RequiresApproval { reason } => {
+                                        let approval_id = uuid::Uuid::new_v4().to_string();
+                                        let rx = approvals_ref.request(ApprovalRequest {
+                                            owner: authority.owner(),
+                                            approval_id: approval_id.clone(), app_id: authority.root_app().into(), session_id,
+                                            invoke_id: invoke_id.clone(), call_id: call_id.clone(),
+                                            tool_name: tool_name.clone(), args: args.clone(), reason: reason.clone(),
+                                            created_at: chrono::Utc::now().to_rfc3339(),
+                                        }).await;
+                                        if let Some(ref tx) = stream_tx {
+                                            let _ = tx.send(AgentEvent::ApprovalRequired {
+                                                approval_id: approval_id.clone(), tool_name: tool_name.clone(),
+                                                args: args.clone(), reason: reason.clone(),
                                             }).await;
-                                            if let Some(tx) = stream_tx {
-                                                let _ = tx.send(AgentEvent::ToolCallCompleted {
-                                                    call_id, tool_name, output: None, error: Some(err), duration_ms: 0,
-                                                }).await;
-                                            }
-                                            return;
                                         }
-                                        PolicyDecision::RequiresApproval { reason } => {
-                                            let approval_id = uuid::Uuid::new_v4().to_string();
-                                            if let Some(ref tx) = stream_tx {
-                                                let _ = tx.send(AgentEvent::ApprovalRequired {
-                                                    approval_id: approval_id.clone(), tool_name: tool_name.clone(),
-                                                    args: args.clone(), reason: reason.clone(),
-                                                }).await;
+                                        let confirmation = tokio::select! {
+                                            result = tokio::time::timeout(crate::extensions::agents::approvals::APPROVAL_TIMEOUT, rx) => result.ok().and_then(Result::ok),
+                                            _ = authority.cancelled() => None,
+                                        };
+                                        match confirmation {
+                                            Some(ApprovalResponse::Approved) => {}
+                                            Some(ApprovalResponse::Rejected { reason }) => {
+                                                let err = format!("rejected: {reason}");
+                                                crate::tool_executor::send_result(
+                                                    &out_tx, &stream_tx, &invoke_id, &call_id, &tool_name,
+                                                    None, Some(err), 0,
+                                                ).await;
+                                                return;
                                             }
-                                            let rx = approvals_ref.request(ApprovalRequest {
-                                                approval_id, app_id: aid.clone(), session_id: String::new(),
-                                                invoke_id: invoke_id.clone(), call_id: call_id.clone(),
-                                                tool_name: tool_name.clone(), args: args.clone(), reason,
-                                                created_at: chrono::Utc::now().to_rfc3339(),
-                                            }).await;
-                                            match rx.await {
-                                                Ok(ApprovalResponse::Approved) => {}
-                                                Ok(ApprovalResponse::Rejected { reason }) => {
-                                                    let err = format!("rejected: {reason}");
-                                                    let _ = out_tx.send(OutboundMessage::AgentToolResult {
-                                                        invoke_id, call_id: call_id.clone(), result: None, error: Some(err.clone()),
-                                                    }).await;
-                                                    if let Some(tx) = stream_tx {
-                                                        let _ = tx.send(AgentEvent::ToolCallCompleted {
-                                                            call_id, tool_name, output: None, error: Some(err), duration_ms: 0,
-                                                        }).await;
-                                                    }
-                                                    return;
-                                                }
-                                                Err(_) => {
-                                                    let err = "approval channel dropped".to_string();
-                                                    let _ = out_tx.send(OutboundMessage::AgentToolResult {
-                                                        invoke_id, call_id: call_id.clone(), result: None, error: Some(err.clone()),
-                                                    }).await;
-                                                    if let Some(tx) = stream_tx {
-                                                        let _ = tx.send(AgentEvent::ToolCallCompleted {
-                                                            call_id, tool_name, output: None, error: Some(err), duration_ms: 0,
-                                                        }).await;
-                                                    }
-                                                    return;
-                                                }
+                                            _ => {
+                                                approvals_ref.cancel(&approval_id, "expired").await;
+                                                let err = "approval channel dropped".to_string();
+                                                crate::tool_executor::send_result(
+                                                    &out_tx, &stream_tx, &invoke_id, &call_id, &tool_name,
+                                                    None, Some(err), 0,
+                                                ).await;
+                                                return;
                                             }
                                         }
                                     }
                                 }
 
-                                let agent_uid = crate::extensions::agents::agent_user_id(&aid);
-                                let permissions = cached_perms.unwrap_or_default();
-
                                 crate::tool_executor::execute(
-                                    tool, tool_name, args, aid, agent_uid, invoker_uid,
-                                    permissions, cached_scope, pool, dispatch, int_caller, act_caller,
+                                    tool, tool_name, args, authority, pool, dispatch, int_caller, act_caller,
                                     out_tx, stream_tx, invoke_id, call_id,
                                 ).await;
                             });
@@ -1864,6 +1854,7 @@ async fn supervisor_loop(
                         ipc_reader = None;
                         for h in output_handles.drain(..) { h.abort(); }
 
+                        agent_runs.clear();
                         for (_sid, tx) in pending_agent_streams.drain() {
                             let _ = tx.send(AgentEvent::Error {
                                 error: "worker crashed".into(),
@@ -1871,7 +1862,7 @@ async fn supervisor_loop(
                         }
                         // The process is gone. The respawned worker re-runs
                         // onStart from scratch (if it is the lifecycle worker).
-                        effective_permissions.clear(); task_scopes.clear();
+                        policy_evaluators.clear();
                         cancel_job_leases(&mut job_leases);
                         job_payloads.clear();
                         if approved {

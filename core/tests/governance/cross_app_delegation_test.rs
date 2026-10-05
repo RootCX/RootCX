@@ -155,6 +155,7 @@ async fn delegated_grants_respect_task_scope_and_own_requires_an_owned_table() {
                 "delegated read" | "task scope strips read" | "own scope"
             ) {
                 let mut ctx = ToolContext {
+                    authority: None,
                     pool: rt.pool().clone(),
                     core_bound_app_id: Some("consumer".into()),
                     app_id: "consumer".into(),

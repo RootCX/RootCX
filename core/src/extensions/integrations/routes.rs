@@ -272,7 +272,7 @@ pub async fn webhook_ingress(
                 attachments: None,
                 task_scope: Some(vec![format!("app:{}:*", wh.app_id)]),
             };
-            let _ = wm.agent_invoke(&wh.app_id, invoke_payload, None).await
+            let _ = wm.agent_invoke(&wh.app_id, invoke_payload, Default::default()).await
                 .map_err(|e| ApiError::Internal(e.to_string()))?;
             return Ok(Json(json!({"status": "accepted"})));
         }

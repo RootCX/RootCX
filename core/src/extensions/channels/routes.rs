@@ -1,3 +1,5 @@
+use crate::governance::execution::AgentSource;
+use super::origin::ChannelSession;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::Instant;
@@ -10,7 +12,6 @@ use futures::future::join_all;
 use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
 use tokio::sync::Mutex;
-use tokio::task::AbortHandle;
 use tracing::{error, info};
 
 use super::types::{ChannelProvider, InboundEvent, MediaRef};
@@ -32,6 +33,9 @@ pub struct CreateChannel {
 pub async fn create_channel(
     _identity: Identity, State(rt): State<SharedRuntime>, Json(body): Json<CreateChannel>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    if body.config["managed"] == true {
+        return Err(ApiError::BadRequest("managed channels are provisioned by the platform".into()));
+    }
     if super::provider(&body.provider).is_none() {
         return Err(ApiError::BadRequest(format!("unsupported provider: {}", body.provider)));
     }
@@ -72,7 +76,7 @@ pub async fn delete_channel(
     if let Some((prov, cfg)) = sqlx::query_as::<_, (String, JsonValue)>(
         "SELECT provider, config FROM rootcx_system.channels WHERE id = $1::uuid",
     ).bind(&channel_id).fetch_optional(&pool).await? {
-        if let Some(p) = super::provider(&prov) { let _ = p.unregister_webhook(&cfg).await; }
+        if let Some(p) = super::provider_for(&prov, &cfg) { let _ = p.unregister_webhook(&cfg).await; }
     }
     sqlx::query("DELETE FROM rootcx_system.channels WHERE id = $1::uuid")
         .bind(&channel_id).execute(&pool).await?;
@@ -105,6 +109,9 @@ pub async fn activate_channel(
     let body = body.map(|b| b.0).unwrap_or_default();
 
     if let Some(patch) = body.config {
+        if patch.get("managed").is_some() || patch.get("channel_id").is_some() || patch.get("linking_version").is_some() {
+            return Err(ApiError::BadRequest("platform channel configuration cannot be patched".into()));
+        }
         let (mut creds, mut rest) = (serde_json::Map::new(), serde_json::Map::new());
         if let Some(obj) = patch.as_object() {
             for (k, v) in obj {
@@ -121,7 +128,7 @@ pub async fn activate_channel(
         }
     }
 
-    let provider = super::provider(&prov)
+    let provider = super::provider_for(&prov, &cfg)
         .ok_or_else(|| ApiError::Internal(format!("unknown provider: {prov}")))?;
     let base = resolve_public_url(body.public_url)?;
     let url = format!("{base}/api/v1/channels/{prov}/{channel_id}/webhook");
@@ -146,145 +153,84 @@ pub async fn deactivate_channel(
         "SELECT provider, config FROM rootcx_system.channels WHERE id = $1::uuid",
     ).bind(&channel_id).fetch_optional(&pool).await?, &channel_id)?;
 
-    if let Some(p) = super::provider(&prov) { let _ = p.unregister_webhook(&cfg).await; }
+    if let Some(p) = super::provider_for(&prov, &cfg) { let _ = p.unregister_webhook(&cfg).await; }
     sqlx::query("UPDATE rootcx_system.channels SET status = 'inactive', updated_at = now() WHERE id = $1::uuid")
         .bind(&channel_id).execute(&pool).await?;
     info!(channel_id, "channel deactivated");
     Ok(Json(json!({ "status": "inactive" })))
 }
 
-struct DebounceEntry {
-    texts: Vec<String>,
-    abort: Option<AbortHandle>,
-}
-
-static DEBOUNCE: LazyLock<Mutex<HashMap<(String, String), DebounceEntry>>> =
-    LazyLock::new(Default::default);
-
 pub async fn webhook(
     State(rt): State<SharedRuntime>,
     Path((provider_name, channel_id)): Path<(String, String)>,
     headers: HeaderMap, body: Bytes,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = rt.pool().clone();
-
     let (config, status): (JsonValue, String) = sqlx::query_as(
         "SELECT config, status FROM rootcx_system.channels WHERE id = $1::uuid AND provider = $2",
-    ).bind(&channel_id).bind(&provider_name).fetch_optional(&pool).await?
-    .ok_or_else(|| ApiError::NotFound("channel not found".into()))?;
-
-    let provider = super::provider(&provider_name)
-        .ok_or_else(|| ApiError::BadRequest(format!("unknown provider: {provider_name}")))?;
-    let event = provider.parse_webhook(&config, body, &headers).await
+    ).bind(&channel_id).bind(&provider_name).fetch_optional(rt.pool()).await?
+        .ok_or_else(|| ApiError::NotFound("channel not found".into()))?;
+    let provider = super::provider_for(&provider_name, &config)
+        .ok_or_else(|| ApiError::BadRequest("unknown channel provider".into()))?;
+    let event = provider.parse_webhook(&config, body.clone(), &headers).await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-
-    // Sync reply (URL verification etc.) bypasses the active check.
-    if let InboundEvent::Reply(value) = event {
-        return Ok(Json(value));
+    let (chat, is_message) = match &event {
+        InboundEvent::Reply(value) => return Ok(Json(value.clone())),
+        InboundEvent::Ignored => return Ok(Json(json!({"ok": true}))),
+        InboundEvent::Message { chat_id, .. } => (chat_id.clone(), true),
+        InboundEvent::Callback { chat_id, .. } => (chat_id.clone(), false),
+    };
+    if status != "active" { return Ok(Json(json!({"ok": true}))); }
+    if config["managed"] == true {
+        let user = resolve_invoker(rt.pool(), &channel_id, &chat).await
+            .ok_or_else(|| ApiError::Forbidden("channel identity missing".into()))?;
+        provider.authorize_session(&config, &chat, user).await
+            .map_err(|_| ApiError::Forbidden("channel access revoked".into()))?;
     }
+    let delivery = provider.delivery_id(&body).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    if delivery.is_empty() || delivery.len() > 512 { return Err(ApiError::BadRequest("invalid delivery id".into())); }
+    let channel = channel_id.parse().map_err(|_| ApiError::BadRequest("invalid channel".into()))?;
+    match super::intake::admit(rt.pool(), channel, &delivery, &chat, is_message).await? {
+        super::intake::Admission::Duplicate(status) => return Ok(Json(json!({"ok":true,"duplicate":true,"status":status}))),
+        super::intake::Admission::Busy => return Err(ApiError::Conflict("conversation busy; resend after the current request".into())),
+        super::intake::Admission::Ready => {}
+    }
+    // Managed gateways wait for a terminal receipt; native webhooks acknowledge promptly.
+    if config["managed"] == true {
+        let result = process_event(&rt, &channel_id, &provider_name, &config, provider.as_ref(), event).await;
+        super::intake::finish(rt.pool(), channel, &delivery, result.is_ok()).await?;
+        return Ok(Json(json!({"ok":true,"status":if result.is_ok() {"done"} else {"failed"}})));
+    }
+    tokio::spawn(async move {
+        let result = process_event(&rt, &channel_id, &provider_name, &config, provider.as_ref(), event).await;
+        if let Err(error) = &result { error!(channel_id, %error, "channel processing failed; do not replay actions"); }
+        if let Err(error) = super::intake::finish(rt.pool(), channel, &delivery, result.is_ok()).await {
+            error!(channel_id, %error, "channel receipt remains processing; operator reconciliation required");
+        }
+    });
+    Ok(Json(json!({"ok":true,"status":"processing"})))
+}
 
-    if status != "active" { return Ok(Json(json!({ "ok": true }))); }
-
+async fn process_event(
+    rt: &SharedRuntime, channel: &str, name: &str, config: &JsonValue,
+    provider: &dyn ChannelProvider, event: InboundEvent,
+) -> Result<(), String> {
     match event {
-        InboundEvent::Reply(_) | InboundEvent::Ignored => {}
         InboundEvent::Callback { chat_id, callback_id, data } => {
-            handle_callback(&rt, &channel_id, &config, provider.as_ref(), &chat_id, &callback_id, &data).await;
+            handle_callback(rt, channel, config, provider, &chat_id, &callback_id, &data).await;
+            Ok(())
         }
         InboundEvent::Message { chat_id, text, media } => {
-            if handle_command(&pool, &channel_id, &chat_id, &text, &config, provider.as_ref()).await {
-                return Ok(Json(json!({ "ok": true })));
+            if config["managed"] != true && handle_command(rt.pool(), channel, &chat_id, &text, config, provider).await {
+                return Ok(());
             }
-
-            if resolve_invoker(&pool, &channel_id, &chat_id).await.is_none() {
-                let _ = provider.send_response(&config, &chat_id,
-                    "Hey! 👋 To chat with AI agents, you need to link your RootCX account first.\n\n\
-                     Go to your RootCX dashboard → *Channels* → click *Link my account* and follow the instructions."
-                ).await;
-                return Ok(Json(json!({ "ok": true })));
+            if resolve_invoker(rt.pool(), channel, &chat_id).await.is_none() {
+                return provider.send_response(config, &chat_id, "Link your account from your dashboard before chatting with Shappy.")
+                    .await.map_err(|e| e.to_string());
             }
-
-            if !media.is_empty() {
-                dispatch_invoke(rt, channel_id, provider_name, config, chat_id, text, media);
-            } else {
-                let needs_debounce = provider.debounce_ms().filter(|_| text.len() >= 4096);
-                if let Some(ms) = needs_debounce {
-                    debounce_and_invoke(rt, channel_id, provider_name, config, chat_id, text, ms);
-                } else {
-                    flush_and_invoke(rt, channel_id, provider_name, config, chat_id, text);
-                }
-            }
+            do_invoke(rt, channel, config, name, &chat_id, &text, media).await
         }
+        _ => Ok(()),
     }
-
-    Ok(Json(json!({ "ok": true })))
-}
-
-fn debounce_and_invoke(
-    rt: SharedRuntime, channel_id: String, provider_name: String,
-    config: JsonValue, chat_id: String, text: String, ms: u64,
-) {
-    let key = (channel_id.clone(), chat_id.clone());
-
-    tokio::spawn(async move {
-        let mut map = DEBOUNCE.lock().await;
-        if let Some(entry) = map.get_mut(&key) {
-            if let Some(h) = entry.abort.take() { h.abort(); }
-            entry.texts.push(text);
-        } else {
-            map.insert(key.clone(), DebounceEntry { texts: vec![text], abort: None });
-        }
-
-        let timer_key = key.clone();
-        let timer_rt = rt.clone();
-        let timer_prov = provider_name.clone();
-        let timer_cfg = config.clone();
-        let handle = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-            let combined = {
-                let mut map = DEBOUNCE.lock().await;
-                map.remove(&timer_key).map(|e| e.texts.join("\n")).unwrap_or_default()
-            };
-            if !combined.is_empty() {
-                dispatch_invoke(timer_rt, timer_key.0, timer_prov, timer_cfg, timer_key.1, combined, vec![]);
-            }
-        });
-
-        map.get_mut(&key).unwrap().abort = Some(handle.abort_handle());
-    });
-}
-
-fn flush_and_invoke(
-    rt: SharedRuntime, channel_id: String, provider_name: String,
-    config: JsonValue, chat_id: String, text: String,
-) {
-    let key = (channel_id.clone(), chat_id.clone());
-    tokio::spawn(async move {
-        let prefix = {
-            let mut map = DEBOUNCE.lock().await;
-            if let Some(entry) = map.remove(&key) {
-                if let Some(h) = entry.abort { h.abort(); }
-                Some(entry.texts.join("\n"))
-            } else {
-                None
-            }
-        };
-        let combined = match prefix {
-            Some(mut p) => { p.push('\n'); p.push_str(&text); p }
-            None => text,
-        };
-        dispatch_invoke(rt, channel_id, provider_name, config, chat_id, combined, vec![]);
-    });
-}
-
-fn dispatch_invoke(
-    rt: SharedRuntime, channel_id: String, provider_name: String,
-    config: JsonValue, chat_id: String, text: String, media: Vec<MediaRef>,
-) {
-    tokio::spawn(async move {
-        if let Err(e) = do_invoke(&rt, &channel_id, &config, &provider_name, &chat_id, &text, media).await {
-            error!(channel_id, chat_id, "invoke failed: {e}");
-        }
-    });
 }
 
 async fn do_invoke(
@@ -300,12 +246,10 @@ async fn do_invoke(
         async { Ok(resolve_invoker(pool, channel_id, chat_id).await) },
     ).map_err(&e)?;
 
-    // Single owned-automation gate (B1): linked user present + enabled + valid
-    // channel-link delegation + holds app:{id}:invoke. Fail-fast before any media
-    // download. Authenticity (Family H) is verified upstream by the provider.
-    crate::governance::triggers::fire_gate::assert_can_fire(pool, invoker_user_id, &app_id)
-        .await
-        .map_err(|d| format!("channel agent denied: {d}"))?;
+    // Validate the particular channel link before loading history or media.
+    // The same origin is rechecked at agent admission and before each tool.
+    let human = invoker_user_id.ok_or("channel identity missing")?;
+    let origin = ChannelSession::load(pool, channel_id, chat_id, human, &app_id).await?;
 
     let agent_cfg: JsonValue = sqlx::query_scalar(
         "SELECT config FROM rootcx_system.agents WHERE app_id = $1",
@@ -315,7 +259,7 @@ async fn do_invoke(
     let llm = fetch_default_llm(pool).await.map_err(&e)?
         .map(|(p, m)| LlmModelRef { provider: p, model: m });
 
-    let provider = super::provider(provider_name).unwrap();
+    let provider = super::provider_for(provider_name, config).ok_or("unknown channel provider")?;
     let storage = PostgresBackend;
     let downloaded: Vec<_> = join_all(
         media.iter().map(|m| provider.download_media(config, m))
@@ -344,7 +288,7 @@ async fn do_invoke(
         task_scope: None,
     };
 
-    let mut rx = wm.agent_invoke(&app_id, payload, None).await.map_err(&e)?;
+    let mut rx = wm.agent_invoke(&app_id, payload, AgentSource::Origin(std::sync::Arc::new(origin))).await.map_err(&e)?;
     let typing = provider.start_typing(config, chat_id);
 
     let mut response = String::new();
@@ -354,13 +298,15 @@ async fn do_invoke(
             crate::worker::AgentEvent::Chunk { delta } => response.push_str(&delta),
             crate::worker::AgentEvent::Done { response: r, tokens: t } => { response = r; tokens = t; break; }
             crate::worker::AgentEvent::ApprovalRequired { approval_id, tool_name, args, .. } => {
-                let _ = provider.send_approval(config, chat_id, &approval_id, &tool_name, &args).await;
+                if provider.send_approval(config, chat_id, &approval_id, &tool_name, &args).await.is_err() {
+                    rt.pending_approvals().cancel(&approval_id, "approval could not be delivered").await;
+                }
             }
             crate::worker::AgentEvent::Error { error: e } => {
                 if let Some(h) = &typing { h.abort(); }
                 error!(channel_id, chat_id, "agent error: {e}");
-                let _ = provider.send_response(config, chat_id, &format!("Error: {e}")).await;
-                return Ok(());
+                let _ = provider.send_response(config, chat_id, "La demande a échoué. Vérifiez le résultat dans SHAPP avant de réessayer.").await;
+                return Err(format!("agent failed: {e}"));
             }
             _ => {}
         }
@@ -376,6 +322,7 @@ async fn do_invoke(
     }
     if let Err(e) = provider.send_response(config, chat_id, &response).await {
         error!(channel_id, chat_id, "send response failed: {e}");
+        return Err(e.to_string());
     }
     Ok(())
 }
@@ -425,8 +372,11 @@ async fn resolve_session(
     ).bind(channel_id).bind(chat_id).fetch_optional(pool).await? {
         return Ok(row);
     }
-    let session_id = create_session(pool, channel_id, chat_id, DEFAULT_AGENT).await?;
-    Ok((DEFAULT_AGENT.to_string(), session_id))
+    let app_id: String = sqlx::query_scalar(
+        "SELECT COALESCE(config->>'default_agent', $2) FROM rootcx_system.channels WHERE id = $1::uuid",
+    ).bind(channel_id).bind(DEFAULT_AGENT).fetch_one(pool).await?;
+    let session_id = create_session(pool, channel_id, chat_id, &app_id).await?;
+    Ok((app_id, session_id))
 }
 
 async fn handle_callback(
@@ -437,10 +387,10 @@ async fn handle_callback(
 
     match action {
         ACTION_APPROVE => {
-            handle_approval(rt, config, provider, chat_id, callback_id, payload, ApprovalResponse::Approved, "Approved").await;
+            handle_approval(rt, channel_id, config, provider, chat_id, callback_id, payload, ApprovalResponse::Approved, "Approved").await;
         }
         ACTION_DENY => {
-            handle_approval(rt, config, provider, chat_id, callback_id, payload,
+            handle_approval(rt, channel_id, config, provider, chat_id, callback_id, payload,
                 ApprovalResponse::Rejected { reason: "rejected via chat".into() }, "Denied").await;
         }
         ACTION_AGENT => {
@@ -462,12 +412,21 @@ async fn handle_callback(
     }
 }
 
+async fn reply_approval(
+    rt: &SharedRuntime, channel: &str, chat: &str, approval: &str, response: ApprovalResponse,
+) -> bool {
+    let Some(human) = resolve_invoker(rt.pool(), channel, chat).await else { return false };
+    let Ok((app, _)) = resolve_session(rt.pool(), channel, chat).await else { return false };
+    let Ok(origin) = ChannelSession::load(rt.pool(), channel, chat, human, &app).await else { return false };
+    rt.pending_approvals().reply(approval, &origin.owner(human), response).await
+}
+
 async fn handle_approval(
-    rt: &SharedRuntime, config: &JsonValue, provider: &dyn ChannelProvider,
+    rt: &SharedRuntime, channel_id: &str, config: &JsonValue, provider: &dyn ChannelProvider,
     chat_id: &str, callback_id: &str, approval_id: &str,
     response: ApprovalResponse, ack: &str,
 ) {
-    let replied = rt.pending_approvals().reply(approval_id, response).await;
+    let replied = reply_approval(rt, channel_id, chat_id, approval_id, response).await;
     let msg = if replied { ack } else { "Expired or already handled" };
     let _ = provider.answer_callback(config, callback_id, msg).await;
     if replied {
@@ -586,14 +545,17 @@ pub async fn create_link_token(
     ).bind(&channel_id).fetch_optional(&pool).await?
     .ok_or_else(|| ApiError::NotFound("channel not found".into()))?;
 
+    if config["managed"] == true { return Err(ApiError::BadRequest("Link this channel from your authenticated SHAPP session".into())); }
+
     let token = format!("{LINK_PREFIX}{}", uuid::Uuid::new_v4().simple());
     PENDING_LINKS.lock().await.insert(token.clone(), PendingLink {
-        channel_id, user_id: identity.user_id, created: Instant::now(),
+        channel_id: channel_id.clone(), user_id: identity.user_id, created: Instant::now(),
     });
 
     let mut resp = json!({ "token": token, "provider": provider_name });
-    if let Some(p) = super::provider(&provider_name) {
-        if let Some(url) = p.link_url(&config, &token) {
+    if let Some(p) = super::provider_for(&provider_name, &config) {
+        if let Some(url) = p.prepare_link(&config, &token, &channel_id).await
+            .map_err(|e| ApiError::Unavailable(e.to_string()))? {
             resp.as_object_mut().unwrap().insert("linkUrl".into(), json!(url));
         }
     }
@@ -625,22 +587,38 @@ fn consume_link_token(
 async fn try_complete_link(
     pool: &sqlx::PgPool, channel_id: &str, chat_id: &str, token: &str,
 ) -> Option<String> {
+    let provider: String = sqlx::query_scalar("SELECT provider FROM rootcx_system.channels WHERE id = $1::uuid").bind(channel_id).fetch_one(pool).await.ok()?;
+    if provider == "whatsapp" { return None; }
     let user_id = consume_link_token(&mut *PENDING_LINKS.lock().await, channel_id, token)?;
 
+    let mut tx = pool.begin().await.ok()?;
+    let previous: Option<uuid::Uuid> = sqlx::query_scalar(
+        "SELECT user_id FROM rootcx_system.channel_identities WHERE channel_id = $1::uuid AND external_chat_id = $2 FOR UPDATE",
+    ).bind(channel_id).bind(chat_id).fetch_optional(&mut *tx).await.ok()?;
+    if let Some(previous) = previous.filter(|previous| *previous != user_id) {
+        sqlx::query("DELETE FROM rootcx_system.channel_sessions WHERE channel_id = $1::uuid AND external_chat_id = $2")
+            .bind(channel_id).bind(chat_id).execute(&mut *tx).await.ok()?;
+        sqlx::query("UPDATE rootcx_system.delegations SET revoked_at = now() WHERE trigger_type = 'channel' AND trigger_ref = $1 AND revoked_at IS NULL")
+            .bind(super::channel_delegation_ref(channel_id, previous)).execute(&mut *tx).await.ok()?;
+    }
     sqlx::query(
         "INSERT INTO rootcx_system.channel_identities (channel_id, external_chat_id, user_id)
          VALUES ($1::uuid, $2, $3)
          ON CONFLICT (channel_id, external_chat_id)
          DO UPDATE SET user_id = EXCLUDED.user_id, linked_at = now()",
     ).bind(channel_id).bind(chat_id).bind(user_id)
-    .execute(pool).await.ok()?;
+    .execute(&mut *tx).await.ok()?;
+    tx.commit().await.ok()?;
 
     // Phase 6b: linking grants a standing 'channel' delegation to the active
     // app's agent. The deterministic trigger_ref enables revoke_by_trigger on unlink.
-    if let Ok((app_id, _)) = resolve_session(pool, channel_id, chat_id).await {
+    {
+        let (app_id, _) = resolve_session(pool, channel_id, chat_id).await.ok()?;
         let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
         let trigger_ref = super::channel_delegation_ref(channel_id, user_id);
-        let _ = crate::governance::delegation::create(pool, user_id, agent_uid, "channel", Some(trigger_ref)).await;
+        // Relinking must replace the former agent, not retain its trigger-scoped grant.
+        crate::governance::delegation::revoke_by_trigger(pool, "channel", trigger_ref).await.ok()?;
+        crate::governance::delegation::create(pool, user_id, agent_uid, "channel", Some(trigger_ref)).await.ok()?;
     }
 
     Some(user_id.to_string())

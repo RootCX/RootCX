@@ -172,6 +172,7 @@ async fn full_reads_exceed_page_caps_without_widening_rows_or_remote_projection(
 
     for target in ["consumer", "provider"] {
         let mut ctx = ToolContext {
+            authority: None,
             pool: f.rt.pool().clone(),
             core_bound_app_id: Some("consumer".into()),
             app_id: "consumer".into(),
