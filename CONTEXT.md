@@ -2,7 +2,14 @@
 
 | Term | Meaning |
 | --- | --- |
+| Communication channel | A transport for Shappy messages; WhatsApp and Telegram share execution authority while keeping separate conversations |
+| Channel association | A verified relationship between a SHAPP account and a provider account; linking requires proof in the originating browser session |
+| Channel grant | A revocable association permission for one Company and its linked Core identity; distinct from the selected Company |
+| Channel intake | Durable admission of an authenticated delivery; duplicates do not execute again and confirmations can proceed while a message runs |
 | Core | The trusted runtime that authorizes app operations and reconciles their database contracts |
+| Execution authority | Core-owned responsible human, agent lineage, frozen permission ceiling, task scope and live origin for an agent run; inherited descendants can only narrow it |
+| Execution origin | The authenticated entry context of a run; a channel origin pins the exact linked identity and delegation and provides its live validity check |
+| Agent confirmation | A single-use, expiring decision about one exact tool request, owned by its responsible human and execution origin; distinct from an Approved action |
 | App | An installed manifest and backend whose data and capabilities are governed by Core |
 | Core identity | A Core user identity at the end of an ownership chain; distinct from an app row's primary key |
 | Owner | The Core identity derived from an entity's `owner: true` field, directly or through local owner links |
@@ -38,3 +45,6 @@ at governed IPC/SQL boundaries; the full approved artifact is trusted for
 business checks. Read-only snapshots are defensive, not immutable against
 hostile processes under the same OS account. Host filesystem/process confinement
 is outside this deployment model; platform test coverage requires actual runs.
+
+[ADR 0011](docs/adr/0011-agent-execution-authority.md) records transport-independent
+Execution authority and Agent confirmation ownership.

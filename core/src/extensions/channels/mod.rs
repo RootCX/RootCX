@@ -1,6 +1,9 @@
 pub(crate) mod routes;
 mod slack;
+mod origin;
+mod intake;
 mod telegram;
+pub(crate) mod managed;
 pub(crate) mod types;
 
 use async_trait::async_trait;
@@ -68,11 +71,14 @@ impl RuntimeExtension for ChannelExtension {
             sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
         }
 
+        managed::bootstrap(pool).await?;
+        intake::bootstrap(pool).await.map_err(RuntimeError::Schema)?;
+
         let rows: Vec<(String, serde_json::Value)> = sqlx::query_as(
             "SELECT provider, config FROM rootcx_system.channels WHERE status = 'active'",
         ).fetch_all(pool).await.unwrap_or_default();
         for (prov, cfg) in rows {
-            if let Some(p) = provider(&prov) { p.on_activate_boot(&cfg).await; }
+            if let Some(p) = provider_for(&prov, &cfg) { p.on_activate_boot(&cfg).await; }
         }
 
         Ok(())
@@ -84,6 +90,8 @@ impl RuntimeExtension for ChannelExtension {
             .route("/api/v1/channels/{channel_id}", delete(routes::delete_channel))
             .route("/api/v1/channels/{channel_id}/activate", post(routes::activate_channel))
             .route("/api/v1/channels/{channel_id}/deactivate", post(routes::deactivate_channel))
+            .route("/api/v1/channels/{channel_id}/whatsapp-link", post(managed::link))
+            .route("/api/v1/channels/{channel_id}/managed-link", post(managed::link))
             .route("/api/v1/channels/{channel_id}/link", post(routes::create_link_token))
             .route("/api/v1/channels/{channel_id}/identity", get(routes::identity_status).delete(routes::unlink_identity))
             .route("/api/v1/channels/{provider}/{channel_id}/webhook", post(routes::webhook)))
@@ -94,6 +102,27 @@ pub(crate) fn provider(name: &str) -> Option<Box<dyn types::ChannelProvider>> {
     match name {
         "telegram" => Some(Box::new(telegram::TelegramProvider::new())),
         "slack" => Some(Box::new(slack::SlackProvider::new())),
+        "whatsapp" => Some(Box::new(managed::ManagedProvider { name: name.into() })),
         _ => None,
     }
+}
+
+pub(crate) fn provider_for(name: &str, config: &serde_json::Value) -> Option<Box<dyn types::ChannelProvider>> {
+    if config["managed"] == true && matches!(name, "whatsapp" | "telegram") {
+        Some(Box::new(managed::ManagedProvider { name: name.into() }))
+    } else {
+        provider(name)
+    }
+}
+
+#[cfg(test)]
+pub(super) async fn test_pool() -> PgPool {
+    static READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    let pool = crate::extensions::test_db::pool().await;
+    READY.get_or_init(|| async {
+        super::agents::AgentExtension.bootstrap(&pool).await.unwrap();
+        crate::governance::delegation::grants::bootstrap(&pool).await.unwrap();
+        ChannelExtension.bootstrap(&pool).await.unwrap();
+    }).await;
+    pool
 }

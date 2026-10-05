@@ -1,4 +1,5 @@
 pub mod authority;
+pub mod execution;
 pub mod approved_actions;
 pub(crate) mod row_access;
 pub(crate) mod collection_reads;
@@ -11,3 +12,6 @@ pub mod delegation;
 pub mod enforcement;
 pub mod triggers;
 pub mod audit;
+
+#[cfg(test)]
+mod execution_tests;

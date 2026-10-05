@@ -112,7 +112,7 @@ async fn dispatch_agent_job(
     let _ = persistence::ensure_session(pool, &session_id, target_app, system_user).await;
     let _ = persistence::persist_message(pool, &session_id, "user", &user_message, None, false).await;
 
-    match wm.agent_invoke(target_app, invoke_payload, None).await {
+    match wm.agent_invoke(target_app, invoke_payload, Default::default()).await {
         Ok(mut rx) => {
             let pool_c = pool.clone();
             let target_app_c = target_app.to_string();

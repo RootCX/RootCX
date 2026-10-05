@@ -1,3 +1,4 @@
+use crate::governance::execution::{AgentAuthority, AgentSource};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -92,6 +93,7 @@ enum Principal {
     Public(PublicExecution),
     /// A real identity: a direct user, or an agent's delegated authority.
     User(crate::governance::enforcement::ContextState),
+    Agent(crate::governance::enforcement::ContextState, String),
 }
 
 impl Principal {
@@ -114,6 +116,7 @@ impl Principal {
             Principal::System => "·system".into(),
             Principal::Anonymous => "·anon".into(),
             Principal::Public(execution) => format!("{}|{}", execution.principal_id, execution.key()),
+            Principal::Agent(s, origin) => format!("{}|agent={origin}", Principal::User(s.clone()).key()),
             Principal::User(s) => {
                 let uid = s.user_id.map(|u| u.to_string()).unwrap_or_default();
                 let mut perms = s.effective_perms.clone();
@@ -133,7 +136,7 @@ impl Principal {
     /// user, so RLS denies every row; User poses its real identity.
     fn rls_state(&self) -> crate::governance::enforcement::ContextState {
         match self {
-            Principal::User(s) => s.clone(),
+            Principal::User(s) | Principal::Agent(s, _) => s.clone(),
             Principal::Public(execution) => crate::governance::enforcement::ContextState {
                 user_id: Some(execution.principal_id),
                 is_delegated: true,
@@ -708,21 +711,15 @@ impl WorkerManager {
             .rpc(id, method, params, None).await
     }
 
-    /// Invoke an app's agent. `parent_perms` is the invoking parent agent's
-    /// ALREADY-FROZEN effective set on a sub-invoke (`Some`), or `None` at the
-    /// top of a run-tree (human / cron / webhook / channel). The child narrows
-    /// against the parent, never re-widening against the human, so authority is
-    /// monotone non-increasing down the chain.
+    /// Core admits the run before selecting its immutable worker identity.
     pub async fn agent_invoke(
-        &self, app_id: &str, payload: AgentInvokePayload, parent_perms: Option<Vec<String>>,
+        &self, app_id: &str, payload: AgentInvokePayload, source: AgentSource,
     ) -> Result<mpsc::Receiver<AgentEvent>, RuntimeError> {
-        // Freeze the delegated identity HERE so the worker is keyed and spawned
-        // bound to exactly that authority. user_id stays the human (RLS row
-        // ownership); effective_perms is the narrowed intersection.
+        let authority = AgentAuthority::admit(
+            &self.pool, app_id, payload.invoker_user_id, payload.task_scope.clone(), source,
+        ).await.map_err(RuntimeError::Delegation)?;
         let agent_uid = crate::extensions::agents::agent_user_id(app_id);
-        let effective_perms = crate::governance::authority::delegated_effective(
-            &self.pool, agent_uid, payload.invoker_user_id, parent_perms.as_deref(),
-        ).await;
+        let effective_perms = authority.ceiling().to_vec();
         let identity = crate::governance::enforcement::ContextState {
             user_id: payload.invoker_user_id, is_delegated: true, effective_perms,
             connection_id: None,
@@ -732,16 +729,21 @@ impl WorkerManager {
         };
         // An agent invoke is always a delegated principal, never anonymous.
         let session_id = payload.session_id.clone();
+        let lifetime = authority.clone();
         let mut inner_rx = self.get_or_spawn(
-            app_id, Principal::User(identity), InvocationContext::default(),
-        ).await?.agent_invoke(payload).await?;
+            app_id, Principal::Agent(identity, authority.partition_key()), InvocationContext::default(),
+        ).await?.agent_invoke(payload, authority).await?;
 
         // Fan out events to fleet broadcast for real-time monitoring
         let (outer_tx, outer_rx) = mpsc::channel(64);
         let fleet_tx = self.fleet_tx.clone();
         let app_id = app_id.to_string();
         tokio::spawn(async move {
-            while let Some(event) = inner_rx.recv().await {
+            loop {
+                let event = tokio::select! {
+                    _ = outer_tx.closed() => break,
+                    event = inner_rx.recv() => match event { Some(event) => event, None => break },
+                };
                 let _ = fleet_tx.send(FleetEvent {
                     app_id: app_id.clone(),
                     session_id: session_id.clone(),
@@ -749,6 +751,7 @@ impl WorkerManager {
                 });
                 if outer_tx.send(event).await.is_err() { break; }
             }
+            lifetime.finish();
         });
 
         Ok(outer_rx)
@@ -888,14 +891,11 @@ struct SubAgentDispatch {
 #[async_trait]
 impl AgentDispatcher for SubAgentDispatch {
     async fn dispatch(
-        &self, pool: &PgPool, caller: &str, target: &str, message: &str,
+        &self, target: &str, message: &str, authority: AgentAuthority,
         parent_tx: Option<mpsc::Sender<AgentEvent>>,
-        invoker_user_id: Option<uuid::Uuid>,
-        parent_perms: Vec<String>,
-        task_scope: Option<Vec<String>>,
     ) -> Result<String, String> {
-        if target == caller { return Err("cannot invoke self".into()); }
-
+        if target == authority.app() { return Err("cannot invoke self".into()); }
+        let pool = &self.wm.pool;
         let llm = crate::routes::llm_models::fetch_default_llm(pool).await
             .map_err(|e| e.to_string())?
             .map(|(provider, model)| LlmModelRef { provider, model });
@@ -907,13 +907,13 @@ impl AgentDispatcher for SubAgentDispatch {
             history: vec![],
             is_sub_invoke: true,
             llm,
-            invoker_user_id,
+            invoker_user_id: Some(authority.human()),
             attachments: None,
-            task_scope,
+            task_scope: authority.task_scope(),
         };
 
         let app_id = target.to_string();
-        let mut rx = self.wm.agent_invoke(target, payload, Some(parent_perms)).await.map_err(|e| e.to_string())?;
+        let mut rx = self.wm.agent_invoke(target, payload, AgentSource::Child(authority)).await.map_err(|e| e.to_string())?;
         let mut response = String::new();
         while let Some(event) = rx.recv().await {
             match event {

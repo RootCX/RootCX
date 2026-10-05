@@ -223,7 +223,7 @@ pub async fn invoke_agent(
         })
     } else { None };
 
-    let stream_rx = wm.agent_invoke(&app_id, payload, None).await?;
+    let stream_rx = wm.agent_invoke(&app_id, payload, Default::default()).await?;
 
     Ok(Sse::new(streaming::build_sse_stream(stream_rx, session_id.into(), persist_ctx))
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
@@ -359,32 +359,30 @@ pub async fn get_session_events(
 }
 
 pub async fn list_approvals(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<super::approvals::ApprovalRequest>>, ApiError> {
     let approvals = rt.pending_approvals().clone();
-    Ok(Json(approvals.list(&app_id).await))
+    let owner = crate::governance::execution::ApprovalOwner { user_id: identity.user_id, origin: None };
+    Ok(Json(approvals.list(&app_id, &owner).await))
 }
 
 pub async fn reply_approval(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path((app_id, approval_id)): Path<(String, String)>,
     Json(body): Json<ApprovalReply>,
 ) -> Result<Json<JsonValue>, ApiError> {
     let approvals = rt.pending_approvals().clone();
-    // Verify approval belongs to app
-    if !approvals.belongs_to_app(&approval_id, &app_id).await {
-        return Err(ApiError::NotFound(format!("approval '{approval_id}' not found for app '{app_id}'")));
-    }
+    let owner = crate::governance::execution::ApprovalOwner { user_id: identity.user_id, origin: None };
     let response = match body.action {
         super::approvals::ApprovalAction::Approve => ApprovalResponse::Approved,
         super::approvals::ApprovalAction::Reject => ApprovalResponse::Rejected {
             reason: body.reason.unwrap_or_else(|| "rejected by user".into()),
         },
     };
-    if approvals.reply(&approval_id, response).await {
+    if approvals.reply_for_app(&approval_id, &app_id, &owner, response).await {
         Ok(Json(json!({"status": "ok"})))
     } else {
         Err(ApiError::NotFound(format!("approval '{approval_id}' not found")))
@@ -445,4 +443,3 @@ mod tests {
         assert!(req.file_ids.is_none());
     }
 }
-

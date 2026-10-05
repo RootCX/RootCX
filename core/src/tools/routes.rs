@@ -66,6 +66,7 @@ pub async fn execute_tool(
         )));
     }
     let ctx = ToolContext {
+        authority: None,
         pool, core_bound_app_id: None, app_id: body.app_id, user_id: identity.user_id, invoker_user_id: None,
         permissions, task_scope: None, args: body.args,
         agent_dispatch: None, integration_caller: None, action_caller: None, stream_tx: None,

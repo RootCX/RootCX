@@ -32,6 +32,7 @@ impl SlackProvider {
 
     fn signing_secret(config: &JsonValue) -> Result<&str, ChannelError> {
         config["signing_secret"].as_str()
+            .filter(|secret| !secret.is_empty())
             .ok_or_else(|| ChannelError::Provider("missing signing_secret".into()))
     }
 
@@ -102,6 +103,7 @@ enum Event {
     #[serde(rename = "message")]
     Message {
         channel: String,
+        user: Option<String>,
         channel_type: Option<String>,
         text: Option<String>,
         bot_id: Option<String>,
@@ -111,6 +113,8 @@ enum Event {
     #[serde(rename = "app_mention")]
     AppMention {
         channel: String,
+        user: Option<String>,
+        bot_id: Option<String>,
         text: Option<String>,
         files: Option<Vec<File>>,
     },
@@ -142,6 +146,22 @@ struct User { id: String }
 #[derive(Deserialize)]
 struct Channel { id: String }
 
+// A room is a delivery address, never the identity of the person invoking Core.
+fn bound_chat(channel: &str, user: Option<&str>) -> Result<String, ChannelError> {
+    let user = user.filter(|id| !id.is_empty())
+        .ok_or_else(|| ChannelError::InvalidWebhook("missing sender".into()))?;
+    if channel.is_empty() { return Err(ChannelError::InvalidWebhook("missing channel".into())); }
+    Ok(format!("slack:{}", json!([channel, user])))
+}
+
+fn delivery_chat(identity: &str) -> Result<String, ChannelError> {
+    let pair = identity.strip_prefix("slack:").and_then(|value| serde_json::from_str::<(String, String)>(value).ok());
+    match pair {
+        Some((channel, user)) if !channel.is_empty() && !user.is_empty() => Ok(channel),
+        _ => Err(ChannelError::Provider("channel identity must be relinked".into())),
+    }
+}
+
 fn validate_response_url(url: Option<String>) -> Result<String, ChannelError> {
     let url = url.unwrap_or_default();
     if url.is_empty() { return Ok(url); }
@@ -162,6 +182,13 @@ fn extract_media(files: Option<Vec<File>>) -> Vec<MediaRef> {
 
 #[async_trait]
 impl ChannelProvider for SlackProvider {
+    fn delivery_id(&self, body: &[u8]) -> Result<String, ChannelError> {
+        use sha2::{Digest, Sha256};
+        let event = serde_json::from_slice::<JsonValue>(body).ok();
+        Ok(event.as_ref().and_then(|e| e["event_id"].as_str()).map(str::to_owned)
+            .unwrap_or_else(|| hex::encode(Sha256::digest(body))))
+    }
+
     async fn parse_webhook(
         &self, config: &JsonValue, body: Bytes, headers: &HeaderMap,
     ) -> Result<InboundEvent, ChannelError> {
@@ -189,7 +216,7 @@ impl ChannelProvider for SlackProvider {
             if let Some(cmd) = form.get("command") {
                 if cmd == "/link" {
                     let token = form.get("text").map(|s| s.trim().to_string()).unwrap_or_default();
-                    let chat_id = form.get("channel_id").cloned().unwrap_or_default();
+                    let chat_id = bound_chat(form.get("channel_id").map(String::as_str).unwrap_or(""), form.get("user_id").map(String::as_str))?;
                     return Ok(InboundEvent::Message {
                         chat_id,
                         text: format!("/link {token}"),
@@ -206,7 +233,7 @@ impl ChannelProvider for SlackProvider {
                 .map_err(|e| ChannelError::InvalidWebhook(e.to_string()))?;
             let action = payload.actions.into_iter().next()
                 .ok_or_else(|| ChannelError::InvalidWebhook("no actions".into()))?;
-            let chat_id = payload.channel.map(|c| c.id).unwrap_or(payload.user.id);
+            let chat_id = bound_chat(payload.channel.as_ref().map(|c| c.id.as_str()).unwrap_or(""), Some(&payload.user.id))?;
             let callback_id = validate_response_url(payload.response_url)?;
             return Ok(InboundEvent::Callback { chat_id, callback_id, data: action.value });
         }
@@ -217,7 +244,7 @@ impl ChannelProvider for SlackProvider {
         match envelope {
             Envelope::UrlVerification { .. } => Ok(InboundEvent::Ignored),
             Envelope::EventCallback { event } => match event {
-                Event::Message { channel, channel_type, text, bot_id, subtype, files } => {
+                Event::Message { channel, user, channel_type, text, bot_id, subtype, files } => {
                     // Skip bot's own messages, edits, deletions
                     if bot_id.is_some() || subtype.is_some() { return Ok(InboundEvent::Ignored); }
                     // v1: DMs only
@@ -227,15 +254,16 @@ impl ChannelProvider for SlackProvider {
                     if text.is_empty() && media.is_empty() {
                         return Ok(InboundEvent::Ignored);
                     }
-                    Ok(InboundEvent::Message { chat_id: channel, text, media })
+                    Ok(InboundEvent::Message { chat_id: bound_chat(&channel, user.as_deref())?, text, media })
                 }
-                Event::AppMention { channel, text, files } => {
+                Event::AppMention { channel, user, bot_id, text, files } => {
+                    if bot_id.is_some() { return Ok(InboundEvent::Ignored); }
                     let media = extract_media(files);
                     let text = text.unwrap_or_default();
                     if text.is_empty() && media.is_empty() {
                         return Ok(InboundEvent::Ignored);
                     }
-                    Ok(InboundEvent::Message { chat_id: channel, text, media })
+                    Ok(InboundEvent::Message { chat_id: bound_chat(&channel, user.as_deref())?, text, media })
                 }
                 Event::Other => Ok(InboundEvent::Ignored),
             },
@@ -265,7 +293,7 @@ impl ChannelProvider for SlackProvider {
         &self, config: &JsonValue, chat_id: &str, text: &str,
     ) -> Result<(), ChannelError> {
         self.api_post(config, "chat.postMessage", &json!({
-            "channel": chat_id, "text": text,
+            "channel": delivery_chat(chat_id)?, "text": text,
         })).await?;
         Ok(())
     }
@@ -275,7 +303,7 @@ impl ChannelProvider for SlackProvider {
         tool_name: &str, args: &JsonValue,
     ) -> Result<(), ChannelError> {
         self.api_post(config, "chat.postMessage", &json!({
-            "channel": chat_id,
+            "channel": delivery_chat(chat_id)?,
             "text": format!("Tool approval: {tool_name}"),
             "blocks": [
                 { "type": "section", "text": { "type": "mrkdwn",
@@ -304,7 +332,7 @@ impl ChannelProvider for SlackProvider {
             "action_id": format!("opt_{i}"),
         })).collect();
         self.api_post(config, "chat.postMessage", &json!({
-            "channel": chat_id, "text": text,
+            "channel": delivery_chat(chat_id)?, "text": text,
             "blocks": [
                 { "type": "section", "text": { "type": "mrkdwn", "text": text } },
                 { "type": "actions", "elements": elements },
@@ -343,7 +371,6 @@ impl ChannelProvider for SlackProvider {
         }))
     }
 
-    fn debounce_ms(&self) -> Option<u64> { Some(2000) }
 }
 
 #[cfg(test)]
@@ -389,6 +416,73 @@ mod tests {
         SlackProvider::new().parse_webhook(&config, body, &headers).await
     }
 
+    async fn signed_event(body: JsonValue) -> Result<InboundEvent, ChannelError> {
+        let body = serde_json::to_vec(&body).unwrap();
+        parse_with(json!({"signing_secret": "s"}), signed_headers("s", &body, now()), body.into()).await
+    }
+
+    async fn signed_form(fields: &[(&str, String)]) -> Result<InboundEvent, ChannelError> {
+        let body = url::form_urlencoded::Serializer::new(String::new()).extend_pairs(fields.iter().map(|(key, value)| (*key, value.as_str()))).finish();
+        let mut headers = signed_headers("s", body.as_bytes(), now());
+        headers.insert("content-type", "application/x-www-form-urlencoded".parse().unwrap());
+        parse_with(json!({"signing_secret": "s"}), headers, body.into()).await
+    }
+
+    #[tokio::test]
+    async fn room_members_have_distinct_identities_consistent_across_messages_links_and_callbacks() {
+        let mut identities = Vec::new();
+        for user in ["U1", "U2"] {
+            let mention = signed_event(json!({"type":"event_callback", "event":{
+                "type":"app_mention", "channel":"C42", "user":user, "text":"hello"
+            }})).await.unwrap();
+            let InboundEvent::Message { chat_id, .. } = mention else { panic!("expected message"); };
+            let link = signed_form(&[("command", "/link".into()), ("text", "link_token".into()),
+                ("channel_id", "C42".into()), ("user_id", user.into())]).await.unwrap();
+            let InboundEvent::Message { chat_id: linked, .. } = link else { panic!("expected link"); };
+            let callback = signed_form(&[("payload", json!({
+                "actions":[{"value":"approve:pending"}], "user":{"id":user}, "channel":{"id":"C42"}
+            }).to_string())]).await.unwrap();
+            let InboundEvent::Callback { chat_id: replied, .. } = callback else { panic!("expected callback"); };
+            assert_eq!(chat_id, linked, "link identity for {user}");
+            assert_eq!(chat_id, replied, "callback identity for {user}");
+            assert_eq!(delivery_chat(&chat_id).unwrap(), "C42", "delivery for {user}");
+            identities.push(chat_id);
+        }
+        assert_ne!(identities[0], identities[1], "a shared room cannot share a Core identity");
+    }
+
+    #[tokio::test]
+    async fn missing_sender_or_room_cannot_create_an_executable_event() {
+        for event_type in ["message", "app_mention"] {
+            let result = signed_event(json!({"type":"event_callback", "event":{
+                "type":event_type, "channel":"D42", "channel_type":"im", "text":"/link link_token"
+            }})).await;
+            assert!(result.is_err(), "{event_type}");
+        }
+        assert!(signed_form(&[("command", "/link".into()), ("channel_id", "C42".into()), ("text", "link_token".into())]).await.is_err());
+        for payload in [
+            json!({"actions":[{"value":"approve:a"}], "channel":{"id":"C42"}}),
+            json!({"actions":[{"value":"approve:a"}], "user":{"id":"U1"}}),
+        ] {
+            assert!(signed_form(&[("payload", payload.to_string())]).await.is_err(), "{payload}");
+        }
+    }
+
+    #[tokio::test]
+    async fn bot_mentions_are_ignored() {
+        let event = signed_event(json!({"type":"event_callback", "event":{
+            "type":"app_mention", "channel":"C42", "user":"UBOT", "bot_id":"B1", "text":"hello"
+        }})).await.unwrap();
+        assert!(matches!(event, InboundEvent::Ignored));
+    }
+
+    #[test]
+    fn delivery_never_falls_back_to_legacy_or_incomplete_identities() {
+        for identity in ["C42", "U1", "slack:C42", "slack:[\"C42\",\"\"]", "slack:[\"\",\"U1\"]", "telegram:[42,1]"] {
+            assert!(delivery_chat(identity).is_err(), "{identity}");
+        }
+    }
+
     #[tokio::test]
     async fn url_verification_returns_reply_with_challenge() {
         let body = serde_json::to_vec(&json!({
@@ -405,14 +499,14 @@ mod tests {
     async fn dm_text_message_returns_message_event() {
         let body = serde_json::to_vec(&json!({
             "type": "event_callback",
-            "event": { "type": "message", "channel": "D123",
+            "event": { "type": "message", "user": "U1", "channel": "D123",
                        "channel_type": "im", "text": "hello" }
         })).unwrap();
         let cfg = json!({ "signing_secret": "s" });
         let headers = signed_headers("s", &body, now());
         let event = parse_with(cfg, headers, body.into()).await.unwrap();
         let InboundEvent::Message { chat_id, text, media } = event else { panic!("expected Message") };
-        assert_eq!(chat_id, "D123");
+        assert_eq!(chat_id, r#"slack:["D123","U1"]"#);
         assert_eq!(text, "hello");
         assert!(media.is_empty());
     }
@@ -422,7 +516,7 @@ mod tests {
         // v1: only DMs are handled; messages in public channels (C…) must be ignored.
         let body = serde_json::to_vec(&json!({
             "type": "event_callback",
-            "event": { "type": "message", "channel": "C123",
+            "event": { "type": "message", "user": "U1", "channel": "C123",
                        "channel_type": "channel", "text": "hi" }
         })).unwrap();
         let cfg = json!({ "signing_secret": "s" });
@@ -435,7 +529,7 @@ mod tests {
         // Avoid feedback loop when the bot posts.
         let body = serde_json::to_vec(&json!({
             "type": "event_callback",
-            "event": { "type": "message", "channel": "D123",
+            "event": { "type": "message", "user": "U1", "channel": "D123",
                        "channel_type": "im", "text": "echo", "bot_id": "B999" }
         })).unwrap();
         let cfg = json!({ "signing_secret": "s" });
@@ -448,7 +542,7 @@ mod tests {
         // Edits, deletions, joins all carry a subtype; we don't process them.
         let body = serde_json::to_vec(&json!({
             "type": "event_callback",
-            "event": { "type": "message", "channel": "D123",
+            "event": { "type": "message", "user": "U1", "channel": "D123",
                        "channel_type": "im", "subtype": "message_changed" }
         })).unwrap();
         let cfg = json!({ "signing_secret": "s" });
@@ -460,13 +554,13 @@ mod tests {
     async fn app_mention_extracts_message() {
         let body = serde_json::to_vec(&json!({
             "type": "event_callback",
-            "event": { "type": "app_mention", "channel": "C42", "text": "<@U1> hey" }
+            "event": { "type": "app_mention", "user": "U1", "channel": "C42", "text": "<@U1> hey" }
         })).unwrap();
         let cfg = json!({ "signing_secret": "s" });
         let headers = signed_headers("s", &body, now());
         let event = parse_with(cfg, headers, body.into()).await.unwrap();
         let InboundEvent::Message { chat_id, text, .. } = event else { panic!("expected Message") };
-        assert_eq!(chat_id, "C42");
+        assert_eq!(chat_id, r#"slack:["C42","U1"]"#);
         assert_eq!(text, "<@U1> hey");
     }
 
@@ -474,7 +568,7 @@ mod tests {
     async fn message_with_files_extracts_media() {
         let body = serde_json::to_vec(&json!({
             "type": "event_callback",
-            "event": { "type": "message", "channel": "D1", "channel_type": "im",
+            "event": { "type": "message", "user": "U1", "channel": "D1", "channel_type": "im",
                        "text": "look",
                        "files": [{ "id": "F1", "name": "report.pdf", "mimetype": "application/pdf" }] }
         })).unwrap();
@@ -508,7 +602,7 @@ mod tests {
         // Use an event_callback body — url_verification skips sig check by design.
         let body = serde_json::to_vec(&json!({
             "type": "event_callback",
-            "event": { "type": "message", "channel": "D1", "channel_type": "im", "text": "hi" }
+            "event": { "type": "message", "user": "U1", "channel": "D1", "channel_type": "im", "text": "hi" }
         })).unwrap();
         let cfg = json!({ "signing_secret": "s" });
         let headers = signed_headers("s", &body, now() - 600);
@@ -544,7 +638,7 @@ mod tests {
         // re-sign because content-type doesn't affect HMAC, ts/sig already correct
         let event = parse_with(cfg, headers, body.into()).await.unwrap();
         let InboundEvent::Callback { chat_id, callback_id, data } = event else { panic!("expected Callback") };
-        assert_eq!(chat_id, "D1");
+        assert_eq!(chat_id, r#"slack:["D1","U1"]"#);
         assert_eq!(data, "approve:abc123");
         assert!(callback_id.starts_with("https://hooks.slack.com"));
     }
