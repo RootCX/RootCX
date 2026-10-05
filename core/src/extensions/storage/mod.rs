@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::RuntimeError;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
+use crate::governance::authority::require_perm;
 use crate::routes::SharedRuntime;
 use backend::{PostgresBackend, StorageBackend};
 
@@ -190,6 +191,7 @@ async fn upload_file(
     Path(app_id): Path<String>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
+    require_perm(rt.pool(), identity.user_id, &format!("app:{app_id}:storage.write")).await?;
     let mut field = multipart
         .next_field()
         .await
@@ -244,10 +246,11 @@ async fn download_via_nonce(
 
 /// GET /api/v1/apps/:app_id/storage/:file_id — download file (requires JWT, scoped by app)
 async fn get_file(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path((app_id, file_id)): Path<(String, Uuid)>,
 ) -> Result<Response, ApiError> {
+    require_perm(rt.pool(), identity.user_id, &format!("app:{app_id}:storage.read")).await?;
     let obj = open_file(rt.pool(), file_id, &app_id).await?;
     let safe_name: String = obj.name.chars().filter(|c| !c.is_control() && *c != '"' && *c != '\\').collect();
     let mut headers = HeaderMap::new();
@@ -260,10 +263,11 @@ async fn get_file(
 
 /// DELETE /api/v1/apps/:app_id/storage/:file_id — delete file (requires JWT, scoped by app)
 async fn delete_file(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path((app_id, file_id)): Path<(String, Uuid)>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    require_perm(rt.pool(), identity.user_id, &format!("app:{app_id}:storage.write")).await?;
     let pool = rt.pool().clone();
 
     backend().delete(&pool, file_id, &app_id).await
