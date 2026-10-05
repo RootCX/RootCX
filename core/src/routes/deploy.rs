@@ -50,33 +50,44 @@ pub async fn deploy_backend(
         return Err(ApiError::BadRequest("reserved app_id".into()));
     }
     crate::governance::authority::require_perm(rt.pool(), identity.user_id, "admin:apps.deploy").await?;
+    crate::builder::guard_external_mutation(&rt, &app_id).await?;
 
-    let app_dir = rt.data_dir().join("apps").join(&app_id);
+    let bytes = read_archive(&mut multipart).await?;
+    let applied = deploy_backend_archive(&rt, &app_id, identity.user_id, bytes).await?;
+    Ok(Json(json!({ "message": format!("app '{app_id}' deployed and started"), "migrationsApplied": applied })))
+}
+
+pub(crate) async fn deploy_backend_archive(rt: &SharedRuntime, app_id: &str, user_id: uuid::Uuid, bytes: Vec<u8>) -> Result<Vec<String>, ApiError> {
+    let app_dir = rt.data_dir().join("apps").join(app_id);
     let bun_bin = rt.bun_bin().to_path_buf();
     let pool = rt.pool().clone();
     let secrets = rt.secret_manager().clone();
     let wm = rt.worker_manager().clone();
 
-    let bytes = read_archive(&mut multipart).await?;
     let _lifecycle = crate::governance::cross_app::lock_app_lifecycle(&pool, &app_id).await?;
-    let revision = crate::governance::approved_actions::begin_deployment(&pool, &app_id, identity.user_id).await?;
-    let _ = wm.stop_app(&app_id).await;
-    extract_to(bytes, &app_dir).await?;
+    let staged = rt.data_dir().join("apps").join(format!(".staged-{app_id}-{}", uuid::Uuid::new_v4()));
+    extract_to(bytes, &staged).await?;
 
-    // Refuse app SQL before dependency scripts, agent registration, or startup.
-    // Historical files may remain in archives, but this path never applies any.
-    let applied = crate::app_migrations::run(&pool, &app_id, &app_dir)
+    // Prepare dependencies before stopping the active worker.
+    let applied = crate::app_migrations::run(&pool, &app_id, &staged)
         .await
         .map_err(ApiError::BadRequest)?;
 
+    if staged.join("package.json").exists() {
+        install_deps(&bun_bin, &staged).await?;
+    }
+    let revision = crate::governance::approved_actions::begin_deployment(&pool, app_id, user_id).await?;
+    let previous = rt.data_dir().join("apps").join(format!(".previous-{app_id}-{}", uuid::Uuid::new_v4()));
+    let _ = wm.stop_app(app_id).await;
+    if app_dir.exists() { tokio::fs::rename(&app_dir, &previous).await.map_err(|e| ApiError::Internal(e.to_string()))?; }
+    if let Err(error) = tokio::fs::rename(&staged, &app_dir).await {
+        if previous.exists() { let _ = tokio::fs::rename(&previous, &app_dir).await; }
+        return Err(ApiError::Internal(format!("activate backend: {error}")));
+    }
     info!(app_id = %app_id, dir = %app_dir.display(), "backend deployed");
 
-    if app_dir.join("package.json").exists() {
-        install_deps(&bun_bin, &app_dir).await?;
-    }
-
     if let Some(def) = crate::extensions::agents::config::load_agent_json(&app_dir).await {
-        crate::extensions::agents::register_agent(&pool, &app_id, &def, Some(identity.user_id))
+        crate::extensions::agents::register_agent(&pool, &app_id, &def, Some(user_id))
             .await
             .map_err(|e| ApiError::Internal(format!("agent registration: {e}")))?;
     }
@@ -92,10 +103,8 @@ pub async fn deploy_backend(
     let _ = wm.stop_app(&app_id).await;
     wm.start_app(&pool, &secrets, &app_id).await?;
 
-    Ok(Json(json!({
-        "message": format!("app '{app_id}' deployed and started"),
-        "migrationsApplied": applied,
-    })))
+    if previous.exists() { let _ = tokio::fs::remove_dir_all(previous).await; }
+    Ok(applied)
 }
 
 fn safe_unpack(bytes: &[u8], dest: &std::path::Path) -> Result<(), ApiError> {
@@ -114,17 +123,19 @@ fn safe_unpack(bytes: &[u8], dest: &std::path::Path) -> Result<(), ApiError> {
 
 async fn install_deps(bun_bin: &Path, dir: &Path) -> Result<(), ApiError> {
     info!(bin = %bun_bin.display(), dir = %dir.display(), "installing dependencies");
-    let out = tokio::process::Command::new(bun_bin)
+    let out = tokio::time::timeout(std::time::Duration::from_secs(120), tokio::process::Command::new(bun_bin)
         // An archive is untrusted even when an operator may deploy it. Package
         // scripts must not regain the Core authority removed from app migrations.
         .env_clear()
         .arg("install")
         .arg("--ignore-scripts")
+        .kill_on_drop(true)
         .current_dir(dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .output())
         .await
+        .map_err(|_| ApiError::Unavailable("backend dependency installation timed out".into()))?
         .map_err(|e| ApiError::Internal(format!("{} install: {e}", bun_bin.display())))?;
     if !out.status.success() {
         return Err(ApiError::Internal(format!(
@@ -219,6 +230,7 @@ pub async fn deploy_frontend(
         return Err(ApiError::BadRequest("reserved app_id".into()));
     }
     crate::governance::authority::require_perm(rt.pool(), identity.user_id, "admin:apps.deploy").await?;
+    crate::builder::guard_external_mutation(&rt, &app_id).await?;
 
     let frontend_dir = rt.data_dir().join("frontends").join(&app_id);
     let bytes = read_archive(&mut multipart).await?;
@@ -275,7 +287,7 @@ pub async fn serve_share_frontend(
         Ok(bytes) => {
             headers.insert(header::CONTENT_TYPE, "text/html; charset=utf-8".parse().unwrap());
             headers.insert(header::CACHE_CONTROL, "private, no-store".parse().unwrap());
-            (StatusCode::OK, headers, bytes)
+            (StatusCode::OK, headers, crate::platform_frontend::without_legacy(bytes, &app_id))
         }
         Err(_) => {
             headers.insert(header::CONTENT_TYPE, "text/plain".parse().unwrap());
@@ -302,8 +314,10 @@ pub async fn serve_frontend(
     match tokio::fs::read(&file_path).await {
         Ok(bytes) => {
             let ct = content_type(&file_path).to_string();
+            let bytes = if file_path == frontend_dir.join("index.html") { crate::platform_frontend::configured(bytes, &app_id) } else { bytes };
             // Hashed asset filenames are immutable; HTML needs revalidation
-            let cache = if is_asset { "public, max-age=31536000, immutable" } else { "public, max-age=60, must-revalidate" };
+            let cache = if file_path.extension().is_some_and(|ext| ext == "html") { "no-store" }
+                else if is_asset { "public, max-age=31536000, immutable" } else { "no-cache" };
             (StatusCode::OK, [(header::CONTENT_TYPE, ct), (header::CACHE_CONTROL, cache.to_string())], bytes)
         }
         Err(_) => not_found(),

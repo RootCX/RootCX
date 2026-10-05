@@ -10,6 +10,7 @@
 | Execution authority | Core-owned responsible human, agent lineage, frozen permission ceiling, task scope and live origin for an agent run; inherited descendants can only narrow it |
 | Execution origin | The authenticated entry context of a run; a channel origin pins the exact linked identity and delegation and provides its live validity check |
 | Agent confirmation | A single-use, expiring decision about one exact tool request, owned by its responsible human and execution origin; distinct from an Approved action |
+| Platform companion | An optional host-owned browser companion loaded by Core independently of an App release |
 | App | An installed manifest and backend whose data and capabilities are governed by Core |
 | Core identity | A Core user identity at the end of an ownership chain; distinct from an app row's primary key |
 | Owner | The Core identity derived from an entity's `owner: true` field, directly or through local owner links |

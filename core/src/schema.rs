@@ -64,6 +64,7 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), RuntimeError> {
     .await
     .map_err(RuntimeError::Schema)?;
 
+    crate::builder::bootstrap(pool).await?;
     crate::secrets::bootstrap_secrets_schema(pool).await?;
     crate::jobs::bootstrap(pool).await?;
     crate::crons::bootstrap(pool).await?;

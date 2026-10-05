@@ -1,0 +1,51 @@
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { promisify } from 'node:util';
+import { backupReceiver } from '../backup-receiver.mjs';
+
+const exec = promisify(execFile);
+test('backup acknowledges a restorable Git history and rejects unauthorized replacement', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'source-backup-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repo = join(root, 'repo');
+  const git = (...args) => exec('git', ['-C', repo, ...args]);
+  await exec('git', ['init', repo]);
+  await writeFile(join(repo, 'manifest.json'), '{"appId":"smoke"}');
+  await git('add', '.');
+  await git('-c', 'user.email=test@example.test', '-c', 'user.name=Test', 'commit', '-m', 'Initial source');
+  const initial = (await git('rev-parse', 'HEAD')).stdout.trim();
+  await writeFile(join(repo, 'manifest.json'), '{"appId":"smoke","version":"2.0.0"}');
+  await git('add', '.');
+  await git('-c', 'user.email=test@example.test', '-c', 'user.name=Test', 'commit', '-m', 'Prepared change');
+  const commit = (await git('rev-parse', 'HEAD')).stdout.trim();
+  await git('update-ref', 'refs/changes/test', commit);
+  await git('reset', '--hard', initial);
+  const bundle = join(root, 'source.bundle');
+  await git('bundle', 'create', bundle, '--all');
+  const bytes = await readFile(bundle);
+  const token = 'test-backup-token-'.repeat(3);
+  const directory = join(root, 'backups');
+  const server = backupReceiver({ token, directory });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const url = `http://127.0.0.1:${server.address().port}/smoke/${commit}.bundle`;
+  const put = (body, credential = token) => fetch(url, { method: 'PUT', headers: { authorization: `Bearer ${credential}` }, body });
+  assert.equal((await put(bytes, 'wrong')).status, 401);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await put(bytes);
+    assert.equal(response.status, 201);
+    assert.equal((await response.json()).bytes, bytes.length);
+  }
+  assert.equal((await put(Buffer.concat([bytes, Buffer.from('different')]))).status, 409);
+  const restored = join(root, 'restored');
+  await exec('git', ['clone', join(directory, 'smoke', `${commit}.bundle`), restored]);
+  await exec('git', ['-C', restored, 'checkout', commit]);
+  assert.equal((await exec('git', ['-C', restored, 'rev-parse', 'HEAD'])).stdout.trim(), commit);
+  assert.equal(await readFile(join(restored, 'manifest.json'), 'utf8'), '{"appId":"smoke","version":"2.0.0"}');
+});
