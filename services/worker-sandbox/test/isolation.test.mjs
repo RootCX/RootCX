@@ -8,6 +8,8 @@ import { createServer } from 'node:http';
 import { createServer as netServer } from 'node:net';
 
 const runtime = dirname(dirname(fileURLToPath(import.meta.url)));
+// Core supplies HOME before Bun starts, including when its numeric UID has no passwd entry.
+const launcherEnv = { PATH: process.env.PATH, HOME: '/tmp' };
 
 test('Linux worker preserves IPC and nonce socket while denying parent files, processes and private network', { skip: process.platform !== 'linux', timeout: 40000 }, async t => {
   const parent = await mkdtemp('/tmp/core-worker-test-');
@@ -52,7 +54,7 @@ test('Linux worker preserves IPC and nonce socket while denying parent files, pr
   await writeFile(entry, source);
   const bun = process.env.BUN_PATH || process.execPath;
   const spec = { root, prelude, args: [bun, '--preload', prelude, entry], storageSocket, env: { TEST_PUBLIC: process.env.ROOTCX_TEST_PUBLIC_NETWORK || '', HTTP_PROXY: 'http://169.254.169.254:80', HOME: '/data' } };
-  const child = spawn(bun, [join(runtime, 'supervisor.mjs'), JSON.stringify(spec)], { cwd: runtime, env: { PATH: process.env.PATH, CORE_DATABASE_SECRET: 'should-not-be-in-worker', HTTP_PROXY: 'http://169.254.169.254:80' }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(bun, [join(runtime, 'supervisor.mjs'), JSON.stringify(spec)], { cwd: runtime, env: { ...launcherEnv, CORE_DATABASE_SECRET: 'should-not-be-in-worker', HTTP_PROXY: 'http://169.254.169.254:80' }, stdio: ['pipe', 'pipe', 'pipe'] });
   t.after(() => child.kill('SIGKILL'));
   let stdout = '', stderr = '';
   child.stdout.on('data', data => { stdout += data; });
@@ -73,7 +75,7 @@ test('dependency installation is confined and never runs package lifecycle scrip
   }));
   const bun = process.env.BUN_PATH || process.execPath;
   const spec = { root, args: [bun, 'install', '--ignore-scripts'], env: {}, writeRoot: true, timeoutMs: 30000 };
-  const child = spawn(bun, [join(runtime, 'supervisor.mjs'), JSON.stringify(spec)], { cwd: runtime, env: { PATH: process.env.PATH }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(bun, [join(runtime, 'supervisor.mjs'), JSON.stringify(spec)], { cwd: runtime, env: launcherEnv, stdio: ['ignore', 'pipe', 'pipe'] });
   t.after(() => child.kill('SIGKILL'));
   let stderr = '';
   child.stdout.resume(); child.stderr.on('data', data => { stderr += data; });
