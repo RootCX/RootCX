@@ -4,14 +4,20 @@ import { pipeline } from 'node:stream/promises';
 
 export function createProviderProxy(config, proxyKey) {
   return createServer(async (req, res) => {
-    if (req.headers['x-api-key'] !== proxyKey || req.method !== 'POST' || !['/v1/messages', '/v1/messages/count_tokens'].includes(req.url)) {
+    const [path, query] = (req.url ?? '').split('?');
+    // The native SDK uses Anthropic's beta endpoint; the upstream is still fixed
+    // by Core configuration, and model requests cannot choose another route.
+    const supported = ['/v1/messages', '/v1/messages/count_tokens'].includes(path)
+      && (query === undefined || query === 'beta=true') && req.url.split('?').length <= 2;
+    if (req.headers['x-api-key'] !== proxyKey || req.method !== 'POST' || !supported) {
+      console.error(JSON.stringify({ event: 'provider.request_rejected', reason: req.headers['x-api-key'] !== proxyKey ? 'authentication' : req.method !== 'POST' ? 'method' : 'path', path: req.url?.split('?')[0] }));
       res.writeHead(403); res.end(); return;
     }
     const controller = new AbortController();
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     try {
       const upstream = new URL(config.endpoint);
-      if (req.url.endsWith('/count_tokens')) upstream.pathname += '/count_tokens';
+      if (path.endsWith('/count_tokens')) upstream.pathname += '/count_tokens';
       const headers = { 'content-type': 'application/json', 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01' };
       if (req.headers['anthropic-beta']) headers['anthropic-beta'] = req.headers['anthropic-beta'];
       const response = await fetch(upstream, { method: 'POST', headers, body: req, duplex: 'half', redirect: 'error', signal: controller.signal });

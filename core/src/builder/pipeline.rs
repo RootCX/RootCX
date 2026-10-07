@@ -13,6 +13,25 @@ pub struct Runner {
     url: String,
     token: String,
 }
+
+pub(super) fn http_client(timeout: Duration) -> Result<reqwest::Client, ApiError> {
+    let mut client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout);
+    if let Ok(path) = std::env::var("ROOTCX_BUILDER_CA_FILE") {
+        let pem = std::fs::read(path)
+            .map_err(|_| ApiError::Unavailable("builder CA file cannot be read".into()))?;
+        let certificates = reqwest::Certificate::from_pem_bundle(&pem)
+            .map_err(|_| ApiError::Unavailable("invalid builder CA certificate".into()))?;
+        if certificates.is_empty() {
+            return Err(ApiError::Unavailable("builder CA bundle is empty".into()));
+        }
+        for certificate in certificates {
+            client = client.add_root_certificate(certificate);
+        }
+    }
+    client.build().map_err(|e| ApiError::Internal(e.to_string()))
+}
 impl Runner {
     pub fn configured() -> Result<Self, ApiError> {
         let url = std::env::var("ROOTCX_BUILDER_URL")
@@ -202,11 +221,7 @@ async fn process(
     state(rt, id, "coding", "J’adapte votre application.").await?;
     let root = rt.data_dir().join("sources").join(app);
     let before = files::snapshot(&root, base).await?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(1000))
-        .build()
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let client = http_client(Duration::from_secs(1000))?;
     let conversation: Option<Uuid> =
         sqlx::query_scalar("SELECT conversation_id FROM rootcx_system.source_runs WHERE id=$1")
             .bind(id)

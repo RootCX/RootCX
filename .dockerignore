@@ -1,5 +1,6 @@
 target/
 node_modules/
+**/node_modules/
 .git/
 core/resources/bun
 core/resources/bun.exe

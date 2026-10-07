@@ -23,17 +23,24 @@ dependency directories and build outputs are not source inputs. Git runs without
 host configuration, hooks, filters or signing. Git attributes are not accepted,
 so `git archive` cannot silently transform or omit committed inputs.
 
-The coding engine is OpenCode 1.18.32, not an in-house tool loop. It runs a
-private authenticated HTTP server inside bubblewrap with the app workspace and
-its own persisted home. Native tools, skill loading, context compaction and
-sessions belong to OpenCode. The official RootCX skill is copied from the separate
+The coding engine is the pinned `@opencode/sdk` 2.0.24. Its native tool loop runs
+in a dedicated Bun process inside `@anthropic-ai/sandbox-runtime` 0.0.78 Linux
+isolation, with the app workspace and its own persisted home. The trusted runner
+exchanges commands and events over process pipes; the SDK exposes no listening
+HTTP server. Native tools, skill loading, context compaction and sessions belong
+to OpenCode. Project configuration and plugin discovery are disabled; the image
+provides the trusted configuration and skills. The official RootCX skill is copied from the separate
 `rootcx-skills` build context without rewriting its references; the hosted prompt
 only replaces local onboarding/manual publication with the existing Core pipeline.
+Referenced RootCX documentation is packaged under `/opt/rootcx-docs` at build time.
 The official RootCX CLI 0.17.2 is installed using its checksum-verifying installer.
 
 A loopback proxy injects the model credential outside the agent namespace. The
-agent only sees its scoped proxy credential, not the real provider key. Coding
-commands can use the network; the deployment's network policy isolates tenants.
+agent only sees its scoped proxy credential, not the real provider key. The
+application sandbox permits only that exact loopback model relay and HTTPS to
+`registry.npmjs.org`. Direct sockets, private services, metadata addresses and
+general Internet access are denied. Kubernetes policy separately confines the
+runner pod; the sandbox does not require changes to customer tenant networking.
 The final publication build runs with no network and read-only dependencies;
 dependency installation uses frozen lockfiles and disables lifecycle scripts.
 When final verification fails, its diagnostics return to the same OpenCode session
@@ -238,8 +245,14 @@ Warm processes and dependencies are reused per application. At most four process
 are retained; evicted sessions can resume from their persisted home. Apply a retention
 policy for inactive session homes. The Node entrypoint must close engines on shutdown.
 
+The SDK 2 migration starts fresh internal agent sessions in `opencode-v2.db` and
+`*-v2.json` mappings. It does not import the older OpenCode 1 internal history.
+Core source repositories, published applications, user conversations and their
+recorded requests remain intact; only the agent's private working context restarts.
+
 Additional verification:
-- `node --test services/app-builder/test/opencode.integration.test.mjs` inside the Linux image runs the real pinned OpenCode against a deterministic Messages server, verifies native skill loading and file edits, without paid calls.
+- `node --test services/app-builder/test/opencode.integration.test.mjs` inside the Linux image runs the real SDK inside its sandbox against a deterministic Messages server. It verifies skill loading, file edits, offline-provider errors, cancellation of a running shell command without publication, and conversation resume, without paid calls.
+- `test/sdk.test.mjs` exercises the published SDK through its process pipes, including persisted sessions after restart, disabled project plugins, tool events and credit errors. `test/provider-proxy.test.mjs` checks the SDK's exact beta endpoint while rejecting other paths and parameters.
 - The Core integration test verifies streamed failures, terminal replay, authorization and actual column deletion with existing records.
 
 ## Repeatable development and image verification

@@ -4,12 +4,17 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { confined, collect } from './workspace.mjs';
+import { spawnSandbox } from './sandbox-process.mjs';
+export { spawnSandbox } from './sandbox-process.mjs';
 const installedLocks = new Map();
 export function forgetDependencies(root) { installedLocks.delete(root); installedLocks.delete(join(root, 'backend')); }
 
 export function command(executable, args, options = {}) {
+  return commandResult(spawn(executable, args, { ...options, detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH } }), options);
+}
+
+function commandResult(child, options = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, args, { ...options, detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH } });
     let output = ''; let failed = false;
     function stop(error) {
       if (failed) return;
@@ -35,6 +40,10 @@ export function command(executable, args, options = {}) {
 
 export async function isolated(root, args, { network = false, signal } = {}) {
   if (process.platform !== 'linux') throw new Error('The production builder requires Linux bubblewrap; no unsandboxed fallback');
+  if (network) return commandResult(await spawnSandbox(root, args, {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: { npm_config_cache: `${root}.sandbox/npm-cache`, npm_config_registry: 'https://registry.npmjs.org' },
+  }), { signal });
   const mounts = [];
   for (const path of ['/usr', '/bin', '/lib', '/lib64', '/etc/ssl/certs', '/etc/resolv.conf']) {
     try { await access(path); mounts.push('--ro-bind', path, path); } catch {}

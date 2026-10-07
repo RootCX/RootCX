@@ -1,22 +1,22 @@
-import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
+import { fileURLToPath } from 'node:url';
+import { createInterface } from 'node:readline';
 import { createProviderProxy } from './provider-proxy.mjs';
+import { spawnSandbox } from './sandbox.mjs';
 
 const engines = new Map();
 
 export function providerError(error) {
   let body;
-  try { body = JSON.parse(error?.data?.responseBody); } catch {}
+  try { body = JSON.parse(error?.response?.body ?? error?.data?.responseBody); } catch {}
   if (body?.error?.code === 'AI_CONFIGURATION') return 'AI_CONFIGURATION';
-  const status = error?.data?.statusCode;
+  const status = error?.status ?? error?.data?.statusCode;
   if (status === 402) return 'AI_CREDITS_EXHAUSTED';
-  if ([401, 403].includes(status) || error?.name === 'ProviderAuthError') return 'AI_CONFIGURATION';
+  if ([401, 403].includes(status) || ['ProviderAuthError', 'provider.auth'].includes(error?.type ?? error?.name)) return 'AI_CONFIGURATION';
   if (status === 429 || status >= 500) return 'AI_UNAVAILABLE';
-  if (['ContextOverflowError', 'MessageOutputLengthError'].includes(error?.name)) return 'AI_LIMIT_REACHED';
+  if (['ContextOverflowError', 'MessageOutputLengthError', 'provider.invalid-output'].includes(error?.type ?? error?.name)) return 'AI_LIMIT_REACHED';
   return 'BUILD_FAILED';
 }
 
@@ -38,21 +38,6 @@ export function progressFor(event) {
   return null;
 }
 
-export async function* events(body) {
-  const decoder = new TextDecoder();
-  let pending = '';
-  for await (const chunk of body) {
-    pending += decoder.decode(chunk, { stream: true }).replaceAll('\r\n', '\n');
-    if (pending.length > 2_000_000) throw new Error('OpenCode event exceeds limit');
-    let index;
-    while ((index = pending.indexOf('\n\n')) !== -1) {
-      const block = pending.slice(0, index); pending = pending.slice(index + 2);
-      const data = block.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
-      if (data) yield JSON.parse(data);
-    }
-  }
-}
-
 export async function engine(root, config) {
   if (engines.has(root)) return engines.get(root);
   const promise = startEngine(root, config);
@@ -71,94 +56,114 @@ export async function closeEngine(root) {
   engines.delete(root);
   if (!pending) return;
   const runtime = await pending.catch(() => null);
-  runtime?.close();
+  await runtime?.close();
 }
 
 async function startEngine(root, config) {
   const home = `${root}.agent`;
   await mkdir(home, { recursive: true });
   const proxyKey = randomBytes(32).toString('hex');
-  // The real provider key stays in this process, outside the coding environment.
   const proxy = createProviderProxy(config, proxyKey);
-  await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
-  // Reserve an ephemeral loopback port; OpenCode is internal to this runner.
-  const reservation = createServer();
-  await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
-  const port = reservation.address().port;
-  await new Promise(resolve => reservation.close(resolve));
-  const password = randomBytes(32).toString('hex');
-  const settings = {
-    model: `anthropic/${config.model}`, small_model: `anthropic/${config.model}`,
-    share: 'disabled', autoupdate: false, permission: 'allow',
-    enabled_providers: ['anthropic'],
-    provider: { anthropic: { options: { baseURL: `http://127.0.0.1:${proxy.address().port}/v1`, apiKey: proxyKey }, models: { [config.model]: { name: config.model, limit: { context: 200000, output: 16000 } } } } },
-    skills: { paths: ['/opt/rootcx-skills'] },
-    agent: { build: { prompt: await readFile(new URL('./instructions.md', import.meta.url), 'utf8'), tools: { question: false }, steps: 80 } },
-  };
-  const extraMounts = [];
-  try { await access('/lib64'); extraMounts.push('--ro-bind', '/lib64', '/lib64'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  const args = ['--die-with-parent', '--new-session', '--unshare-user', '--unshare-pid', '--unshare-ipc', '--unshare-uts', '--clearenv',
-    '--ro-bind', '/usr', '/usr', '--ro-bind', '/bin', '/bin', '--ro-bind', '/lib', '/lib', ...extraMounts,
-    '--ro-bind', '/etc/ssl/certs', '/etc/ssl/certs', '--ro-bind', '/etc/resolv.conf', '/etc/resolv.conf',
-    '--ro-bind', '/opt/rootcx-skills', '/opt/rootcx-skills',
-    '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp', '--bind', root, '/workspace', '--bind', home, '/home/agent', '--chdir', '/workspace',
-    '--setenv', 'PATH', '/usr/local/bin:/usr/bin:/bin', '--setenv', 'HOME', '/home/agent', '--setenv', 'CI', 'true',
-    '--setenv', 'OPENCODE_CONFIG_CONTENT', JSON.stringify(settings), '--setenv', 'OPENCODE_SERVER_PASSWORD', password,
-    '--setenv', 'OPENCODE_DISABLE_AUTOUPDATE', 'true', '--setenv', 'OPENCODE_DISABLE_SHARE', 'true',
-    '--', 'opencode', 'serve', '--hostname', '127.0.0.1', '--port', String(port)];
-  const child = spawn('bwrap', args, { detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: { PATH: process.env.PATH } });
+  await new Promise((resolve, reject) => { proxy.once('error', reject); proxy.listen(0, '127.0.0.1', resolve); });
+  const providerUrl = `http://127.0.0.1:${proxy.address().port}`;
+  let child;
+  try {
+    child = await spawnSandbox(root, ['bun', fileURLToPath(new URL('./sdk-host.mjs', import.meta.url))], { home, providerUrl });
+  } catch (error) { proxy.close(); throw error; }
+  const pending = new Map();
+  const subscriptions = new Set();
+  let sequence = 0;
+  let failure;
   let diagnostics = '';
-  let exit;
-  function recordDiagnostics(chunk) {
-    diagnostics = (diagnostics + chunk).slice(-8000);
+  let resolveReady, rejectReady;
+  const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  function failed(error) {
+    if (failure) return;
+    failure = error;
+    engines.delete(root);
+    rejectReady(error);
+    for (const request of pending.values()) request.reject(error);
+    pending.clear();
+    for (const subscription of subscriptions) subscription.wake();
+    proxy.closeAllConnections(); proxy.close();
   }
-  child.stdout.on('data', recordDiagnostics);
-  child.stderr.on('data', recordDiagnostics);
-  child.on('exit', code => { exit = code ?? -1; engines.delete(root); proxy.close(); });
-  child.on('error', () => { exit = -1; });
-  const headers = { authorization: `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`, 'content-type': 'application/json' };
-  const url = `http://127.0.0.1:${port}`;
+  child.stderr.on('data', chunk => { diagnostics = (diagnostics + chunk).slice(-8000); });
+  child.on('error', failed);
+  child.on('exit', code => failed(new Error(`OpenCode SDK stopped (${code}): ${diagnostics}`)));
+  const lines = createInterface({ input: child.stdout });
+  lines.on('line', line => {
+    try {
+      if (line.length > 2_000_000) throw new Error('OpenCode message exceeds limit');
+      const message = JSON.parse(line);
+      if (message.type === 'ready') resolveReady();
+      else if (message.type === 'fatal') failed(new Error(message.error.message));
+      else if (message.type === 'event') {
+        for (const subscription of subscriptions) {
+          if (subscription.queue.length > 1000) throw new Error('OpenCode event consumer stalled');
+          subscription.queue.push(message.event); subscription.wake();
+        }
+      } else if (message.type === 'response') {
+        const request = pending.get(message.id);
+        if (!request) return;
+        pending.delete(message.id);
+        if (message.error) request.reject(Object.assign(new Error(message.error.message), message.error));
+        else request.resolve(message.result);
+      }
+    } catch (error) { failed(error); void close(); }
+  });
+  let closing;
   function close() {
-    try { process.kill(-child.pid, 'SIGKILL'); } catch {}
-    proxy.closeAllConnections();
-    proxy.close();
+    return closing ??= new Promise(resolve => {
+      failed(new Error('OpenCode SDK closed'));
+      lines.close();
+      if (child.exitCode !== null || child.signalCode !== null) return resolve();
+      child.once('close', resolve);
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
+    });
+  }
+  function api(path, body, signal) {
+    if (failure) return Promise.reject(failure);
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    const id = ++sequence;
+    return new Promise((resolve, reject) => {
+      const abort = () => { pending.delete(id); reject(signal.reason); };
+      signal?.addEventListener('abort', abort, { once: true });
+      const finish = callback => value => { signal?.removeEventListener('abort', abort); callback(value); };
+      pending.set(id, { resolve: finish(resolve), reject: finish(reject) });
+      child.stdin.write(JSON.stringify({ id, path, body }) + '\n', error => { if (error) failed(error); });
+    });
+  }
+  async function* subscribe(signal) {
+    const subscription = { queue: [], wake() {} };
+    subscriptions.add(subscription);
+    const wake = () => subscription.wake();
+    signal.addEventListener('abort', wake);
+    try {
+      while (!signal.aborted) {
+        if (failure) throw failure;
+        if (subscription.queue.length) { yield subscription.queue.shift(); continue; }
+        await new Promise(resolve => { subscription.wake = resolve; });
+      }
+    } finally { signal.removeEventListener('abort', wake); subscriptions.delete(subscription); }
   }
   try {
-    for (let n = 0; ; n++) {
-      if (exit !== undefined || n > 120) throw new Error(`OpenCode startup failed: ${diagnostics}`);
-      try { if ((await fetch(`${url}/global/health`, { headers, signal: AbortSignal.timeout(500) })).ok) break; } catch {}
-      await delay(250);
-    }
-    async function api(path, body, signal) {
-      const response = await fetch(url + path, { method: body === undefined ? 'GET' : 'POST', headers, body: body === undefined ? undefined : JSON.stringify(body), signal });
-      if (!response.ok) throw new Error(`OpenCode request failed (${response.status}): ${(await response.text()).slice(0, 1000)}`);
-      return response.json();
-    }
-    let session;
-    const sessionFile = join(home, 'shappy-session.json');
-    try {
-      session = JSON.parse(await readFile(sessionFile, 'utf8'));
-      await api(`/session/${session.id}`);
-    } catch {
-      session = await api('/session', { title: 'Shappy' });
-      await writeFile(sessionFile, JSON.stringify({ id: session.id }));
-    }
-    return { api, url, headers, session: session.id, conversation: id => id ? conversationSession(api, home, id) : Promise.resolve(session.id), close };
-  } catch (error) {
-    close();
-    throw error;
-  }
+    child.stdin.write(JSON.stringify({ root, home, providerUrl, proxyKey, model: config.model, instructions: await readFile(new URL('./instructions.md', import.meta.url), 'utf8') }) + '\n');
+    const deadline = setTimeout(() => { failed(new Error(`OpenCode SDK startup timed out: ${diagnostics}`)); void close(); }, 60000);
+    try { await ready; } finally { clearTimeout(deadline); }
+    const session = await conversationSession(api, home);
+    return { api, subscribe, session, conversation: id => conversationSession(api, home, id), close };
+  } catch (error) { await close(); throw error; }
 }
 
 export async function conversationSession(api, home, id) {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new Error('Invalid conversation');
-  const path = join(home, `conversation-${id}.json`);
+  if (id && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw new Error('Invalid conversation');
+  const path = join(home, id ? `conversation-${id}-v2.json` : 'shappy-session-v2.json');
   try {
     const saved = JSON.parse(await readFile(path, 'utf8'));
     await api(`/session/${saved.id}`);
     return saved.id;
   } catch (error) {
-    if (error.code !== 'ENOENT' && !String(error.message).includes('(404)')) throw error;
+    if (error.code !== 'ENOENT' && error.status !== 404 && !String(error.message).includes('(404)')) throw error;
     const created = await api('/session', { title: 'Shappy' });
     await writeFile(`${path}.tmp`, JSON.stringify({ id: created.id }));
     await rename(`${path}.tmp`, path);

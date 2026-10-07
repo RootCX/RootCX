@@ -4,7 +4,7 @@ import { mkdtemp, rm, symlink, mkdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sourcePath, confined, materialize, collect, edit, validateFiles } from '../workspace.mjs';
-import { progressFor, providerError, events } from '../opencode.mjs';
+import { progressFor, providerError } from '../opencode.mjs';
 import { createBuilder } from '../server.mjs';
 import { businessReply } from '../agent.mjs';
 
@@ -61,13 +61,6 @@ test('only activity categories leave the agent, never code or reasoning', () => 
     assert.equal(progressFor({ type: 'message.part.updated', properties: { part: { type: 'tool', tool, state: { status, input: { command: 'secret' } } } } }), expected);
   }
   for (const [status, expected] of [[402, 'AI_CREDITS_EXHAUSTED'], [401, 'AI_CONFIGURATION'], [429, 'AI_UNAVAILABLE'], [503, 'AI_UNAVAILABLE'], [400, 'BUILD_FAILED']]) assert.equal(providerError({ data: { statusCode: status } }), expected);
-});
-
-test('split SSE events preserve UTF-8 and skip heartbeats', async () => {
-  const bytes = Buffer.from(': heartbeat\n\ndata: {"text":"préparation"}\n\ndata: {"type":"done"}\n\n');
-  const body = new ReadableStream({ start(controller) { for (const byte of bytes) controller.enqueue(Uint8Array.of(byte)); controller.close(); } });
-  const received = []; for await (const event of events(body)) received.push(event);
-  assert.deepEqual(received, [{ text: 'préparation' }, { type: 'done' }]);
 });
 
 test('conversational replies remain business language', () => {

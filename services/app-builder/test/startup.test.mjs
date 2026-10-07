@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 import test from 'node:test';
 
-test('production entrypoint accepts in-memory configuration and enforces transport policy', async t => {
+test('production entrypoint accepts in-memory configuration and enforces transport policy', { skip: process.platform !== 'linux' }, async t => {
   const config = { token: 'a'.repeat(32), apiKey: 'provider-private-value', model: 'test-model', endpoint: 'http://host.docker.internal:4178/api/llm/v1/messages' };
   for (const local of [false, true]) {
     const child = spawn(process.execPath, ['server.mjs', '--config-stdin'], {

@@ -1,12 +1,12 @@
 // Deploy separately from Core, behind TLS, with independently backed persistent storage.
-import { createServer } from 'node:http';
+import { serviceServer } from './service-server.mjs';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { open, mkdir, link, unlink, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-export function backupReceiver({ token, directory }) {
+export function backupReceiver({ token, directory, tls }) {
   if (!token || token.length < 32 || !directory) throw new Error('Backup receiver configuration incomplete');
-  return createServer(async (req, res) => {
+  return serviceServer(async (req, res) => {
     const reply = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
     if (req.method === 'GET' && req.url === '/health') return reply(200, { ready: true });
     const actual = Buffer.from(req.headers.authorization ?? '');
@@ -53,7 +53,7 @@ export function backupReceiver({ token, directory }) {
       await file?.close();
       await unlink(staging).catch(() => {});
     }
-  });
+  }, tls);
 }
 
 if (import.meta.url === new URL(process.argv[1], 'file:').href) {

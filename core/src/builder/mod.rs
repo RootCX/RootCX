@@ -111,11 +111,7 @@ async fn import(
             .trim()
             .to_string();
         pipeline::backup(
-            &reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .unwrap(),
+            &pipeline::http_client(std::time::Duration::from_secs(120))?,
             &root,
             &app,
             &commit,
@@ -152,11 +148,7 @@ async fn import(
         let commit = files::commit(&temp, "Import application sources").await?;
         tokio::fs::rename(&temp, &root).await.map_err(files::io)?;
         pipeline::backup(
-            &reqwest::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .unwrap(),
+            &pipeline::http_client(std::time::Duration::from_secs(120))?,
             &root,
             &app,
             &commit,

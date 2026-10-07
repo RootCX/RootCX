@@ -2,7 +2,7 @@ import { businessText, narrator } from './narrator.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { collect, validateFiles } from './workspace.mjs';
 import { build } from './sandbox.mjs';
-import { closeEngine, engine, events, progressFor, providerError } from './opencode.mjs';
+import { closeEngine, engine, progressFor, providerError } from './opencode.mjs';
 
 export async function code({ root, appId, prompt, conversationId, signal, config, onProgress = () => {}, compile = build }) {
   const initial = await collect(root);
@@ -11,12 +11,10 @@ export async function code({ root, appId, prompt, conversationId, signal, config
   const session = await runtime.conversation(conversationId);
   const streamController = new AbortController();
   const combined = AbortSignal.any([signal, streamController.signal]);
-  const response = await fetch(`${runtime.url}/event`, { headers: runtime.headers, signal: combined });
-  if (!response.ok) throw new Error('OpenCode events unavailable');
   const voice = narrator({ config, prompt, signal, onProgress });
   let skillLoaded = false;
   async function observeProgress() {
-    for await (const event of events(response.body)) {
+    for await (const event of runtime.subscribe(combined)) {
       const part = event.properties?.part;
       if ((part?.sessionID ?? event.properties?.sessionID) !== session) continue;
       if (part?.type === 'tool' && part.tool === 'skill' && part.state?.input?.name === 'rootcx' && part.state.status === 'completed') skillLoaded = true;
@@ -37,7 +35,7 @@ export async function code({ root, appId, prompt, conversationId, signal, config
   }
   signal.addEventListener('abort', abort, { once: true });
   try {
-    let request = `Use the rootcx skill for this request. The files in /workspace are the current published sources; they supersede previous session edits. Application: ${appId}. User request: ${prompt}`;
+    let request = `Use the rootcx skill for this request. The files in the current workspace are the current published sources; they supersede previous session edits. Application: ${appId}. User request: ${prompt}`;
     for (let attempt = 0; attempt < 3; attempt++) {
       const result = await Promise.race([
         runtime.api(`/session/${session}/message`, {

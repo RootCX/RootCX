@@ -1,4 +1,4 @@
-import { createServer } from 'node:http';
+import { serviceServer } from './service-server.mjs';
 import { timingSafeEqual } from 'node:crypto';
 import { mkdtemp, mkdir, rm, readdir, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -12,7 +12,7 @@ export function createBuilder(config, coding = code) {
   let active = 0;
   const workspaces = new Map();
   const activeApps = new Set();
-  const server = createServer(async (req, res) => {
+  const server = serviceServer(async (req, res) => {
     function respond(status, body) {
       if (res.destroyed) return;
       res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
@@ -101,7 +101,7 @@ export function createBuilder(config, coding = code) {
         }
       }
     }
-  });
+  }, config.tls);
   server.on('close', () => { for (const path of workspaces.values()) { void closeEngine(path); forgetDependencies(path); } });
   return server;
 }
@@ -129,7 +129,13 @@ if (import.meta.url === new URL(process.argv[1], 'file:').href) {
   if ((endpoint.protocol !== 'https:' && !localHttp) || endpoint.username || endpoint.password) throw new Error('Coding endpoint must use HTTPS');
   // Refuse readiness if the host cannot enforce the sandbox. Never silently run builds on the host.
   const probe = await mkdtemp(join(tmpdir(), 'rootcx-probe-'));
-  try { await isolated(probe, ['node', '-e', 'process.exit(0)']); } finally { await rm(probe, { recursive: true, force: true }); }
+  try {
+    await isolated(probe, ['node', '-e', 'process.exit(0)']);
+    await isolated(probe, ['node', '-e', 'process.exit(0)'], { network: true });
+  } finally {
+    await rm(probe, { recursive: true, force: true });
+    await rm(`${probe}.sandbox`, { recursive: true, force: true });
+  }
   const server = createBuilder(config);
   server.requestTimeout = 60_000;
   server.headersTimeout = 15_000;
