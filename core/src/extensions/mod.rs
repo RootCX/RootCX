@@ -46,6 +46,13 @@ pub trait RuntimeExtension: Send + Sync {
         Ok(())
     }
 
+    /// Called instead of `on_table_created` for a derived entity (ADR 0012): an
+    /// extension that attaches a row trigger in `on_table_created` drops it here,
+    /// so an entity that became derived loses what an earlier install attached.
+    async fn on_derived_table(&self, _pool: &PgPool, _schema: &str, _table: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+
     async fn on_app_installed(&self, _pool: &PgPool, _manifest: &AppManifest, _installed_by: Uuid) -> Result<(), RuntimeError> {
         Ok(())
     }

@@ -25,6 +25,7 @@ fn field(name: &str, required: bool) -> FieldContract {
 fn contacts(indexes: Vec<IndexContract>) -> Vec<EntityContract> {
     vec![EntityContract {
             share: None,
+            derived_from: None,
         entity_name: "contacts".into(),
         fields: vec![
             field("first_name", true), field("last_name", true),

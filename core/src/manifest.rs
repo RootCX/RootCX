@@ -109,7 +109,11 @@ pub async fn install_app(
         if !manifest.data_contract.is_empty() {
             for ext in extensions {
                 for entity in &manifest.data_contract {
-                    ext.on_table_created(pool, manifest, app_id, &entity.entity_name).await?;
+                    if entity.is_derived() {
+                        ext.on_derived_table(pool, app_id, &entity.entity_name).await?;
+                    } else {
+                        ext.on_table_created(pool, manifest, app_id, &entity.entity_name).await?;
+                    }
                 }
             }
 
@@ -246,7 +250,9 @@ fn generate_create_table(app_id: &str, entity: &EntityContract, pk_types: &HashM
 
     let mut columns: Vec<String> = Vec::new();
 
-    let has_id = entity.fields.iter().any(|f| f.name == "id");
+    // A derived entity is rebuilt by its app and never reached by id: it gets
+    // exactly the columns it declares (ADR 0012).
+    let has_id = entity.is_derived() || entity.fields.iter().any(|f| f.name == "id");
     if !has_id {
         columns.push("\"id\" UUID PRIMARY KEY DEFAULT gen_random_uuid()".to_string());
     }
@@ -258,8 +264,10 @@ fn generate_create_table(app_id: &str, entity: &EntityContract, pk_types: &HashM
         columns.push(field_to_column(field, pk_types));
     }
 
-    columns.push("\"created_at\" TIMESTAMPTZ NOT NULL DEFAULT now()".to_string());
-    columns.push("\"updated_at\" TIMESTAMPTZ NOT NULL DEFAULT now()".to_string());
+    if !entity.is_derived() {
+        columns.push("\"created_at\" TIMESTAMPTZ NOT NULL DEFAULT now()".to_string());
+        columns.push("\"updated_at\" TIMESTAMPTZ NOT NULL DEFAULT now()".to_string());
+    }
 
     format!("CREATE TABLE IF NOT EXISTS {} (\n  {}\n)", table_name, columns.join(",\n  "))
 }
@@ -394,8 +402,25 @@ async fn load_entity(
     Ok(m.data_contract.into_iter().find(|e| e.entity_name == entity))
 }
 
+/// The entity as every path other than its app's worker SQL reaches it: the CRUD
+/// routes, the worker's collection API, the agent data tools, publications and
+/// cross-app operations all resolve it here. A derived entity is internal to its
+/// app (ADR 0012), so it is refused once, here, rather than at each of them.
+async fn load_reachable_entity(
+    pool: &PgPool,
+    app_id: &str,
+    entity: &str,
+) -> Result<Option<EntityContract>, crate::RuntimeError> {
+    match load_entity(pool, app_id, entity).await? {
+        Some(contract) if contract.is_derived() => Err(crate::RuntimeError::PermissionDenied(format!(
+            "entity '{entity}' of app '{app_id}' is derived: only the app's worker reaches it, through SQL"
+        ))),
+        found => Ok(found),
+    }
+}
+
 pub async fn entity_exists(pool: &PgPool, app_id: &str, entity: &str) -> Result<bool, crate::RuntimeError> {
-    Ok(load_entity(pool, app_id, entity).await?.is_some())
+    Ok(load_reachable_entity(pool, app_id, entity).await?.is_some())
 }
 
 /// The app's stored manifest as raw JSON, for handing back to its own worker at
@@ -417,7 +442,7 @@ pub async fn field_type_map(
     app_id: &str,
     entity: &str,
 ) -> Result<FieldTypes, crate::RuntimeError> {
-    let Some(entity) = load_entity(pool, app_id, entity).await? else {
+    let Some(entity) = load_reachable_entity(pool, app_id, entity).await? else {
         return Ok(system_field_types());
     };
     field_types(&entity).map_err(crate::RuntimeError::Invalid)
@@ -708,7 +733,75 @@ pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
             FieldType::from_field(field).map_err(RuntimeError::Invalid)?;
         }
     }
+    validate_derived_entities(manifest)?;
     crate::governance::row_access::validate_sql_declarations(manifest)
+}
+
+/// A derived entity is a table internal to its app, rebuilt by its worker
+/// (ADR 0012). Everything that would reach its rows from outside that worker, or
+/// that assumes the system columns it does not have, is refused at install rather
+/// than failing later on a missing `id`.
+fn validate_derived_entities(manifest: &AppManifest) -> Result<(), RuntimeError> {
+    let refuse = |entity: &str, why: &str| {
+        Err(RuntimeError::Invalid(format!("derived entity '{entity}' {why}")))
+    };
+    let derived: Vec<&str> = manifest.data_contract.iter()
+        .filter(|entity| entity.is_derived())
+        .map(|entity| entity.entity_name.as_str())
+        .collect();
+    for entity in manifest.data_contract.iter().filter(|entity| entity.is_derived()) {
+        let name = entity.entity_name.as_str();
+        // Its keys are its source's: the source must be an entity of this app that
+        // carries keys, never another derived one.
+        let source = entity.keys_entity();
+        let ordinary = manifest.data_contract.iter()
+            .any(|candidate| candidate.entity_name == source && !candidate.is_derived());
+        if !ordinary {
+            return refuse(name, &format!(
+                "is derived from '{source}', which must be an ordinary entity of this app"
+            ));
+        }
+        if let Some(field) = entity.fields.iter().find(|field| is_system_field(&field.name)) {
+            return refuse(name, &format!("cannot declare '{}': it has no system columns", field.name));
+        }
+        if entity.share.is_some() {
+            return refuse(name, "cannot be shared");
+        }
+        if entity.identity_kind.is_some() || entity.identity_key.is_some() {
+            return refuse(name, "cannot carry an identity");
+        }
+        if entity.fields.iter().any(|field| field.owner) {
+            return refuse(name, "cannot have an owner");
+        }
+        if entity.fields.iter().any(|field| field.sensitive) {
+            return refuse(name, "cannot have sensitive fields: only its own worker reads it");
+        }
+    }
+    for entity in &manifest.data_contract {
+        for field in entity.fields.iter().filter(|field| field.field_type == "entity_link") {
+            let Some(refs) = &field.references else { continue };
+            if let RefTarget::Local(target) = parse_entity_ref(&refs.entity)
+                && derived.contains(&target.as_str())
+            {
+                return refuse(&target, &format!(
+                    "cannot be linked to: '{}.{}' would need an id it does not have",
+                    entity.entity_name, field.name
+                ));
+            }
+        }
+    }
+    if let Some(surface) = &manifest.public {
+        // A publication may name another app's entity; only this app's count here.
+        let own = |app: &Option<String>| app.as_deref().is_none_or(|app| app == manifest.app_id);
+        let exposed = surface.collections.iter().map(|c| c.entity.as_str())
+            .chain(surface.publications.iter().filter(|p| own(&p.app)).map(|p| p.entity.as_str()));
+        for entity in exposed {
+            if derived.contains(&entity) {
+                return refuse(entity, "cannot be exposed by the public surface");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Boot replays access declarations, not historical column types, checks or indexes.
@@ -887,7 +980,7 @@ mod tests {
     }
 
     fn entity(name: &str, fields: Vec<FieldContract>) -> EntityContract {
-        EntityContract { entity_name: name.to_string(), fields, share: None, identity_kind: None, identity_key: None, indexes: vec![], checks: vec![], unknown: Default::default() }
+        EntityContract { entity_name: name.to_string(), fields, share: None, identity_kind: None, identity_key: None, indexes: vec![], checks: vec![], derived_from: None, unknown: Default::default() }
     }
 
     /// Every reserved suffix is refused on the action segment, whole, and nowhere
@@ -1505,6 +1598,95 @@ mod tests {
             entity("accounts", vec![field("name", "text")]),
         ]);
         assert!(validate_manifest(&m).is_ok());
+    }
+
+    /// An entity derived from `article`, the ordinary entity `with_source` adds.
+    fn derived(name: &str, fields: Vec<FieldContract>) -> EntityContract {
+        EntityContract { derived_from: Some("article".into()), ..entity(name, fields) }
+    }
+
+    fn with_source(entities: Vec<EntityContract>) -> AppManifest {
+        let mut all = vec![entity("article", vec![field("designation", "text")])];
+        all.extend(entities);
+        manifest_with(all)
+    }
+
+    /// A derived table carries exactly what it declares: no `id`, no timestamps,
+    /// because nothing reaches its rows by id and nothing edits them (ADR 0012).
+    #[test]
+    fn a_derived_table_has_only_its_declared_columns() {
+        let postings = derived("word_posting", vec![field("word_no", "number"), field("doc_no", "number")]);
+        let ddl = generate_create_table("kova", &postings, &build_pk_type_map(std::slice::from_ref(&postings)));
+        assert!(ddl.contains("\"word_no\" DOUBLE PRECISION") && ddl.contains("\"doc_no\" DOUBLE PRECISION"), "{ddl}");
+        for system in ["\"id\"", "\"created_at\"", "\"updated_at\""] {
+            assert!(!ddl.contains(system), "a derived table must not get {system}: {ddl}");
+        }
+        let ordinary = entity("notes", vec![field("body", "text")]);
+        let ddl = generate_create_table("kova", &ordinary, &build_pk_type_map(std::slice::from_ref(&ordinary)));
+        assert!(ddl.contains("\"id\" UUID PRIMARY KEY") && ddl.contains("\"updated_at\""), "{ddl}");
+    }
+
+    /// Everything that would reach a derived row from outside its worker, or that
+    /// assumes the system columns it lacks, is refused at install with the reason.
+    #[test]
+    fn install_refuses_what_a_derived_entity_cannot_be() {
+        let mut owner = field("owner_id", "entity_link");
+        owner.owner = true;
+        owner.references = Some(FieldReference { entity: "core:users".into(), field: "id".into() });
+        let mut secret = field("secret", "text");
+        secret.sensitive = true;
+        let mut link = field("posting_id", "entity_link");
+        link.references = Some(FieldReference { entity: "word_posting".into(), field: "id".into() });
+        let postings = || derived("word_posting", vec![field("word_no", "number")]);
+        let cases: Vec<(&str, AppManifest, &str)> = vec![
+            ("system field", with_source(vec![derived("word_posting", vec![field("id", "uuid")])]), "no system columns"),
+            ("identity", with_source(vec![EntityContract {
+                identity_kind: Some("word".into()), identity_key: Some("word_no".into()), ..postings()
+            }]), "cannot carry an identity"),
+            ("owner", with_source(vec![derived("word_posting", vec![owner])]), "cannot have an owner"),
+            ("sensitive", with_source(vec![derived("word_posting", vec![secret])]), "cannot have sensitive fields"),
+            ("link target", with_source(vec![postings(), entity("notes", vec![link])]), "cannot be linked to"),
+            ("public surface", {
+                let mut manifest = with_source(vec![postings()]);
+                manifest.public = Some(serde_json::from_value(serde_json::json!({
+                    "collections": [{ "entity": "word_posting", "actions": ["read"] }]
+                })).expect("public surface"));
+                manifest
+            }, "cannot be exposed by the public surface"),
+        ];
+        for (label, manifest, expected) in cases {
+            let error = validate_manifest(&manifest).expect_err(label).to_string();
+            assert!(error.contains("derived entity") && error.contains(expected), "{label}: {error}");
+        }
+    }
+
+    /// A derived entity borrows the permission keys of an ordinary entity of its
+    /// own app, never of another derived one.
+    #[test]
+    fn derived_from_names_an_ordinary_local_entity() {
+        let from = |source: &str| EntityContract {
+            derived_from: Some(source.into()),
+            ..entity("article_word", vec![field("word", "text")])
+        };
+        validate_manifest(&with_source(vec![from("article")])).expect("an ordinary local source installs");
+        for (label, manifest, expected) in [
+            ("missing", with_source(vec![from("nowhere")]), "must be an ordinary entity"),
+            ("derived source", with_source(vec![
+                derived("cache", vec![field("word", "text")]), from("cache"),
+            ]), "must be an ordinary entity"),
+        ] {
+            let error = validate_manifest(&manifest).expect_err(label).to_string();
+            assert!(error.contains(expected), "{label}: {error}");
+        }
+    }
+
+    /// A derived row may point at the records it was computed from.
+    #[test]
+    fn a_derived_entity_may_link_to_an_ordinary_one() {
+        let mut article = field("article_id", "entity_link");
+        article.references = Some(FieldReference { entity: "article".into(), field: "id".into() });
+        let manifest = with_source(vec![derived("article_word", vec![field("word_no", "number"), article])]);
+        validate_manifest(&manifest).expect("a derived entity linking to an ordinary one installs");
     }
 
     #[test]
