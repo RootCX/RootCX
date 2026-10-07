@@ -8,6 +8,24 @@ Releases marked **Breaking** need the matching guide in
 
 ## Unreleased
 
+## 0.31.0 - 2026-10-07
+
+See [ADR 0012](docs/adr/0012-derived-entities.md). Built from 0.30.0; no other
+change.
+
+- An entity declared with `"derivedFrom": "<entity>"` is a derived entity: a
+  table its app's worker rebuilds from that ordinary entity of the same app,
+  such as a search index. Core adds no `id`, `created_at` or `updated_at`,
+  attaches neither the audit nor the hooks trigger (and drops them if an earlier
+  install attached them), and guards its row-level security with the source's
+  permission keys, minting no keys of its own.
+- A derived entity is reachable only through its app worker's SQL: the CRUD
+  routes, the worker's collection API, agent data tools, publications and
+  cross-app operations refuse it with 403. Installation refuses a derived entity
+  whose source is missing or derived, that declares system fields, is shared,
+  carries an identity, an owner or sensitive fields, is the target of an
+  `entity_link`, or is exposed by the public surface.
+
 ## 0.30.0 - 2026-09-23 - Breaking
 
 See [ADR 0010](docs/adr/0010-governed-declarative-rules.md) and the updated
