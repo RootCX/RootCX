@@ -107,7 +107,8 @@ async fn reconcile(conn: &mut PgConnection, manifest: &AppManifest) -> Result<()
         let approved_read = manifest.actions.iter()
             .filter_map(|a| a.authority.as_ref().and_then(|authority| authority.data.get(table)))
             .any(|operations| operations.contains(&rootcx_types::DataOperation::Read));
-        policies::apply_table_rls(conn, schema, table, &owners, shared.as_deref(), &sensitive, approved_read).await?;
+        let guard = entities.get(table.as_str()).map_or(table.as_str(), |e| e.keys_entity());
+        policies::apply_table_rls(conn, schema, table, guard, &owners, shared.as_deref(), &sensitive, approved_read).await?;
     }
     let parents: Vec<String> = owners.values().filter_map(|(_, p)| p.clone()).collect();
     policies::prune_owner_resolvers_tx(conn, schema, &parents).await?;

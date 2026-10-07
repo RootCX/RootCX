@@ -303,8 +303,27 @@ pub struct EntityContract {
     /// installation rejects them; field enums generate Core-controlled checks.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checks: Vec<CheckContract>,
+    /// The local entity this one is recomputed from, which makes it a derived
+    /// entity (ADR 0012): a table its app's worker rebuilds, with no implicit
+    /// columns, no audit or hooks trigger, reachable only through the worker's SQL,
+    /// and guarded by the source's permission keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub derived_from: Option<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub unknown: UnknownKeys,
+}
+
+impl EntityContract {
+    /// A table its app recomputes from another entity rather than a record anyone edits.
+    pub fn is_derived(&self) -> bool {
+        self.derived_from.is_some()
+    }
+
+    /// The entity whose permission keys guard this one: its source when derived
+    /// (whoever may read the articles may read their index), itself otherwise.
+    pub fn keys_entity(&self) -> &str {
+        self.derived_from.as_deref().unwrap_or(&self.entity_name)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

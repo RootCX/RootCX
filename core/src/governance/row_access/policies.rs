@@ -19,10 +19,12 @@ use super::plan::{LinkFacts, OwnerFacts, TableFacts};
 ///
 /// The whole plan is computed before its first statement runs, so a contract that
 /// cannot compile aborts without having applied any of it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_table_rls(
     conn: &mut PgConnection,
     schema: &str,
     table: &str,
+    guard: &str,
     owners: &OwnerMap,
     shared: Option<&str>,
     sensitive: &[String],
@@ -32,7 +34,7 @@ pub(crate) async fn apply_table_rls(
         columns: columns(conn, schema, table).await?,
         owner: owner_facts(conn, schema, table, owners).await?,
     };
-    for statement in super::plan::table_rls(schema, table, &facts, shared, sensitive, approved_read)? {
+    for statement in super::plan::table_rls(schema, table, guard, &facts, shared, sensitive, approved_read)? {
         exec(conn, &statement).await?;
     }
     Ok(())

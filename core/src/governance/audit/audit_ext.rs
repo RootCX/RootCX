@@ -198,6 +198,14 @@ impl RuntimeExtension for AuditExtension {
         exec(pool, &sql).await
     }
 
+    /// A derived entity is recomputed from audited sources: auditing it would
+    /// record the rebuild of an index, one JSON row per indexed row (ADR 0012).
+    async fn on_derived_table(&self, pool: &PgPool, schema: &str, table: &str) -> Result<(), RuntimeError> {
+        let sql =
+            format!("SELECT rootcx_system.disable_tracking('{}.{}'::regclass)", quote_ident(schema), quote_ident(table));
+        exec(pool, &sql).await
+    }
+
     fn routes(&self) -> Option<Router<SharedRuntime>> {
         Some(Router::new().route("/api/v1/audit", get(list_audit_events)))
     }
