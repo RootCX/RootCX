@@ -8,6 +8,10 @@ use crate::routes::{self, SharedRuntime};
 const MAX_UPLOAD_BYTES: usize = 50 * 1024 * 1024;
 
 pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    let worker_listener = runtime.worker_storage_listener.lock().unwrap_or_else(|e| e.into_inner()).take();
+    #[cfg(unix)]
+    let worker_router = crate::extensions::storage::worker_routes().with_state(runtime.clone());
     let mut router = Router::new()
         .route("/health", get(routes::health))
         .route("/ready", get(routes::ready))
@@ -94,5 +98,12 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
     let bind = if std::env::var("ROOTCX_BIND").is_ok() { "0.0.0.0" } else { "127.0.0.1" };
     let listener = tokio::net::TcpListener::bind(format!("{bind}:{port}")).await?;
     tracing::info!(port = port, bind = bind, "runtime HTTP server listening");
+    #[cfg(unix)]
+    if let Some(worker_listener) = worker_listener {
+        return tokio::select! {
+            result = axum::serve(listener, router) => result,
+            result = axum::serve(worker_listener, worker_router) => result,
+        };
+    }
     axum::serve(listener, router).await
 }

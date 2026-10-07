@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -2019,27 +2018,15 @@ async fn spawn_worker(
     let bin = &config.js_runtime;
     info!(app_id = %config.app_id, bin = %bin.display(), entry = %config.entry_point.display(), "spawning worker");
 
-    let mut cmd = Command::new(bin);
-    // Phase 0a: empty the environment, then add back ONLY the strict allow-list
-    // (`sandbox_env`). The worker must never inherit DATABASE_URL /
-    // ROOTCX_JWT_SECRET / etc — the sandbox's central claim, asserted executably
-    // by the governance contract suite (Category 4).
-    cmd.env_clear()
-        .arg("--preload")
-        .arg(&config.prelude_path)
-        .arg(&config.entry_point)
-        .current_dir(&config.working_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .envs(if approved {
-            vec![
-                ("ROOTCX_APP_ID".into(), config.app_id.clone()),
-                ("ROOTCX_RUNTIME_URL".into(), config.runtime_url.clone()),
-            ]
-        } else {
-            sandbox_env(&config.app_id, &config.runtime_url, &config.credentials)
-        });
+    let env = if approved {
+        vec![
+            ("ROOTCX_APP_ID".into(), config.app_id.clone()),
+            ("ROOTCX_RUNTIME_URL".into(), config.runtime_url.clone()),
+        ]
+    } else {
+        sandbox_env(&config.app_id, &config.runtime_url, &config.credentials)
+    };
+    let mut cmd = crate::worker_sandbox::command(config, env)?;
 
     // Preserve the usual Unix privilege drop when Core is already root.
     // Nonroot deployments keep their process identity.

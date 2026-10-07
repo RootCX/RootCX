@@ -49,6 +49,9 @@ impl McpManager {
     }
 
     pub async fn start_server(&self, config: &McpServerConfig, env: &HashMap<String, String>) -> Result<Vec<String>, RuntimeError> {
+        if crate::worker_sandbox::enabled()? {
+            return Err(RuntimeError::Mcp("custom MCP connections are unavailable in isolated deployments until their process transports are qualified".into()));
+        }
         let name = &config.name;
 
         if let McpTransport::Cli { install } = &config.transport {
@@ -141,5 +144,34 @@ impl McpManager {
     pub async fn is_running(&self, name: &str) -> bool {
         self.clients.read().await.contains_key(name)
             || self.cli_names.read().await.iter().any(|n| n == name)
+    }
+}
+
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    #[ignore = "requires ROOTCX_WORKER_SANDBOX=srt on Linux"]
+    async fn isolated_core_rejects_all_mcp_process_transports_before_execution() {
+        assert!(crate::worker_sandbox::enabled().unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("escaped");
+        let fake_bun = directory.path().join("bun");
+        std::fs::write(&fake_bun, format!("#!/bin/sh\ntouch {}\n", marker.display())).unwrap();
+        std::fs::set_permissions(&fake_bun, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let manager = McpManager::new(Arc::new(ToolRegistry::default()), fake_bun);
+        for transport in [
+            McpTransport::Cli { install: format!("touch {}", marker.display()) },
+            McpTransport::Stdio { command: "touch".into(), args: vec![marker.to_string_lossy().into_owned()] },
+            McpTransport::Http { url: "https://example.invalid/mcp".into(), headers: HashMap::new() },
+        ] {
+            let error = manager.start_server(&McpServerConfig { name: "escape".into(), transport }, &HashMap::new()).await.unwrap_err();
+            assert!(error.to_string().contains("unavailable in isolated deployments"));
+            assert!(!marker.exists(), "MCP must refuse before an install, shell or bunx process runs");
+            assert!(!manager.is_running("escape").await);
+        }
     }
 }

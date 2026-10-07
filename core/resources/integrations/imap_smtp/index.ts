@@ -3,6 +3,8 @@ import { ImapFlow } from "imapflow";
 import { createTransport } from "nodemailer";
 import MailComposer from "nodemailer/lib/mail-composer";
 import PostalMime from "postal-mime";
+import * as socks from "socks";
+import { imapProxySocket, mailProxy } from "./sandbox-proxy";
 
 const MAX_THROTTLE = 5;
 const FETCH_CONCURRENCY = 10;
@@ -54,25 +56,27 @@ async function runAction(ctx: RootCxCtx, action: string, input: Record<string, u
 }
 
 async function withImap<T>(creds: Creds, fn: (client: ImapFlow) => Promise<T>): Promise<T> {
+  const socket = await imapProxySocket(creds.imapHost, creds.imapPort || 993);
   const client = new ImapFlow({
     host: creds.imapHost, port: creds.imapPort, secure: true,
     auth: { user: creds.username, pass: creds.password },
-    logger: false, tls: { rejectUnauthorized: true },
+    logger: false, tls: { rejectUnauthorized: true, ...(socket ? { socket } : {}) },
     greetingTimeout: 16_000, socketTimeout: 30_000,
   });
-  await client.connect();
-  try { return await fn(client); }
-  finally { await client.logout().catch(() => {}); }
+  try { await client.connect(); return await fn(client); }
+  finally { await client.logout().catch(() => {}); socket?.destroy(); }
 }
 
 async function sendEmail(creds: Creds, input: any, userId: string, ctx: RootCxCtx) {
   const { to, subject, body, cc, bcc, html } = input;
   const transport = createTransport({
     host: creds.smtpHost, port: 587, secure: false,
+    proxy: mailProxy(),
     requireTLS: true,
     auth: { user: creds.username, pass: creds.password },
     tls: { rejectUnauthorized: true },
   });
+  transport.set("proxy_socks_module", socks);
   const mailOptions: any = {
     from: creds.username, to, subject,
     ...(cc ? { cc } : {}), ...(bcc ? { bcc } : {}),

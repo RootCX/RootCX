@@ -123,6 +123,9 @@ fn safe_unpack(bytes: &[u8], dest: &std::path::Path) -> Result<(), ApiError> {
 
 async fn install_deps(bun_bin: &Path, dir: &Path) -> Result<(), ApiError> {
     info!(bin = %bun_bin.display(), dir = %dir.display(), "installing dependencies");
+    if crate::worker_sandbox::enabled()? {
+        return crate::worker_sandbox::install_dependencies(bun_bin, dir).await.map_err(Into::into);
+    }
     let out = tokio::time::timeout(std::time::Duration::from_secs(120), tokio::process::Command::new(bun_bin)
         // An archive is untrusted even when an operator may deploy it. Package
         // scripts must not regain the Core authority removed from app migrations.

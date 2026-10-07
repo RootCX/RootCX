@@ -209,6 +209,14 @@ pub async fn uninstall_app(
     // Keep the lifecycle lock until all cleanup completes. Cleanup failures are
     // fail-closed and retryable: the committed revocation is never undone.
     let mut lifecycle = crate::governance::cross_app::lock_app_lifecycle(pool, app_id).await?;
+    let has_sources: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM rootcx_system.source_projects WHERE app_id=$1)",
+    ).bind(app_id).fetch_one(pool).await.map_err(RuntimeError::Schema)?;
+    if has_sources {
+        return Err(RuntimeError::Conflict(
+            "application has managed sources; uninstall would discard its Builder history".into(),
+        ));
+    }
     let mut tx = lifecycle.begin().await.map_err(RuntimeError::Schema)?;
     crate::governance::cross_app::deactivate_installation_tx(
         &mut tx, app_id, actor_id, "application uninstalled",

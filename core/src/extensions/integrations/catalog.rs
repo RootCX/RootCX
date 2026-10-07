@@ -94,16 +94,20 @@ pub async fn deploy_from_catalog(
     info!(id = %id, "integration copied to apps dir");
 
     if app_dir.join("package.json").exists() {
-        let out = tokio::process::Command::new(&bun_bin)
-            .arg("install")
-            .current_dir(&app_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| ApiError::Internal(format!("bun install: {e}")))?;
-        if !out.status.success() {
-            return Err(ApiError::Internal(format!("bun install: {}", String::from_utf8_lossy(&out.stderr))));
+        if crate::worker_sandbox::enabled()? {
+            crate::worker_sandbox::install_dependencies(&bun_bin, &app_dir).await?;
+        } else {
+            let out = tokio::process::Command::new(&bun_bin)
+                .arg("install")
+                .current_dir(&app_dir)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+                .await
+                .map_err(|e| ApiError::Internal(format!("bun install: {e}")))?;
+            if !out.status.success() {
+                return Err(ApiError::Internal(format!("bun install: {}", String::from_utf8_lossy(&out.stderr))));
+            }
         }
     }
 
@@ -129,9 +133,9 @@ pub async fn undeploy(
     let secrets = rt.secret_manager().clone();
     let wm = rt.worker_manager().clone();
 
-    let _ = wm.stop_app(&id).await;
-
     let manifest = super::routes::get_integration_manifest(&pool, &id).await?;
+    crate::manifest::uninstall_app(&pool, &id, Some(identity.user_id)).await?;
+    let _ = wm.stop_app(&id).await;
     let secret_map = super::routes::platform_secret_map(&manifest);
     for (_, secret_key) in &secret_map {
         let _ = secrets.delete(&pool, "_platform", secret_key).await;
@@ -160,9 +164,6 @@ pub async fn undeploy(
     .bind(format!("integration:{id}:%"))
     .execute(&pool)
     .await?;
-
-    crate::manifest::uninstall_app(&pool, &id, Some(identity.user_id)).await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
 
     if app_dir.exists() {
         tokio::fs::remove_dir_all(&app_dir).await

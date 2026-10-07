@@ -215,6 +215,89 @@ async fn uninstall_cleans_db_and_filesystem() {
 }
 
 #[tokio::test]
+async fn uninstall_with_managed_sources_preserves_data_worker_and_authority() {
+    let rt = TestRuntime::boot().await;
+    rt.install("retained", "contacts").await;
+    let record = rt.create("retained", "contacts", &json!({"first_name":"Still", "last_name":"Here"})).await;
+    let archive = make_tar_gz(&[("index.ts", b"process.stdin.resume();")]);
+    let (status, body) = rt.deploy("retained", &archive).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, worker) = rt.get_json("/api/v1/apps/retained/worker/status").await;
+    assert_eq!(status, 200, "{worker}");
+    assert_eq!(worker["status"], "running");
+    let (status, body) = rt.post_json("/api/v1/apps/retained/secrets", &json!({"key":"KEEP", "value":"preserved"})).await;
+    assert_eq!(status, 200, "{body}");
+    sqlx::query("INSERT INTO rootcx_system.source_projects(app_id,head_commit) VALUES('retained',$1)")
+        .bind("a".repeat(40)).execute(rt.pool()).await.unwrap();
+    let source_dir = rt.runtime.data_dir().join("sources/retained");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("retained.txt"), "source history remains owned by Core").unwrap();
+    let authority: Value = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(i) ORDER BY generation) FROM rootcx_system.app_installations i WHERE app_id='retained'",
+    ).fetch_one(rt.pool()).await.unwrap();
+    assert!(authority.as_array().unwrap().iter().any(|row| row["active"] == true));
+
+    for endpoint in ["/api/v1/apps/retained", "/api/v1/integrations/catalog/retained"] {
+        let (status, error) = rt.delete_json(endpoint).await;
+        assert_eq!(status, 409, "{endpoint}: {error}");
+        assert!(error["error"].as_str().unwrap().contains("managed sources"));
+        let (status, current_worker) = rt.get_json("/api/v1/apps/retained/worker/status").await;
+        assert_eq!(status, 200, "{current_worker}");
+        assert_eq!(current_worker, worker, "a refused uninstall must not stop its backend");
+    }
+    let (status, saved) = rt.get_json(&format!("/api/v1/apps/retained/collections/contacts/{}", record["id"].as_str().unwrap())).await;
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!(saved["first_name"], "Still");
+    let current_authority: Value = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(i) ORDER BY generation) FROM rootcx_system.app_installations i WHERE app_id='retained'",
+    ).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(current_authority, authority, "refusal must not revoke installation authority");
+    let secret_count: i64 = sqlx::query_scalar("SELECT count(*) FROM rootcx_system.secrets WHERE app_id='retained' AND key_name='KEEP'")
+        .fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(secret_count, 1);
+    let (_, source) = rt.get_json("/api/v1/apps/retained/sources").await;
+    assert_eq!(source["headCommit"], "a".repeat(40));
+    assert_eq!(std::fs::read_to_string(source_dir.join("retained.txt")).unwrap(), "source history remains owned by Core");
+    assert!(rt.runtime.data_dir().join("apps/retained/index.ts").is_file());
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn source_import_waits_for_uninstall_lifecycle_before_reading_or_writing_sources() {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let rt = TestRuntime::boot().await;
+    let manifest = json!({"appId":"serial_import", "name":"Serial import", "version":"1.0.0", "dataContract":[]});
+    rt.install_manifest(&manifest).await;
+    let mut lifecycle = rt.pool().acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(hashtext('serial_import'))")
+        .execute(&mut *lifecycle).await.unwrap();
+    let request = rt.client.post(rt.url("/api/v1/apps/serial_import/sources"))
+        .bearer_auth(&rt.token)
+        .json(&json!({"files":{"manifest.json":STANDARD.encode(serde_json::to_vec(&manifest).unwrap())}}));
+    let imported = tokio::spawn(async move { request.send().await.unwrap() });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted AND objid=(hashtext('serial_import')::bigint & 4294967295)::oid)",
+            ).fetch_one(rt.pool()).await.unwrap();
+            if waiting { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("source import must wait for the ongoing app lifecycle operation");
+    assert!(!rt.runtime.data_dir().join("sources/serial_import").exists());
+    // Finish the registry deletion while the uninstall's lifecycle lock is held.
+    sqlx::query("DELETE FROM rootcx_system.apps WHERE id='serial_import'")
+        .execute(&mut *lifecycle).await.unwrap();
+    sqlx::query("SELECT pg_advisory_unlock(hashtext('serial_import'))")
+        .execute(&mut *lifecycle).await.unwrap();
+    drop(lifecycle);
+    let response = imported.await.unwrap();
+    assert_eq!(response.status(), 404, "import must recheck the installation after uninstall");
+    assert!(!rt.runtime.data_dir().join("sources/serial_import").exists());
+    rt.shutdown().await;
+}
+
+#[tokio::test]
 async fn crud_create_list() {
     let rt = TestRuntime::boot().await;
     rt.install("crud", "contacts").await;
@@ -4013,5 +4096,39 @@ async fn query_pagination_no_duplicates() {
     assert_eq!(seen.len(), n, "expected {n} unique records, got {}", seen.len());
     assert_eq!(seen, ids, "paginated results don't match inserted records");
 
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn worker_storage_roundtrip_preserves_nonce_authority() {
+    let rt = TestRuntime::boot().await;
+    rt.install("storageworker", "items").await;
+    let backend = br#"
+        serve({rpc: {roundtrip: async (_params, _caller, ctx) => {
+            const id = await ctx.uploadFile('isolated bytes', 'proof.txt', 'text/plain');
+            const file = await ctx.downloadFile(id);
+            const item = await ctx.collection('items').insert({first_name:'ipc preserved',last_name:'proof'});
+            let fullCoreVisible = false;
+            if (process.env.SANDBOX_RUNTIME === '1') {
+                try { fullCoreVisible = (await fetch(ctx.runtimeUrl + '/health')).ok; } catch {}
+            }
+            return {id, text:new TextDecoder().decode(file.content), item:item.first_name,
+                isolated:process.env.SANDBOX_RUNTIME === '1', fullCoreVisible};
+        }}});
+    "#;
+    let (status, body) = rt.deploy("storageworker", &make_tar_gz(&[("index.ts", backend)])).await;
+    assert_eq!(status, 200, "{body}");
+    let (status, body) = rt.post_json("/api/v1/apps/storageworker/rpc", &json!({"method":"roundtrip"})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["text"], "isolated bytes");
+    assert_eq!(body["item"], "ipc preserved");
+    if std::env::var("ROOTCX_WORKER_SANDBOX").as_deref() == Ok("srt") {
+        assert_eq!(body["isolated"], true);
+        assert_eq!(body["fullCoreVisible"], false);
+    }
+    let app: String = sqlx::query_scalar("SELECT app_id FROM rootcx_system.files WHERE id = $1")
+        .bind(body["id"].as_str().unwrap().parse::<uuid::Uuid>().unwrap())
+        .fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(app, "storageworker");
     rt.shutdown().await;
 }

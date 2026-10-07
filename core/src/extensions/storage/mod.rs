@@ -113,11 +113,7 @@ impl RuntimeExtension for StorageExtension {
 
     fn routes(&self) -> Option<Router<SharedRuntime>> {
         Some(
-            Router::new()
-                // Nonce-authenticated upload for workers (no Identity required)
-                .route("/api/v1/storage/upload/{nonce}", post(upload_via_nonce).layer(DefaultBodyLimit::max(max_file_bytes())))
-                // Nonce-authenticated download for workers (no Identity required)
-                .route("/api/v1/storage/download/{nonce}", get(download_via_nonce))
+            worker_routes()
                 // JWT-authenticated upload for users/frontend — scoped by app_id
                 .route("/api/v1/apps/{app_id}/storage/upload", post(upload_file).layer(DefaultBodyLimit::max(max_file_bytes())))
                 // JWT-authenticated download/delete — scoped by app_id
@@ -125,6 +121,13 @@ impl RuntimeExtension for StorageExtension {
                 .merge(resumable::routes())
         )
     }
+}
+
+// The isolated worker transport exposes only existing single-use capabilities.
+pub(crate) fn worker_routes() -> Router<SharedRuntime> {
+    Router::new()
+        .route("/api/v1/storage/upload/{nonce}", post(upload_via_nonce).layer(DefaultBodyLimit::max(max_file_bytes())))
+        .route("/api/v1/storage/download/{nonce}", get(download_via_nonce))
 }
 
 fn backend() -> PostgresBackend {

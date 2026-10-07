@@ -7,6 +7,21 @@
 // side. The Rust side lives in `core/src/ipc.rs` — keep them in sync.
 
 import { AsyncLocalStorage } from "node:async_hooks";
+
+// Keep existing attachment URLs working without exposing Core's HTTP listener.
+if (process.env.ROOTCX_WORKER_STORAGE_SOCKET) {
+  const nativeFetch = globalThis.fetch;
+  const origin = new URL(process.env.ROOTCX_RUNTIME_URL).origin;
+  const socket = process.env.ROOTCX_WORKER_STORAGE_SOCKET;
+  globalThis.fetch = (input, options) => {
+    const url = new URL(input instanceof Request ? input.url : String(input));
+    if (url.origin === origin && /^\/api\/v1\/storage\/(upload|download)\/[^/]+$/.test(url.pathname)) {
+      return nativeFetch(input, { ...options, unix: socket });
+    }
+    return nativeFetch(input, options);
+  };
+}
+
 //
 // ──────────────── Architecture ────────────────
 //

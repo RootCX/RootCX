@@ -2,6 +2,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 use sqlx::PgPool;
+use sha2::{Digest, Sha256};
 use tracing::info;
 
 use crate::RuntimeError;
@@ -11,6 +12,8 @@ use crate::worker_manager::WorkerManager;
 
 const APP_ID: &str = "assistant";
 const RELEASE_URL: &str = "https://github.com/RootCX/ai-agent-base/releases/latest/download/backend.tar.gz";
+const SANDBOX_RELEASE_URL: &str = "https://github.com/RootCX/ai-agent-base/releases/download/v0.4.1/backend.tar.gz";
+const SANDBOX_RELEASE_SHA256: &str = "d32d0bf35238654308c9542b8aeced12cfccd6cdda8fe6b9af7c01c9624d8385";
 const LOCAL_OVERRIDE_ENV: &str = "ROOTCX_ASSISTANT_DIR";
 
 fn w(msg: impl std::fmt::Display) -> RuntimeError { RuntimeError::Worker(msg.to_string()) }
@@ -46,6 +49,8 @@ pub async fn seed_assistant(
     std::fs::create_dir_all(&app_dir).map_err(w)?;
 
     let env_dir = std::env::var_os(LOCAL_OVERRIDE_ENV).map(std::path::PathBuf::from);
+    let sandboxed = crate::worker_sandbox::enabled()?;
+    let bundled_dependencies = sandboxed && local_dir.is_none() && env_dir.is_none();
     if let Some(src) = local_dir.or(env_dir.as_deref()) {
         info!("seeding assistant from local override: {}", src.display());
         if !src.join("index.ts").exists() {
@@ -53,10 +58,14 @@ pub async fn seed_assistant(
         }
         copy_dir_recursive(src, &app_dir).map_err(w)?;
     } else {
-        info!("seeding assistant from {RELEASE_URL}");
-        let bytes = reqwest::get(RELEASE_URL).await.map_err(w)?
+        let release_url = if sandboxed { SANDBOX_RELEASE_URL } else { RELEASE_URL };
+        info!("seeding assistant from {release_url}");
+        let bytes = reqwest::get(release_url).await.map_err(w)?
             .error_for_status().map_err(w)?
             .bytes().await.map_err(w)?;
+        if sandboxed && hex::encode(Sha256::digest(&bytes)) != SANDBOX_RELEASE_SHA256 {
+            return Err(w("assistant release checksum mismatch"));
+        }
 
         let dest = app_dir.clone();
         tokio::task::spawn_blocking(move || {
@@ -65,13 +74,22 @@ pub async fn seed_assistant(
         }).await.map_err(w)??;
     }
 
-    if app_dir.join("package.json").exists() {
-        let out = tokio::process::Command::new(bun_bin)
-            .arg("install").current_dir(&app_dir)
-            .stdout(Stdio::piped()).stderr(Stdio::piped())
-            .output().await.map_err(w)?;
-        if !out.status.success() {
-            return Err(w(format!("bun install: {}", String::from_utf8_lossy(&out.stderr))));
+    // The pinned archive already includes its reviewed dependencies; reinstalling
+    // would replace them using the package's floating version ranges.
+    if bundled_dependencies && !app_dir.join("node_modules").is_dir() {
+        return Err(w("pinned assistant dependencies are missing"));
+    }
+    if app_dir.join("package.json").exists() && !bundled_dependencies {
+        if sandboxed {
+            crate::worker_sandbox::install_dependencies(bun_bin, &app_dir).await?;
+        } else {
+            let out = tokio::process::Command::new(bun_bin)
+                .arg("install").current_dir(&app_dir)
+                .stdout(Stdio::piped()).stderr(Stdio::piped())
+                .output().await.map_err(w)?;
+            if !out.status.success() {
+                return Err(w(format!("bun install: {}", String::from_utf8_lossy(&out.stderr))));
+            }
         }
     }
 

@@ -160,6 +160,8 @@ const REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 /// for a real customer app; the higher figure is the one to plan against, since
 /// the OOM killer counts RSS.
 const WORKER_MEMORY_BUDGET: u64 = 70 * 1024 * 1024;
+// Linux qualification measured 210 MiB for an idle assistant and its SRT proxy.
+const ISOLATED_WORKER_MEMORY_BUDGET: u64 = 256 * 1024 * 1024;
 
 /// Held back for the core process itself, its connection pool and page cache.
 const CORE_MEMORY_RESERVE: u64 = 160 * 1024 * 1024;
@@ -185,12 +187,13 @@ const MAX_EVICTION_PROBES: usize = 4;
 /// binary runs on a 512 MiB tenant and a 32 GiB one. `ROOTCX_MAX_WORKERS`
 /// overrides it for operators; an unreadable limit (dev machines, non-cgroup
 /// hosts) falls back to `default_cap`.
-fn worker_cap(limit_bytes: Option<u64>, override_env: Option<&str>, default_cap: usize) -> usize {
+fn worker_cap(limit_bytes: Option<u64>, override_env: Option<&str>, default_cap: usize, isolated: bool) -> usize {
     if let Some(n) = override_env.and_then(|v| v.trim().parse::<usize>().ok()) {
         return n.clamp(MIN_WORKERS, MAX_WORKERS);
     }
     let Some(limit) = limit_bytes else { return default_cap };
-    let budgeted = limit.saturating_sub(CORE_MEMORY_RESERVE) / WORKER_MEMORY_BUDGET;
+    let per_worker = if isolated { ISOLATED_WORKER_MEMORY_BUDGET } else { WORKER_MEMORY_BUDGET };
+    let budgeted = limit.saturating_sub(CORE_MEMORY_RESERVE) / per_worker;
     (budgeted as usize).clamp(MIN_WORKERS, MAX_WORKERS)
 }
 
@@ -283,6 +286,7 @@ impl WorkerManager {
                 cgroup_memory_limit(),
                 std::env::var("ROOTCX_MAX_WORKERS").ok().as_deref(),
                 DEFAULT_WORKER_CAP,
+                std::env::var("ROOTCX_WORKER_SANDBOX").as_deref() == Ok("srt"),
             )
         });
         info!(cap, "worker pool sized");
@@ -1361,43 +1365,50 @@ mod tests {
 
         // The default tenant plan. Small on purpose: this is the pod that a
         // single user exercising a dozen actions used to kill.
-        let micro = worker_cap(Some(512 * mib), None, DEFAULT_WORKER_CAP);
+        let micro = worker_cap(Some(512 * mib), None, DEFAULT_WORKER_CAP, false);
         assert!(
             (MIN_WORKERS..=8).contains(&micro),
             "512 MiB must yield a handful of workers, got {micro}",
         );
         assert!(
-            worker_cap(Some(8192 * mib), None, DEFAULT_WORKER_CAP) > micro,
+            worker_cap(Some(8192 * mib), None, DEFAULT_WORKER_CAP, false) > micro,
             "a larger pod must host more workers",
         );
 
         assert_eq!(
-            worker_cap(Some(64 * mib), None, DEFAULT_WORKER_CAP),
+            worker_cap(Some(64 * mib), None, DEFAULT_WORKER_CAP, false),
             MIN_WORKERS,
             "a pod too small to budget for must still host a lifecycle worker and a caller",
         );
         assert_eq!(
-            worker_cap(Some(u64::MAX), None, DEFAULT_WORKER_CAP),
+            worker_cap(Some(u64::MAX), None, DEFAULT_WORKER_CAP, false),
             MAX_WORKERS,
             "an unbounded cgroup must not produce an unbounded cap",
         );
         assert_eq!(
-            worker_cap(None, None, DEFAULT_WORKER_CAP),
+            worker_cap(None, None, DEFAULT_WORKER_CAP, false),
             DEFAULT_WORKER_CAP,
             "off cgroup (a developer machine) falls back rather than guessing",
         );
     }
 
     #[test]
+    fn isolated_assistants_reserve_the_measured_supervisor_memory() {
+        let cap = worker_cap(Some(1024 * 1024 * 1024), None, DEFAULT_WORKER_CAP, true);
+        assert_eq!(cap, 3, "one GiB must accommodate assistant, app and integration without the legacy Bun-only overcommit");
+        assert!(cap < worker_cap(Some(1024 * 1024 * 1024), None, DEFAULT_WORKER_CAP, false));
+    }
+
+    #[test]
     fn an_operator_override_wins_but_is_still_clamped() {
-        assert_eq!(worker_cap(Some(512 * 1024 * 1024), Some("40"), DEFAULT_WORKER_CAP), 40);
-        assert_eq!(worker_cap(None, Some(" 40 "), DEFAULT_WORKER_CAP), 40);
+        assert_eq!(worker_cap(Some(512 * 1024 * 1024), Some("40"), DEFAULT_WORKER_CAP, false), 40);
+        assert_eq!(worker_cap(None, Some(" 40 "), DEFAULT_WORKER_CAP, false), 40);
         assert_eq!(
-            worker_cap(None, Some("0"), DEFAULT_WORKER_CAP), MIN_WORKERS,
+            worker_cap(None, Some("0"), DEFAULT_WORKER_CAP, false), MIN_WORKERS,
             "zero would wedge the runtime shut; clamp rather than obey",
         );
         assert_eq!(
-            worker_cap(None, Some("nonsense"), DEFAULT_WORKER_CAP), DEFAULT_WORKER_CAP,
+            worker_cap(None, Some("nonsense"), DEFAULT_WORKER_CAP, false), DEFAULT_WORKER_CAP,
             "an unparseable override must not silently disable the cap",
         );
     }

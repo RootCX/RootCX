@@ -27,6 +27,7 @@ mod tool_executor;
 pub mod webhooks;
 pub mod worker;
 mod worker_manager;
+mod worker_sandbox;
 
 pub use error::RuntimeError;
 /// Worker IPC wire types exposed for the governance contract suite (Category 4):
@@ -147,9 +148,8 @@ impl Runtime {
             .await
             .map_err(RuntimeError::Database)?;
 
-        // Phase 0d: env_clear() on spawn + setuid(1001) already prevent workers
-        // from reading core secrets. remove_var was here as belt-and-suspenders
-        // but is UB in edition 2024 (not thread-safe with tokio running).
+        // Child environments are explicit. Hosted workers additionally use OS
+        // isolation; mutating the process environment here is not thread-safe.
 
         schema::bootstrap(&pool).await?;
 
@@ -175,6 +175,11 @@ impl Runtime {
         let apps_dir = self.data_dir.join("apps");
         std::fs::create_dir_all(&apps_dir).map_err(|e| RuntimeError::Worker(format!("create apps dir: {e}")))?;
 
+        let isolated_workers = worker_sandbox::enabled()?;
+        #[cfg(unix)]
+        let worker_storage_listener = if isolated_workers {
+            Some(worker_sandbox::storage_listener().await.map_err(|e| RuntimeError::Worker(format!("worker storage: {e}")))?)
+        } else { None };
         let runtime_url = format!("http://127.0.0.1:{api_port}");
         let upload_nonces = Arc::new(std::sync::Mutex::new(extensions::storage::nonce::NonceStore::default()));
         let wm = Arc::new(WorkerManager::new(
@@ -212,6 +217,8 @@ impl Runtime {
             scheduler,
             workflow_events,
             upload_nonces,
+            #[cfg(unix)]
+            worker_storage_listener: std::sync::Mutex::new(worker_storage_listener),
             runtime_url,
             resources_dir: self.resources_dir,
             data_dir: self.data_dir,
@@ -233,6 +240,8 @@ pub struct ReadyRuntime {
     scheduler: SchedulerHandle,
     workflow_events: extensions::workflows::events::WorkflowEvents,
     upload_nonces: Arc<std::sync::Mutex<extensions::storage::nonce::NonceStore>>,
+    #[cfg(unix)]
+    worker_storage_listener: std::sync::Mutex<Option<tokio::net::UnixListener>>,
     runtime_url: String,
     resources_dir: PathBuf,
     data_dir: PathBuf,

@@ -9,6 +9,7 @@
         "nodemailer": "^8.0.4",
         "postal-mime": "^2.6.1",
         "postgres": "^3.4.5",
+        "socks": "2.8.8",
       },
     },
   },

@@ -71,6 +71,9 @@ async fn import(
 ) -> Result<Json<Value>, ApiError> {
     authorize(&rt, &identity, &app).await?;
     let manifest = files::manifest(&input.files, &app)?;
+    // Uninstall must either see this source project or finish before import
+    // reads the installation and creates its repository.
+    let _lifecycle = crate::governance::cross_app::lock_app_lifecycle(rt.pool(), &app).await?;
     let installed: Option<Value> =
         sqlx::query_scalar("SELECT manifest FROM rootcx_system.apps WHERE id=$1")
             .bind(&app)
