@@ -424,6 +424,7 @@ mod tests {
     fn types_of(entity_fields: &[(&str, &str, bool)]) -> FieldTypes {
         let entity = EntityContract {
             share: None,
+            derived_from: None,
             entity_name: "account".into(),
             fields: entity_fields
                 .iter()

@@ -145,7 +145,10 @@ impl RuntimeExtension for RbacExtension {
         // custom keys the manifest declares. (A custom block used to REPLACE
         // these, leaving custom-permission apps with ungrantable, invisible
         // entity keys and deny-all data for every non-admin.)
+        // A derived entity with a source is guarded by the source's keys: keys of
+        // its own would gate nothing and only clutter the role picker (ADR 0012).
         let (mut keys, mut descs): (Vec<String>, Vec<String>) = manifest.data_contract.iter()
+            .filter(|e| !e.is_derived())
             .flat_map(|e| ENTITY_ACTIONS
                 .map(|a| (format!("app:{app_id}:{}.{a}", e.entity_name), format!("{a} {}", e.entity_name))))
             .chain(["read", "write", "trigger"].into_iter()
