@@ -14,6 +14,7 @@
 | Resource path | An explicit, bounded chain of local primary-key entity links from a readable target to the Resource |
 | Shared-read scope | A target entity's `.read.shared` permission; grants reads through active assignments without changing ownership or granting writes |
 | Sensitive field | A column withheld from the worker executor's `SELECT` privileges and omitted from generated read projections |
+| Derived entity | A table its app's worker rebuilds from an ordinary entity it names with `derivedFrom`: only declared columns, no audit or hooks trigger, reached only through the worker's SQL, guarded by its source's permission keys (ADR 0012) |
 | Row-access contract | The validated, versioned Core projection used to reconcile ownership, sharing, sensitive privileges, and RLS |
 | SQL admission | Checks on new manifest SQL declarations before DDL; existing database objects remain operator-managed and are not audited at boot |
 | Lifecycle worker | The fixed no-user worker that runs `onStart` without implicit data authority |
@@ -29,6 +30,7 @@
 The [row-access guide](docs/row-access.md) defines usage.
 [ADR 0006](docs/adr/0006-governed-row-access.md) records governed row access;
 [ADR 0007](docs/adr/0007-resource-sharing.md) adds explicit resource sharing.
+[ADR 0012](docs/adr/0012-derived-entities.md) adds derived entities.
 [Approved actions](docs/approved-actions.md) and
 [ADR 0008](docs/adr/0008-approved-actions.md) describe reviewed backend authority.
 Ordinary declared RPCs accept `invoke` or the fine action grant; approved actions

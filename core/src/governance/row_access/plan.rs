@@ -54,9 +54,14 @@ pub(super) const RLS_POLICIES: [(&str, &str, &str, &[&str]); 4] = [
 /// Every statement that brings one table's access rules to their declared state,
 /// in execution order. Idempotent: each policy is dropped before it is recreated,
 /// which is what makes a replay at boot safe.
+///
+/// `guard` names the entity whose permission keys guard the table: the table
+/// itself, or for a derived entity the entity it is computed from (ADR 0012), so
+/// that reading an index takes exactly the right to read what it indexes.
 pub(crate) fn table_rls(
     schema: &str,
     table: &str,
+    guard: &str,
     facts: &TableFacts,
     shared: Option<&str>,
     sensitive: &[String],
@@ -88,7 +93,7 @@ pub(crate) fn table_rls(
     policy(&mut out, &qt, "rootcx_rls_select_shared", "SELECT", &["USING"], shared.as_deref());
 
     for (name, command, action, clauses) in RLS_POLICIES {
-        let key = format!("app:{schema}:{table}.{action}");
+        let key = format!("app:{schema}:{guard}.{action}");
         policy(&mut out, &qt, name, command, clauses, Some(&collection_gate(&key, mine.as_deref())));
 
         // The row-scoped twin. PERMISSIVE, so Postgres ORs it with the unscoped
@@ -115,7 +120,7 @@ pub(crate) fn table_rls(
         restrictive_policy(&mut out, &qt, &format!("{name}_publication_ceiling"), command, clauses, &ceiling);
     }
 
-    let public = publication_gate(&format!("app:{schema}:{table}.read"), mine.as_deref());
+    let public = publication_gate(&format!("app:{schema}:{guard}.read"), mine.as_deref());
     policy(&mut out, &qt, "rootcx_rls_select_publication", "SELECT", &["USING"], Some(&public));
 
     // PostgreSQL row locks require UPDATE privilege and its USING predicate.
@@ -356,7 +361,7 @@ mod tests {
 
     #[test]
     fn a_sensitive_column_absent_from_the_table_is_refused() {
-        let err = table_rls("hr", "profile", &facts(&["id"], None), None, &["salary".into()], false)
+        let err = table_rls("hr", "profile", "profile", &facts(&["id"], None), None, &["salary".into()], false)
             .unwrap_err().to_string();
         assert!(err.contains("sensitive column 'hr.profile.salary' is missing"), "{err}");
     }
@@ -365,14 +370,14 @@ mod tests {
     /// withheld, and the withheld column never appears in a GRANT.
     #[test]
     fn a_sensitive_column_is_withheld_from_the_executor() {
-        let plan = table_rls("hr", "profile", &facts(&["id", "salary"], None), None, &["salary".into()], false).unwrap();
+        let plan = table_rls("hr", "profile", "profile", &facts(&["id", "salary"], None), None, &["salary".into()], false).unwrap();
         assert!(plan.contains(&r#"GRANT SELECT ("id") ON "hr"."profile" TO rootcx_app_executor"#.to_string()), "{plan:#?}");
         assert!(!plan.iter().any(|s| s.starts_with("GRANT SELECT ON")), "{plan:#?}");
     }
 
     #[test]
     fn a_table_without_sensitive_columns_is_granted_whole() {
-        let plan = table_rls("hr", "profile", &facts(&["id"], None), None, &[], false).unwrap();
+        let plan = table_rls("hr", "profile", "profile", &facts(&["id"], None), None, &[], false).unwrap();
         assert!(plan.contains(&r#"GRANT SELECT ON "hr"."profile" TO rootcx_app_executor"#.to_string()), "{plan:#?}");
     }
 
@@ -380,7 +385,7 @@ mod tests {
     /// strand it, so the `_own` twins are dropped and not recreated.
     #[test]
     fn dropping_ownership_drops_the_row_scoped_twins() {
-        let plan = table_rls("hr", "profile", &facts(&["id"], None), None, &[], false).unwrap();
+        let plan = table_rls("hr", "profile", "profile", &facts(&["id"], None), None, &[], false).unwrap();
         for (name, ..) in RLS_POLICIES {
             assert!(plan.contains(&format!(r#"DROP POLICY IF EXISTS {name}_own ON "hr"."profile""#)), "{name}");
             assert!(!plan.iter().any(|s| s.starts_with(&format!("CREATE POLICY {name}_own "))), "{name}");
@@ -391,7 +396,7 @@ mod tests {
     /// a confined read stops being indexable.
     #[test]
     fn ownership_casts_the_caller_not_the_column() {
-        let plan = table_rls("hr", "profile", &facts(&["id"], Some(direct("owner_id", "uuid"))), None, &[], false).unwrap();
+        let plan = table_rls("hr", "profile", "profile", &facts(&["id"], Some(direct("owner_id", "uuid"))), None, &[], false).unwrap();
         let own = plan.iter().find(|s| s.starts_with("CREATE POLICY rootcx_rls_select_own ")).expect("policy");
         assert!(own.contains(r#""owner_id" = (SELECT nullif(current_setting('rootcx.user_id', true), ''))::uuid"#), "{own}");
     }
@@ -407,7 +412,7 @@ mod tests {
                 resolver: "rootcx_own.hr.project".into(), pk: "id".into(), pk_type: "uuid".into(),
             }],
         };
-        let plan = table_rls("hr", "task", &facts(&["id", "project_id"], Some(owner)), None, &[], false).unwrap();
+        let plan = table_rls("hr", "task", "task", &facts(&["id", "project_id"], Some(owner)), None, &[], false).unwrap();
         let created = plan.iter().position(|s| s.starts_with("CREATE OR REPLACE FUNCTION")).expect("resolver");
         let named = plan.iter().position(|s| s.contains("rootcx_own.hr.project")
             && s.starts_with("CREATE POLICY")).expect("policy");
@@ -417,11 +422,11 @@ mod tests {
     /// An approved reader may lock a row, never write it.
     #[test]
     fn the_action_lock_never_passes_a_write_check() {
-        let plan = table_rls("hr", "profile", &facts(&["id"], None), None, &[], true).unwrap();
+        let plan = table_rls("hr", "profile", "profile", &facts(&["id"], None), None, &[], true).unwrap();
         let lock = plan.iter().find(|s| s.starts_with("CREATE POLICY rootcx_rls_action_lock ")).expect("lock");
         assert!(lock.contains("FOR UPDATE"), "{lock}");
         assert!(lock.contains("WITH CHECK (FALSE)"), "{lock}");
-        let plan = table_rls("hr", "profile", &facts(&["id"], None), None, &[], false).unwrap();
+        let plan = table_rls("hr", "profile", "profile", &facts(&["id"], None), None, &[], false).unwrap();
         assert!(!plan.iter().any(|s| s.starts_with("CREATE POLICY rootcx_rls_action_lock ")), "{plan:#?}");
     }
 
@@ -429,7 +434,7 @@ mod tests {
     /// widen a public execution, and no write is ever reachable through one.
     #[test]
     fn the_publication_ceiling_is_restrictive_and_denies_writes() {
-        let plan = table_rls("hr", "profile", &facts(&["id"], None), None, &[], false).unwrap();
+        let plan = table_rls("hr", "profile", "profile", &facts(&["id"], None), None, &[], false).unwrap();
         for (name, _, action, _) in RLS_POLICIES {
             let ceiling = plan.iter()
                 .find(|s| s.starts_with(&format!("CREATE POLICY {name}_publication_ceiling ")))
@@ -438,6 +443,19 @@ mod tests {
             if action != "read" {
                 assert!(ceiling.contains("(FALSE)"), "{ceiling}");
             }
+        }
+    }
+
+    /// A derived table is guarded by the keys of the entity it is computed from:
+    /// reading an index takes the right to read what it indexes, and no key of
+    /// its own gates anything (ADR 0012).
+    #[test]
+    fn a_derived_table_is_guarded_by_its_source_keys() {
+        let plan = table_rls("shop", "article_word", "article", &facts(&["word", "article_id"], None), None, &[], false).unwrap();
+        for (name, _, action, _) in RLS_POLICIES {
+            let policy = plan.iter().find(|s| s.starts_with(&format!("CREATE POLICY {name} "))).unwrap_or_else(|| panic!("{name}"));
+            assert!(policy.contains(&format!("'app:shop:article.{action}'")), "{policy}");
+            assert!(!policy.contains("article_word."), "{policy}");
         }
     }
 }

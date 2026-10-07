@@ -292,6 +292,21 @@ impl RuntimeExtension for HooksExtension {
         )
         .await?;
 
+        // Its inverse, named the same way: a derived entity carries no hooks trigger.
+        exec(
+            pool,
+            r#"
+            CREATE OR REPLACE FUNCTION rootcx_system.disable_hooks(target_table REGCLASS)
+            RETURNS VOID AS $$
+            DECLARE trigger_name TEXT;
+            BEGIN
+                trigger_name := regexp_replace('hooks_' || target_table::TEXT, '[^a-zA-Z0-9_]', '_', 'g');
+                EXECUTE format('DROP TRIGGER IF EXISTS %I ON %s', trigger_name, target_table::TEXT);
+            END;
+            $$ LANGUAGE plpgsql"#,
+        )
+        .await?;
+
         info!("hooks extension ready");
         Ok(())
     }
@@ -305,6 +320,17 @@ impl RuntimeExtension for HooksExtension {
     ) -> Result<(), RuntimeError> {
         let sql = format!(
             "SELECT rootcx_system.enable_hooks('{}.{}'::regclass)",
+            quote_ident(schema),
+            quote_ident(table)
+        );
+        exec(pool, &sql).await
+    }
+
+    /// Hooks react to edits of records. A derived row is recomputed by its app,
+    /// never edited, and a lookup per indexed row would slow every rebuild.
+    async fn on_derived_table(&self, pool: &PgPool, schema: &str, table: &str) -> Result<(), RuntimeError> {
+        let sql = format!(
+            "SELECT rootcx_system.disable_hooks('{}.{}'::regclass)",
             quote_ident(schema),
             quote_ident(table)
         );
@@ -648,6 +674,7 @@ mod tests {
     fn manifest_with(entity: &str, fields: &[(&str, bool)]) -> rootcx_types::AppManifest {
         let entity = rootcx_types::EntityContract {
             share: None,
+            derived_from: None,
             entity_name: entity.into(),
             fields: fields
                 .iter()
