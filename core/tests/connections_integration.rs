@@ -429,8 +429,14 @@ async fn managed_google_configuration_and_cancelled_callback_stay_server_owned()
     assert!(!start.to_string().contains("fixture-google-secret"));
     assert!(!integrations.to_string().contains("fixture-google-secret"));
     let state = &params["state"];
-    let (code, _) = rt.get_json(&format!("/api/v1/integrations/auth/callback?error=access_denied&state={state}")).await;
-    assert_eq!(code, StatusCode::OK);
+    let callback = rt.client.get(rt.url(&format!("/api/v1/integrations/auth/callback?error=access_denied&state={state}"))).send().await.unwrap();
+    assert_eq!(callback.status(), StatusCode::OK);
+    let html = callback.text().await.unwrap();
+    assert!(html.contains("Connexion non terminée"));
+    assert!(html.contains("/shapp/companies"));
+    assert!(!html.contains("window.close"));
+    assert!(!html.contains("Connexion réussie"));
+    assert!(!html.contains("fixture-google-secret"));
     let attempt = start["attemptId"].as_str().unwrap();
     let (code, receipt) = rt.request_as(Method::GET, &format!("/api/v1/integrations/google_drive/auth/attempts/{attempt}"), &member, None).await;
     assert_eq!(code, StatusCode::OK);

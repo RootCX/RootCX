@@ -155,7 +155,7 @@ pub async fn callback(
     sqlx::query("UPDATE rootcx_system.integration_oauth_attempts SET status = $2 WHERE id = $1")
         .bind(&attempt_hash).bind(status).execute(&pool).await?;
     if outcome.is_err() {
-        return Ok(Html("<!doctype html><html><body><h2>Connection not completed</h2><p>Return to SHAPP to try again.</p><script>window.close()</script></body></html>".into()));
+        return Ok(Html(callback_html(&pending.integration_id, &pending.callback_url, Some((status, "Authorization was not completed")))));
     }
     Ok(Html(callback_html(&pending.integration_id, &pending.callback_url, None)))
 }
@@ -274,7 +274,7 @@ async fn try_auto_sync_connect(
 }
 
 fn callback_html(integration_id: &str, callback_url: &str, error: Option<(&str, &str)>) -> String {
-    if super::managed::enabled(integration_id) && error.is_none() {
+    if super::managed::enabled(integration_id) {
         // Use the server-owned OAuth callback origin, never a user-provided redirect.
         let return_url = url::Url::parse(callback_url)
             .ok().filter(|url| matches!(url.scheme(), "http" | "https"))
@@ -282,7 +282,16 @@ fn callback_html(integration_id: &str, callback_url: &str, error: Option<(&str, 
             .map(|url| url.to_string()).unwrap_or_else(|| "/".into());
         let return_url = return_url.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
         let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let cancelled = error.is_some();
         return include_str!("callback-assets/connected.html")
+            .replace("{{TITLE}}", if cancelled { "Connexion non terminée" } else { "Google Drive connecté" })
+            .replace("{{HEADING}}", if cancelled { "Google Drive n’est pas encore connecté." } else { "Google Drive rejoint votre espace SHAPP." })
+            .replace("{{DESCRIPTION}}", if cancelled { "La connexion n’a pas été activée. Retournez dans votre application pour réessayer." } else { "Votre compte est connecté. Retrouvez-le dans les intégrations de votre application." })
+            .replace("{{RESULT}}", if cancelled { "Connexion non terminée" } else { "Connexion réussie" })
+            .replace("{{SUMMARY}}", if cancelled { "Aucun nouvel accès Google Drive n’a été activé dans SHAPP." } else { "Google Drive est maintenant connecté à SHAPP." })
+            .replace("{{STATUS}}", if cancelled { "À reconnecter" } else { "Connecté" })
+            .replace("{{ICON}}", if cancelled { "M12 7v6m0 4h.01" } else { "m5 12 4 4 10-10" })
+            .replace("{{MARK}}", if cancelled { "·" } else { "✓" })
             .replace("{{SHAPPY}}", &encode(include_bytes!("callback-assets/shappy.webp")))
             .replace("{{DRIVE}}", &encode(include_bytes!("callback-assets/google-drive.png")))
             .replace("{{FONT}}", &encode(include_bytes!("callback-assets/inter-latin.woff2")))
