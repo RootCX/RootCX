@@ -72,7 +72,10 @@ pub async fn list_integrations(
             .collect();
     for item in &mut items {
         let map = platform_secret_map(item);
-        let configured = is_configured(item, &map, &present_keys);
+        let id = item["id"].as_str().unwrap_or("");
+        let managed = super::managed::enabled(id);
+        let configured = if managed { super::managed::config(id).is_ok() } else { is_configured(item, &map, &present_keys) };
+        item.as_object_mut().unwrap().insert("managedOAuth".into(), json!(managed));
         item.as_object_mut().unwrap().insert("configured".into(), json!(configured));
     }
     Ok(Json(items))
@@ -84,9 +87,20 @@ pub async fn save_platform_config(
     Path(integration_id): Path<String>,
     Json(config): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    super::managed::reject_override(&integration_id)?;
     let (pool, secrets) = routes::pool_and_secrets(&rt);
     require_admin(&pool, identity.user_id).await?;
     let manifest = get_integration_manifest(&pool, &integration_id).await?;
+    if manifest.pointer("/userAuth/plugin/protocolVersion").is_some() {
+        let props = manifest.pointer("/configSchema/properties").and_then(|v| v.as_object())
+            .ok_or_else(|| ApiError::BadRequest("invalid plugin configuration schema".into()))?;
+        for (field, value) in config.as_object().ok_or_else(|| ApiError::BadRequest("configuration must be an object".into()))? {
+            let definition = props.get(field).ok_or_else(|| ApiError::BadRequest(format!("unknown configuration field: {field}")))?;
+            if !value.is_string() || definition.get("const").is_some_and(|constant| constant != value) {
+                return Err(ApiError::BadRequest(format!("invalid configuration field: {field}")));
+            }
+        }
+    }
     let secret_map = platform_secret_map(&manifest);
     save_config_secrets_at(&pool, &secrets, PLATFORM_SCOPE, &secret_map, &config).await?;
 
@@ -149,10 +163,16 @@ pub async fn execute_action(
     }
 
     // config + creds resolve together: the chosen connection pins its OAuth client.
-    let (config, user_credentials, effective_uid, conn_id) = super::connections::resolve_credentials(
-        &secrets, &pool, &integration_id, &target_user, caller_app,
-    // A rejected grant is the caller's to fix by reconnecting, not our failure.
-    ).await.map_err(|e| match e {
+    let resolved = if let Some(connection_id) = headers.get("x-integration-connection").and_then(|v| v.to_str().ok()) {
+        // The settings UI may select one of the caller's accounts explicitly.
+        // Never combine this with app binding resolution or impersonate an owner.
+        if caller_app.is_some() { return Err(ApiError::BadRequest("choose an account or an app binding, not both".into())); }
+        super::connections::verify_owner(&pool, connection_id, &integration_id, &identity).await?;
+        super::connections::resolve_by_connection_id(&secrets, &pool, &integration_id, connection_id, &target_user).await
+    } else {
+        super::connections::resolve_credentials(&secrets, &pool, &integration_id, &target_user, caller_app).await
+    };
+    let (config, user_credentials, effective_uid, conn_id) = resolved.map_err(|e| match e {
         super::oauth::RenewError::Rejected(m) => ApiError::Forbidden(m),
         super::oauth::RenewError::Transient(m) => ApiError::Internal(m),
     })?;
@@ -463,6 +483,7 @@ pub async fn create_config(
     Path(integration_id): Path<String>,
     Json(body): Json<CreateConfigBody>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    super::managed::reject_override(&integration_id)?;
     let (pool, secrets) = routes::pool_and_secrets(&rt);
     require_admin(&pool, identity.user_id).await?;
     let manifest = get_integration_manifest(&pool, &integration_id).await?;
@@ -514,7 +535,7 @@ pub async fn resolve_config(
     secrets: &crate::secrets::SecretManager,
     integration_id: &str,
 ) -> Result<JsonValue, ApiError> {
-    resolve_config_scoped(pool, secrets, integration_id, None).await
+    Ok(super::managed::worker_config(integration_id, resolve_config_scoped(pool, secrets, integration_id, None).await?))
 }
 
 /// Resolve a provider config (OAuth client creds) for an integration.
@@ -526,6 +547,10 @@ pub(crate) async fn resolve_config_scoped(
     integration_id: &str,
     config_id: Option<&str>,
 ) -> Result<JsonValue, ApiError> {
+    if super::managed::enabled(integration_id) {
+        if config_id.is_some() { return Err(ApiError::Forbidden("managed OAuth does not allow alternate clients".into())); }
+        return super::managed::config(integration_id)?.ok_or_else(|| ApiError::Internal("missing managed config".into()));
+    }
     let manifest = get_integration_manifest(pool, integration_id).await?;
     fetch_config_at(pool, secrets, config_id.unwrap_or(PLATFORM_SCOPE), &platform_secret_map(&manifest)).await
 }

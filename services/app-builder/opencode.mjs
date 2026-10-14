@@ -38,6 +38,16 @@ export function progressFor(event) {
   return null;
 }
 
+// Engine-specific evidence is reduced before crossing the narration Interface.
+export function narrationFact(event, phase) {
+  const part = event.properties?.part;
+  const path = String(part?.state?.input?.filePath ?? part?.state?.input?.path ?? '');
+  let area = 'application';
+  if (/\.(?:tsx|jsx|css|html)$/.test(path)) area = 'screen';
+  else if (/manifest\.json$|(?:^|\/)backend\//.test(path)) area = 'data';
+  return { phase, status: part?.state?.status, area };
+}
+
 export async function engine(root, config) {
   if (engines.has(root)) return engines.get(root);
   const promise = startEngine(root, config);

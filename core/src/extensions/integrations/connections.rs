@@ -20,6 +20,7 @@ pub struct Connection {
     pub user_id: String,
     pub label: Option<String>,
     pub created_at: String,
+    pub status: String,
 }
 
 pub async fn bootstrap(pool: &sqlx::PgPool) -> Result<(), crate::RuntimeError> {
@@ -208,29 +209,32 @@ pub(crate) async fn upsert_connection(
     label: Option<&str>,
     config_id: Option<&str>,
 ) -> Result<String, ApiError> {
-    if let Some(lbl) = label {
-        let existing: Option<(String,)> = sqlx::query_as(
-            "SELECT id FROM rootcx_system.integration_connections
-             WHERE integration_id = $1 AND user_id = $2 AND label = $3 AND kind = 'direct'"
-        )
-        .bind(integration_id)
-        .bind(user_id)
-        .bind(lbl)
-        .fetch_optional(pool).await?;
-
-        if let Some((id,)) = existing {
-            // Reconnecting a known mailbox: revive it and repin its config (the
-            // user may have re-authed via a different OAuth client). Credentials
-            // are overwritten by the caller, so any prior 'dead' flag is stale.
-            let _ = sqlx::query(
-                "UPDATE rootcx_system.integration_connections
-                 SET status = 'active', last_error = NULL, last_error_at = NULL, config_id = $2 WHERE id = $1"
-            ).bind(&id).bind(config_id).execute(pool).await;
-            return Ok(id);
-        }
-    }
-
-    create_connection(pool, integration_id, user_id, label, "direct", config_id).await
+    let Some(lbl) = label else {
+        return create_connection(pool, integration_id, user_id, label, "direct", config_id).await;
+    };
+    let mut tx = pool.begin().await?;
+    // Two OAuth callbacks for the same account must not create duplicate connections.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 73432))")
+        .bind(serde_json::to_string(&(integration_id, user_id, lbl)).unwrap())
+        .execute(&mut *tx).await?;
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM rootcx_system.integration_connections
+         WHERE integration_id = $1 AND user_id = $2 AND label = $3 AND kind = 'direct'"
+    ).bind(integration_id).bind(user_id).bind(lbl).fetch_optional(&mut *tx).await?;
+    let id = if let Some(id) = existing {
+        sqlx::query("UPDATE rootcx_system.integration_connections
+            SET status = 'active', last_error = NULL, last_error_at = NULL, config_id = $2 WHERE id = $1")
+            .bind(&id).bind(config_id).execute(&mut *tx).await?;
+        id
+    } else {
+        let id = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO rootcx_system.integration_connections
+            (id, integration_id, user_id, label, kind, config_id) VALUES ($1,$2,$3,$4,'direct',$5)")
+            .bind(&id).bind(integration_id).bind(user_id).bind(lbl).bind(config_id).execute(&mut *tx).await?;
+        id
+    };
+    tx.commit().await?;
+    Ok(id)
 }
 
 /// After an integration RPC, flag the connection dead if the result reports a
@@ -406,7 +410,7 @@ pub(crate) async fn resolve_credentials(
 
     let config = super::routes::resolve_config_scoped(pool, secrets, integration_id, None)
         .await.unwrap_or(JsonValue::Null);
-    Ok((config, JsonValue::Null, user_id.to_string(), None))
+    Ok((super::managed::worker_config(integration_id, config), JsonValue::Null, user_id.to_string(), None))
 }
 
 /// `(config, credentials, effective_user_id, connection_id)`.
@@ -432,20 +436,20 @@ pub(crate) async fn resolve_by_connection_id(
         None => (fallback_user.to_string(), None),
     };
     let config = super::routes::resolve_config_scoped(pool, secrets, integration_id, config_id.as_deref())
-        .await.unwrap_or(JsonValue::Null);
+        .await.map_err(|_| super::oauth::RenewError::Transient("OAuth configuration unavailable".into()))?;
     match secrets.get(pool, integration_id, &conn_key).await {
         Ok(Some(raw)) => {
             let creds: JsonValue = serde_json::from_str(&raw).unwrap_or(JsonValue::Null);
             let creds = super::oauth::credentials_for_worker(
                 pool, secrets, integration_id, connection_id, &config, creds,
             ).await?;
-            Ok((config, creds, effective_user, Some(connection_id.to_string())))
+            Ok((super::managed::worker_config(integration_id, config), creds, effective_user, Some(connection_id.to_string())))
         }
-        _ => Ok((config, JsonValue::Null, fallback_user.to_string(), None)),
+        _ => Ok((super::managed::worker_config(integration_id, config), JsonValue::Null, fallback_user.to_string(), None)),
     }
 }
 
-async fn verify_owner(
+pub(super) async fn verify_owner(
     pool: &sqlx::PgPool,
     connection_id: &str,
     integration_id: &str,
@@ -472,8 +476,8 @@ pub async fn list_connections(
     Path(integration_id): Path<String>,
 ) -> Result<Json<Vec<Connection>>, ApiError> {
     let pool = routes::pool(&rt);
-    let rows: Vec<(String, String, String, Option<String>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT id, integration_id, user_id, label, created_at
+    let rows: Vec<(String, String, String, Option<String>, chrono::DateTime<chrono::Utc>, String)> = sqlx::query_as(
+        "SELECT id, integration_id, user_id, label, created_at, status
          FROM rootcx_system.integration_connections
          WHERE integration_id = $1 AND user_id = $2 AND kind = 'direct'
          ORDER BY created_at"
@@ -482,8 +486,8 @@ pub async fn list_connections(
     .bind(identity.user_id.to_string())
     .fetch_all(&pool).await?;
 
-    let connections: Vec<Connection> = rows.into_iter().map(|(id, iid, uid, label, created_at)| {
-        Connection { id, integration_id: iid, user_id: uid, label, created_at: created_at.to_rfc3339() }
+    let connections: Vec<Connection> = rows.into_iter().map(|(id, iid, uid, label, created_at, status)| {
+        Connection { id, integration_id: iid, user_id: uid, label, created_at: created_at.to_rfc3339(), status }
     }).collect();
 
     Ok(Json(connections))
@@ -494,14 +498,16 @@ pub async fn delete_connection(
     State(rt): State<SharedRuntime>,
     Path((integration_id, connection_id)): Path<(String, String)>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, secrets) = routes::pool_and_secrets(&rt);
+    let pool = routes::pool(&rt);
     verify_owner(&pool, &connection_id, &integration_id, &identity).await?;
 
-    let _ = secrets.delete(&pool, &integration_id, &credential_key(&connection_id)).await;
-
+    // A failed secret deletion must not leave a usable orphan credential behind.
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM rootcx_system.secrets WHERE app_id = $1 AND key_name = $2")
+        .bind(&integration_id).bind(credential_key(&connection_id)).execute(&mut *tx).await?;
     sqlx::query("DELETE FROM rootcx_system.integration_connections WHERE id = $1")
-        .bind(&connection_id)
-        .execute(&pool).await?;
+        .bind(&connection_id).execute(&mut *tx).await?;
+    tx.commit().await?;
 
     Ok(Json(json!({ "message": "connection deleted" })))
 }
@@ -532,16 +538,16 @@ pub async fn update_connection(
 }
 
 pub async fn list_app_bindings(
-    _identity: Identity,
+    identity: Identity,
     State(rt): State<SharedRuntime>,
     Path(app_id): Path<String>,
 ) -> Result<Json<Vec<JsonValue>>, ApiError> {
     let pool = routes::pool(&rt);
     let rows: Vec<(String, bool, Option<String>, String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
         "SELECT integration_id, enabled, connection_id, user_id, created_at
-         FROM rootcx_system.app_integrations WHERE app_id = $1"
+         FROM rootcx_system.app_integrations WHERE app_id = $1 AND user_id IN ('', $2)"
     )
-    .bind(&app_id)
+    .bind(&app_id).bind(identity.user_id.to_string())
     .fetch_all(&pool).await?;
 
     let bindings: Vec<JsonValue> = rows.into_iter().map(|(iid, enabled, conn_id, user_id, created_at)| {

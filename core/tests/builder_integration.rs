@@ -30,7 +30,14 @@ fn source_to_git_to_schema_to_published_frontend() {
                     return Json(json!({"files":input["files"],"frontend":"","summary":"Bonjour ! Que souhaitez-vous améliorer ?"})).into_response();
                 }
                 if input["prompt"] == "Credit failure fixture" {
-                    return ([("content-type", "application/x-ndjson")], "{\"type\":\"progress\",\"phase\":\"editing\"}\n{\"type\":\"error\",\"error\":\"AI_CREDITS_EXHAUSTED\"}\n").into_response();
+                    assert_eq!(input["narrationPrompt"], input["prompt"]);
+                    let progress = [
+                        json!({"type":"progress","phase":"editing","message":"Je prépare la date de visite."}),
+                        json!({"type":"progress","phase":"checking"}),
+                        json!({"type":"progress","phase":"checking"}),
+                        json!({"type":"error","error":"AI_CREDITS_EXHAUSTED"}),
+                    ].map(|event| format!("{event}\n")).join("");
+                    return ([("content-type", "application/x-ndjson")], progress).into_response();
                 }
                 if input["prompt"] == "Delete visit date" {
                     let mut manifest:Value=serde_json::from_slice(&STANDARD.decode(input["files"]["manifest.json"].as_str().unwrap()).unwrap()).unwrap();
@@ -134,7 +141,14 @@ fn source_to_git_to_schema_to_published_frontend() {
             let last=states.last().expect("SSE must replay persisted state");
             assert_eq!(last["status"],expected,"{transcript}");
             assert!(!transcript.contains("AI_CREDITS_EXHAUSTED"),"internal diagnostics must not leak");
-            if expected=="failed" { assert!(last["message"].as_str().unwrap().contains("crédits")); }
+            if expected=="failed" {
+                assert!(last["message"].as_str().unwrap().contains("crédits"));
+                let activity: Value = sqlx::query_scalar("SELECT activity FROM rootcx_system.source_runs WHERE id=$1::uuid")
+                    .bind(change["id"].as_str().unwrap()).fetch_one(rt.pool()).await.unwrap();
+                let messages: Vec<&str> = activity.as_array().unwrap().iter().filter_map(|item| item["message"].as_str()).collect();
+                assert_eq!(messages.iter().filter(|text| **text == "Je prépare la date de visite.").count(), 1);
+                assert!(!messages.iter().any(|text| text.contains("changements pour")), "phase-only heartbeats must preserve the narration: {messages:?}");
+            }
             // Reconnect to a completed run: replay terminal state and close immediately.
             let replay=rt.client.get(rt.url(&stream_path)).bearer_auth(&rt.token).send().await.unwrap().text().await.unwrap();
             assert!(replay.contains(expected));

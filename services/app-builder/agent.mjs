@@ -1,17 +1,17 @@
-import { businessText, narrator } from './narrator.mjs';
+import { businessText, narrator, narrationGateway } from './narrator.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { collect, validateFiles } from './workspace.mjs';
 import { build } from './sandbox.mjs';
-import { closeEngine, engine, progressFor, providerError } from './opencode.mjs';
+import { closeEngine, engine, progressFor, narrationFact, providerError } from './opencode.mjs';
 
-export async function code({ root, appId, prompt, conversationId, signal, config, onProgress = () => {}, compile = build }) {
+export async function code({ root, appId, prompt, narrationPrompt = prompt, conversationId, signal, config, onProgress = () => {}, compile = build }) {
   const initial = await collect(root);
   onProgress('understanding');
   const runtime = await engine(root, config);
   const session = await runtime.conversation(conversationId);
   const streamController = new AbortController();
   const combined = AbortSignal.any([signal, streamController.signal]);
-  const voice = narrator({ config, prompt, signal, onProgress });
+  const voice = narrator({ translate: narrationGateway(config), prompt: narrationPrompt, signal, onProgress });
   let skillLoaded = false;
   async function observeProgress() {
     for await (const event of runtime.subscribe(combined)) {
@@ -20,7 +20,7 @@ export async function code({ root, appId, prompt, conversationId, signal, config
       if (part?.type === 'tool' && part.tool === 'skill' && part.state?.input?.name === 'rootcx' && part.state.status === 'completed') skillLoaded = true;
       const phase = progressFor(event);
       if (phase) onProgress(phase);
-      voice.observe(event, phase);
+      if (phase) voice.observe(narrationFact(event, phase));
     }
     throw new Error('OpenCode event stream disconnected');
   }
@@ -59,7 +59,7 @@ export async function code({ root, appId, prompt, conversationId, signal, config
       // The native engine owns all coding/tool/reasoning loops. Publication verifies
       // the final revision and returns concrete failures to that same session.
       onProgress('checking');
-      voice.observe({}, 'checking');
+      voice.observe({ phase: 'checking', status: 'running' });
       try {
         const before = await collect(root);
         validateFiles(before);
@@ -74,7 +74,7 @@ export async function code({ root, appId, prompt, conversationId, signal, config
         if (signal.aborted) throw error;
         if (attempt === 2) { error.code = 'BUILD_FAILED'; throw error; }
         onProgress('repairing');
-        voice.observe({}, 'repairing');
+        voice.observe({ phase: 'repairing', status: 'running' });
         request = `The publication verification failed. Correct the real source files and run the checks again. Do not claim success until fixed. Diagnostic:\n${String(error.message).slice(-24000)}`;
       }
     }

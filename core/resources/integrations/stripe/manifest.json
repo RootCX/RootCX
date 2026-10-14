@@ -1,0 +1,242 @@
+{
+  "appId": "stripe",
+  "name": "Stripe",
+  "version": "1.0.0",
+  "type": "integration",
+  "description": "Connect Stripe and operate on live data.",
+  "entities": [],
+  "configSchema": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  },
+  "userAuth": {
+    "type": "credentials",
+    "plugin": {
+      "protocolVersion": 1,
+      "qualification": "requires-live-verification",
+      "discovery": null
+    },
+    "tokenAuth": {
+      "label": "Stripe secret or restricted API key (account read and selected customer/subscription permissions)",
+      "helpUrl": "https://dashboard.stripe.com/apikeys"
+    },
+    "oauth": null,
+    "credentialSchema": {
+      "type": "object",
+      "properties": {
+        "accessToken": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Stripe secret or restricted API key (account read and selected customer/subscription permissions)"
+        }
+      },
+      "required": [
+        "accessToken"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "actions": [
+    {
+      "id": "verify_connection",
+      "name": "Verify connection",
+      "description": "Verify the connected account with the provider [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "list_customers",
+      "name": "List customers",
+      "description": "Read one page of Stripe customers [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "Opaque cursor from the previous response"
+          },
+          "email": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "get_customer",
+      "name": "Get customer",
+      "description": "Read one Stripe customer [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "customerId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          }
+        },
+        "required": [
+          "customerId"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "create_customer",
+      "name": "Create customer",
+      "description": "Create a customer using a stable idempotency key for this intended creation [write]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "email": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "metadata": {
+            "type": "object",
+            "maxProperties": 200,
+            "additionalProperties": true
+          },
+          "idempotencyKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 255,
+            "description": "Reuse only for the same intended creation"
+          }
+        },
+        "required": [
+          "name",
+          "idempotencyKey"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "update_customer",
+      "name": "Update customer",
+      "description": "Update the existing customer [write]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "customerId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "email": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "metadata": {
+            "type": "object",
+            "maxProperties": 200,
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "customerId"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "list_subscriptions",
+      "name": "List subscriptions",
+      "description": "Read customer subscriptions without changing billing [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "Opaque cursor from the previous response"
+          },
+          "customerId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    }
+  ],
+  "instructions": "RootCX integration plugin protocol 1. Connect an account and bind it to the application. Credentials and permissions belong to Core. Reads are live. Use discovery and schema actions before writing. Follow nextCursor explicitly. Never retry an uncertain write automatically; reconcile with the provider. Only the listed actions are supported. Provider qualification is required before production activation."
+}

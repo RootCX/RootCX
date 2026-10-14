@@ -1,7 +1,7 @@
 /// <reference path="../rootcx-worker.d.ts" />
 import {
   type Config, type UserCreds,
-  oauth2ClientFor, buildAuthUrl, exchangeCodeForRefreshToken, evictClient,
+  oauth2ClientFor, evictClient,
 } from "./lib/oauth";
 import { type Result, ok, fail, classifyHttp, withRetry } from "./lib/errors";
 import { parseMessage } from "./lib/parse-message";
@@ -13,13 +13,16 @@ const EXCLUDE_QUERY = "-in:spam -in:trash -in:drafts -category:promotions -categ
 const MAX_THROTTLE = 5;
 const FETCH_CONCURRENCY = 15;
 
+import { rpc as pluginRpc, actionIds as pluginActions } from "./plugin";
+
 serve({
   rpc: {
-    __auth_start: authStart,
-    __auth_callback: authCallback,
+    __auth_start: pluginRpc.__auth_start,
+    __auth_callback: pluginRpc.__auth_callback,
     async __integration(params, _caller, ctx) {
+      if (pluginActions.includes(params.action)) return pluginRpc.__integration(params);
       const { action, input, config, userCredentials, userId, connectionId } = params;
-      if (!userCredentials?.refreshToken) return fail({ code: "INSUFFICIENT_PERMISSIONS", message: "user not connected" });
+      if (!userCredentials?.refreshToken && !userCredentials?.accessToken) return fail({ code: "INSUFFICIENT_PERMISSIONS", message: "user not connected" });
       const handler = actions[action];
       if (!handler) return fail({ code: "MISCONFIGURED", message: `unknown action: ${action}` });
       return handler(config, userCredentials, input, userId, ctx, connectionId ?? null);
@@ -70,17 +73,6 @@ async function runAction(ctx: RootCxCtx, action: string, input: Record<string, u
     throw Object.assign(new Error(r.error?.message ?? action), { code: r.error?.code, retryAfter: r.error?.retryAfter });
   }
   return r?.ok === true && "data" in r ? r.data : r;
-}
-
-async function authStart(params: any) {
-  const { config, callbackUrl, state } = params;
-  return { type: "redirect", url: buildAuthUrl(config, callbackUrl, state) };
-}
-
-async function authCallback(params: any) {
-  const { config, query } = params;
-  const { refreshToken, email } = await exchangeCodeForRefreshToken(config, query.code, query.redirect_uri ?? params.callbackUrl ?? "");
-  return { credentials: { refreshToken }, label: email };
 }
 
 async function fetchAndCacheAliases(config: Config, creds: UserCreds, userId: string, connectionId?: string | null): Promise<Result<{ primary: string; aliases: string[] }>> {

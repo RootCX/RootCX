@@ -1,6 +1,5 @@
 use std::collections::HashMap;
-use std::sync::LazyLock;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -8,8 +7,9 @@ use axum::http::HeaderMap;
 use axum::response::Html;
 use hmac::{Hmac, Mac};
 use serde_json::{Value as JsonValue, json};
-use sha2::Sha256;
-use tokio::sync::Mutex;
+use sha2::{Digest, Sha256};
+use base64::Engine;
+use serde::{Serialize, Deserialize};
 use tracing::{info, warn};
 use crate::governance::authority::require_admin;
 use uuid::Uuid;
@@ -20,10 +20,27 @@ use crate::routes::SharedRuntime;
 
 type HmacSha256 = Hmac<Sha256>;
 
-struct Pending { integration_id: String, user_id: String, config_id: Option<String>, callback_url: String, created: Instant }
+#[derive(Serialize, Deserialize)]
+struct Pending { integration_id: String, user_id: String, config_id: Option<String>, callback_url: String, code_verifier: String }
 
-static PENDING: LazyLock<Mutex<HashMap<String, Pending>>> = LazyLock::new(Default::default);
-const TTL_SECS: u64 = 600;
+pub(crate) async fn bootstrap(pool: &sqlx::PgPool) -> Result<(), crate::RuntimeError> {
+    sqlx::query("CREATE TABLE IF NOT EXISTS rootcx_system.integration_oauth_states (
+        state_hash TEXT PRIMARY KEY, nonce BYTEA NOT NULL, ciphertext BYTEA NOT NULL,
+        expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '10 minutes')")
+        .execute(pool).await.map_err(crate::RuntimeError::Schema)?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS integration_oauth_states_expiry ON rootcx_system.integration_oauth_states (expires_at)")
+        .execute(pool).await.map_err(crate::RuntimeError::Schema)?;
+    sqlx::query("CREATE TABLE IF NOT EXISTS rootcx_system.integration_oauth_attempts (
+        id TEXT PRIMARY KEY, integration_id TEXT NOT NULL, user_id TEXT NOT NULL,
+        connection_id TEXT, status TEXT NOT NULL DEFAULT 'pending',
+        expires_at TIMESTAMPTZ NOT NULL DEFAULT now() + interval '10 minutes')")
+        .execute(pool).await.map_err(crate::RuntimeError::Schema)?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS integration_oauth_attempts_expiry ON rootcx_system.integration_oauth_attempts (expires_at)")
+        .execute(pool).await.map_err(crate::RuntimeError::Schema)?;
+    Ok(())
+}
+
+fn state_hash(state: &str) -> String { hex::encode(Sha256::digest(state.as_bytes())) }
 
 fn resolve_callback_url(headers: &HeaderMap) -> String {
     std::env::var("OAUTH_CALLBACK_URL").unwrap_or_else(|_| {
@@ -86,19 +103,43 @@ pub async fn start(
     let nonce = Uuid::new_v4().to_string();
     let (cb, state) = build_callback_and_state(&headers, &nonce);
 
-    PENDING.lock().await.insert(nonce, Pending {
+    let code_verifier = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
+    let pending = Pending {
         integration_id: integration_id.clone(), user_id: identity.user_id.to_string(),
-        config_id, callback_url: cb.clone(), created: Instant::now(),
-    });
+        config_id, callback_url: cb.clone(), code_verifier,
+    };
+    let (iv, ciphertext) = secrets.encrypt(&serde_json::to_string(&pending).map_err(|e| ApiError::Internal(e.to_string()))?)
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    sqlx::query("DELETE FROM rootcx_system.integration_oauth_states WHERE expires_at <= now()")
+        .execute(&pool).await?;
+    sqlx::query("INSERT INTO rootcx_system.integration_oauth_states (state_hash, nonce, ciphertext) VALUES ($1, $2, $3)")
+        .bind(state_hash(&nonce)).bind(iv).bind(ciphertext).execute(&pool).await?;
 
-    let result = wm.rpc(
+    let mut result = if super::managed::enabled(&integration_id) {
+        super::managed::start(&config, &cb, &state, &code_challenge)
+    } else { wm.rpc(
         &integration_id, Uuid::new_v4().to_string(), "__auth_start".into(),
-        json!({ "config": config, "callbackUrl": cb, "state": state, "userId": identity.user_id }),
+        json!({ "config": config, "callbackUrl": cb, "state": state, "codeChallenge": code_challenge, "userId": identity.user_id }),
         None,
-    ).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    ).await.map_err(|e| ApiError::Internal(e.to_string()))? };
 
+    sqlx::query("DELETE FROM rootcx_system.integration_oauth_attempts WHERE expires_at <= now()")
+        .execute(&pool).await?;
+    sqlx::query("INSERT INTO rootcx_system.integration_oauth_attempts (id, integration_id, user_id) VALUES ($1, $2, $3)")
+        .bind(state_hash(&nonce)).bind(&integration_id).bind(identity.user_id.to_string()).execute(&pool).await?;
+    result["attemptId"] = json!(nonce);
     info!(integration_id, user_id = %identity.user_id, "auth flow started");
     Ok(Json(result))
+}
+
+async fn consume_state(pool: &sqlx::PgPool, secrets: &crate::secrets::SecretManager, nonce: &str) -> Result<Pending, ApiError> {
+    let stored: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "DELETE FROM rootcx_system.integration_oauth_states WHERE state_hash = $1 AND expires_at > now() RETURNING nonce, ciphertext"
+    ).bind(state_hash(nonce)).fetch_optional(pool).await?;
+    let (iv, ciphertext) = stored.ok_or_else(|| ApiError::BadRequest("invalid or expired auth state".into()))?;
+    serde_json::from_str(&secrets.decrypt(&iv, &ciphertext)
+        .map_err(|e| ApiError::Internal(e.to_string()))?).map_err(|e| ApiError::Internal(e.to_string()))
 }
 
 pub async fn callback(
@@ -106,23 +147,64 @@ pub async fn callback(
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Html<String>, ApiError> {
     let state = params.get("state").ok_or_else(|| ApiError::BadRequest("missing state".into()))?;
-    let pending = {
-        let mut map = PENDING.lock().await;
-        map.retain(|_, p| p.created.elapsed().as_secs() < TTL_SECS);
-        map.remove(extract_nonce(state))
-    }.ok_or_else(|| ApiError::BadRequest("invalid or expired auth state".into()))?;
-
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
+    let pending = consume_state(&pool, &secrets, extract_nonce(state)).await?;
+    let attempt_hash = state_hash(extract_nonce(state));
+    let outcome = finish_callback(&rt, &pool, &secrets, &pending, &params, &attempt_hash).await;
+    let status = if outcome.is_ok() { "connected" } else if params.get("error").map(String::as_str) == Some("access_denied") { "cancelled" } else { "failed" };
+    sqlx::query("UPDATE rootcx_system.integration_oauth_attempts SET status = $2 WHERE id = $1")
+        .bind(&attempt_hash).bind(status).execute(&pool).await?;
+    if outcome.is_err() {
+        return Ok(Html("<!doctype html><html><body><h2>Connection not completed</h2><p>Return to SHAPP to try again.</p><script>window.close()</script></body></html>".into()));
+    }
+    Ok(Html(callback_html(&pending.integration_id, &pending.callback_url, None)))
+}
+
+pub async fn attempt_status(
+    identity: Identity, State(rt): State<SharedRuntime>,
+    Path((integration_id, attempt_id)): Path<(String, String)>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT status, connection_id FROM rootcx_system.integration_oauth_attempts
+         WHERE id = $1 AND integration_id = $2 AND user_id = $3 AND expires_at > now()")
+        .bind(state_hash(&attempt_id)).bind(integration_id).bind(identity.user_id.to_string())
+        .fetch_optional(&crate::routes::pool(&rt)).await?;
+    let (status, connection) = row.ok_or_else(|| ApiError::NotFound("auth attempt not found or expired".into()))?;
+    Ok(Json(json!({ "status": status, "connectionId": if status == "connected" { connection } else { None } })))
+}
+
+pub async fn verify_managed_connection(
+    identity: Identity, State(rt): State<SharedRuntime>,
+    Path((integration_id, connection_id)): Path<(String, String)>,
+) -> Result<Json<JsonValue>, ApiError> {
+    if !super::managed::enabled(&integration_id) { return Err(ApiError::NotFound("managed connector not enabled".into())); }
+    let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
+    super::connections::verify_owner(&pool, &connection_id, &integration_id, &identity).await?;
+    let (_, credentials, _, _) = super::connections::resolve_by_connection_id(&secrets, &pool, &integration_id, &connection_id, &identity.user_id.to_string())
+        .await.map_err(|_| ApiError::BadRequest("Reconnect your Google account".into()))?;
+    let access = credentials["accessToken"].as_str().ok_or_else(|| ApiError::BadRequest("Reconnect your Google account".into()))?;
+    super::managed::verify_access(access).await?;
+    Ok(Json(json!({"verified": true})))
+}
+
+async fn finish_callback(
+    rt: &SharedRuntime, pool: &sqlx::PgPool, secrets: &crate::secrets::SecretManager,
+    pending: &Pending, params: &HashMap<String, String>, attempt_hash: &str,
+) -> Result<(), ApiError> {
     let wm = crate::routes::wm(&rt);
     let config = super::routes::resolve_config_scoped(&pool, &secrets, &pending.integration_id, pending.config_id.as_deref()).await?;
 
-    let result = wm.rpc(
+    let result = if super::managed::enabled(&pending.integration_id) {
+        super::managed::callback(&config, params, &pending.callback_url, &pending.code_verifier).await?
+    } else { wm.rpc(
         &pending.integration_id, Uuid::new_v4().to_string(), "__auth_callback".into(),
-        json!({ "config": config, "query": params, "userId": pending.user_id, "callbackUrl": pending.callback_url }),
+        json!({ "config": config, "query": params, "userId": pending.user_id, "callbackUrl": pending.callback_url, "codeVerifier": pending.code_verifier }),
         None,
-    ).await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    ).await.map_err(|e| ApiError::Internal(e.to_string()))? };
 
-    if let Some(creds) = result.get("credentials") {
+    let creds = result.get("credentials").filter(|v| v.is_object())
+        .ok_or_else(|| ApiError::BadRequest("provider did not return verified credentials".into()))?;
+    {
         let label = result.get("label").and_then(|v| v.as_str()).map(|s| s.to_string());
 
         let conn_id = super::connections::upsert_connection(
@@ -132,15 +214,17 @@ pub async fn callback(
         secrets.set(&pool, &pending.integration_id, &conn_key, &creds.to_string()).await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
 
+        sqlx::query("UPDATE rootcx_system.integration_oauth_attempts SET connection_id = $2 WHERE id = $1")
+            .bind(attempt_hash).bind(&conn_id).execute(pool).await?;
         info!(integration_id = %pending.integration_id, user_id = %pending.user_id,
             connection_id = %conn_id, label = label.as_deref().unwrap_or(""), "credentials stored");
 
         if let Some((code, msg)) = try_auto_sync_connect(&pool, &secrets, &wm, &pending, &conn_id).await {
-            return Ok(Html(callback_html(&pending.integration_id, Some((&code, &msg)))));
+            return Err(ApiError::BadRequest(format!("{code}: {msg}")));
         }
     }
 
-    Ok(Html(callback_html(&pending.integration_id, None)))
+    Ok(())
 }
 
 async fn try_auto_sync_connect(
@@ -150,6 +234,8 @@ async fn try_auto_sync_connect(
     pending: &Pending,
     conn_id: &str,
 ) -> Option<(String, String)> {
+    let manifest = super::routes::get_integration_manifest(pool, &pending.integration_id).await.ok()?;
+    if !manifest.get("actions").and_then(|v| v.as_array()).is_some_and(|actions| actions.iter().any(|a| a.get("id").and_then(|v| v.as_str()) == Some("sync_connect"))) { return None; }
     let user_id: uuid::Uuid = pending.user_id.parse().ok()?;
     let caller = Some(crate::principal::resolve_caller_pinned(pool, user_id, conn_id.to_string()).await?);
 
@@ -187,7 +273,22 @@ async fn try_auto_sync_connect(
     }
 }
 
-fn callback_html(integration_id: &str, error: Option<(&str, &str)>) -> String {
+fn callback_html(integration_id: &str, callback_url: &str, error: Option<(&str, &str)>) -> String {
+    if super::managed::enabled(integration_id) && error.is_none() {
+        // Use the server-owned OAuth callback origin, never a user-provided redirect.
+        let return_url = url::Url::parse(callback_url)
+            .ok().filter(|url| matches!(url.scheme(), "http" | "https"))
+            .and_then(|url| url.join("/shapp/companies").ok())
+            .map(|url| url.to_string()).unwrap_or_else(|| "/".into());
+        let return_url = return_url.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        return include_str!("callback-assets/connected.html")
+            .replace("{{SHAPPY}}", &encode(include_bytes!("callback-assets/shappy.webp")))
+            .replace("{{DRIVE}}", &encode(include_bytes!("callback-assets/google-drive.png")))
+            .replace("{{FONT}}", &encode(include_bytes!("callback-assets/inter-latin.woff2")))
+            .replace("{{THEME}}", include_str!("callback-assets/shapp-theme.css"))
+            .replace("{{RETURN_URL}}", &return_url);
+    }
     let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;");
     let body = match error {
         Some((code, msg)) => format!(
@@ -200,7 +301,7 @@ fn callback_html(integration_id: &str, error: Option<(&str, &str)>) -> String {
         ),
     };
     format!(
-        r#"<!DOCTYPE html><html><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#1a1a1a;color:#fff">{}</body></html>"#,
+        r#"<!DOCTYPE html><html><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#1a1a1a;color:#fff">{}<script>window.close()</script></body></html>"#,
         body,
     )
 }
@@ -242,11 +343,24 @@ pub async fn submit_credentials(
     Path(integration_id): Path<String>,
     Json(body): Json<JsonValue>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    super::managed::reject_override(&integration_id)?;
     let creds = body.get("credentials").ok_or_else(|| ApiError::BadRequest("missing credentials".into()))?;
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
     let user_id = identity.user_id.to_string();
 
-    let label = body.get("label").and_then(|v| v.as_str());
+    let manifest = super::routes::get_integration_manifest(&pool, &integration_id).await?;
+    let verified = if manifest.pointer("/userAuth/plugin/protocolVersion").is_some() {
+        Some(crate::routes::wm(&rt).rpc(&integration_id, Uuid::new_v4().to_string(), "__auth_credentials".into(),
+            json!({ "credentials": creds, "userId": user_id }), None).await
+            .map_err(|_| ApiError::BadRequest("provider could not verify these credentials".into()))?)
+    } else { None };
+    let creds = match &verified {
+        Some(result) => result.get("credentials").filter(|v| v.is_object())
+            .ok_or_else(|| ApiError::BadRequest("provider did not verify credentials".into()))?,
+        None => creds,
+    };
+    let label = verified.as_ref().and_then(|v| v.get("label")).and_then(|v| v.as_str())
+        .or_else(|| body.get("label").and_then(|v| v.as_str()));
     // Reconnecting a known mailbox (same label) reuses its row and clears any
     // stale 'dead' flag; the credentials below overwrite the rejected ones.
     let conn_id = super::connections::upsert_connection(&pool, &integration_id, &user_id, label, None).await?;
@@ -350,4 +464,21 @@ mod tests {
         let b = resolve_target_user(&id, &HashMap::from([("agent_app_id".into(), "agent-b".into())]));
         assert_ne!(a, b);
     }
+    #[tokio::test]
+    async fn oauth_state_is_single_use_across_connections_and_rejects_expired_callbacks() {
+        let pool = crate::extensions::test_db::pool().await;
+        bootstrap(&pool).await.unwrap();
+        let secrets = crate::secrets::SecretManager::with_key(&[0x4A; 32]);
+        for expired in [false, true] {
+            let nonce = Uuid::new_v4().to_string();
+            let pending = Pending { integration_id: "notion".into(), user_id: "owner".into(), config_id: None, callback_url: "https://app.example/callback".into(), code_verifier: "private-verifier".into() };
+            let (iv, cipher) = secrets.encrypt(&serde_json::to_string(&pending).unwrap()).unwrap();
+            sqlx::query("INSERT INTO rootcx_system.integration_oauth_states (state_hash, nonce, ciphertext, expires_at) VALUES ($1, $2, $3, now() + $4 * interval '1 second')")
+                .bind(state_hash(&nonce)).bind(iv).bind(cipher).bind(if expired { -1.0_f64 } else { 60.0_f64 }).execute(&pool).await.unwrap();
+            let (a, b) = tokio::join!(consume_state(&pool, &secrets, &nonce), consume_state(&pool, &secrets, &nonce));
+            assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), if expired { 0 } else { 1 });
+            if let Ok(pending) = a.or(b) { assert_eq!(pending.code_verifier, "private-verifier"); assert_eq!(pending.user_id, "owner"); }
+        }
+    }
+
 }

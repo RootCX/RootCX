@@ -309,10 +309,10 @@ is reported, not silently replayed. A publication requiring recovery blocks that
 application. Requests without a conversation retain the previous conflict behavior.
 
 Each conversation selects a persisted native OpenCode session. The independent
-narrator uses the configured provider with at most 20 short calls per run,
-8 seconds between calls and a 6-second deadline. Narration failure never blocks
-coding. Only completed explanatory text and activity categories are summarized;
-tool outputs and private reasoning are excluded. Core alone confirms publication.
+narrator uses the dedicated narration gateway with at most 20 short calls per builder execution,
+8 seconds between calls and a 3-second deadline. Narration failure never blocks
+coding. Only reduced action/status/area facts are summarized with the original
+request; model text, tool outputs and private reasoning are excluded. Core alone confirms publication.
 The UI retrieves persisted updates while active and backs off when idle; unchanged
 conversation histories are not transferred again. No browser connection owns a job.
 
@@ -324,3 +324,27 @@ companion. No App files or source commits are rewritten to adopt a newer platfor
 version. The website builds the same platform assets for development and production;
 its CORS policy permits public modules/assets to load on tenant origins. Authenticated
 conversation requests remain on the tenant Core origin.
+
+## Build narration
+
+The Build narration Module exposes `observe({phase, status, area})` and `close()`.
+Its Implementation owns coalescing, duplicate suppression, a 20-call budget per
+builder execution, an eight-second minimum interval, a three-second end-to-end
+deadline, late-response rejection and business-text validation. Core repair
+attempts are separate builder executions. Closing cancels pending narration;
+no caller awaits it. The finite observation vocabulary excludes source text,
+paths, model reasoning and tool output. The original user request travels as
+`narrationPrompt`, separately from repair diagnostics.
+
+The translator Seam has a hosted HTTP Adapter and deterministic test Adapters.
+`ROOTCX_BUILDER_NARRATION_ENDPOINT` selects the managed narration route; missing
+configuration disables translation without falling back to the coding model.
+AWS credentials and model configuration stay in that route, outside the coding
+sandbox. The route uses Nova Micro through Converse, independent pricing and
+project credit accounting. See the SHAPP managed-LLM documentation for settings.
+
+The Module earns its Depth by keeping scheduling, provider failures and text
+policy out of the coding loop. This concentrates Locality and gives Leverage
+to both engine observations and publication verification. Core remains the
+only authority for completion: phase-only events preserve the current message,
+and the companion shows the current response rather than the activity history.

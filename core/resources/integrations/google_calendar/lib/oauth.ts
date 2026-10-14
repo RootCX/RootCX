@@ -16,12 +16,20 @@ export interface Config {
 }
 
 export interface UserCreds {
+  accessToken?: string;
   refreshToken?: string;
 }
 
 const CLIENT_CACHE = new LruMap<string, Auth.OAuth2Client>(64, 30 * 60_000);
 
 export function oauth2ClientFor(config: Config, creds: UserCreds, userId: string): Auth.OAuth2Client {
+  // Managed credentials have already been renewed by Core; never cache across accounts.
+  if (creds.accessToken) {
+    const client = new google.auth.OAuth2(config.clientId, config.clientSecret);
+    client.setCredentials({ access_token: creds.accessToken });
+    return client;
+  }
+
   const cached = CLIENT_CACHE.get(userId);
   if (cached) return cached;
   const client = new google.auth.OAuth2(config.clientId, config.clientSecret);

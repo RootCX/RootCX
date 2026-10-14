@@ -1,0 +1,8 @@
+{
+  "compilerOptions": {
+    "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler",
+    "strict": true, "noUnusedLocals": true, "noUnusedParameters": true, "noEmit": true, "skipLibCheck": true,
+    "lib": ["ES2023", "DOM"], "types": ["bun"]
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "build.ts", "live-check.ts"]
+}

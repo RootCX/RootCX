@@ -83,6 +83,9 @@ fn core_validation_repairs_candidates_before_publication_and_stops_at_the_limit(
             assert_eq!(completed["status"], status, "{app}: {completed}");
             let calls: Vec<_> = requests.lock().unwrap().iter().filter(|input| input["appId"] == app).cloned().collect();
             assert_eq!(calls.len(), attempts, "{app}: bounded repair attempts");
+            for call in &calls {
+                assert_eq!(call["narrationPrompt"], request["prompt"], "{app}: narration must never receive repair diagnostics");
+            }
             assert!(calls[0]["conversationId"].is_string(), "{app}: conversation must be retained");
             for call in &calls[1..] {
                 assert_eq!(call["runId"], calls[0]["runId"], "{app}");

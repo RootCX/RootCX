@@ -70,7 +70,7 @@ pub(super) async fn claim(
     .bind(app)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query("UPDATE rootcx_system.source_runs SET base_commit=$2,status='coding',phase='understanding',message='Je prends connaissance de votre demande.',updated_at=now() WHERE id=$1 AND status='queued'")
+    sqlx::query("UPDATE rootcx_system.source_runs SET base_commit=$2,status='coding',phase='understanding',message='Je prépare votre demande.',updated_at=now() WHERE id=$1 AND status='queued'")
         .bind(id).bind(&base).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(Some(base))

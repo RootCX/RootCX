@@ -1,7 +1,7 @@
 {
   "appId": "gmail",
   "name": "Gmail",
-  "version": "0.3.0",
+  "version": "1.0.0",
   "type": "integration",
   "description": "Gmail integration with per-user sync. Owns email data (messages, threads, participants, attachments). Consumer apps read via the collections API.",
   "crons": [
@@ -19,12 +19,16 @@
     "properties": {
       "clientId": {
         "type": "string",
-        "description": "Google OAuth 2.0 Client ID",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "OAuth client ID",
         "platformSecret": "GMAIL_CLIENT_ID"
       },
       "clientSecret": {
         "type": "string",
-        "description": "Google OAuth 2.0 Client Secret",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "OAuth client secret",
         "platformSecret": "GMAIL_CLIENT_SECRET"
       },
       "enableModifyScope": {
@@ -35,15 +39,78 @@
       "pubsubTopicName": {
         "type": "string",
         "description": "Cloud Pub/Sub topic for push notifications"
+      },
+      "tokenUrl": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "https://oauth2.googleapis.com/token",
+        "platformSecret": "GMAIL_TOKEN_URL"
+      },
+      "tokenAuthMethod": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "body",
+        "platformSecret": "GMAIL_TOKEN_AUTH_METHOD"
+      },
+      "tokenEncoding": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "form",
+        "platformSecret": "GMAIL_TOKEN_ENCODING"
       }
     },
     "required": [
       "clientId",
-      "clientSecret"
-    ]
+      "clientSecret",
+      "tokenUrl"
+    ],
+    "additionalProperties": false
   },
   "userAuth": {
-    "type": "redirect"
+    "type": "oauth2",
+    "plugin": {
+      "protocolVersion": 1,
+      "qualification": "requires-live-verification",
+      "discovery": null,
+      "legacySync": true
+    },
+    "tokenAuth": null,
+    "oauth": {
+      "scopes": [
+        "openid",
+        "email",
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.compose",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/gmail.settings.basic",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/profile.emails.read"
+      ],
+      "tokenUrl": "https://oauth2.googleapis.com/token",
+      "tokenAuthMethod": "body",
+      "tokenEncoding": "form"
+    },
+    "credentialSchema": {
+      "type": "object",
+      "properties": {
+        "accessToken": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Access token"
+        }
+      },
+      "required": [
+        "accessToken"
+      ],
+      "additionalProperties": false
+    }
   },
   "actions": [
     {
@@ -342,6 +409,164 @@
       "description": "Cancel push subscription.",
       "inputSchema": {
         "type": "object"
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "live_verify_connection",
+      "name": "Verify connection",
+      "description": "Verify the connected account with the provider [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "live_search_messages",
+      "name": "Search messages",
+      "description": "Search Gmail using native q syntax [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "Opaque cursor from the previous response"
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "live_get_message",
+      "name": "Get message",
+      "description": "Read a message including headers and MIME payload [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "messageId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          }
+        },
+        "required": [
+          "messageId"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "live_create_draft",
+      "name": "Create draft",
+      "description": "Create a plain-text email draft. Does not send it. [write]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "description": "Bare email address",
+              "pattern": "^[^\\s<>@,;]+@[^\\s<>@,;]+\\.[^\\s<>@,;]+$"
+            },
+            "maxItems": 50,
+            "minItems": 1
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 998,
+            "description": "Subject",
+            "pattern": "^[^\\r\\n]*$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 100000,
+            "description": "Plain text body"
+          }
+        },
+        "required": [
+          "to",
+          "subject",
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "live_send_message",
+      "name": "Send message",
+      "description": "Send a plain-text email. Never automatically retry an uncertain send. [write]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "description": "Bare email address",
+              "pattern": "^[^\\s<>@,;]+@[^\\s<>@,;]+\\.[^\\s<>@,;]+$"
+            },
+            "maxItems": 50,
+            "minItems": 1
+          },
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 998,
+            "description": "Subject",
+            "pattern": "^[^\\r\\n]*$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 100000,
+            "description": "Plain text body"
+          }
+        },
+        "required": [
+          "to",
+          "subject",
+          "text"
+        ],
+        "additionalProperties": false
       },
       "outputSchema": {
         "type": "object"

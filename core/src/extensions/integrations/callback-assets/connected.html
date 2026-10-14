@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer"><meta name="color-scheme" content="light">
+<title>Google Drive connecté · SHAPP</title>
+<style>
+@font-face{font-family:'SHAPP Inter';font-style:normal;font-weight:100 900;font-display:swap;src:url(data:font/woff2;base64,{{FONT}}) format('woff2')}
+{{THEME}}
+*{box-sizing:border-box}body{margin:0;min-height:100svh;background:var(--shapp-paper)}
+header{height:72px;display:flex;align-items:center;padding:0 40px;border-bottom:1px solid hsl(var(--border));font-size:24px;font-weight:700;letter-spacing:-1px}header span{color:hsl(var(--primary))}
+body:has([data-shapp-product]) main[data-shapp-product]{background:transparent;display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:80px;max-width:1120px;min-height:calc(100svh - 72px);margin:auto;padding:64px 40px}
+.illustration{display:flex;align-items:center;gap:16px;margin-bottom:28px}.shappy,.drive{width:64px;height:64px;object-fit:contain}.drive{display:grid;place-items:center}.drive img{width:64px;height:64px;object-fit:contain}.bridge{display:flex;gap:5px}.bridge i{width:4px;height:4px;border-radius:50%;background:hsl(var(--input))}
+.eyebrow{font-size:12px;font-weight:500;color:hsl(var(--muted-foreground));margin:0 0 12px}h1{font-size:30px;line-height:1.2;font-weight:600;letter-spacing:-.035em;margin:0 0 16px;text-wrap:balance}.description{font-size:14px;line-height:1.6;color:hsl(var(--muted-foreground));margin:0;max-width:380px}
+body:has([data-shapp-product]) .panel[data-slot='dialog-content']{position:relative;transform:none;display:flex;flex-direction:column;gap:20px;width:100%}
+h2,p{margin:0}.panel p{color:hsl(var(--muted-foreground))}.check{width:32px;height:32px;border-radius:50%;background:hsl(var(--accent));color:hsl(var(--primary));display:grid;place-items:center}.check svg{width:16px;height:16px}
+.account{display:flex;align-items:center;gap:12px;padding:14px 12px;border:1px solid hsl(var(--border));border-radius:var(--radius);background:hsl(var(--background))}.account img{width:24px;height:24px}.account strong{font-size:13px;font-weight:500}.status{margin-left:auto;font-size:12px;color:hsl(var(--muted-foreground));display:flex;align-items:center;gap:6px}.status:before{content:'✓';color:hsl(var(--primary))}
+.return-link{display:flex;align-items:center;justify-content:center;text-decoration:none;font:inherit;border:0;background:hsl(var(--primary));color:hsl(var(--primary-foreground));cursor:pointer}.return-link:hover{background:hsl(var(--primary)/.9)}.panel .hint{font-size:12px;text-align:center}
+@media(max-width:760px){header{padding:0 24px}body:has([data-shapp-product]) main[data-shapp-product]{grid-template-columns:1fr;gap:36px;padding:40px 24px;max-width:520px;min-height:auto}h1{font-size:28px}}
+</style>
+</head>
+<body>
+<header>SHAPP<span>.</span></header>
+
+<main data-shapp-product>
+<section class="intro" aria-labelledby="connection-title">
+<div class="illustration"><img class="shappy" src="data:image/webp;base64,{{SHAPPY}}" alt="Shappy vous salue" width="64" height="64"><div class="bridge" aria-hidden="true"><i></i><i></i><i></i></div><div class="drive"><img src="data:image/png;base64,{{DRIVE}}" alt="Google Drive" width="64" height="64"></div></div>
+<p class="eyebrow">SHAPP + Google Drive</p>
+<h1 id="connection-title">Google Drive rejoint votre espace SHAPP.</h1>
+<p class="description">Votre compte est connecté. Retrouvez-le dans les intégrations de votre application.</p>
+</section>
+<section data-slot="dialog-content" class="panel" aria-labelledby="success-title">
+<span class="check" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 4 4 10-10"/></svg></span>
+<h2 data-slot="dialog-title" id="success-title">Connexion réussie</h2>
+<p>Google Drive est maintenant connecté à SHAPP.</p>
+<div class="account"><img src="data:image/png;base64,{{DRIVE}}" alt="" width="28" height="28"><strong>Google Drive</strong><span class="status">Connecté</span></div>
+<a class="return-link" data-variant="default" data-control="button" href="{{RETURN_URL}}">Retourner à SHAPP</a>
+<p class="hint" id="close-hint" aria-live="polite">Retrouvez vos applications dans votre espace SHAPP.</p>
+</section>
+</main>
+</body></html>

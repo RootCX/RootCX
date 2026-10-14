@@ -1,5 +1,6 @@
 pub(crate) mod auth;
 mod catalog;
+mod managed;
 pub(crate) mod connections;
 pub(crate) mod oauth;
 pub(crate) mod routes;
@@ -128,6 +129,7 @@ impl RuntimeExtension for IntegrationsExtension {
             sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
         }
         connections::bootstrap(pool).await?;
+        auth::bootstrap(pool).await?;
         // Legacy indexes enforced 1-cursor-per-user; multi-mailbox needs N cursors.
         for idx in ["gmail.idx_gmail_cursor_user", "imap_smtp.idx_imap_cursor_user"] {
             let _ = sqlx::query(&format!("DROP INDEX IF EXISTS {idx}")).execute(pool).await;
@@ -151,6 +153,7 @@ impl RuntimeExtension for IntegrationsExtension {
             .route("/api/v1/integrations/{integration_id}/connected-users", get(routes::connected_users))
             .route("/api/v1/integrations/{integration_id}/auth", get(auth::status).delete(auth::disconnect))
             .route("/api/v1/integrations/{integration_id}/auth/start", post(auth::start))
+            .route("/api/v1/integrations/{integration_id}/auth/attempts/{attempt_id}", get(auth::attempt_status))
             .route("/api/v1/integrations/{integration_id}/auth/credentials", post(auth::submit_credentials))
             .route("/api/v1/integrations/{integration_id}/auth/delegate", post(auth::delegate))
             .route("/api/v1/integrations/auth/callback", get(auth::callback))
@@ -159,6 +162,7 @@ impl RuntimeExtension for IntegrationsExtension {
             .route("/api/v1/integrations/{integration_id}/connections", get(connections::list_connections))
             .route("/api/v1/integrations/{integration_id}/connections/{connection_id}",
                 axum::routing::patch(connections::update_connection).delete(connections::delete_connection))
+            .route("/api/v1/integrations/{integration_id}/connections/{connection_id}/verify", post(auth::verify_managed_connection))
             // App integration bindings
             .route("/api/v1/apps/{app_id}/integrations",
                 get(connections::list_app_bindings).post(connections::bind_app))

@@ -30,16 +30,14 @@ export function createBuilder(config, coding = code) {
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     let root; let appId; let heartbeat;
     let phase = 'understanding';
-    let message;
     const streaming = req.headers.accept === 'application/x-ndjson';
     const emit = value => { if (!res.destroyed) res.write(JSON.stringify(value) + '\n'); };
     const onProgress = (next, text) => {
       if (!['understanding', 'editing', 'checking', 'repairing', 'waiting'].includes(next)) return;
       if (next === 'understanding' && !['understanding', 'waiting'].includes(phase)) return;
-      if (phase === next && (!text || text === message)) return;
+      if (phase === next && !text) return;
       phase = next;
-      message = text;
-      if (streaming) emit({ type: 'progress', phase, message });
+      if (streaming) emit({ type: 'progress', phase, message: text });
     };
     try {
       let size = 0; const chunks = [];
@@ -47,6 +45,7 @@ export function createBuilder(config, coding = code) {
       const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       // Internal repairs include the original request plus Core's bounded diagnostic.
       if (!/^[a-z][a-z0-9_]{0,49}$/.test(input.appId) || typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 48000) throw new Error('Invalid application change');
+      if (input.narrationPrompt != null && (typeof input.narrationPrompt !== 'string' || input.narrationPrompt.length > 2000)) throw new Error('Invalid narration request');
       if (input.conversationId != null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.conversationId)) throw new Error('Invalid conversation');
       if (activeApps.has(input.appId)) throw new Error('An application build is already running');
       appId = input.appId; activeApps.add(appId);
@@ -65,9 +64,9 @@ export function createBuilder(config, coding = code) {
       if (streaming) {
         res.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
         emit({ type: 'progress', phase });
-        heartbeat = setInterval(() => emit({ type: 'progress', phase, message }), 10_000);
+        heartbeat = setInterval(() => emit({ type: 'progress', phase }), 10_000);
       }
-      const result = await coding({ root, appId: input.appId, prompt: input.prompt, conversationId: input.conversationId, signal: controller.signal, config, onProgress });
+      const result = await coding({ root, appId: input.appId, prompt: input.prompt, narrationPrompt: input.narrationPrompt, conversationId: input.conversationId, signal: controller.signal, config, onProgress });
       if (streaming) { emit({ type: 'result', ...result }); res.end(); }
       else respond(200, result);
     } catch (error) {
@@ -111,6 +110,7 @@ if (import.meta.url === new URL(process.argv[1], 'file:').href) {
   let config = {
     token: process.env.ROOTCX_BUILDER_TOKEN,
     endpoint: process.env.ROOTCX_BUILDER_LLM_ENDPOINT,
+    narrationEndpoint: process.env.ROOTCX_BUILDER_NARRATION_ENDPOINT,
     apiKey: process.env.ROOTCX_BUILDER_LLM_KEY,
     model: process.env.ROOTCX_BUILDER_MODEL,
     concurrency: Number(process.env.ROOTCX_BUILDER_CONCURRENCY ?? 1),

@@ -120,23 +120,6 @@ pub async fn execute(
         .bind(id).bind(error).bind(message).execute(rt.pool()).await;
 }
 
-fn progress_message(phase: &str) -> Option<&'static str> {
-    match phase {
-        "understanding" => {
-            Some("Je regarde comment votre application fonctionne pour préparer votre demande.")
-        }
-        "editing" => Some("J’adapte votre application à votre demande."),
-        "checking" => {
-            Some("Je prépare et vérifie les changements pour qu’ils fonctionnent ensemble.")
-        }
-        "repairing" => Some("J’ai repéré un point à ajuster. Je le corrige avant de continuer."),
-        "waiting" => Some(
-            "Le service répond plus lentement que prévu. Je patiente et reprends automatiquement.",
-        ),
-        _ => None,
-    }
-}
-
 pub(super) fn failure_message(error: &str) -> &'static str {
     let cases = [
         (
@@ -220,13 +203,14 @@ async fn request_build(
     base: &str,
     conversation: Option<Uuid>,
     prompt: &str,
+    narration_prompt: &str,
     sources: &Files,
 ) -> Result<Built, ApiError> {
     let mut response = client
         .post(format!("{}/build", runner.url.trim_end_matches('/')))
         .bearer_auth(&runner.token)
         .header("accept", "application/x-ndjson")
-        .json(&json!({"runId":id,"appId":app,"baseCommit":base,"prompt":prompt,"conversationId":conversation,"files":sources}))
+        .json(&json!({"runId":id,"appId":app,"baseCommit":base,"prompt":prompt,"narrationPrompt":narration_prompt,"conversationId":conversation,"files":sources}))
         .send()
         .await
         .map_err(|e| ApiError::Unavailable(format!("builder transport: {e}")))?;
@@ -281,14 +265,16 @@ async fn request_build(
                     .map_err(|e| ApiError::BadRequest(format!("invalid builder event: {e}")))?;
                 match event["type"].as_str() {
                     Some("progress") if completed.is_none() => {
-                        if let Some(fallback) =
-                            progress_message(event["phase"].as_str().unwrap_or(""))
-                        {
+                        if matches!(
+                            event["phase"].as_str(),
+                            Some(
+                                "understanding" | "editing" | "checking" | "repairing" | "waiting"
+                            )
+                        ) {
                             let message = event["message"]
                                 .as_str()
-                                .filter(|s| !s.is_empty() && s.len() <= 1200)
-                                .unwrap_or(fallback);
-                            sqlx::query("UPDATE rootcx_system.source_runs SET phase=$2,message=$3,updated_at=now() WHERE id=$1 AND status='coding'")
+                                .filter(|s| !s.is_empty() && s.len() <= 1200);
+                            sqlx::query("UPDATE rootcx_system.source_runs SET phase=$2,message=COALESCE($3,message),updated_at=now() WHERE id=$1 AND status='coding'")
                                 .bind(id).bind(event["phase"].as_str()).bind(message).execute(rt.pool()).await?;
                         }
                     }
@@ -343,7 +329,7 @@ async fn process(
     base: &str,
     prompt: &str,
 ) -> Result<(), ApiError> {
-    state(rt, id, "coding", "J’adapte votre application.").await?;
+    state(rt, id, "coding", "Je prépare votre demande.").await?;
     let root = rt.data_dir().join("sources").join(app);
     let before = files::snapshot(&root, base).await?;
     let client = http_client(Duration::from_secs(1000))?;
@@ -365,6 +351,7 @@ async fn process(
             base,
             conversation,
             &request,
+            prompt,
             &sources,
         )
         .await?;
@@ -376,7 +363,7 @@ async fn process(
             Err(ApiError::BadRequest(diagnostic)) if attempt < 2 => {
                 attempt += 1;
                 sqlx::query("UPDATE rootcx_system.source_runs SET phase='repairing',message=$2,updated_at=now() WHERE id=$1 AND status='coding'")
-                    .bind(id).bind(progress_message("repairing")).execute(rt.pool()).await?;
+                    .bind(id).bind("J’ai repéré un point à ajuster. Je le corrige avant de continuer.").execute(rt.pool()).await?;
                 request = format!(
                     "Core rejected the generated manifest before publication. Repair the current source files according to the RootCX documentation, preserving the original user request below. Do not deploy independently. Core validation diagnostic:\n{}\nOriginal user request:\n{prompt}",
                     diagnostic.chars().take(12000).collect::<String>()

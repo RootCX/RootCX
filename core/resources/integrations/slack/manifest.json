@@ -1,0 +1,217 @@
+{
+  "appId": "slack",
+  "name": "Slack",
+  "version": "1.0.0",
+  "type": "integration",
+  "description": "Connect Slack and operate on live data.",
+  "entities": [],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "clientId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "OAuth client ID",
+        "platformSecret": "SLACK_CLIENT_ID"
+      },
+      "clientSecret": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "OAuth client secret",
+        "platformSecret": "SLACK_CLIENT_SECRET"
+      },
+      "tokenUrl": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "https://slack.com/api/oauth.v2.access",
+        "platformSecret": "SLACK_TOKEN_URL"
+      },
+      "tokenAuthMethod": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "body",
+        "platformSecret": "SLACK_TOKEN_AUTH_METHOD"
+      },
+      "tokenEncoding": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "form",
+        "platformSecret": "SLACK_TOKEN_ENCODING"
+      }
+    },
+    "required": [
+      "clientId",
+      "clientSecret",
+      "tokenUrl"
+    ],
+    "additionalProperties": false
+  },
+  "userAuth": {
+    "type": "oauth2",
+    "plugin": {
+      "protocolVersion": 1,
+      "qualification": "requires-live-verification",
+      "discovery": {
+        "action": "list_channels",
+        "itemsPath": "items",
+        "idPath": "id",
+        "labelPath": "name"
+      }
+    },
+    "tokenAuth": {
+      "label": "Slack bot access token",
+      "helpUrl": "https://api.slack.com/apps"
+    },
+    "oauth": {
+      "scopes": [
+        "channels:read",
+        "groups:read",
+        "channels:history",
+        "groups:history",
+        "chat:write"
+      ],
+      "tokenUrl": "https://slack.com/api/oauth.v2.access",
+      "tokenAuthMethod": "body",
+      "tokenEncoding": "form"
+    },
+    "credentialSchema": {
+      "type": "object",
+      "properties": {
+        "accessToken": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Slack bot access token"
+        }
+      },
+      "required": [
+        "accessToken"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "actions": [
+    {
+      "id": "verify_connection",
+      "name": "Verify connection",
+      "description": "Verify the connected account with the provider [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "list_channels",
+      "name": "List channels",
+      "description": "List public and private channels accessible to this bot [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "Opaque cursor from the previous response"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "get_history",
+      "name": "Read channel history",
+      "description": "Read one page of messages in a channel accessible to this bot [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "channelId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "Opaque cursor from the previous response"
+          }
+        },
+        "required": [
+          "channelId"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "send_message",
+      "name": "Send channel message",
+      "description": "Post a bot message. Never automatically retry an uncertain send. [write]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "channelId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "description": "Slack mrkdwn text"
+          },
+          "threadTs": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Parent message timestamp",
+            "pattern": "^\\d+\\.\\d+$"
+          }
+        },
+        "required": [
+          "channelId",
+          "text"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    }
+  ],
+  "instructions": "RootCX integration plugin protocol 1. Connect an account and bind it to the application. Credentials and permissions belong to Core. Reads are live. Use discovery and schema actions before writing. Follow nextCursor explicitly. Never retry an uncertain write automatically; reconcile with the provider. Only the listed actions are supported. Provider qualification is required before production activation."
+}

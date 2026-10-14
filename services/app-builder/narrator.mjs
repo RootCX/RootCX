@@ -1,8 +1,6 @@
-import { readFileSync } from 'node:fs';
-
-const instructions = readFileSync(new URL('./business-progress.md', import.meta.url), 'utf8');
 const sentences = new Intl.Segmenter('fr', { granularity: 'sentence' });
-// Presentation only: never awaited by the coding loop and never allowed to announce publication.
+const phases = new Set(['understanding', 'editing', 'checking', 'repairing', 'waiting']);
+
 export function businessText(value) {
   if (typeof value !== 'string') return null;
   const text = value.trim();
@@ -10,64 +8,80 @@ export function businessText(value) {
   return text;
 }
 
-export function narrator({ config, prompt, signal, onProgress }) {
+// This Adapter never falls back to the coding endpoint or its model.
+export function narrationGateway({ narrationEndpoint, apiKey }) {
+  return async (input, signal) => {
+    if (!narrationEndpoint) return null;
+    const response = await fetch(narrationEndpoint, {
+      method: 'POST', redirect: 'error', signal,
+      headers: { 'content-type': 'application/json', 'x-api-key': apiKey },
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) throw Object.assign(new Error('Narration unavailable'), { status: response.status });
+    return (await response.json()).message;
+  };
+}
+
+// Observe facts, never await presentation. The translator is the only provider Seam.
+export function narrator({ translate, prompt, signal, onProgress }) {
   let phase = 'understanding';
-  let notes = '';
+  let revision = 0;
   let inFlight = false;
-  let lastSent = 0;
+  let lastSent = -Infinity;
   let calls = 0;
   let closed = false;
-  let previousMessage = '';
+  const previous = [];
+  const pending = new Set();
+  const observed = new Set();
   const controller = new AbortController();
   const timer = setInterval(() => void flush(), 8000);
   timer.unref();
 
   async function flush() {
-    if (closed || inFlight || !notes || calls >= 20 || Date.now() - lastSent < 8000) return;
+    if (closed || signal.aborted || inFlight || !pending.size || calls >= 20 || Date.now() - lastSent < 8000) return;
     inFlight = true;
     calls++;
     lastSent = Date.now();
-    const observedPhase = phase;
-    const evidence = notes;
-    notes = '';
+    const observedRevision = revision;
+    const evidence = [...pending].join('\n');
+    pending.clear();
     try {
-      const response = await fetch(config.endpoint, {
-        method: 'POST', redirect: 'error',
-        headers: { 'content-type': 'application/json', 'x-api-key': config.apiKey, 'anthropic-version': '2023-06-01' },
-        signal: AbortSignal.any([signal, controller.signal, AbortSignal.timeout(6000)]),
-        body: JSON.stringify({ model: config.model, max_tokens: 160,
-          system: instructions,
-          messages: [{ role: 'user', content: JSON.stringify({ request: prompt.slice(0, 3000), phase: observedPhase, observation: evidence.slice(-4000), previousMessage }) }],
-        }),
+      const timeout = AbortSignal.any([signal, controller.signal, AbortSignal.timeout(3000)]);
+      // Enforce the deadline even if a translator ignores cancellation.
+      const cancelled = new Promise((_, reject) => {
+        timeout.addEventListener('abort', () => reject(timeout.reason), { once: true });
       });
-      if (!response.ok) {
-        if ([401, 402, 403].includes(response.status)) calls = 20;
-        return;
-      }
-      const result = await response.json();
-      if (result.stop_reason === 'max_tokens') return;
-      const message = businessText(result.content?.filter(part => part.type === 'text').map(part => part.text).join(' '));
-      if (!closed && phase === observedPhase && message && message !== 'RIEN' && message !== previousMessage
-        && [...sentences.segment(message)].length <= 2
+      const result = await Promise.race([translate({
+        request: prompt.slice(0, 2000), phase, observation: evidence,
+        previousMessage: previous.join('\n').slice(-500),
+      }, timeout), cancelled]);
+      const message = businessText(result);
+      if (!closed && !signal.aborted && revision === observedRevision && message && message !== 'RIEN'
+        && !previous.some(text => text.toLocaleLowerCase() === message.toLocaleLowerCase())
+        && message.length <= 240 && [...sentences.segment(message)].length <= 1
         && !/(?:^|[^\p{L}])(?:termin[ée]e?s?|disponibles?|publi[ée]e?s?|appliqu[ée]e?s?|prêt[es]*|réussi[es]*|enregistr[ée]e?s?)(?=$|[^\p{L}])/iu.test(message)) {
-        previousMessage = message;
+        previous.push(message);
+        if (previous.length > 2) previous.shift();
         onProgress(phase, message);
       }
-    } catch { /* A slow narrator must never interrupt the actual work. */ }
-    finally { inFlight = false; }
+    } catch (error) {
+      if ([401, 402, 403, 404].includes(error?.status)) calls = 20;
+    } finally { inFlight = false; }
   }
   return {
-    observe(event, nextPhase) {
-      // Match the public phase: rereading a file does not restart the whole request.
-      if (nextPhase && (nextPhase !== 'understanding' || ['understanding', 'waiting'].includes(phase))) phase = nextPhase;
-      const part = event.properties?.part;
-      if (part?.type === 'text' && part.time?.end && typeof part.text === 'string') notes = (notes + '\n' + part.text).slice(-4000);
-      // Tool output and model reasoning never enter the presentation prompt.
-      if (part?.type === 'tool' && nextPhase) {
-        const status = ['pending', 'running', 'completed', 'error'].includes(part.state?.status) ? part.state.status : 'observed';
-        notes = (notes + `\nObserved activity: ${nextPhase}; status: ${status}`).slice(-4000);
+    observe(fact) {
+      if (closed || !phases.has(fact.phase)) return;
+      const next = fact.phase;
+      if (next !== 'understanding' || ['understanding', 'waiting'].includes(phase)) {
+        if (phase !== next) { phase = next; revision++; pending.clear(); }
       }
-      if (nextPhase && !notes) notes = `Observed activity: ${nextPhase}`;
+      // A finite vocabulary bounds memory and prevents logs, paths or secrets entering the prompt.
+      const status = ['pending', 'running', 'completed', 'error'].includes(fact.status) ? fact.status : 'observed';
+      const area = ['screen', 'data'].includes(fact.area) ? fact.area : 'application';
+      const key = JSON.stringify({ phase: next, status, area });
+      if (observed.has(key)) return;
+      observed.add(key);
+      pending.add(key);
       void flush();
     },
     close() { closed = true; clearInterval(timer); controller.abort(); },

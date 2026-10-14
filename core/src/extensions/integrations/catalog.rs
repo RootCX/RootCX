@@ -38,6 +38,7 @@ pub async fn list_catalog(
 
         entries.push(json!({
             "id": id,
+            "managedOAuth": super::managed::enabled(id),
             "name": manifest.get("name").and_then(|v| v.as_str()).unwrap_or(id),
             "version": manifest.get("version").and_then(|v| v.as_str()).unwrap_or("0.0.0"),
             "description": manifest.get("description").and_then(|v| v.as_str()).unwrap_or(""),
@@ -57,6 +58,7 @@ pub async fn deploy_from_catalog(
     State(rt): State<SharedRuntime>,
     Path(id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    validate_id(&id)?;
     let pool = rt.pool().clone();
     crate::governance::authority::require_perm(&pool, identity.user_id, "admin:apps.install").await?;
     let catalog_path = rt.resources_dir().join("integrations").join(&id);
@@ -75,6 +77,7 @@ pub async fn deploy_from_catalog(
     let manifest: rootcx_types::AppManifest = serde_json::from_str(&manifest_raw)
         .map_err(|e| ApiError::Internal(format!("parse manifest: {e}")))?;
 
+    verify_package(&catalog_path, &id, &manifest_raw).await?;
     crate::manifest::install_app(&pool, &manifest, rt.extensions(), identity.user_id, &secrets).await?;
     sync_integration_permissions(&pool, &id, &manifest).await?;
 
@@ -93,7 +96,9 @@ pub async fn deploy_from_catalog(
     copy_dir_recursive(&catalog_path, &app_dir).await?;
     info!(id = %id, "integration copied to apps dir");
 
-    if app_dir.join("package.json").exists() {
+    let descriptor: JsonValue = serde_json::from_str(&manifest_raw).map_err(|e| ApiError::Internal(e.to_string()))?;
+    let bundled = descriptor.pointer("/userAuth/plugin/protocolVersion").is_some() && descriptor.pointer("/userAuth/plugin/legacySync") != Some(&json!(true));
+    if !bundled && app_dir.join("package.json").exists() {
         if crate::worker_sandbox::enabled()? {
             crate::worker_sandbox::install_dependencies(&bun_bin, &app_dir).await?;
         } else {
@@ -119,7 +124,7 @@ pub async fn deploy_from_catalog(
         "SELECT webhook_token FROM rootcx_system.apps WHERE id = $1",
     ).bind(&id).fetch_optional(&pool).await?.flatten();
 
-    Ok(Json(json!({ "message": format!("integration '{id}' deployed and started"), "webhookToken": webhook_token })))
+    Ok(Json(json!({ "message": format!("integration '{id}' installed"), "webhookToken": webhook_token })))
 }
 
 pub async fn undeploy(
@@ -127,6 +132,7 @@ pub async fn undeploy(
     State(rt): State<SharedRuntime>,
     Path(id): Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    validate_id(&id)?;
     let pool = rt.pool().clone();
     crate::governance::authority::require_perm(&pool, identity.user_id, "admin:apps.install").await?;
     let app_dir = rt.data_dir().join("apps").join(&id);
@@ -212,4 +218,60 @@ async fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Res
         }
     }
     Ok(())
+}
+
+fn validate_id(id: &str) -> Result<(), ApiError> {
+    if id.is_empty() || id.len() > 128 || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-') {
+        return Err(ApiError::BadRequest("invalid integration id".into()));
+    }
+    Ok(())
+}
+
+// These hashes detect incomplete/corrupted release artifacts, not publisher trust.
+// Catalog files are shipped with Core; arbitrary untrusted plugin upload is unsupported.
+async fn verify_package(path: &std::path::Path, id: &str, raw: &str) -> Result<(), ApiError> {
+    use sha2::{Digest, Sha256};
+    let manifest: JsonValue = serde_json::from_str(raw).map_err(|e| ApiError::Internal(e.to_string()))?;
+    if manifest.get("appId").and_then(|v| v.as_str()) != Some(id) {
+        return Err(ApiError::BadRequest("integration identity mismatch".into()));
+    }
+    let Some(protocol) = manifest.pointer("/userAuth/plugin/protocolVersion") else { return Ok(()); };
+    if protocol.as_u64() != Some(1) { return Err(ApiError::BadRequest("unsupported integration protocol".into())); }
+    let lock: JsonValue = serde_json::from_slice(&tokio::fs::read(path.join("plugin-lock.json")).await
+        .map_err(|_| ApiError::BadRequest("missing plugin lock".into()))?)
+        .map_err(|_| ApiError::BadRequest("invalid plugin lock".into()))?;
+    if lock.get("protocolVersion") != Some(protocol) || lock.get("version") != manifest.get("version") {
+        return Err(ApiError::BadRequest("plugin lock version mismatch".into()));
+    }
+    let entry = if manifest.pointer("/userAuth/plugin/legacySync") == Some(&json!(true)) { "plugin.ts" } else { "index.ts" };
+    for filename in ["manifest.json", entry] {
+        let bytes = tokio::fs::read(path.join(filename)).await.map_err(|_| ApiError::BadRequest("missing plugin artifact".into()))?;
+        let digest = hex::encode(Sha256::digest(bytes));
+        if lock.get("artifacts").and_then(|v| v.get(filename)).and_then(|v| v.as_str()) != Some(digest.as_str()) {
+            return Err(ApiError::BadRequest(format!("plugin integrity check failed: {filename}")));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn shipped_plugins_are_locked_and_tampered_packages_are_rejected() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/integrations");
+        for id in ["notion", "stripe", "hubspot", "salesforce", "airtable", "gmail", "google_calendar", "google_sheets", "google_drive", "slack"] {
+            let path = root.join(id);
+            let raw = tokio::fs::read_to_string(path.join("manifest.json")).await.unwrap();
+            verify_package(&path, id, &raw).await.unwrap();
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let raw = tokio::fs::read_to_string(root.join("notion/manifest.json")).await.unwrap();
+        tokio::fs::write(temp.path().join("manifest.json"), &raw).await.unwrap();
+        tokio::fs::copy(root.join("notion/plugin-lock.json"), temp.path().join("plugin-lock.json")).await.unwrap();
+        tokio::fs::write(temp.path().join("index.ts"), "tampered").await.unwrap();
+        assert!(verify_package(temp.path(), "notion", &raw).await.is_err());
+        assert!(verify_package(&root.join("notion"), "stripe", &raw).await.is_err());
+        for id in ["", "..", "../notion", "notion/file", "notion%2f.."] { assert!(validate_id(id).is_err(), "accepted {id}"); }
+    }
 }

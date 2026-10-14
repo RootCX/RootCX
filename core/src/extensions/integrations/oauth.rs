@@ -11,9 +11,6 @@
 //! taken from the manifest: app code authors manifests, so a manifest-supplied
 //! URL would let the Core be told where to post its own secrets.
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
-
 use serde_json::{Value as JsonValue, json};
 use sqlx::PgPool;
 
@@ -62,18 +59,6 @@ impl RenewError {
     }
 }
 
-/// One in-flight renewal per connection. The Core is the only renewer, so an
-/// in-process guard covers every worker; correctness does not rest on it, the
-/// read-back fence below does.
-static IN_FLIGHT: LazyLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
-    LazyLock::new(Default::default);
-
-fn guard_for(connection_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    let mut map = IN_FLIGHT.lock().unwrap();
-    map.retain(|_, g| Arc::strong_count(g) > 1);
-    map.entry(connection_id.to_string()).or_default().clone()
-}
-
 fn now_secs() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -95,7 +80,7 @@ fn is_live(blob: &JsonValue, now: i64) -> bool {
 /// `__bind`'s `mergeConfig`. Only an admin writes these
 /// (`save_platform_config`), which is what keeps the renewal destination out of
 /// reach of application code.
-pub(crate) const CORE_OWNED_CONFIG: [&str; 3] = ["tokenUrl", "clientId", "clientSecret"];
+pub(crate) const CORE_OWNED_CONFIG: [&str; 5] = ["tokenUrl", "clientId", "clientSecret", "tokenAuthMethod", "tokenEncoding"];
 
 /// The Core renews for this connection only when an admin configured a token
 /// endpoint and the credential actually carries a refresh token.
@@ -134,23 +119,22 @@ pub(crate) async fn credentials_for_worker(
         return Ok(for_worker(&blob, config));
     }
 
-    let guard = guard_for(connection_id);
-    let _held = guard.lock().await;
-
-    // Read-back fence: whoever held the guard before us may have renewed already,
-    // and presenting a consumed refresh token can cost the whole grant.
-    //
-    // Fails closed. Falling back to the caller's pre-guard snapshot on a read error
-    // would present a token the previous holder already rotated, and the provider's
-    // rejection would then flag a perfectly healthy connection dead.
-    let blob = match reread(pool, secrets, integration_id, connection_id).await {
-        Ok(Some(current)) => current,
-        Ok(None) => return Err(RenewError::Transient("the credential is gone".into())),
-        Err(e) => return Err(e),
-    };
-    if is_live(&blob, now_secs()) {
-        return Ok(for_worker(&blob, config));
-    }
+    let mut tx = pool.begin().await.map_err(|e| RenewError::Transient(e.to_string()))?;
+    sqlx::query("SET LOCAL lock_timeout = '20s'").execute(&mut *tx).await
+        .map_err(|e| RenewError::Transient(e.to_string()))?;
+    // Transaction-scoped lock spans replicas and is released on cancellation.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 73431))")
+        .bind(format!("{integration_id}:{connection_id}")).execute(&mut *tx).await
+        .map_err(|e| RenewError::Transient(e.to_string()))?;
+    let key = super::connections::credential_key(connection_id);
+    let stored: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT nonce, ciphertext FROM rootcx_system.secrets WHERE app_id = $1 AND key_name = $2"
+    ).bind(integration_id).bind(&key).fetch_optional(&mut *tx).await
+        .map_err(|e| RenewError::Transient(e.to_string()))?;
+    let (old_nonce, old_ciphertext) = stored.ok_or_else(|| RenewError::Transient("the credential is gone".into()))?;
+    let blob: JsonValue = serde_json::from_str(&secrets.decrypt(&old_nonce, &old_ciphertext)
+        .map_err(|e| RenewError::Transient(e.to_string()))?).map_err(|e| RenewError::Transient(e.to_string()))?;
+    if !manages(config, &blob) || is_live(&blob, now_secs()) { return Ok(for_worker(&blob, config)); }
 
     let refresh = str_field(&blob, F_REFRESH)
         .ok_or_else(|| RenewError::Rejected("connection has no refresh token".into()))?
@@ -161,38 +145,36 @@ pub(crate) async fn credentials_for_worker(
         Ok(renewed) => renewed,
         Err(e) => {
             if matches!(e, RenewError::Rejected(_)) {
-                super::connections::flag_if_auth_failed(
-                    pool, integration_id, Some(connection_id), &e.envelope(),
-                ).await;
+                // Only invalidate the grant actually rejected. A concurrent reconnect wins.
+                sqlx::query("UPDATE rootcx_system.integration_connections SET status = 'dead', last_error = $2, last_error_at = now()
+                    WHERE id = $1 AND EXISTS (SELECT 1 FROM rootcx_system.secrets
+                    WHERE app_id = $3 AND key_name = $4 AND nonce = $5 AND ciphertext = $6)")
+                    .bind(connection_id).bind(e.message()).bind(integration_id).bind(&key)
+                    .bind(&old_nonce).bind(&old_ciphertext).execute(&mut *tx).await
+                    .map_err(|e| RenewError::Transient(e.to_string()))?;
+                tx.commit().await.map_err(|e| RenewError::Transient(e.to_string()))?;
             }
             return Err(e);
         }
     };
 
-    // Neither the reconnect nor the disconnect paths take our guard. If either
-    // landed while we were at the provider, it wins: writing now would revert a
-    // fresh credential, or resurrect one the owner just revoked. Read directly
-    // rather than through `reread`, which cannot tell a vanished credential from a
-    // failed read, and only the first means "revoked".
-    let unchanged = reread(pool, secrets, integration_id, connection_id)
-        .await?
-        .is_some_and(|current| str_field(&current, F_REFRESH) == Some(&refresh));
-    if !unchanged {
-        return Err(RenewError::Transient("the credential changed while renewing".into()));
-    }
-
     let merged = merge(&blob, renewed);
-
-    secrets
-        .set(pool, integration_id, &super::connections::credential_key(connection_id), &merged.to_string())
-        .await
-        .map_err(|e| RenewError::Transient(format!("persisting the credential failed: {e}")))?;
+    let (nonce, ciphertext) = secrets.encrypt(&merged.to_string())
+        .map_err(|e| RenewError::Transient(e.to_string()))?;
+    // Reconnection and deletion win even while the provider request is in flight.
+    let updated = sqlx::query("UPDATE rootcx_system.secrets SET nonce = $3, ciphertext = $4
+        WHERE app_id = $1 AND key_name = $2 AND nonce = $5 AND ciphertext = $6")
+        .bind(integration_id).bind(&key).bind(nonce).bind(ciphertext).bind(old_nonce).bind(old_ciphertext)
+        .execute(&mut *tx).await.map_err(|e| RenewError::Transient(e.to_string()))?;
+    if updated.rows_affected() != 1 { return Err(RenewError::Transient("the credential changed while renewing".into())); }
+    tx.commit().await.map_err(|e| RenewError::Transient(e.to_string()))?;
 
     Ok(for_worker(&merged, config))
 }
 
 /// The stored credential. `Ok(None)` means absent, which is revoked; an `Err`
 /// means we could not tell, which is not the same thing and must not be conflated.
+#[cfg(test)]
 async fn reread(
     pool: &PgPool, secrets: &SecretManager, integration_id: &str, connection_id: &str,
 ) -> Result<Option<JsonValue>, RenewError> {
@@ -242,23 +224,31 @@ async fn exchange(config: &JsonValue, refresh_token: &str) -> Result<Renewed, Re
         ("grant_type", "refresh_token".to_string()),
         ("refresh_token", refresh_token.to_string()),
     ];
-    for key in ["clientId", "clientSecret"] {
+    let basic = str_field(config, "tokenAuthMethod") == Some("basic");
+    for key in if basic { [].as_slice() } else { ["clientId", "clientSecret"].as_slice() } {
         if let Some(v) = str_field(config, key) {
-            let wire = if key == "clientId" { "client_id" } else { "client_secret" };
+            let wire = if *key == "clientId" { "client_id" } else { "client_secret" };
             form.push((wire, v.to_string()));
         }
     }
 
-    let response = client
-        .post(url)
-        .form(&form)
-        .send()
-        .await
-        .map_err(|e| RenewError::Transient(format!("token endpoint unreachable: {e}")))?;
+    let mut request = client.post(url);
+    if basic {
+        request = request.basic_auth(str_field(config, "clientId").unwrap_or(""), str_field(config, "clientSecret"));
+    }
+    request = if str_field(config, "tokenEncoding") == Some("json") {
+        request.json(&form.into_iter().collect::<std::collections::HashMap<_, _>>())
+    } else { request.form(&form) };
+    let mut response = request.send().await
+        .map_err(|_| RenewError::Transient("token endpoint unreachable".into()))?;
 
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    interpret(status.as_u16(), &body)
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|_| RenewError::Transient("token response interrupted".into()))? {
+        if body.len() + chunk.len() > 1024 * 1024 { return Err(RenewError::Transient("token response exceeds 1 MiB".into())); }
+        body.extend_from_slice(&chunk);
+    }
+    interpret(status.as_u16(), &String::from_utf8_lossy(&body))
 }
 
 /// An HTTP client pinned to the addresses the destination resolved to, refusing
@@ -300,7 +290,7 @@ fn interpret(status: u16, body: &str) -> Result<Renewed, RenewError> {
     let access = str_field(&parsed, "access_token")
         .ok_or_else(|| RenewError::Transient("token endpoint returned no access_token".into()))?
         .to_string();
-    let lifetime = parsed.get("expires_in").and_then(JsonValue::as_i64).filter(|s| *s > 0).unwrap_or(3600);
+    let lifetime = parsed.get("expires_in").and_then(JsonValue::as_i64).filter(|s| *s > 0).unwrap_or(MARGIN_SECS).min(31_536_000);
 
     Ok(Renewed {
         access,
@@ -312,15 +302,10 @@ fn interpret(status: u16, body: &str) -> Result<Renewed, RenewError> {
 /// The provider's own error wording, never the whole body: a token endpoint can
 /// echo credentials back in an error.
 fn describe(body: &str) -> String {
-    serde_json::from_str::<JsonValue>(body)
-        .ok()
-        .and_then(|v| {
-            ["error", "error_description", "ErrorType", "Message"]
-                .iter()
-                .filter_map(|k| str_field(&v, k).map(str::to_string))
-                .reduce(|a, b| format!("{a}: {b}"))
-        })
-        .unwrap_or_else(|| "no detail".into())
+    serde_json::from_str::<JsonValue>(body).ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+        .filter(|s| matches!(s.as_str(), "invalid_grant" | "invalid_client" | "invalid_request" | "unauthorized_client" | "invalid_scope" | "temporarily_unavailable"))
+        .unwrap_or_else(|| "provider error".into())
 }
 
 #[cfg(test)]
@@ -483,10 +468,10 @@ mod tests {
                 r#"{"access_token":"a2","refresh_token":"r2","expires_in":3600}"#, Some("r2"), 3600),
             ("a non-rotating provider returns only an access token",
                 r#"{"access_token":"a2","expires_in":60}"#, None, 60),
-            ("a missing lifetime falls back to an hour",
-                r#"{"access_token":"a2"}"#, None, 3600),
-            ("a zero lifetime would renew on every call, so it falls back too",
-                r#"{"access_token":"a2","expires_in":0}"#, None, 3600),
+            ("an unknown lifetime requires renewal before reuse",
+                r#"{"access_token":"a2"}"#, None, MARGIN_SECS),
+            ("a zero lifetime must never be assumed live for an hour",
+                r#"{"access_token":"a2","expires_in":0}"#, None, MARGIN_SECS),
         ];
         for (case, body, rotated, min_lifetime) in cases {
             let r = interpret(200, body).unwrap_or_else(|e| panic!("case: {case}: {e:?}"));
@@ -514,16 +499,6 @@ mod tests {
             let err = interpret(*status, body).err().expect(case);
             assert_eq!(matches!(err, RenewError::Rejected(_)), *terminal, "case: {case}");
         }
-    }
-
-    #[tokio::test]
-    async fn one_guard_per_connection_and_the_map_does_not_grow_unbounded() {
-        let a = guard_for("conn-a");
-        assert!(Arc::ptr_eq(&a, &guard_for("conn-a")), "concurrent callers must share one guard");
-        assert!(!Arc::ptr_eq(&a, &guard_for("conn-b")), "distinct connections must not serialise");
-        drop(a);
-        let _ = guard_for("conn-c");
-        assert!(!IN_FLIGHT.lock().unwrap().contains_key("conn-a"), "released guards are reaped");
     }
 
     mod against_a_provider {
@@ -733,7 +708,7 @@ mod tests {
     #[test]
     fn describe_reports_the_provider_wording_and_never_the_raw_body() {
         assert!(describe(r#"{"error":"invalid_grant"}"#).contains("invalid_grant"));
-        assert_eq!(describe("<html>secret=abc</html>"), "no detail");
-        assert_eq!(describe(r#"{"unknown":1}"#), "no detail");
+        assert_eq!(describe("<html>secret=abc</html>"), "provider error");
+        assert_eq!(describe(r#"{"unknown":1}"#), "provider error");
     }
 }

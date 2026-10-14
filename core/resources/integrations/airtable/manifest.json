@@ -1,0 +1,336 @@
+{
+  "appId": "airtable",
+  "name": "Airtable",
+  "version": "1.0.0",
+  "type": "integration",
+  "description": "Connect Airtable and operate on live data.",
+  "entities": [],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "clientId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "OAuth client ID",
+        "platformSecret": "AIRTABLE_CLIENT_ID"
+      },
+      "clientSecret": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "OAuth client secret",
+        "platformSecret": "AIRTABLE_CLIENT_SECRET"
+      },
+      "tokenUrl": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "https://airtable.com/oauth2/v1/token",
+        "platformSecret": "AIRTABLE_TOKEN_URL"
+      },
+      "tokenAuthMethod": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "basic",
+        "platformSecret": "AIRTABLE_TOKEN_AUTH_METHOD"
+      },
+      "tokenEncoding": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "form",
+        "platformSecret": "AIRTABLE_TOKEN_ENCODING"
+      }
+    },
+    "required": [
+      "clientId",
+      "clientSecret",
+      "tokenUrl"
+    ],
+    "additionalProperties": false
+  },
+  "userAuth": {
+    "type": "oauth2",
+    "plugin": {
+      "protocolVersion": 1,
+      "qualification": "requires-live-verification",
+      "discovery": {
+        "action": "list_bases",
+        "itemsPath": "items",
+        "idPath": "id",
+        "labelPath": "name"
+      }
+    },
+    "tokenAuth": {
+      "label": "Airtable personal access token",
+      "helpUrl": "https://airtable.com/create/tokens"
+    },
+    "oauth": {
+      "scopes": [
+        "data.records:read",
+        "data.records:write",
+        "schema.bases:read"
+      ],
+      "tokenUrl": "https://airtable.com/oauth2/v1/token",
+      "tokenAuthMethod": "basic",
+      "tokenEncoding": "form"
+    },
+    "credentialSchema": {
+      "type": "object",
+      "properties": {
+        "accessToken": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Airtable personal access token"
+        }
+      },
+      "required": [
+        "accessToken"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "actions": [
+    {
+      "id": "verify_connection",
+      "name": "Verify connection",
+      "description": "Verify the connected account with the provider [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "list_bases",
+      "name": "List bases",
+      "description": "Discover accessible bases [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "Opaque cursor from the previous response"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "get_schema",
+      "name": "Get base schema",
+      "description": "Read tables and field definitions for one base [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "baseId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          }
+        },
+        "required": [
+          "baseId"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "list_records",
+      "name": "List records",
+      "description": "Read one page of table records with an optional native filter formula [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "baseId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "tableId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "Opaque cursor from the previous response"
+          },
+          "filterByFormula": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          }
+        },
+        "required": [
+          "baseId",
+          "tableId"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "get_record",
+      "name": "Get record",
+      "description": "Read an existing record by its stable ID [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "baseId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "tableId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "recordId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          }
+        },
+        "required": [
+          "baseId",
+          "tableId",
+          "recordId"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "create_record",
+      "name": "Create record",
+      "description": "Create one record using native field values; no automatic retry [write]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "baseId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "tableId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "fields": {
+            "type": "object",
+            "maxProperties": 200,
+            "additionalProperties": true,
+            "minProperties": 1
+          }
+        },
+        "required": [
+          "baseId",
+          "tableId",
+          "fields"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "update_record",
+      "name": "Update record",
+      "description": "Patch one existing record using native field values [write]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "baseId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "tableId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "recordId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "fields": {
+            "type": "object",
+            "maxProperties": 200,
+            "additionalProperties": true,
+            "minProperties": 1
+          }
+        },
+        "required": [
+          "baseId",
+          "tableId",
+          "recordId",
+          "fields"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    }
+  ],
+  "instructions": "RootCX integration plugin protocol 1. Connect an account and bind it to the application. Credentials and permissions belong to Core. Reads are live. Use discovery and schema actions before writing. Follow nextCursor explicitly. Never retry an uncertain write automatically; reconcile with the provider. Only the listed actions are supported. Provider qualification is required before production activation."
+}

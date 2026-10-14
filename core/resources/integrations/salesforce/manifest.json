@@ -1,0 +1,273 @@
+{
+  "appId": "salesforce",
+  "name": "Salesforce",
+  "version": "1.0.0",
+  "type": "integration",
+  "description": "Connect Salesforce and operate on live data.",
+  "entities": [],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "clientId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "OAuth client ID",
+        "platformSecret": "SALESFORCE_CLIENT_ID"
+      },
+      "clientSecret": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "OAuth client secret",
+        "platformSecret": "SALESFORCE_CLIENT_SECRET"
+      },
+      "tokenUrl": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "https://login.salesforce.com/services/oauth2/token",
+        "platformSecret": "SALESFORCE_TOKEN_URL"
+      },
+      "tokenAuthMethod": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "body",
+        "platformSecret": "SALESFORCE_TOKEN_AUTH_METHOD"
+      },
+      "tokenEncoding": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "form",
+        "platformSecret": "SALESFORCE_TOKEN_ENCODING"
+      }
+    },
+    "required": [
+      "clientId",
+      "clientSecret",
+      "tokenUrl"
+    ],
+    "additionalProperties": false
+  },
+  "userAuth": {
+    "type": "oauth2",
+    "plugin": {
+      "protocolVersion": 1,
+      "qualification": "requires-live-verification",
+      "discovery": null
+    },
+    "tokenAuth": null,
+    "oauth": {
+      "scopes": [
+        "api",
+        "refresh_token",
+        "openid"
+      ],
+      "tokenUrl": "https://login.salesforce.com/services/oauth2/token",
+      "tokenAuthMethod": "body",
+      "tokenEncoding": "form"
+    },
+    "credentialSchema": {
+      "type": "object",
+      "properties": {
+        "accessToken": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Access token"
+        }
+      },
+      "required": [
+        "accessToken"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "actions": [
+    {
+      "id": "verify_connection",
+      "name": "Verify connection",
+      "description": "Verify the connected account with the provider [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "get_schema",
+      "name": "Get object schema",
+      "description": "Discover fields, types and writable properties [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "objectType": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Supported Salesforce object",
+            "enum": [
+              "Contact",
+              "Opportunity"
+            ]
+          }
+        },
+        "required": [
+          "objectType"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "query_records",
+      "name": "Query records",
+      "description": "Execute read-only SOQL, or follow the previous nextCursor. Queries must target Contact or Opportunity. [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 10000,
+            "description": "SOQL SELECT query"
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "Opaque cursor from the previous response"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "get_record",
+      "name": "Get record",
+      "description": "Read a contact or opportunity [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "objectType": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Supported Salesforce object",
+            "enum": [
+              "Contact",
+              "Opportunity"
+            ]
+          },
+          "recordId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          }
+        },
+        "required": [
+          "objectType",
+          "recordId"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "create_record",
+      "name": "Create record",
+      "description": "Create a contact or opportunity with native fields; no automatic retry [write]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "objectType": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Supported Salesforce object",
+            "enum": [
+              "Contact",
+              "Opportunity"
+            ]
+          },
+          "fields": {
+            "type": "object",
+            "maxProperties": 200,
+            "additionalProperties": true,
+            "minProperties": 1
+          }
+        },
+        "required": [
+          "objectType",
+          "fields"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "update_record",
+      "name": "Update record",
+      "description": "Patch the existing contact or opportunity [write]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "objectType": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Supported Salesforce object",
+            "enum": [
+              "Contact",
+              "Opportunity"
+            ]
+          },
+          "recordId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "fields": {
+            "type": "object",
+            "maxProperties": 200,
+            "additionalProperties": true,
+            "minProperties": 1
+          }
+        },
+        "required": [
+          "objectType",
+          "recordId",
+          "fields"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    }
+  ],
+  "instructions": "RootCX integration plugin protocol 1. Connect an account and bind it to the application. Credentials and permissions belong to Core. Reads are live. Use discovery and schema actions before writing. Follow nextCursor explicitly. Never retry an uncertain write automatically; reconcile with the provider. Only the listed actions are supported. Provider qualification is required before production activation."
+}

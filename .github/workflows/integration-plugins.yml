@@ -1,0 +1,26 @@
+name: Integration plugins
+on:
+  pull_request:
+    paths:
+      - 'runtime/integrations/**'
+      - 'core/resources/integrations/**'
+      - '.github/workflows/integration-plugins.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: runtime/integrations
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.10'
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - run: bun run typecheck
+      - run: bun build.ts --check
+      - run: bun test test

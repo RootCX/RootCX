@@ -1,0 +1,8 @@
+{
+  "protocolVersion": 1,
+  "version": "1.0.0",
+  "artifacts": {
+    "plugin.ts": "df87e5236732f0f894f5bdcb629671866aa00839043cfbeedcd29699fec4324a",
+    "manifest.json": "b8c0854dcd17cfc1cbb5f0814ef57de43829ee1d3079f6e238c9a65820f45b92"
+  }
+}

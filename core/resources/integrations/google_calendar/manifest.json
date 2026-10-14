@@ -1,59 +1,211 @@
 {
   "appId": "google_calendar",
   "name": "Google Calendar",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "integration",
   "description": "Google Calendar integration with per-user, per-calendar sync. Owns calendar data (calendars, events, attendees, attachments). Consumer apps read via the collections API.",
-  "crons": [{
-    "name": "sync",
-    "schedule": "*/5 * * * *",
-    "payload": { "type": "sync_all" },
-    "overlapPolicy": "skip"
-  }],
+  "crons": [
+    {
+      "name": "sync",
+      "schedule": "*/5 * * * *",
+      "payload": {
+        "type": "sync_all"
+      },
+      "overlapPolicy": "skip"
+    }
+  ],
   "configSchema": {
     "type": "object",
     "properties": {
-      "clientId": { "type": "string", "description": "Google OAuth 2.0 Client ID", "platformSecret": "GOOGLE_CALENDAR_CLIENT_ID" },
-      "clientSecret": { "type": "string", "description": "Google OAuth 2.0 Client Secret", "platformSecret": "GOOGLE_CALENDAR_CLIENT_SECRET" }
+      "clientId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "OAuth client ID",
+        "platformSecret": "GOOGLE_CALENDAR_CLIENT_ID"
+      },
+      "clientSecret": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "OAuth client secret",
+        "platformSecret": "GOOGLE_CALENDAR_CLIENT_SECRET"
+      },
+      "tokenUrl": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "https://oauth2.googleapis.com/token",
+        "platformSecret": "GOOGLE_CALENDAR_TOKEN_URL"
+      },
+      "tokenAuthMethod": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "body",
+        "platformSecret": "GOOGLE_CALENDAR_TOKEN_AUTH_METHOD"
+      },
+      "tokenEncoding": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "form",
+        "platformSecret": "GOOGLE_CALENDAR_TOKEN_ENCODING"
+      }
     },
-    "required": ["clientId", "clientSecret"]
+    "required": [
+      "clientId",
+      "clientSecret",
+      "tokenUrl"
+    ],
+    "additionalProperties": false
   },
-  "userAuth": { "type": "redirect" },
+  "userAuth": {
+    "type": "oauth2",
+    "plugin": {
+      "protocolVersion": 1,
+      "qualification": "requires-live-verification",
+      "discovery": {
+        "action": "live_list_calendars",
+        "itemsPath": "items",
+        "idPath": "id",
+        "labelPath": "summary"
+      },
+      "legacySync": true
+    },
+    "tokenAuth": null,
+    "oauth": {
+      "scopes": [
+        "openid",
+        "email",
+        "https://www.googleapis.com/auth/calendar"
+      ],
+      "tokenUrl": "https://oauth2.googleapis.com/token",
+      "tokenAuthMethod": "body",
+      "tokenEncoding": "form"
+    },
+    "credentialSchema": {
+      "type": "object",
+      "properties": {
+        "accessToken": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Access token"
+        }
+      },
+      "required": [
+        "accessToken"
+      ],
+      "additionalProperties": false
+    }
+  },
   "actions": [
     {
       "id": "sync_connect",
       "name": "Start Sync",
       "description": "Initialize sync for the current user. Lists user calendars (selected only), creates one sync_cursor per calendar, registers a 5-min cron, triggers the first sync.",
-      "inputSchema": { "type": "object" },
-      "outputSchema": { "type": "object", "properties": { "cursor_ids": { "type": "array", "items": { "type": "string" } }, "calendars": { "type": "array" } } }
+      "inputSchema": {
+        "type": "object"
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "cursor_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "calendars": {
+            "type": "array"
+          }
+        }
+      }
     },
     {
       "id": "sync_disconnect",
       "name": "Stop Sync",
       "description": "Disable sync for the current user. Removes cron, keeps synced data.",
-      "inputSchema": { "type": "object" },
-      "outputSchema": { "type": "object", "properties": { "ok": { "type": "boolean" } } }
+      "inputSchema": {
+        "type": "object"
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      }
     },
     {
       "id": "sync_now",
       "name": "Trigger Sync",
       "description": "Trigger an immediate sync for the current user.",
-      "inputSchema": { "type": "object" },
-      "outputSchema": { "type": "object", "properties": { "triggered": { "type": "boolean" } } }
+      "inputSchema": {
+        "type": "object"
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "triggered": {
+            "type": "boolean"
+          }
+        }
+      }
     },
     {
       "id": "get_profile",
       "name": "Get Profile",
       "description": "Return the user's primary email and timezone.",
-      "inputSchema": { "type": "object" },
-      "outputSchema": { "type": "object", "properties": { "emailAddress": { "type": "string" }, "timeZone": { "type": "string" } } }
+      "inputSchema": {
+        "type": "object"
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "emailAddress": {
+            "type": "string"
+          },
+          "timeZone": {
+            "type": "string"
+          }
+        }
+      }
     },
     {
       "id": "list_calendars",
       "name": "List Calendars",
       "description": "List the user's calendars (calendarList).",
-      "inputSchema": { "type": "object", "properties": { "showHidden": { "type": "boolean" }, "minAccessRole": { "type": "string", "enum": ["freeBusyReader", "reader", "writer", "owner"] } } },
-      "outputSchema": { "type": "object", "properties": { "calendars": { "type": "array" } } }
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "showHidden": {
+            "type": "boolean"
+          },
+          "minAccessRole": {
+            "type": "string",
+            "enum": [
+              "freeBusyReader",
+              "reader",
+              "writer",
+              "owner"
+            ]
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "calendars": {
+            "type": "array"
+          }
+        }
+      }
     },
     {
       "id": "update_calendar_visibility",
@@ -62,12 +214,30 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "calendarExternalId": { "type": "string" },
-          "visibility": { "type": "string", "enum": ["share_everything", "metadata"] }
+          "calendarExternalId": {
+            "type": "string"
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "share_everything",
+              "metadata"
+            ]
+          }
         },
-        "required": ["calendarExternalId", "visibility"]
+        "required": [
+          "calendarExternalId",
+          "visibility"
+        ]
       },
-      "outputSchema": { "type": "object", "properties": { "ok": { "type": "boolean" } } }
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      }
     },
     {
       "id": "list_events",
@@ -76,26 +246,78 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "calendarId": { "type": "string" },
-          "timeMin": { "type": "string" },
-          "timeMax": { "type": "string" },
-          "q": { "type": "string" },
-          "maxResults": { "type": "integer" },
-          "pageToken": { "type": "string" },
-          "singleEvents": { "type": "boolean" },
-          "showDeleted": { "type": "boolean" },
-          "orderBy": { "type": "string", "enum": ["startTime", "updated"] },
-          "syncToken": { "type": "string" }
+          "calendarId": {
+            "type": "string"
+          },
+          "timeMin": {
+            "type": "string"
+          },
+          "timeMax": {
+            "type": "string"
+          },
+          "q": {
+            "type": "string"
+          },
+          "maxResults": {
+            "type": "integer"
+          },
+          "pageToken": {
+            "type": "string"
+          },
+          "singleEvents": {
+            "type": "boolean"
+          },
+          "showDeleted": {
+            "type": "boolean"
+          },
+          "orderBy": {
+            "type": "string",
+            "enum": [
+              "startTime",
+              "updated"
+            ]
+          },
+          "syncToken": {
+            "type": "string"
+          }
         }
       },
-      "outputSchema": { "type": "object", "properties": { "events": { "type": "array" }, "nextPageToken": { "type": "string" }, "nextSyncToken": { "type": "string" } } }
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "events": {
+            "type": "array"
+          },
+          "nextPageToken": {
+            "type": "string"
+          },
+          "nextSyncToken": {
+            "type": "string"
+          }
+        }
+      }
     },
     {
       "id": "get_event",
       "name": "Get Event",
       "description": "Get a single event by ID.",
-      "inputSchema": { "type": "object", "properties": { "calendarId": { "type": "string" }, "eventId": { "type": "string" } }, "required": ["eventId"] },
-      "outputSchema": { "type": "object" }
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "calendarId": {
+            "type": "string"
+          },
+          "eventId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "eventId"
+        ]
+      },
+      "outputSchema": {
+        "type": "object"
+      }
     },
     {
       "id": "create_event",
@@ -104,24 +326,111 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "calendarId": { "type": "string", "description": "Default: primary" },
-          "summary": { "type": "string" },
-          "description": { "type": "string" },
-          "location": { "type": "string" },
-          "start": { "type": "object", "description": "{ dateTime, timeZone } or { date }" },
-          "end": { "type": "object", "description": "{ dateTime, timeZone } or { date }" },
-          "attendees": { "type": "array", "items": { "type": "object", "properties": { "email": { "type": "string" }, "displayName": { "type": "string" }, "optional": { "type": "boolean" } }, "required": ["email"] } },
-          "recurrence": { "type": "array", "items": { "type": "string" }, "description": "RFC5545 RRULE/RDATE/EXDATE lines" },
-          "createMeet": { "type": "boolean", "default": false, "description": "If true, request an auto-generated Google Meet conference" },
-          "sendUpdates": { "type": "string", "enum": ["all", "externalOnly", "none"], "default": "all" },
-          "guestsCanModify": { "type": "boolean" },
-          "guestsCanInviteOthers": { "type": "boolean" },
-          "transparency": { "type": "string", "enum": ["opaque", "transparent"] },
-          "visibility": { "type": "string", "enum": ["default", "public", "private", "confidential"] }
+          "calendarId": {
+            "type": "string",
+            "description": "Default: primary"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "location": {
+            "type": "string"
+          },
+          "start": {
+            "type": "object",
+            "description": "{ dateTime, timeZone } or { date }"
+          },
+          "end": {
+            "type": "object",
+            "description": "{ dateTime, timeZone } or { date }"
+          },
+          "attendees": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "email": {
+                  "type": "string"
+                },
+                "displayName": {
+                  "type": "string"
+                },
+                "optional": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "email"
+              ]
+            }
+          },
+          "recurrence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "RFC5545 RRULE/RDATE/EXDATE lines"
+          },
+          "createMeet": {
+            "type": "boolean",
+            "default": false,
+            "description": "If true, request an auto-generated Google Meet conference"
+          },
+          "sendUpdates": {
+            "type": "string",
+            "enum": [
+              "all",
+              "externalOnly",
+              "none"
+            ],
+            "default": "all"
+          },
+          "guestsCanModify": {
+            "type": "boolean"
+          },
+          "guestsCanInviteOthers": {
+            "type": "boolean"
+          },
+          "transparency": {
+            "type": "string",
+            "enum": [
+              "opaque",
+              "transparent"
+            ]
+          },
+          "visibility": {
+            "type": "string",
+            "enum": [
+              "default",
+              "public",
+              "private",
+              "confidential"
+            ]
+          }
         },
-        "required": ["summary", "start", "end"]
+        "required": [
+          "summary",
+          "start",
+          "end"
+        ]
       },
-      "outputSchema": { "type": "object", "properties": { "eventId": { "type": "string" }, "htmlLink": { "type": "string" }, "hangoutLink": { "type": "string" } } }
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "eventId": {
+            "type": "string"
+          },
+          "htmlLink": {
+            "type": "string"
+          },
+          "hangoutLink": {
+            "type": "string"
+          }
+        }
+      }
     },
     {
       "id": "update_event",
@@ -130,14 +439,33 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "calendarId": { "type": "string" },
-          "eventId": { "type": "string" },
-          "patch": { "type": "object" },
-          "sendUpdates": { "type": "string", "enum": ["all", "externalOnly", "none"], "default": "all" }
+          "calendarId": {
+            "type": "string"
+          },
+          "eventId": {
+            "type": "string"
+          },
+          "patch": {
+            "type": "object"
+          },
+          "sendUpdates": {
+            "type": "string",
+            "enum": [
+              "all",
+              "externalOnly",
+              "none"
+            ],
+            "default": "all"
+          }
         },
-        "required": ["eventId", "patch"]
+        "required": [
+          "eventId",
+          "patch"
+        ]
       },
-      "outputSchema": { "type": "object" }
+      "outputSchema": {
+        "type": "object"
+      }
     },
     {
       "id": "delete_event",
@@ -146,13 +474,34 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "calendarId": { "type": "string" },
-          "eventId": { "type": "string" },
-          "sendUpdates": { "type": "string", "enum": ["all", "externalOnly", "none"], "default": "all" }
+          "calendarId": {
+            "type": "string"
+          },
+          "eventId": {
+            "type": "string"
+          },
+          "sendUpdates": {
+            "type": "string",
+            "enum": [
+              "all",
+              "externalOnly",
+              "none"
+            ],
+            "default": "all"
+          }
         },
-        "required": ["eventId"]
+        "required": [
+          "eventId"
+        ]
       },
-      "outputSchema": { "type": "object", "properties": { "ok": { "type": "boolean" } } }
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      }
     },
     {
       "id": "respond_event",
@@ -161,13 +510,30 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "calendarId": { "type": "string" },
-          "eventId": { "type": "string" },
-          "responseStatus": { "type": "string", "enum": ["accepted", "declined", "tentative", "needsAction"] }
+          "calendarId": {
+            "type": "string"
+          },
+          "eventId": {
+            "type": "string"
+          },
+          "responseStatus": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "declined",
+              "tentative",
+              "needsAction"
+            ]
+          }
         },
-        "required": ["eventId", "responseStatus"]
+        "required": [
+          "eventId",
+          "responseStatus"
+        ]
       },
-      "outputSchema": { "type": "object" }
+      "outputSchema": {
+        "type": "object"
+      }
     },
     {
       "id": "quick_add",
@@ -176,13 +542,34 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "calendarId": { "type": "string" },
-          "text": { "type": "string" },
-          "sendUpdates": { "type": "string", "enum": ["all", "externalOnly", "none"], "default": "all" }
+          "calendarId": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "sendUpdates": {
+            "type": "string",
+            "enum": [
+              "all",
+              "externalOnly",
+              "none"
+            ],
+            "default": "all"
+          }
         },
-        "required": ["text"]
+        "required": [
+          "text"
+        ]
       },
-      "outputSchema": { "type": "object", "properties": { "eventId": { "type": "string" } } }
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "eventId": {
+            "type": "string"
+          }
+        }
+      }
     },
     {
       "id": "freebusy",
@@ -191,14 +578,44 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "timeMin": { "type": "string" },
-          "timeMax": { "type": "string" },
-          "items": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" } }, "required": ["id"] } },
-          "timeZone": { "type": "string" }
+          "timeMin": {
+            "type": "string"
+          },
+          "timeMax": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id"
+              ]
+            }
+          },
+          "timeZone": {
+            "type": "string"
+          }
         },
-        "required": ["timeMin", "timeMax", "items"]
+        "required": [
+          "timeMin",
+          "timeMax",
+          "items"
+        ]
       },
-      "outputSchema": { "type": "object", "properties": { "calendars": { "type": "object" } } }
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "calendars": {
+            "type": "object"
+          }
+        }
+      }
     },
     {
       "id": "watch",
@@ -207,128 +624,875 @@
       "inputSchema": {
         "type": "object",
         "properties": {
-          "calendarId": { "type": "string" },
-          "address": { "type": "string" },
-          "token": { "type": "string" },
-          "ttlSeconds": { "type": "integer" }
+          "calendarId": {
+            "type": "string"
+          },
+          "address": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          },
+          "ttlSeconds": {
+            "type": "integer"
+          }
         },
-        "required": ["address"]
+        "required": [
+          "address"
+        ]
       },
-      "outputSchema": { "type": "object", "properties": { "channelId": { "type": "string" }, "resourceId": { "type": "string" }, "expiration": { "type": "integer" } } }
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "channelId": {
+            "type": "string"
+          },
+          "resourceId": {
+            "type": "string"
+          },
+          "expiration": {
+            "type": "integer"
+          }
+        }
+      }
     },
     {
       "id": "stop_watch",
       "name": "Stop Watch",
       "description": "Terminate a previously registered push channel.",
-      "inputSchema": { "type": "object", "properties": { "channelId": { "type": "string" }, "resourceId": { "type": "string" } }, "required": ["channelId", "resourceId"] },
-      "outputSchema": { "type": "object" }
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "channelId": {
+            "type": "string"
+          },
+          "resourceId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "channelId",
+          "resourceId"
+        ]
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "live_verify_connection",
+      "name": "Verify connection",
+      "description": "Verify the connected account with the provider [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "live_list_calendars",
+      "name": "List calendars",
+      "description": "Discover accessible calendars [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "Opaque cursor from the previous response"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "live_list_events",
+      "name": "List events",
+      "description": "Read a page of events in a calendar [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "calendarId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Calendar ID, or primary"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "Opaque cursor from the previous response"
+          },
+          "timeMin": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "timeMax": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          }
+        },
+        "required": [
+          "calendarId"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "live_get_event",
+      "name": "Get event",
+      "description": "Read an existing event [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "calendarId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Calendar ID, or primary"
+          },
+          "eventId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          }
+        },
+        "required": [
+          "calendarId",
+          "eventId"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "live_create_event",
+      "name": "Create event",
+      "description": "Create an event using a stable client-generated base32hex ID; reconcile conflicts [write]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "calendarId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Calendar ID, or primary"
+          },
+          "eventId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "description": "Stable ID: lowercase a-v and digits 0-9",
+            "pattern": "^[a-v0-9]{5,1024}$"
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "location": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "start": {
+            "type": "object",
+            "properties": {
+              "date": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "YYYY-MM-DD",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+              },
+              "dateTime": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "RFC3339 timestamp"
+              },
+              "timeZone": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": ""
+              }
+            },
+            "required": [],
+            "additionalProperties": false,
+            "oneOf": [
+              {
+                "required": [
+                  "date"
+                ],
+                "not": {
+                  "required": [
+                    "dateTime"
+                  ]
+                }
+              },
+              {
+                "required": [
+                  "dateTime"
+                ],
+                "not": {
+                  "required": [
+                    "date"
+                  ]
+                }
+              }
+            ]
+          },
+          "end": {
+            "type": "object",
+            "properties": {
+              "date": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "YYYY-MM-DD",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+              },
+              "dateTime": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "RFC3339 timestamp"
+              },
+              "timeZone": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": ""
+              }
+            },
+            "required": [],
+            "additionalProperties": false,
+            "oneOf": [
+              {
+                "required": [
+                  "date"
+                ],
+                "not": {
+                  "required": [
+                    "dateTime"
+                  ]
+                }
+              },
+              {
+                "required": [
+                  "dateTime"
+                ],
+                "not": {
+                  "required": [
+                    "date"
+                  ]
+                }
+              }
+            ]
+          },
+          "attendees": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "email": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": ""
+                }
+              },
+              "required": [
+                "email"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 100
+          }
+        },
+        "required": [
+          "calendarId",
+          "eventId",
+          "summary",
+          "start",
+          "end"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "live_update_event",
+      "name": "Update event",
+      "description": "Patch the selected event without replacing other fields [write]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "calendarId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "Calendar ID, or primary"
+          },
+          "eventId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "summary": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "location": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "start": {
+            "type": "object",
+            "properties": {
+              "date": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "YYYY-MM-DD",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+              },
+              "dateTime": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "RFC3339 timestamp"
+              },
+              "timeZone": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": ""
+              }
+            },
+            "required": [],
+            "additionalProperties": false,
+            "oneOf": [
+              {
+                "required": [
+                  "date"
+                ],
+                "not": {
+                  "required": [
+                    "dateTime"
+                  ]
+                }
+              },
+              {
+                "required": [
+                  "dateTime"
+                ],
+                "not": {
+                  "required": [
+                    "date"
+                  ]
+                }
+              }
+            ]
+          },
+          "end": {
+            "type": "object",
+            "properties": {
+              "date": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "YYYY-MM-DD",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+              },
+              "dateTime": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": "RFC3339 timestamp"
+              },
+              "timeZone": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096,
+                "description": ""
+              }
+            },
+            "required": [],
+            "additionalProperties": false,
+            "oneOf": [
+              {
+                "required": [
+                  "date"
+                ],
+                "not": {
+                  "required": [
+                    "dateTime"
+                  ]
+                }
+              },
+              {
+                "required": [
+                  "dateTime"
+                ],
+                "not": {
+                  "required": [
+                    "date"
+                  ]
+                }
+              }
+            ]
+          },
+          "attendees": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "email": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096,
+                  "description": ""
+                }
+              },
+              "required": [
+                "email"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 100
+          }
+        },
+        "required": [
+          "calendarId",
+          "eventId"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
     }
   ],
   "dataContract": [
     {
       "entityName": "calendars",
       "fields": [
-        { "name": "external_id",   "type": "text", "required": true },
-        { "name": "user_id",       "type": "text", "required": true },
-        { "name": "summary",       "type": "text" },
-        { "name": "description",   "type": "text" },
-        { "name": "primary",       "type": "boolean" },
-        { "name": "time_zone",     "type": "text" },
-        { "name": "access_role",   "type": "text" },
-        { "name": "background_color", "type": "text" },
-        { "name": "foreground_color", "type": "text" },
-        { "name": "selected",      "type": "boolean" },
-        { "name": "visibility",    "type": "text", "enum_values": ["share_everything", "metadata"] }
+        {
+          "name": "external_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "user_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "summary",
+          "type": "text"
+        },
+        {
+          "name": "description",
+          "type": "text"
+        },
+        {
+          "name": "primary",
+          "type": "boolean"
+        },
+        {
+          "name": "time_zone",
+          "type": "text"
+        },
+        {
+          "name": "access_role",
+          "type": "text"
+        },
+        {
+          "name": "background_color",
+          "type": "text"
+        },
+        {
+          "name": "foreground_color",
+          "type": "text"
+        },
+        {
+          "name": "selected",
+          "type": "boolean"
+        },
+        {
+          "name": "visibility",
+          "type": "text",
+          "enum_values": [
+            "share_everything",
+            "metadata"
+          ]
+        }
       ]
     },
     {
       "entityName": "events",
       "fields": [
-        { "name": "external_id",          "type": "text", "required": true },
-        { "name": "ical_uid",             "type": "text" },
-        { "name": "title",                "type": "text" },
-        { "name": "description",          "type": "text" },
-        { "name": "location",             "type": "text" },
-        { "name": "starts_at",            "type": "timestamp" },
-        { "name": "ends_at",              "type": "timestamp" },
-        { "name": "is_full_day",          "type": "boolean" },
-        { "name": "time_zone",            "type": "text" },
-        { "name": "external_created_at",  "type": "timestamp" },
-        { "name": "external_updated_at",  "type": "timestamp" },
-        { "name": "recurring_event_external_id", "type": "text" },
-        { "name": "recurrence",           "type": "text" },
-        { "name": "conference_solution",  "type": "text" },
-        { "name": "conference_link",      "type": "text" },
-        { "name": "html_link",            "type": "text" },
-        { "name": "organizer_address",    "type": "text" },
-        { "name": "transparency",         "type": "text" },
-        { "name": "visibility",           "type": "text" }
+        {
+          "name": "external_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "ical_uid",
+          "type": "text"
+        },
+        {
+          "name": "title",
+          "type": "text"
+        },
+        {
+          "name": "description",
+          "type": "text"
+        },
+        {
+          "name": "location",
+          "type": "text"
+        },
+        {
+          "name": "starts_at",
+          "type": "timestamp"
+        },
+        {
+          "name": "ends_at",
+          "type": "timestamp"
+        },
+        {
+          "name": "is_full_day",
+          "type": "boolean"
+        },
+        {
+          "name": "time_zone",
+          "type": "text"
+        },
+        {
+          "name": "external_created_at",
+          "type": "timestamp"
+        },
+        {
+          "name": "external_updated_at",
+          "type": "timestamp"
+        },
+        {
+          "name": "recurring_event_external_id",
+          "type": "text"
+        },
+        {
+          "name": "recurrence",
+          "type": "text"
+        },
+        {
+          "name": "conference_solution",
+          "type": "text"
+        },
+        {
+          "name": "conference_link",
+          "type": "text"
+        },
+        {
+          "name": "html_link",
+          "type": "text"
+        },
+        {
+          "name": "organizer_address",
+          "type": "text"
+        },
+        {
+          "name": "transparency",
+          "type": "text"
+        },
+        {
+          "name": "visibility",
+          "type": "text"
+        }
       ]
     },
     {
       "entityName": "channel_event_associations",
       "fields": [
-        { "name": "event_id",                "type": "entity_link", "references": { "entity": "events", "field": "id" }, "required": true },
-        { "name": "user_id",                 "type": "text", "required": true },
-        { "name": "calendar_external_id",    "type": "text", "required": true },
-        { "name": "event_external_id",       "type": "text", "required": true },
-        { "name": "recurring_event_external_id", "type": "text" }
+        {
+          "name": "event_id",
+          "type": "entity_link",
+          "references": {
+            "entity": "events",
+            "field": "id"
+          },
+          "required": true
+        },
+        {
+          "name": "user_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "calendar_external_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "event_external_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "recurring_event_external_id",
+          "type": "text"
+        }
       ]
     },
     {
       "entityName": "attendees",
       "fields": [
-        { "name": "event_id",        "type": "entity_link", "references": { "entity": "events", "field": "id" }, "required": true },
-        { "name": "address",         "type": "text", "required": true },
-        { "name": "display_name",    "type": "text" },
-        { "name": "response_status", "type": "text", "enum_values": ["needs_action", "declined", "tentative", "accepted"] },
-        { "name": "is_organizer",    "type": "boolean" },
-        { "name": "optional",        "type": "boolean" }
+        {
+          "name": "event_id",
+          "type": "entity_link",
+          "references": {
+            "entity": "events",
+            "field": "id"
+          },
+          "required": true
+        },
+        {
+          "name": "address",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "display_name",
+          "type": "text"
+        },
+        {
+          "name": "response_status",
+          "type": "text",
+          "enum_values": [
+            "needs_action",
+            "declined",
+            "tentative",
+            "accepted"
+          ]
+        },
+        {
+          "name": "is_organizer",
+          "type": "boolean"
+        },
+        {
+          "name": "optional",
+          "type": "boolean"
+        }
       ]
     },
     {
       "entityName": "event_attachments",
       "fields": [
-        { "name": "event_id",   "type": "entity_link", "references": { "entity": "events", "field": "id" }, "required": true },
-        { "name": "file_id",    "type": "text" },
-        { "name": "file_url",   "type": "text" },
-        { "name": "title",      "type": "text" },
-        { "name": "mime_type",  "type": "text" },
-        { "name": "icon_link",  "type": "text" }
+        {
+          "name": "event_id",
+          "type": "entity_link",
+          "references": {
+            "entity": "events",
+            "field": "id"
+          },
+          "required": true
+        },
+        {
+          "name": "file_id",
+          "type": "text"
+        },
+        {
+          "name": "file_url",
+          "type": "text"
+        },
+        {
+          "name": "title",
+          "type": "text"
+        },
+        {
+          "name": "mime_type",
+          "type": "text"
+        },
+        {
+          "name": "icon_link",
+          "type": "text"
+        }
       ]
     },
     {
       "entityName": "sync_cursors",
       "fields": [
-        { "name": "user_id",              "type": "text", "required": true },
-        { "name": "calendar_external_id", "type": "text", "required": true },
-        { "name": "sync_token",           "type": "text" },
-        { "name": "status",               "type": "text", "enum_values": ["idle", "syncing", "needs_reauth", "failed_temporary", "failed_permanent"] },
-        { "name": "last_synced_at",       "type": "timestamp" },
-        { "name": "throttle_count",       "type": "number" },
-        { "name": "throttle_after",       "type": "timestamp" },
-        { "name": "cron_id",              "type": "text" },
-        { "name": "watch_channel_id",     "type": "text" },
-        { "name": "watch_resource_id",    "type": "text" },
-        { "name": "watch_expires_at",     "type": "timestamp" },
-        { "name": "enabled",              "type": "boolean" }
+        {
+          "name": "user_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "calendar_external_id",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "sync_token",
+          "type": "text"
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "enum_values": [
+            "idle",
+            "syncing",
+            "needs_reauth",
+            "failed_temporary",
+            "failed_permanent"
+          ]
+        },
+        {
+          "name": "last_synced_at",
+          "type": "timestamp"
+        },
+        {
+          "name": "throttle_count",
+          "type": "number"
+        },
+        {
+          "name": "throttle_after",
+          "type": "timestamp"
+        },
+        {
+          "name": "cron_id",
+          "type": "text"
+        },
+        {
+          "name": "watch_channel_id",
+          "type": "text"
+        },
+        {
+          "name": "watch_resource_id",
+          "type": "text"
+        },
+        {
+          "name": "watch_expires_at",
+          "type": "timestamp"
+        },
+        {
+          "name": "enabled",
+          "type": "boolean"
+        }
       ]
     }
   ],
   "permissions": {
     "permissions": [
-      { "key": "calendars.read",   "description": "Read synced calendars" },
-      { "key": "calendars.write",  "description": "Write calendars (internal sync)" },
-      { "key": "events.read",      "description": "Read synced events" },
-      { "key": "events.write",     "description": "Write events (internal sync)" },
-      { "key": "channel_event_associations.read",  "description": "Read calendar/event associations" },
-      { "key": "channel_event_associations.write", "description": "Write associations (internal sync)" },
-      { "key": "attendees.read",   "description": "Read event attendees" },
-      { "key": "attendees.write",  "description": "Write attendees (internal sync)" },
-      { "key": "event_attachments.read",  "description": "Read event attachment metadata" },
-      { "key": "event_attachments.write", "description": "Write attachments (internal sync)" },
-      { "key": "sync_cursors.read",  "description": "Read sync state" },
-      { "key": "sync_cursors.write", "description": "Manage sync state" }
+      {
+        "key": "calendars.read",
+        "description": "Read synced calendars"
+      },
+      {
+        "key": "calendars.write",
+        "description": "Write calendars (internal sync)"
+      },
+      {
+        "key": "events.read",
+        "description": "Read synced events"
+      },
+      {
+        "key": "events.write",
+        "description": "Write events (internal sync)"
+      },
+      {
+        "key": "channel_event_associations.read",
+        "description": "Read calendar/event associations"
+      },
+      {
+        "key": "channel_event_associations.write",
+        "description": "Write associations (internal sync)"
+      },
+      {
+        "key": "attendees.read",
+        "description": "Read event attendees"
+      },
+      {
+        "key": "attendees.write",
+        "description": "Write attendees (internal sync)"
+      },
+      {
+        "key": "event_attachments.read",
+        "description": "Read event attachment metadata"
+      },
+      {
+        "key": "event_attachments.write",
+        "description": "Write attachments (internal sync)"
+      },
+      {
+        "key": "sync_cursors.read",
+        "description": "Read sync state"
+      },
+      {
+        "key": "sync_cursors.write",
+        "description": "Manage sync state"
+      }
     ]
   },
   "instructions": "Google Calendar integration v0.1 -- owns calendar data.\n\nThis integration syncs events from all user-selected calendars (calendarList where selected=true) and stores them in its own entities. Consumer apps (CRM, scheduler) read via the collections API:\n\n  GET /api/v1/apps/google_calendar/collections/events?where={...}\n  GET /api/v1/apps/google_calendar/collections/attendees?where={address: {$eq: \"user@example.com\"}}\n\nSync model:\n- One sync_cursor per (user_id, calendar_external_id)\n- syncToken per calendar (incremental). 410 Gone -> reset to full sync.\n- singleEvents=true everywhere (recurring instances flattened)\n- showDeleted=true is required by syncToken; cancelled events trigger DELETE locally\n- Cron 5min loops over enabled cursors, calls events.list with syncToken\n\nDedup:\n- events.ical_uid is UNIQUE -> same event invited to multiple synced accounts/calendars is stored once\n- channel_event_associations is N:M between event and (user, calendar)\n\nWrite actions:\n- create_event: pass createMeet=true to auto-generate a Google Meet (sets conferenceDataVersion=1)\n- update_event/delete_event/respond_event: sendUpdates defaults to 'all'\n- quick_add: natural-language event creation (events.quickAdd)\n\nFreeBusy:\n- Up to 50 calendars per query\n\nError contract (mirrors Gmail integration):\n- All actions return {ok: true, data} or {ok: false, error: {code, message, retryAfter?}}\n- Codes: INSUFFICIENT_PERMISSIONS, TEMPORARY_ERROR, SYNC_CURSOR_ERROR, NOT_FOUND, MISCONFIGURED, UNKNOWN"

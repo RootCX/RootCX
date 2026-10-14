@@ -552,6 +552,16 @@ impl WorkerManager {
     /// agent workers spawn lazily on first request. Shares the single per-identity
     /// spawn path; `pool`/`secrets` are vestigial (the manager holds its own).
     pub async fn start_app(&self, _pool: &PgPool, _secrets: &SecretManager, app_id: &str) -> Result<(), RuntimeError> {
+        // Stateless integration plugins have no lifecycle work. They consume a
+        // bounded worker slot only when invoked, even with thousands installed.
+        if let Ok(raw) = tokio::fs::read(self.apps_dir.join(app_id).join("manifest.json")).await {
+            if let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&raw) {
+                if manifest.pointer("/userAuth/plugin/protocolVersion").and_then(|v| v.as_u64()) == Some(1)
+                    && manifest.pointer("/userAuth/plugin/legacySync").and_then(|v| v.as_bool()) != Some(true) {
+                    return Ok(());
+                }
+            }
+        }
         self.get_or_spawn(app_id, Principal::System, InvocationContext::default()).await.map(|_| ())
     }
 

@@ -1,7 +1,7 @@
 /// <reference path="../rootcx-worker.d.ts" />
 import {
   type Config, type UserCreds,
-  oauth2ClientFor, authUrl, exchangeCodeForRefreshToken, evictClient,
+  oauth2ClientFor, evictClient,
 } from "./lib/oauth";
 import { type Result, ok, fail, classifyHttp, withRetry } from "./lib/errors";
 import { parseEvent, type ParsedEvent } from "./lib/parse-event";
@@ -12,13 +12,16 @@ const CALENDAR_API = "https://www.googleapis.com/calendar/v3";
 const MAX_THROTTLE = 5;
 const PAGE_SIZE = 250;
 
+import { rpc as pluginRpc, actionIds as pluginActions } from "./plugin";
+
 serve({
   rpc: {
-    __auth_start: authStart,
-    __auth_callback: authCallback,
+    __auth_start: pluginRpc.__auth_start,
+    __auth_callback: pluginRpc.__auth_callback,
     async __integration(params, _caller, ctx) {
+      if (pluginActions.includes(params.action)) return pluginRpc.__integration(params);
       const { action, input, config, userCredentials, userId } = params;
-      if (!userCredentials?.refreshToken) return fail({ code: "INSUFFICIENT_PERMISSIONS", message: "user not connected" });
+      if (!userCredentials?.refreshToken && !userCredentials?.accessToken) return fail({ code: "INSUFFICIENT_PERMISSIONS", message: "user not connected" });
       const handler = actions[action];
       if (!handler) return fail({ code: "MISCONFIGURED", message: `unknown action: ${action}` });
       return handler(config, userCredentials, input, userId, ctx);
@@ -65,17 +68,6 @@ async function calApi(
 
 const callCal = (config: Config, creds: UserCreds, path: string, init: RequestInit | undefined, userId: string) =>
   withRetry(() => calApi(config, creds, path, init, userId));
-
-async function authStart(params: any) {
-  const { config, callbackUrl, state } = params;
-  return { type: "redirect", url: authUrl(config, callbackUrl, state) };
-}
-
-async function authCallback(params: any) {
-  const { config, query } = params;
-  const refreshToken = await exchangeCodeForRefreshToken(config, query.code, query.redirect_uri ?? params.callbackUrl ?? "");
-  return { credentials: { refreshToken } };
-}
 
 async function getProfile(config: Config, creds: UserCreds, _input: any, userId: string, _ctx: RootCxCtx): Promise<Result<any>> {
   const cals = await callCal(config, creds, "/users/me/calendarList?maxResults=250", undefined, userId);

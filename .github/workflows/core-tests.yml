@@ -25,3 +25,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash scripts/core-test.sh verify
+      - run: bash scripts/core-test.sh integration connections_integration

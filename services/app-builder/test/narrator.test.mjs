@@ -1,38 +1,43 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { narrator, businessText } from '../narrator.mjs';
+import { narrator, businessText, narrationGateway } from '../narrator.mjs';
+import { narrationFact } from '../opencode.mjs';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
-test('narration is optional, bounded, and never leaks tool output or reasoning', async t => {
+const signal = () => new AbortController().signal;
+
+test('slow narration never blocks observations or replaces a newer phase', async t => {
   let input; let release;
-  t.mock.method(globalThis, 'fetch', async (_, options) => {
-    input = JSON.parse(options.body);
-    await new Promise(resolve => { release = resolve; });
-    return { ok: true, json: async () => ({ content: [{ type: 'text', text: 'Je prépare le suivi des visites sur les fiches clients.' }] }) };
-  });
   const messages = [];
-  const voice = narrator({ config: { endpoint: 'https://example.invalid/messages', apiKey: 'test', model: 'test' }, prompt: 'Suivre les visites', signal: new AbortController().signal, onProgress: (...args) => messages.push(args) });
+  const voice = narrator({ prompt: 'Suivre les visites', signal: signal(), onProgress: (...args) => messages.push(args),
+    translate: async value => { input = value; return new Promise(resolve => { release = resolve; }); },
+  });
   t.after(() => voice.close());
-  voice.observe({ properties: { part: { type: 'reasoning', text: 'private reasoning' } } });
-  voice.observe({ properties: { part: { type: 'tool', state: { output: 'private credentials' } } } }, 'editing');
+  voice.observe(narrationFact({ properties: { part: { type: 'tool', state: {
+    input: { filePath: 'src/private-client.tsx' }, status: 'running', output: 'private credentials',
+  } } } }, 'editing'));
   await tick();
   assert.ok(!JSON.stringify(input).includes('private'));
-  assert.equal(messages.length, 0, 'coding continues while narration is still pending');
-  voice.observe({}, 'checking');
-  release(); await tick();
-  assert.equal(messages.length, 0, 'a late editing message cannot replace a newer checking phase');
+  assert.match(input.observation, /screen/);
+  voice.observe({ phase: 'checking' });
+  release('Je prépare le suivi des visites sur les fiches clients.'); await tick();
+  assert.deepEqual(messages, []);
 });
 
-test('closed narration cannot publish a late message', async t => {
-  let release;
-  t.mock.method(globalThis, 'fetch', async () => {
-    await new Promise(resolve => { release = resolve; });
-    return { ok: true, json: async () => ({ content: [{ type: 'text', text: 'Je prépare les fiches clients.' }] }) };
-  });
-  const messages = [];
-  const voice = narrator({ config: {}, prompt: 'Clients', signal: new AbortController().signal, onProgress: (...args) => messages.push(args) });
-  voice.observe({}, 'editing'); await tick(); voice.close(); release(); await tick();
-  assert.deepEqual(messages, []);
+test('closing or cancelling narration discards pending translations', async () => {
+  for (const ending of ['close', 'abort']) {
+    let release;
+    const controller = new AbortController();
+    const messages = [];
+    const voice = narrator({ prompt: 'Clients', signal: controller.signal, onProgress: text => messages.push(text),
+      translate: () => new Promise(resolve => { release = resolve; }),
+    });
+    voice.observe({ phase: 'editing' }); await tick();
+    if (ending === 'close') voice.close(); else controller.abort();
+    release('Je prépare les fiches clients.'); await tick();
+    voice.close();
+    assert.deepEqual(messages, [], ending);
+  }
 });
 
 test('technical, malformed, or oversized narration is discarded', () => {
@@ -40,10 +45,10 @@ test('technical, malformed, or oversized narration is discarded', () => {
   assert.equal(businessText('Je prépare la date sur les fiches clients.'), 'Je prépare la date sur les fiches clients.');
 });
 
-test('the business voice delivers at most two sentences and cannot announce publication', async t => {
+test('the voice accepts one business sentence and cannot announce publication', async () => {
   for (const [text, delivered] of [
-    ['Je prépare la fiche client. Je vérifie la place de la date de visite.', true],
-    ['Je prépare la fiche. Je regarde la date. Je regarde la liste.', false],
+    ['Je prépare la date de visite sur la fiche client.', true],
+    ['Je prépare la fiche. Je regarde la date.', false],
     ['Votre modification est disponible.', false],
     ['La modification est terminée.', false],
     ['Le changement est appliqué.', false],
@@ -51,36 +56,90 @@ test('the business voice delivers at most two sentences and cannot announce publ
     ['RIEN', false],
   ]) {
     const messages = [];
-    const fetch = t.mock.method(globalThis, 'fetch', async () => ({
-      ok: true, json: async () => ({ content: [{ type: 'text', text }] }),
-    }));
-    const voice = narrator({ config: {}, prompt: 'Ajouter une date de visite', signal: new AbortController().signal, onProgress: (...args) => messages.push(args) });
+    const voice = narrator({ prompt: 'Ajouter une date de visite', signal: signal(), translate: async () => text,
+      onProgress: (...args) => messages.push(args) });
     try {
-      voice.observe({ properties: { part: { type: 'tool', tool: 'edit', state: { status: 'running', output: 'private' } } } }, 'editing');
-      await tick();
+      voice.observe({ phase: 'editing', status: 'running' }); await tick();
       assert.equal(messages.length, delivered ? 1 : 0, text);
-    } finally { voice.close(); fetch.mock.restore(); }
+    } finally { voice.close(); }
   }
 });
 
-test('rereading during an edit keeps narration on the public phase', async t => {
-  let now = 10_000;
+test('duplicate events and messages do not consume calls or repeat updates', async t => {
+  let now = 0; let calls = 0;
   const messages = [];
-  const inputs = [];
   t.mock.method(Date, 'now', () => now);
-  t.mock.method(globalThis, 'fetch', async (_, options) => {
-    inputs.push(JSON.parse(JSON.parse(options.body).messages[0].content));
-    const text = inputs.length === 1 ? 'Je prépare la date de visite.' : 'Je regarde aussi la présentation de la fiche client.';
-    return { ok: true, json: async () => ({ content: [{ type: 'text', text }] }) };
+  const voice = narrator({ prompt: 'Date de visite', signal: signal(), onProgress: (...args) => messages.push(args),
+    translate: async () => { calls++; return 'Je prépare la date de visite.'; },
   });
-  const voice = narrator({ config: {}, prompt: 'Ajouter une date de visite', signal: new AbortController().signal, onProgress: (...args) => messages.push(args) });
   t.after(() => voice.close());
-  voice.observe({ properties: { part: { type: 'tool', state: { status: 'completed' } } } }, 'editing');
-  await tick();
+  voice.observe({ phase: 'editing', status: 'running' }); await tick();
   now += 8001;
-  voice.observe({ properties: { part: { type: 'tool', state: { status: 'completed' } } } }, 'understanding');
-  await tick();
-  assert.equal(messages.length, 2);
-  assert.equal(messages[1][0], 'editing', 'the public stream must accept the new business update');
-  assert.match(inputs[1].observation, /understanding/, 'the narrator still receives the actual observed activity');
+  voice.observe({ phase: 'editing', status: 'running' }); await tick();
+  assert.equal(calls, 1);
+  voice.observe({ phase: 'editing', status: 'completed' }); await tick();
+  assert.equal(calls, 2);
+  assert.equal(messages.length, 1);
+});
+
+test('narration coalesces bursts and stops spending after its request budget', async t => {
+  let now = 0; let calls = 0;
+  t.mock.method(Date, 'now', () => now);
+  const voice = narrator({ prompt: 'Clients', signal: signal(), onProgress() {}, translate: async () => { calls++; return null; } });
+  t.after(() => voice.close());
+  for (const phase of ['understanding', 'editing', 'checking', 'repairing', 'waiting']) {
+    for (const status of ['pending', 'running', 'completed', 'error']) {
+      for (const area of ['screen', 'data', 'application']) {
+        voice.observe({ phase, status, area });
+        await tick();
+        now += 8001;
+      }
+    }
+  }
+  assert.equal(calls, 20);
+});
+
+test('authorization or credit refusal disables further narration', async t => {
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  for (const status of [401, 402, 403, 404]) {
+    let calls = 0;
+    const voice = narrator({ prompt: 'Clients', signal: signal(), onProgress() {},
+      translate: async () => { calls++; throw Object.assign(new Error('Unavailable'), { status }); },
+    });
+    voice.observe({ phase: 'editing' }); await tick(); now += 8001;
+    voice.observe({ phase: 'checking' }); await tick(); voice.close();
+    assert.equal(calls, 1, String(status));
+  }
+});
+
+test('gateway never uses the coding endpoint even without narration configuration', async t => {
+  const calls = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return { ok: true, json: async () => ({ message: 'Je prépare votre page.' }) };
+  });
+  const input = { request: 'Bonjour', phase: 'editing', observation: '', previousMessage: '' };
+  const config = { endpoint: 'https://coding.invalid', model: 'expensive', apiKey: 'test' };
+  assert.equal(await narrationGateway(config)(input, signal()), null);
+  assert.equal(calls.length, 0);
+  const result = await narrationGateway({ ...config, narrationEndpoint: 'https://portal.invalid/api/llm/v1/narration' })(input, signal());
+  assert.equal(result, 'Je prépare votre page.');
+  assert.deepEqual(calls, [{ url: 'https://portal.invalid/api/llm/v1/narration', body: input }]);
+});
+
+test('a hung translator releases the slot at the deadline without blocking later facts', async t => {
+  let now = 0; let calls = 0;
+  const messages = [];
+  t.mock.method(Date, 'now', () => now);
+  const voice = narrator({ prompt: 'Page', signal: signal(), onProgress: (...args) => messages.push(args),
+    translate: () => ++calls === 1 ? new Promise(() => {}) : Promise.resolve('Je vérifie la page.'),
+  });
+  t.after(() => voice.close());
+  voice.observe({ phase: 'editing' });
+  await new Promise(resolve => setTimeout(resolve, 3100));
+  now = 8001;
+  voice.observe({ phase: 'checking' }); await tick();
+  assert.equal(calls, 2);
+  assert.deepEqual(messages, [['checking', 'Je vérifie la page.']]);
 });

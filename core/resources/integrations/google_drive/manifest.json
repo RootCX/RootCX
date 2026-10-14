@@ -1,0 +1,303 @@
+{
+  "appId": "google_drive",
+  "name": "Google Drive",
+  "version": "1.0.0",
+  "type": "integration",
+  "description": "Connect Google Drive and operate on live data.",
+  "entities": [],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "clientId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "OAuth client ID",
+        "platformSecret": "GOOGLE_DRIVE_CLIENT_ID"
+      },
+      "clientSecret": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "OAuth client secret",
+        "platformSecret": "GOOGLE_DRIVE_CLIENT_SECRET"
+      },
+      "tokenUrl": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "https://oauth2.googleapis.com/token",
+        "platformSecret": "GOOGLE_DRIVE_TOKEN_URL"
+      },
+      "tokenAuthMethod": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "body",
+        "platformSecret": "GOOGLE_DRIVE_TOKEN_AUTH_METHOD"
+      },
+      "tokenEncoding": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "",
+        "const": "form",
+        "platformSecret": "GOOGLE_DRIVE_TOKEN_ENCODING"
+      }
+    },
+    "required": [
+      "clientId",
+      "clientSecret",
+      "tokenUrl"
+    ],
+    "additionalProperties": false
+  },
+  "userAuth": {
+    "type": "oauth2",
+    "plugin": {
+      "protocolVersion": 1,
+      "qualification": "requires-live-verification",
+      "discovery": {
+        "action": "list_files",
+        "itemsPath": "items",
+        "idPath": "id",
+        "labelPath": "name"
+      }
+    },
+    "tokenAuth": null,
+    "oauth": {
+      "scopes": [
+        "openid",
+        "email",
+        "https://www.googleapis.com/auth/drive"
+      ],
+      "tokenUrl": "https://oauth2.googleapis.com/token",
+      "tokenAuthMethod": "body",
+      "tokenEncoding": "form"
+    },
+    "credentialSchema": {
+      "type": "object",
+      "properties": {
+        "accessToken": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "description": "Access token"
+        }
+      },
+      "required": [
+        "accessToken"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "actions": [
+    {
+      "id": "verify_connection",
+      "name": "Verify connection",
+      "description": "Verify the connected account with the provider [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "list_files",
+      "name": "List files",
+      "description": "Search accessible Drive files using the native q expression [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "Opaque cursor from the previous response"
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "get_file",
+      "name": "Get file metadata",
+      "description": "Read file metadata without downloading contents [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          }
+        },
+        "required": [
+          "fileId"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "download_file",
+      "name": "Download file",
+      "description": "Read binary file contents as base64, up to 10 MiB. Use export_file for Google documents. [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          }
+        },
+        "required": [
+          "fileId"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "export_file",
+      "name": "Export Google document",
+      "description": "Export a Workspace document to an explicit MIME type, up to 10 MiB [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "mimeType": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          }
+        },
+        "required": [
+          "fileId",
+          "mimeType"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "update_file",
+      "name": "Update file metadata",
+      "description": "Rename a file or move it to/from the trash without permanently deleting it [write]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "fileId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "trashed": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "fileId"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "upload_file",
+      "name": "Upload file",
+      "description": "Create a file with metadata and base64 contents, up to 1 MiB decoded. Reconcile uncertain writes. [write]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": ""
+          },
+          "mimeType": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096,
+            "description": "MIME type",
+            "pattern": "^[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+$"
+          },
+          "parentId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "contentBase64": {
+            "type": "string",
+            "minLength": 0,
+            "maxLength": 1398104,
+            "description": "Base64-encoded file bytes",
+            "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+          }
+        },
+        "required": [
+          "name",
+          "mimeType",
+          "contentBase64"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    }
+  ],
+  "instructions": "RootCX integration plugin protocol 1. Connect an account and bind it to the application. Credentials and permissions belong to Core. Reads are live. Use discovery and schema actions before writing. Follow nextCursor explicitly. Never retry an uncertain write automatically; reconcile with the provider. Only the listed actions are supported. Provider qualification is required before production activation."
+}

@@ -1,7 +1,7 @@
 mod harness;
 use harness::TestRuntime;
 use reqwest::{Method, StatusCode};
-use serde_json::{Value, json};
+use serde_json::json;
 
 async fn setup_integration(rt: &TestRuntime) {
     rt.install_manifest(&json!({
@@ -320,5 +320,186 @@ async fn connection_credentials_stay_out_of_worker_environment() {
     let stored = secrets.get(rt.pool(), "test_integ", &format!("_conn.{conn}")).await.unwrap();
     assert!(stored.is_some(), "the credential must remain stored for the core to resolve");
 
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn explicit_account_selection_cannot_borrow_another_users_connection_even_as_admin() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+    let other = rt.create_user("plugin-owner@test.local").await;
+    let connection = create_connection(&rt, &other, "test_integ", "Other account").await;
+    let response = rt.client.post(rt.url("/api/v1/integrations/test_integ/actions/verify_connection"))
+        .bearer_auth(&rt.token).header("x-integration-connection", &connection).json(&json!({})).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_catalog_plugin_starts_on_demand_and_rejects_unverified_credentials() {
+    let rt = TestRuntime::boot().await;
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/integrations/stripe");
+    let dest = rt.runtime.resources_dir().join("integrations/stripe");
+    std::fs::create_dir_all(&dest).unwrap();
+    for file in ["index.ts", "manifest.json", "plugin-lock.json", "package.json"] {
+        std::fs::copy(src.join(file), dest.join(file)).unwrap();
+    }
+    let (status, body) = rt.post_json("/api/v1/integrations/catalog/stripe/deploy", &json!({})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // This crosses the actual Core -> worker RPC boundary. Empty credentials
+    // must fail locally, without sending a request to Stripe or storing a connection.
+    let (status, _) = rt.post_json("/api/v1/integrations/stripe/auth/credentials", &json!({ "credentials": {} })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, connections) = rt.get_json("/api/v1/integrations/stripe/connections").await;
+    assert_eq!(connections, json!([]));
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn oauth_receipts_are_private_expiring_and_only_expose_successful_connections() {
+    use sha2::{Digest, Sha256};
+    let rt = TestRuntime::boot().await;
+    let (_, me) = rt.get_json("/api/v1/auth/me").await;
+    let owner = me["id"].as_str().unwrap();
+    let other = rt.create_user("receipt-other@test.local").await;
+    for status in ["pending", "failed", "cancelled", "connected"] {
+        let attempt = uuid::Uuid::new_v4().to_string();
+        let hash = hex::encode(Sha256::digest(attempt.as_bytes()));
+        sqlx::query("INSERT INTO rootcx_system.integration_oauth_attempts (id, integration_id, user_id, connection_id, status) VALUES ($1, 'google_drive', $2, 'receipt-connection', $3)")
+            .bind(&hash).bind(owner).bind(status).execute(rt.runtime.pool()).await.unwrap();
+        let path = format!("/api/v1/integrations/google_drive/auth/attempts/{attempt}");
+        let (code, body) = rt.get_json(&path).await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        assert_eq!(body["status"], status);
+        assert_eq!(body["connectionId"], if status == "connected" { json!("receipt-connection") } else { serde_json::Value::Null });
+        let (code, _) = rt.request_as(Method::GET, &path, &other, None).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        let (code, _) = rt.get_json(&path.replace("google_drive", "notion")).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        sqlx::query("UPDATE rootcx_system.integration_oauth_attempts SET expires_at = now() - interval '1 second' WHERE id = $1")
+            .bind(&hash).execute(rt.runtime.pool()).await.unwrap();
+        let (code, _) = rt.get_json(&path).await;
+        assert_eq!(code, StatusCode::NOT_FOUND);
+    }
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn managed_google_configuration_and_cancelled_callback_stay_server_owned() {
+    if std::env::var("GOOGLE_MANAGED_TEST_CHILD").as_deref() != Ok("true") {
+        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "managed_google_configuration_and_cancelled_callback_stay_server_owned", "--nocapture"])
+            .env("GOOGLE_MANAGED_TEST_CHILD", "true")
+            .env("ROOTCX_MANAGED_GOOGLE_OAUTH", "true")
+            .env("ROOTCX_GOOGLE_CLIENT_ID", "fixture-google-client")
+            .env("ROOTCX_GOOGLE_CLIENT_SECRET", "fixture-google-secret")
+            .output().await.unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    let rt = TestRuntime::boot().await;
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/integrations/google_drive");
+    let dest = rt.runtime.resources_dir().join("integrations/google_drive");
+    std::fs::create_dir_all(&dest).unwrap();
+    for file in ["index.ts", "manifest.json", "plugin-lock.json", "package.json"] {
+        std::fs::copy(src.join(file), dest.join(file)).unwrap();
+    }
+    let (code, body) = rt.post_json("/api/v1/integrations/catalog/google_drive/deploy", &json!({})).await;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let (code, _) = rt.request_as(Method::PUT, "/api/v1/integrations/google_drive/config", &rt.token, Some(&json!({"clientSecret":"tenant-override"}))).await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+    let (code, _) = rt.post_json("/api/v1/integrations/google_drive/configs", &json!({"label":"alternate", "credentials":{}})).await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+    let (_, integrations) = rt.get_json("/api/v1/integrations").await;
+    let drive = integrations.as_array().unwrap().iter().find(|i| i["id"] == "google_drive").unwrap();
+    assert_eq!(drive["managedOAuth"], true);
+    assert_eq!(drive["configured"], true);
+    let member = rt.create_user("google-member@test.local").await;
+    let (_, me) = rt.get_json("/api/v1/auth/me").await;
+    sqlx::query("INSERT INTO rootcx_system.integration_connections (id, integration_id, user_id, kind) VALUES ('other-google', 'google_drive', $1, 'direct')")
+        .bind(me["id"].as_str().unwrap()).execute(rt.pool()).await.unwrap();
+    let (code, _) = rt.request_as(Method::POST, "/api/v1/integrations/google_drive/connections/other-google/verify", &member, Some(&json!({}))).await;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+    let (code, start) = rt.request_as(Method::POST, "/api/v1/integrations/google_drive/auth/start", &member, Some(&json!({}))).await;
+    assert_eq!(code, StatusCode::OK, "{start}");
+    let url = reqwest::Url::parse(start["url"].as_str().unwrap()).unwrap();
+    let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+    assert_eq!(params["code_challenge_method"], "S256");
+    assert_eq!(params["access_type"], "offline");
+    assert!(!start.to_string().contains("fixture-google-secret"));
+    assert!(!integrations.to_string().contains("fixture-google-secret"));
+    let state = &params["state"];
+    let (code, _) = rt.get_json(&format!("/api/v1/integrations/auth/callback?error=access_denied&state={state}")).await;
+    assert_eq!(code, StatusCode::OK);
+    let attempt = start["attemptId"].as_str().unwrap();
+    let (code, receipt) = rt.request_as(Method::GET, &format!("/api/v1/integrations/google_drive/auth/attempts/{attempt}"), &member, None).await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(receipt["status"], "cancelled");
+    assert!(receipt["connectionId"].is_null());
+    let (code, _) = rt.get_json(&format!("/api/v1/integrations/auth/callback?error=access_denied&state={state}")).await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn disconnect_is_atomic_when_the_connection_delete_fails() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+    let id = create_connection(&rt, &rt.token, "test_integ", "disconnect-test").await;
+    sqlx::query("CREATE FUNCTION rootcx_system.reject_disconnect() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture storage failure'; END $$")
+        .execute(rt.pool()).await.unwrap();
+    sqlx::query("CREATE TRIGGER reject_disconnect BEFORE DELETE ON rootcx_system.integration_connections FOR EACH ROW EXECUTE FUNCTION rootcx_system.reject_disconnect()")
+        .execute(rt.pool()).await.unwrap();
+    let path = format!("/api/v1/integrations/test_integ/connections/{id}");
+    let (status, _) = rt.delete_json(&path).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    let key = format!("_conn.{id}");
+    let remains: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM rootcx_system.secrets WHERE app_id='test_integ' AND key_name=$1)")
+        .bind(&key).fetch_one(rt.pool()).await.unwrap();
+    assert!(remains, "a failed disconnect must roll back the secret deletion too");
+    sqlx::query("DROP TRIGGER reject_disconnect ON rootcx_system.integration_connections").execute(rt.pool()).await.unwrap();
+    let (status, _) = rt.delete_json(&path).await;
+    assert_eq!(status, StatusCode::OK);
+    let remains: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM rootcx_system.secrets WHERE app_id='test_integ' AND key_name=$1)")
+        .bind(&key).fetch_one(rt.pool()).await.unwrap();
+    assert!(!remains, "a successful disconnect must erase the stored credential");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn personal_bindings_are_visible_only_to_their_owner() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+    rt.install("binding_privacy", "items").await;
+    let other = rt.create_user("private-binding@test.local").await;
+    let a = create_connection(&rt, &rt.token, "test_integ", "a").await;
+    let b = create_connection(&rt, &other, "test_integ", "b").await;
+    let path = "/api/v1/apps/binding_privacy/integrations";
+    for (token, conn) in [(&rt.token, &a), (&other, &b)] {
+        let (status, body) = rt.request_as(Method::POST, path, token, Some(&json!({"integrationId":"test_integ","connectionId":conn,"scope":"user"}))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+    for (token, conn) in [(&rt.token, &a), (&other, &b)] {
+        let (status, rows) = rt.request_as(Method::GET, path, token, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(rows.as_array().unwrap().len(), 1, "must not expose another user's account selection");
+        assert_eq!(rows[0]["connectionId"], *conn);
+    }
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn simultaneous_reconnections_do_not_duplicate_an_account() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+    let (first, second, third) = tokio::join!(
+        create_connection(&rt, &rt.token, "test_integ", "same-google-account"),
+        create_connection(&rt, &rt.token, "test_integ", "same-google-account"),
+        create_connection(&rt, &rt.token, "test_integ", "same-google-account"),
+    );
+    assert_eq!(first, second, "concurrent callbacks must reuse the same account");
+    assert_eq!(first, third);
+    let (_, rows) = rt.get_json("/api/v1/integrations/test_integ/connections").await;
+    assert_eq!(rows.as_array().unwrap().len(), 1);
     rt.shutdown().await;
 }
