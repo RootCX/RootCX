@@ -30,7 +30,9 @@ pub(super) fn http_client(timeout: Duration) -> Result<reqwest::Client, ApiError
             client = client.add_root_certificate(certificate);
         }
     }
-    client.build().map_err(|e| ApiError::Internal(e.to_string()))
+    client
+        .build()
+        .map_err(|e| ApiError::Internal(e.to_string()))
 }
 impl Runner {
     pub fn configured() -> Result<Self, ApiError> {
@@ -209,29 +211,22 @@ async fn state(rt: &SharedRuntime, id: Uuid, status: &str, message: &str) -> Res
     Ok(())
 }
 
-async fn process(
+async fn request_build(
     rt: &SharedRuntime,
-    runner: Runner,
+    client: &reqwest::Client,
+    runner: &Runner,
     id: Uuid,
     app: &str,
-    user: Uuid,
     base: &str,
+    conversation: Option<Uuid>,
     prompt: &str,
-) -> Result<(), ApiError> {
-    state(rt, id, "coding", "J’adapte votre application.").await?;
-    let root = rt.data_dir().join("sources").join(app);
-    let before = files::snapshot(&root, base).await?;
-    let client = http_client(Duration::from_secs(1000))?;
-    let conversation: Option<Uuid> =
-        sqlx::query_scalar("SELECT conversation_id FROM rootcx_system.source_runs WHERE id=$1")
-            .bind(id)
-            .fetch_one(rt.pool())
-            .await?;
+    sources: &Files,
+) -> Result<Built, ApiError> {
     let mut response = client
         .post(format!("{}/build", runner.url.trim_end_matches('/')))
         .bearer_auth(&runner.token)
         .header("accept", "application/x-ndjson")
-        .json(&json!({"runId":id,"appId":app,"baseCommit":base,"prompt":prompt,"conversationId":conversation,"files":before}))
+        .json(&json!({"runId":id,"appId":app,"baseCommit":base,"prompt":prompt,"conversationId":conversation,"files":sources}))
         .send()
         .await
         .map_err(|e| ApiError::Unavailable(format!("builder transport: {e}")))?;
@@ -336,7 +331,61 @@ async fn process(
         serde_json::from_slice(&bytes)
             .map_err(|e| ApiError::BadRequest(format!("invalid builder response: {e}")))?
     };
-    files::manifest(&built.files, app)?;
+    Ok(built)
+}
+
+async fn process(
+    rt: &SharedRuntime,
+    runner: Runner,
+    id: Uuid,
+    app: &str,
+    user: Uuid,
+    base: &str,
+    prompt: &str,
+) -> Result<(), ApiError> {
+    state(rt, id, "coding", "J’adapte votre application.").await?;
+    let root = rt.data_dir().join("sources").join(app);
+    let before = files::snapshot(&root, base).await?;
+    let client = http_client(Duration::from_secs(1000))?;
+    let conversation: Option<Uuid> =
+        sqlx::query_scalar("SELECT conversation_id FROM rootcx_system.source_runs WHERE id=$1")
+            .bind(id)
+            .fetch_one(rt.pool())
+            .await?;
+    let mut sources = before.clone();
+    let mut request = prompt.to_owned();
+    let mut attempt = 0;
+    let built = loop {
+        let built = request_build(
+            rt,
+            &client,
+            &runner,
+            id,
+            app,
+            base,
+            conversation,
+            &request,
+            &sources,
+        )
+        .await?;
+        // Validate before staging or installing anything. Repair the rejected sources,
+        // while keeping the published base and the user's conversation unchanged.
+        files::decode(&built.files)?;
+        match files::manifest(&built.files, app) {
+            Ok(_) => break built,
+            Err(ApiError::BadRequest(diagnostic)) if attempt < 2 => {
+                attempt += 1;
+                sqlx::query("UPDATE rootcx_system.source_runs SET phase='repairing',message=$2,updated_at=now() WHERE id=$1 AND status='coding'")
+                    .bind(id).bind(progress_message("repairing")).execute(rt.pool()).await?;
+                request = format!(
+                    "Core rejected the generated manifest before publication. Repair the current source files according to the RootCX documentation, preserving the original user request below. Do not deploy independently. Core validation diagnostic:\n{}\nOriginal user request:\n{prompt}",
+                    diagnostic.chars().take(12000).collect::<String>()
+                );
+                sources = built.files;
+            }
+            Err(error) => return Err(error),
+        }
+    };
     if before == built.files {
         sqlx::query("UPDATE rootcx_system.source_runs SET status='succeeded',phase='answered',message=$2,updated_at=now() WHERE id=$1")
             .bind(id).bind(built.summary.chars().take(2000).collect::<String>()).execute(rt.pool()).await?;

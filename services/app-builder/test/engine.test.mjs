@@ -69,3 +69,22 @@ test('conversational replies remain business language', () => {
     assert.equal(businessReply(text), 'Je suis là pour vous aider à faire évoluer votre application. Dites-moi ce que vous souhaitez changer.');
   }
 });
+
+test('Core repair requests fit alongside the original prompt without removing the size limit', async t => {
+  const prompts = [];
+  const server = createBuilder({ token: 'r'.repeat(32), concurrency: 1 }, async ({ root, prompt }) => {
+    prompts.push(prompt);
+    return { files: await collect(root), frontend: '', summary: 'Prepared' };
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  for (const [length, status] of [[16001, 200], [48000, 200], [48001, 422], [0, 422]]) {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/build`, {
+      method: 'POST', headers: { authorization: `Bearer ${'r'.repeat(32)}` },
+      body: JSON.stringify({ appId: 'repair_size', prompt: 'x'.repeat(length), files: { 'manifest.json': encoded('{}') } }),
+    });
+    assert.equal(response.status, status, `internal prompt length ${length}`);
+    await response.text();
+  }
+  assert.deepEqual(prompts.map(prompt => prompt.length), [16001, 48000]);
+});

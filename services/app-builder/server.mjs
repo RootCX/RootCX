@@ -45,7 +45,8 @@ export function createBuilder(config, coding = code) {
       let size = 0; const chunks = [];
       for await (const chunk of req) { size += chunk.length; if (size > 96 * 1024 * 1024) throw new Error('Request too large'); chunks.push(chunk); }
       const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-      if (!/^[a-z][a-z0-9_]{0,49}$/.test(input.appId) || typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 16000) throw new Error('Invalid application change');
+      // Internal repairs include the original request plus Core's bounded diagnostic.
+      if (!/^[a-z][a-z0-9_]{0,49}$/.test(input.appId) || typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 48000) throw new Error('Invalid application change');
       if (input.conversationId != null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.conversationId)) throw new Error('Invalid conversation');
       if (activeApps.has(input.appId)) throw new Error('An application build is already running');
       appId = input.appId; activeApps.add(appId);
