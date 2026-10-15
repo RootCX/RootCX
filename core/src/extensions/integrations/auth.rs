@@ -320,10 +320,23 @@ fn shapp_callback_html(integration_id: &str, callback_url: &str, failed: bool) -
         .unwrap_or_else(|| "/".into())
         .replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
     let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
-    let visual = if integration_id == "google_drive" {
-        format!(r#"<img src="data:image/png;base64,{}" alt="" width="64" height="64">"#, encode(include_bytes!("callback-assets/google-drive.png")))
-    } else {
-        r#"<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m10 13 4-4m-6 7-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m2-2 1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0"/></svg>"#.into()
+    // Official provider marks, bundled so the callback page makes no third-party request.
+    let logo: Option<(&str, &[u8])> = match integration_id {
+        "google_drive" => Some(("image/png", include_bytes!("callback-assets/google-drive.png"))),
+        "google_sheets" => Some(("image/png", include_bytes!("callback-assets/google-sheets.png"))),
+        "google_calendar" => Some(("image/svg+xml", include_bytes!("callback-assets/google-calendar.svg"))),
+        "gmail" => Some(("image/svg+xml", include_bytes!("callback-assets/gmail.svg"))),
+        "notion" => Some(("image/svg+xml", include_bytes!("callback-assets/notion.svg"))),
+        "airtable" => Some(("image/png", include_bytes!("callback-assets/airtable.png"))),
+        "hubspot" => Some(("image/png", include_bytes!("callback-assets/hubspot.png"))),
+        "salesforce" => Some(("image/svg+xml", include_bytes!("callback-assets/salesforce.svg"))),
+        "slack" => Some(("image/png", include_bytes!("callback-assets/slack.png"))),
+        "stripe" => Some(("image/svg+xml", include_bytes!("callback-assets/stripe.svg"))),
+        _ => None,
+    };
+    let visual = match logo {
+        Some((mime, bytes)) => format!(r#"<img src="data:{mime};base64,{}" alt="" width="64" height="64">"#, encode(bytes)),
+        None => r#"<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m10 13 4-4m-6 7-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m2-2 1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0"/></svg>"#.into(),
     };
     include_str!("callback-assets/connected.html")
         .replace("{{TITLE}}", if failed { "Connexion non terminée" } else { "Connexion réussie" })
@@ -530,7 +543,11 @@ mod tests {
             assert!(!html.contains("evil.example") && !html.contains("window.location") && !html.contains("{{"), "{id}");
             assert_eq!(html.contains("window.close()"), id != "google_drive", "{id}");
             if id != "google_drive" { assert!(!html.contains("Google Drive"), "{id}"); }
+            assert_eq!(html.matches(r#"<img src="data:image/"#).count(), 2, "{id}: provider logo in illustration and account row");
+            assert!(!html.contains("m10 13 4-4") && !html.contains("Retrouvez vos applications"), "{id}");
         }
+        let unknown = shapp_callback_html("other", "https://app.shapp.ai/callback", false);
+        assert!(unknown.contains("m10 13 4-4"));
     }
 
     #[test]
