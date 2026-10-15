@@ -1017,7 +1017,7 @@ impl IntegrationCaller for IntegrationCallImpl {
         // papered over: report it as the credential failure it is. Dead-flagging
         // already happened inside the renewal, which is the only layer that knows
         // whether the provider's answer was terminal.
-        let (config, user_credentials, effective_uid, conn_id) = match resolved {
+        let (config, user_credentials, effective_uid, conn_id, credential_version) = match resolved {
             Ok(r) => r,
             Err(e) => return Ok(e.envelope()),
         };
@@ -1038,7 +1038,7 @@ impl IntegrationCaller for IntegrationCallImpl {
             caller,
         ).await.map_err(|e| e.to_string())?;
 
-        crate::extensions::integrations::connections::flag_if_auth_failed(pool, integration_id, conn_id.as_deref(), &result).await;
+        crate::extensions::integrations::connections::flag_if_auth_failed(pool, &self.secrets, integration_id, conn_id.as_deref(), credential_version.as_ref(), &result).await;
         Ok(result)
     }
 }

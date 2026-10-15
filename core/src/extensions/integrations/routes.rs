@@ -177,7 +177,7 @@ pub async fn execute_action(
     } else {
         super::connections::resolve_credentials(&secrets, &pool, &integration_id, &target_user, caller_app).await
     };
-    let (config, user_credentials, effective_uid, conn_id) = resolved.map_err(|e| match e {
+    let (config, user_credentials, effective_uid, conn_id, credential_version) = resolved.map_err(|e| match e {
         super::oauth::RenewError::Rejected(m) => ApiError::Forbidden(m),
         super::oauth::RenewError::Transient(m) => ApiError::Internal(m),
     })?;
@@ -213,7 +213,7 @@ pub async fn execute_action(
             ApiError::Internal(e.to_string())
         })?;
 
-    super::connections::flag_if_auth_failed(&pool, &integration_id, conn_id.as_deref(), &result).await;
+    super::connections::flag_if_auth_failed(&pool, &secrets, &integration_id, conn_id.as_deref(), credential_version.as_ref(), &result).await;
 
     Ok(Json(result))
 }

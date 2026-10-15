@@ -13,6 +13,7 @@
 
 use serde_json::{Value as JsonValue, json};
 use sqlx::PgPool;
+use sha2::{Digest, Sha256};
 
 use crate::secrets::SecretManager;
 
@@ -100,6 +101,25 @@ fn for_worker(blob: &JsonValue, config: &JsonValue) -> JsonValue {
     out
 }
 
+/// Opaque Core-only identity of the grant used by an RPC. Never passed to a worker.
+#[derive(PartialEq, Eq)]
+pub(crate) struct CredentialVersion([u8; 32]);
+
+impl CredentialVersion {
+    pub(crate) fn of(blob: &JsonValue) -> Self {
+        Self(Sha256::digest(blob.to_string().as_bytes()).into())
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn credentials_for_worker(
+    pool: &PgPool, secrets: &SecretManager, integration_id: &str, connection_id: &str,
+    config: &JsonValue, blob: JsonValue,
+) -> Result<JsonValue, RenewError> {
+    credentials_for_worker_versioned(pool, secrets, integration_id, connection_id, config, blob, None)
+        .await.map(|(credential, _)| credential)
+}
+
 /// The credential to hand a worker: a live access token, renewed if needed, and
 /// never the refresh token.
 ///
@@ -107,16 +127,17 @@ fn for_worker(blob: &JsonValue, config: &JsonValue) -> JsonValue {
 /// access token is used. A failed write fails the call: continuing would spend an
 /// access token whose refresh token the provider has already consumed and we did
 /// not keep.
-pub(crate) async fn credentials_for_worker(
+pub(crate) async fn credentials_for_worker_versioned(
     pool: &PgPool,
     secrets: &SecretManager,
     integration_id: &str,
     connection_id: &str,
     config: &JsonValue,
     blob: JsonValue,
-) -> Result<JsonValue, RenewError> {
+    config_snapshot: Option<&str>,
+) -> Result<(JsonValue, CredentialVersion), RenewError> {
     if !manages(config, &blob) || is_live(&blob, now_secs()) {
-        return Ok(for_worker(&blob, config));
+        return Ok((for_worker(&blob, config), CredentialVersion::of(&blob)));
     }
 
     let mut tx = pool.begin().await.map_err(|e| RenewError::Transient(e.to_string()))?;
@@ -126,6 +147,15 @@ pub(crate) async fn credentials_for_worker(
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 73431))")
         .bind(format!("{integration_id}:{connection_id}")).execute(&mut *tx).await
         .map_err(|e| RenewError::Transient(e.to_string()))?;
+    {
+        let current: Option<(Option<String>,)> = sqlx::query_as(
+            "SELECT config_id FROM rootcx_system.integration_connections WHERE id = $1 AND integration_id = $2"
+        ).bind(connection_id).bind(integration_id).fetch_optional(&mut *tx).await
+            .map_err(|_| RenewError::Transient("Connection configuration unavailable".into()))?;
+        if current.as_ref().map(|(id,)| id.as_deref()) != Some(config_snapshot) {
+            return Err(RenewError::Transient("the OAuth client changed while resolving".into()));
+        }
+    }
     let key = super::connections::credential_key(connection_id);
     let stored: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
         "SELECT nonce, ciphertext FROM rootcx_system.secrets WHERE app_id = $1 AND key_name = $2"
@@ -134,7 +164,7 @@ pub(crate) async fn credentials_for_worker(
     let (old_nonce, old_ciphertext) = stored.ok_or_else(|| RenewError::Transient("the credential is gone".into()))?;
     let blob: JsonValue = serde_json::from_str(&secrets.decrypt(&old_nonce, &old_ciphertext)
         .map_err(|e| RenewError::Transient(e.to_string()))?).map_err(|e| RenewError::Transient(e.to_string()))?;
-    if !manages(config, &blob) || is_live(&blob, now_secs()) { return Ok(for_worker(&blob, config)); }
+    if !manages(config, &blob) || is_live(&blob, now_secs()) { return Ok((for_worker(&blob, config), CredentialVersion::of(&blob))); }
 
     let refresh = str_field(&blob, F_REFRESH)
         .ok_or_else(|| RenewError::Rejected("connection has no refresh token".into()))?
@@ -169,7 +199,7 @@ pub(crate) async fn credentials_for_worker(
     if updated.rows_affected() != 1 { return Err(RenewError::Transient("the credential changed while renewing".into())); }
     tx.commit().await.map_err(|e| RenewError::Transient(e.to_string()))?;
 
-    Ok(for_worker(&merged, config))
+    Ok((for_worker(&merged, config), CredentialVersion::of(&merged)))
 }
 
 /// The stored credential. `Ok(None)` means absent, which is revoked; an `Err`
@@ -586,8 +616,44 @@ mod tests {
             json!({ "tokenUrl": provider.url, "clientId": "cid", "clientSecret": "csec" })
         }
 
-        /// The defect this module exists for: the provider consumes the old refresh
-        /// token, so the new one must be durable before the call proceeds.
+        #[tokio::test]
+        async fn stale_worker_rejection_cannot_kill_a_reconnected_grant() {
+            for reconnect in [false, true] {
+                let original = json!({"accessToken": "same-access", "refreshToken": "old-refresh"});
+                let c = Connected::with(json!({}), original.clone()).await;
+                // The RPC has already obtained its grant when a reconnect completes.
+                let (_, version) = credentials_for_worker_versioned(
+                    &c.pool, &c.secrets, APP, &c.id, &c.config, original, None,
+                ).await.unwrap();
+                if reconnect {
+                    c.secrets.set(&c.pool, APP, &connections::credential_key(&c.id),
+                        &json!({"accessToken": "same-access", "refreshToken": "new-refresh"}).to_string(),
+                    ).await.unwrap();
+                }
+                connections::flag_if_auth_failed(&c.pool, &c.secrets, APP, Some(&c.id), Some(&version),
+                    &json!({"ok": false, "error": {"code": "unauthorized", "message": "rejected"}}),
+                ).await;
+                assert_eq!(c.status().await, if reconnect { "active" } else { "dead" }, "reconnect={reconnect}");
+            }
+        }
+
+        #[tokio::test]
+        async fn a_changed_client_is_not_used_to_refresh_the_new_grant() {
+            let provider = stub::rotating(0).await;
+            let original = json!({"refreshToken": "original"});
+            let c = Connected::with(config_for(&provider), original.clone()).await;
+            // Reconnect changes the pinned client after resolution took its snapshot.
+            sqlx::query("UPDATE rootcx_system.integration_connections SET config_id = 'new-client' WHERE id = $1")
+                .bind(&c.id).execute(&c.pool).await.unwrap();
+            let result = credentials_for_worker_versioned(
+                &c.pool, &c.secrets, APP, &c.id, &c.config, original, None,
+            ).await;
+            assert!(matches!(result, Err(RenewError::Transient(_))));
+            assert_eq!(provider.exchanges.load(Ordering::SeqCst), 0);
+            assert_eq!(c.status().await, "active");
+        }
+
+        /// The provider consumes the old refresh token, so its replacement must be durable before use.
         #[tokio::test]
         async fn a_rotated_refresh_token_is_persisted_before_use() {
             let provider = stub::rotating(0).await;

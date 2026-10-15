@@ -196,7 +196,7 @@ pub async fn verify_managed_connection(
     if !super::managed::enabled(&integration_id) { return Err(ApiError::NotFound("managed connector not enabled".into())); }
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
     super::connections::verify_owner(&pool, &connection_id, &integration_id, &identity).await?;
-    let (_, credentials, _, _) = super::connections::resolve_by_connection_id(&secrets, &pool, &integration_id, &connection_id, &identity.user_id.to_string())
+    let (_, credentials, _, _, _) = super::connections::resolve_by_connection_id(&secrets, &pool, &integration_id, &connection_id, &identity.user_id.to_string())
         .await.map_err(|_| ApiError::BadRequest("Reconnect your account".into()))?;
     super::managed::verify(&integration_id, &credentials).await?;
     Ok(Json(json!({"verified": true})))
@@ -223,11 +223,8 @@ async fn finish_callback(
         let label = result.get("label").and_then(|v| v.as_str()).map(|s| s.to_string());
 
         let conn_id = super::connections::upsert_connection(
-            &pool, &pending.integration_id, &pending.user_id, label.as_deref(), pending.config_id.as_deref(),
+            &pool, &secrets, &pending.integration_id, &pending.user_id, label.as_deref(), pending.config_id.as_deref(), creds,
         ).await?;
-        let conn_key = super::connections::credential_key(&conn_id);
-        secrets.set(&pool, &pending.integration_id, &conn_key, &creds.to_string()).await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
 
         sqlx::query("UPDATE rootcx_system.integration_oauth_attempts SET connection_id = $2 WHERE id = $1")
             .bind(attempt_hash).bind(&conn_id).execute(pool).await?;
@@ -254,7 +251,7 @@ async fn try_auto_sync_connect(
     let user_id: uuid::Uuid = pending.user_id.parse().ok()?;
     let caller = Some(crate::principal::resolve_caller_pinned(pool, user_id, conn_id.to_string()).await?);
 
-    let (config, user_credentials, effective_uid, resolved_conn) = match super::connections::resolve_by_connection_id(
+    let (config, user_credentials, effective_uid, resolved_conn, credential_version) = match super::connections::resolve_by_connection_id(
         secrets, pool, &pending.integration_id, conn_id, &pending.user_id,
     ).await {
         Ok(r) => r,
@@ -272,7 +269,7 @@ async fn try_auto_sync_connect(
             // first call a new connection ever makes, so a credential rejected here
             // was reported as connected until the next action happened to fail.
             super::connections::flag_if_auth_failed(
-                pool, &pending.integration_id, resolved_conn.as_deref(), &res,
+                pool, secrets, &pending.integration_id, resolved_conn.as_deref(), credential_version.as_ref(), &res,
             ).await;
             let err = res.get("error");
             let code = err.and_then(|e| e.get("code")).and_then(|v| v.as_str()).unwrap_or("UNKNOWN");
@@ -385,12 +382,8 @@ pub async fn submit_credentials(
     };
     let label = verified.as_ref().and_then(|v| v.get("label")).and_then(|v| v.as_str())
         .or_else(|| body.get("label").and_then(|v| v.as_str()));
-    // Reconnecting a known mailbox (same label) reuses its row and clears any
-    // stale 'dead' flag; the credentials below overwrite the rejected ones.
-    let conn_id = super::connections::upsert_connection(&pool, &integration_id, &user_id, label, None).await?;
-    let conn_key = super::connections::credential_key(&conn_id);
-    secrets.set(&pool, &integration_id, &conn_key, &creds.to_string()).await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // Reactivation and credential replacement must become visible together.
+    let conn_id = super::connections::upsert_connection(&pool, &secrets, &integration_id, &user_id, label, None, creds).await?;
 
     Ok(Json(json!({ "message": "credentials stored", "connectionId": conn_id })))
 }

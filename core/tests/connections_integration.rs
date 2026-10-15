@@ -598,3 +598,69 @@ async fn failed_catalog_install_is_incomplete_until_redeployment_and_preserves_l
     }
     rt.shutdown().await;
 }
+
+
+#[tokio::test]
+async fn credential_storage_failure_never_publishes_a_new_or_reactivated_connection() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+    let existing = create_connection(&rt, &rt.token, "test_integ", "existing").await;
+    sqlx::query("UPDATE rootcx_system.integration_connections SET status='dead', config_id='previous-client', last_error='previous failure' WHERE id=$1")
+        .bind(&existing).execute(rt.pool()).await.unwrap();
+    sqlx::query("CREATE FUNCTION rootcx_system.reject_credential_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture credential storage failure'; END $$")
+        .execute(rt.pool()).await.unwrap();
+    sqlx::query("CREATE TRIGGER reject_credential_write BEFORE INSERT OR UPDATE ON rootcx_system.secrets FOR EACH ROW WHEN (NEW.app_id='test_integ') EXECUTE FUNCTION rootcx_system.reject_credential_write()")
+        .execute(rt.pool()).await.unwrap();
+    for label in [Some("existing"), Some("new"), None] {
+        let (status, _) = rt.post_json("/api/v1/integrations/test_integ/auth/credentials", &json!({"credentials":{"apiKey":"replacement"}, "label":label})).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{label:?}");
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM rootcx_system.integration_connections WHERE integration_id='test_integ'")
+            .fetch_one(rt.pool()).await.unwrap();
+        assert_eq!(count, 1, "failed storage created a connection for {label:?}");
+        let row: (String, Option<String>, Option<String>) = sqlx::query_as("SELECT status,config_id,last_error FROM rootcx_system.integration_connections WHERE id=$1")
+            .bind(&existing).fetch_one(rt.pool()).await.unwrap();
+        assert_eq!(row, ("dead".into(), Some("previous-client".into()), Some("previous failure".into())));
+        let stored = rt.runtime.secret_manager().get(rt.pool(), "test_integ", &format!("_conn.{existing}")).await.unwrap().unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&stored).unwrap(), json!({"apiKey":"test"}));
+    }
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn reconnect_waits_for_refresh_before_publishing_new_credentials() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+    let id = create_connection(&rt, &rt.token, "test_integ", "locked-account").await;
+    sqlx::query("UPDATE rootcx_system.integration_connections SET status='dead' WHERE id=$1")
+        .bind(&id).execute(rt.pool()).await.unwrap();
+    let mut refresh = rt.pool().begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1,73431))")
+        .bind(format!("test_integ:{id}")).execute(&mut *refresh).await.unwrap();
+    let client = rt.client.clone(); let token = rt.token.clone(); let url = rt.url("/api/v1/integrations/test_integ/auth/credentials");
+    let pending = tokio::spawn(async move {
+        client.post(url).bearer_auth(token).json(&json!({"credentials":{"apiKey":"new"},"label":"locked-account"})).send().await.unwrap()
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted)")
+                .fetch_one(rt.pool()).await.unwrap();
+            if waiting { break; }
+            assert!(!pending.is_finished(), "reconnect bypassed the refresh lock");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let status: String = sqlx::query_scalar("SELECT status FROM rootcx_system.integration_connections WHERE id=$1")
+        .bind(&id).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(status,"dead");
+    refresh.commit().await.unwrap();
+    let response = pending.await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["connectionId"], id);
+    let stored = rt.runtime.secret_manager().get(rt.pool(),"test_integ",&format!("_conn.{id}")).await.unwrap().unwrap();
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&stored).unwrap(), json!({"apiKey":"new"}));
+    let status: String = sqlx::query_scalar("SELECT status FROM rootcx_system.integration_connections WHERE id=$1")
+        .bind(&id).fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(status,"active");
+    rt.shutdown().await;
+}

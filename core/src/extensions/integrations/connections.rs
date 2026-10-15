@@ -199,40 +199,44 @@ pub(crate) async fn create_connection(
     Ok(id)
 }
 
-/// Create or reuse a connection. If a direct connection with the same label
-/// already exists for this user+integration, return its id (credentials will be overwritten).
-/// If label is None, always creates a new connection.
+/// Publish the account metadata and encrypted credential together, after any refresh finishes.
 pub(crate) async fn upsert_connection(
     pool: &sqlx::PgPool,
+    secrets: &crate::secrets::SecretManager,
     integration_id: &str,
     user_id: &str,
     label: Option<&str>,
     config_id: Option<&str>,
+    credentials: &JsonValue,
 ) -> Result<String, ApiError> {
-    let Some(lbl) = label else {
-        return create_connection(pool, integration_id, user_id, label, "direct", config_id).await;
-    };
+    let (nonce, ciphertext) = secrets.encrypt(&credentials.to_string())?;
     let mut tx = pool.begin().await?;
-    // Two OAuth callbacks for the same account must not create duplicate connections.
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 73432))")
-        .bind(serde_json::to_string(&(integration_id, user_id, lbl)).unwrap())
-        .execute(&mut *tx).await?;
-    let existing: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM rootcx_system.integration_connections
-         WHERE integration_id = $1 AND user_id = $2 AND label = $3 AND kind = 'direct'"
-    ).bind(integration_id).bind(user_id).bind(lbl).fetch_optional(&mut *tx).await?;
-    let id = if let Some(id) = existing {
-        sqlx::query("UPDATE rootcx_system.integration_connections
+    sqlx::query("SET LOCAL lock_timeout = '20s'").execute(&mut *tx).await?;
+    let existing: Option<String> = if let Some(label) = label {
+        // Serialize callbacks for the same account before deciding whether it exists.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 73432))")
+            .bind(serde_json::to_string(&(integration_id, user_id, label)).unwrap())
+            .execute(&mut *tx).await?;
+        sqlx::query_scalar("SELECT id FROM rootcx_system.integration_connections
+            WHERE integration_id = $1 AND user_id = $2 AND label = $3 AND kind = 'direct'")
+            .bind(integration_id).bind(user_id).bind(label).fetch_optional(&mut *tx).await?
+    } else { None };
+    let id = existing.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 73431))")
+        .bind(format!("{integration_id}:{id}")).execute(&mut *tx).await?;
+    if existing.is_some() {
+        let updated = sqlx::query("UPDATE rootcx_system.integration_connections
             SET status = 'active', last_error = NULL, last_error_at = NULL, config_id = $2 WHERE id = $1")
             .bind(&id).bind(config_id).execute(&mut *tx).await?;
-        id
+        if updated.rows_affected() == 0 { return Err(ApiError::Conflict("Connection was removed; authorize again".into())); }
     } else {
-        let id = Uuid::new_v4().to_string();
         sqlx::query("INSERT INTO rootcx_system.integration_connections
             (id, integration_id, user_id, label, kind, config_id) VALUES ($1,$2,$3,$4,'direct',$5)")
-            .bind(&id).bind(integration_id).bind(user_id).bind(lbl).bind(config_id).execute(&mut *tx).await?;
-        id
-    };
+            .bind(&id).bind(integration_id).bind(user_id).bind(label).bind(config_id).execute(&mut *tx).await?;
+    }
+    sqlx::query("INSERT INTO rootcx_system.secrets (app_id, key_name, nonce, ciphertext) VALUES ($1,$2,$3,$4)
+        ON CONFLICT (app_id, key_name) DO UPDATE SET nonce=EXCLUDED.nonce, ciphertext=EXCLUDED.ciphertext")
+        .bind(integration_id).bind(credential_key(&id)).bind(nonce).bind(ciphertext).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(id)
 }
@@ -246,20 +250,35 @@ pub(crate) async fn upsert_connection(
 /// the log — the WARN fires exactly once, when a live mailbox first dies.
 /// Best-effort: flagging must never mask the underlying call's own error.
 pub(crate) async fn flag_if_auth_failed(
-    pool: &sqlx::PgPool, integration_id: &str, connection_id: Option<&str>, result: &JsonValue,
+    pool: &sqlx::PgPool, secrets: &crate::secrets::SecretManager, integration_id: &str,
+    connection_id: Option<&str>, version: Option<&super::oauth::CredentialVersion>, result: &JsonValue,
 ) {
-    let (Some(cid), Some(msg)) = (connection_id, auth_failure_message(result)) else { return };
+    let (Some(cid), Some(version), Some(msg)) = (connection_id, version, auth_failure_message(result)) else { return };
+    let Ok(mut tx) = pool.begin().await else { return };
+    if sqlx::query("SET LOCAL lock_timeout = '20s'").execute(&mut *tx).await.is_err() { return; }
+    if sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 73431))")
+        .bind(format!("{integration_id}:{cid}")).execute(&mut *tx).await.is_err() { return; }
+    let key = credential_key(cid);
+    let stored: Option<(Vec<u8>, Vec<u8>)> = sqlx::query_as(
+        "SELECT nonce, ciphertext FROM rootcx_system.secrets WHERE app_id = $1 AND key_name = $2"
+    ).bind(integration_id).bind(&key).fetch_optional(&mut *tx).await.ok().flatten();
+    let Some((nonce, ciphertext)) = stored else { return };
+    let Some(blob) = secrets.decrypt(&nonce, &ciphertext).ok()
+        .and_then(|raw| serde_json::from_str::<JsonValue>(&raw).ok()) else { return };
+    if &super::oauth::CredentialVersion::of(&blob) != version { return; }
 
     let transitioned: Option<(Option<String>,)> = sqlx::query_as(
         "UPDATE rootcx_system.integration_connections
          SET status = 'dead', last_error = $2, last_error_at = NOW()
-         WHERE id = $1 AND status <> 'dead'
+         WHERE id = $1 AND status <> 'dead' AND EXISTS (SELECT 1 FROM rootcx_system.secrets
+             WHERE app_id = $3 AND key_name = $4 AND nonce = $5 AND ciphertext = $6)
          RETURNING label"
     )
     .bind(cid)
-    .bind(&msg)
-    .fetch_optional(pool).await.ok().flatten();
+    .bind(&msg).bind(integration_id).bind(&key).bind(nonce).bind(ciphertext)
+    .fetch_optional(&mut *tx).await.ok().flatten();
 
+    if tx.commit().await.is_err() { return; }
     if let Some((label,)) = transitioned {
         tracing::warn!(
             integration_id,
@@ -345,11 +364,11 @@ pub(crate) fn manage_perm(integration_id: &str) -> String {
 /// Resolve which provider config + credentials to use for an integration action.
 /// Unified entry point: handles app binding lookup, delegation, and direct fallback.
 ///
-/// Returns `(config, credentials, effective_user_id, connection_id)`. `config` is
+/// Returns `(config, credentials, effective_user_id, connection_id, credential_version)`. `config` is
 /// the OAuth client of the selected connection (pinned via its `config_id`), or
 /// the default `_platform` config when no stored connection is selected.
 /// `connection_id` is `Some` whenever a stored connection was selected, so
-/// callers can flag it dead if the provider later rejects it.
+/// callers can flag it dead only if the provider rejects that same credential version.
 pub(crate) async fn resolve_credentials(
     secrets: &crate::secrets::SecretManager, pool: &sqlx::PgPool,
     integration_id: &str, user_id: &str, app_id: Option<&str>,
@@ -410,11 +429,11 @@ pub(crate) async fn resolve_credentials(
 
     let config = super::routes::resolve_config_scoped(pool, secrets, integration_id, None)
         .await.unwrap_or(JsonValue::Null);
-    Ok((super::managed::worker_config(integration_id, config), JsonValue::Null, user_id.to_string(), None))
+    Ok((super::managed::worker_config(integration_id, config), JsonValue::Null, user_id.to_string(), None, None))
 }
 
 /// `(config, credentials, effective_user_id, connection_id)`.
-pub(crate) type Resolved = (JsonValue, JsonValue, String, Option<String>);
+pub(crate) type Resolved = (JsonValue, JsonValue, String, Option<String>, Option<super::oauth::CredentialVersion>);
 
 /// Resolve a connection's config and credentials, renewing the access token first
 /// when the Core manages this connection's OAuth.
@@ -427,25 +446,29 @@ pub(crate) async fn resolve_by_connection_id(
     integration_id: &str, connection_id: &str, fallback_user: &str,
 ) -> Result<Resolved, super::oauth::RenewError> {
     let conn_key = credential_key(connection_id);
-    // The connection's config_id pins which OAuth client refreshes its token.
-    let row: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT user_id, config_id FROM rootcx_system.integration_connections WHERE id = $1"
-    ).bind(connection_id).fetch_optional(pool).await.ok().flatten();
-    let (effective_user, config_id) = match row {
-        Some((uid, cfg)) => (uid, cfg),
-        None => (fallback_user.to_string(), None),
-    };
+    // Read the pinned client and encrypted grant from one committed snapshot.
+    let row: Option<(String, Option<String>, Option<Vec<u8>>, Option<Vec<u8>>)> = sqlx::query_as(
+        "SELECT c.user_id, c.config_id, s.nonce, s.ciphertext
+         FROM rootcx_system.integration_connections c LEFT JOIN rootcx_system.secrets s
+           ON s.app_id = c.integration_id AND s.key_name = $3
+         WHERE c.id = $1 AND c.integration_id = $2"
+    ).bind(connection_id).bind(integration_id).bind(&conn_key).fetch_optional(pool).await
+        .map_err(|_| super::oauth::RenewError::Transient("Connection snapshot unavailable".into()))?;
+    let (effective_user, config_id, nonce, ciphertext) = row
+        .unwrap_or_else(|| (fallback_user.to_string(), None, None, None));
     let config = super::routes::resolve_config_scoped(pool, secrets, integration_id, config_id.as_deref())
         .await.map_err(|_| super::oauth::RenewError::Transient("OAuth configuration unavailable".into()))?;
-    match secrets.get(pool, integration_id, &conn_key).await {
-        Ok(Some(raw)) => {
-            let creds: JsonValue = serde_json::from_str(&raw).unwrap_or(JsonValue::Null);
-            let creds = super::oauth::credentials_for_worker(
-                pool, secrets, integration_id, connection_id, &config, creds,
-            ).await?;
-            Ok((super::managed::worker_config(integration_id, config), creds, effective_user, Some(connection_id.to_string())))
-        }
-        _ => Ok((super::managed::worker_config(integration_id, config), JsonValue::Null, fallback_user.to_string(), None)),
+    if let (Some(nonce), Some(ciphertext)) = (nonce, ciphertext) {
+        let raw = secrets.decrypt(&nonce, &ciphertext)
+            .map_err(|_| super::oauth::RenewError::Transient("Connection credential unavailable".into()))?;
+        let creds: JsonValue = serde_json::from_str(&raw)
+            .map_err(|_| super::oauth::RenewError::Transient("Connection credential invalid".into()))?;
+        let (creds, version) = super::oauth::credentials_for_worker_versioned(
+            pool, secrets, integration_id, connection_id, &config, creds, config_id.as_deref(),
+        ).await?;
+        Ok((super::managed::worker_config(integration_id, config), creds, effective_user, Some(connection_id.to_string()), Some(version)))
+    } else {
+        Ok((super::managed::worker_config(integration_id, config), JsonValue::Null, fallback_user.to_string(), None, None))
     }
 }
 
