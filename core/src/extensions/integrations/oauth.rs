@@ -81,7 +81,7 @@ fn is_live(blob: &JsonValue, now: i64) -> bool {
 /// `__bind`'s `mergeConfig`. Only an admin writes these
 /// (`save_platform_config`), which is what keeps the renewal destination out of
 /// reach of application code.
-pub(crate) const CORE_OWNED_CONFIG: [&str; 6] = ["tokenUrl", "clientId", "clientSecret", "tokenAuthMethod", "tokenEncoding", "stripeLivemode"];
+pub(crate) const CORE_OWNED_CONFIG: [&str; 7] = ["tokenUrl", "clientId", "clientSecret", "tokenAuthMethod", "tokenEncoding", "stripeLivemode", "stripeExternalTestLinkId"];
 
 /// The Core renews for this connection only when an admin configured a token
 /// endpoint and the credential actually carries a refresh token.

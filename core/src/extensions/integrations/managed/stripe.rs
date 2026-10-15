@@ -16,7 +16,12 @@ fn config_with(read: impl Fn(&str) -> Option<String>) -> Result<Value, ApiError>
         Some("live") => true, Some("test" | "sandbox") => false, _ => return Err(error()),
     };
     if !key.starts_with(if live { "sk_live_" } else { "sk_test_" }) || key.len() <= 8 || key.contains(['\r', '\n']) { return Err(error()); }
-    Ok(json!({"clientId": client, "clientSecret": key, "tokenUrl": TOKEN_URL,
+    let external_test = read("ROOTCX_STRIPE_EXTERNAL_TEST_LINK_ID");
+    if external_test.as_ref().is_some_and(|id| live || !id.strip_prefix("chnlink_")
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.len() <= 128 && suffix.bytes().all(|c| c.is_ascii_alphanumeric()))) {
+        return Err(error());
+    }
+    Ok(json!({"stripeExternalTestLinkId": external_test, "clientId": client, "clientSecret": key, "tokenUrl": TOKEN_URL,
         "tokenAuthMethod": "stripe-apps", "tokenEncoding": "form", "stripeLivemode": live}))
 }
 pub(super) fn config() -> Result<Value, ApiError> { config_with(|key| std::env::var(key).ok()) }
@@ -25,6 +30,9 @@ pub(super) fn enabled() -> bool {
 }
 pub(super) fn start(config: &Value, callback: &str, state: &str) -> Value {
     let mut url = reqwest::Url::parse("https://marketplace.stripe.com/oauth/v2/authorize").unwrap();
+    if let Some(id) = config["stripeExternalTestLinkId"].as_str() {
+        url.set_path(&format!("/oauth/v2/{id}/authorize"));
+    }
     url.query_pairs_mut().extend_pairs([
         ("client_id", config["clientId"].as_str().unwrap_or("")), ("redirect_uri", callback), ("state", state),
     ]);
@@ -129,6 +137,33 @@ mod tests {
         assert_eq!(url.path(), "/oauth/v2/authorize");
         assert_eq!(url.query_pairs().count(), 3);
         assert!(!url.as_str().contains("must-stay-private"));
+    }
+    #[test]
+    fn external_test_link_is_an_operator_owned_identifier_not_an_arbitrary_url() {
+        let build = |mode: &str, link: &str| config_with(|name| match name {
+            "ROOTCX_STRIPE_CLIENT_ID" => Some("ca_fixture".into()),
+            "ROOTCX_STRIPE_CLIENT_SECRET" => Some(if mode == "live" { "sk_live_fixture" } else { "sk_test_fixture" }.into()),
+            "ROOTCX_STRIPE_OAUTH_MODE" => Some(mode.into()),
+            "ROOTCX_STRIPE_EXTERNAL_TEST_LINK_ID" => Some(link.into()), _ => None,
+        });
+        for mode in ["test", "sandbox"] {
+            let config = build(mode, "chnlink_AbC123").unwrap();
+            let result = start(&config, "https://app.example/callback?value=one&two=three", "state&client_id=attacker");
+            let url = reqwest::Url::parse(result["url"].as_str().unwrap()).unwrap();
+            assert_eq!(url.origin().ascii_serialization(), "https://marketplace.stripe.com");
+            assert_eq!(url.path(), "/oauth/v2/chnlink_AbC123/authorize");
+            let query: std::collections::HashMap<_,_> = url.query_pairs().into_owned().collect();
+            assert_eq!(query.len(), 3);
+            assert_eq!(query["client_id"], "ca_fixture");
+            assert_eq!(query["state"], "state&client_id=attacker");
+            assert_eq!(query["redirect_uri"], "https://app.example/callback?value=one&two=three");
+            assert!(!url.as_str().contains("sk_test_"));
+        }
+        assert!(build("live", "chnlink_AbC123").is_err());
+        for link in ["", "chnlink_", "https://attacker.invalid", "chnlink_x/authorize", "chnlink_..", "chnlink_x?client_id=other", "chnlink_x#fragment", "chnlink_x%2fescape", "chnlink_x\\escape", "chnlink_x\n", "chnlink_é"] {
+            assert!(build("sandbox", link).is_err(), "unsafe link identifier");
+        }
+        assert!(build("sandbox", &format!("chnlink_{}", "a".repeat(129))).is_err());
     }
     #[test]
     fn grants_require_account_scope_mode_and_rotation_without_inventing_response_expiry() {
