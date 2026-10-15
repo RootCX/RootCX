@@ -209,7 +209,7 @@ fn validate_grant_client(config: &JsonValue, credential: &JsonValue) -> Result<(
         if config["hubspotUserLevel"] != true || credential["hubspotUserLevel"] != true
             || str_field(config, "clientId").is_none()
             || config["clientId"] != credential["hubspotClientId"] {
-            return Err(RenewError::Transient("Reconnect HubSpot with the configured user-level application".into()));
+            return Err(RenewError::Rejected("Reconnect HubSpot with the configured user-level application".into()));
         }
     }
     Ok(())
@@ -454,7 +454,7 @@ mod tests {
         for (cfg, blob) in [(config.clone(), json!({})), (json!({}), credential.clone()),
             (json!({"hubspotUserLevel":true,"clientId":"other-client"}), credential.clone()),
             (json!({"hubspotUserLevel":true}), json!({"hubspotUserLevel":true}))] {
-            assert!(validate_grant_client(&cfg, &blob).is_err());
+            assert!(matches!(validate_grant_client(&cfg, &blob), Err(RenewError::Rejected(_))));
         }
         assert!(validate_grant_client(&json!({}), &json!({})).is_ok());
     }
