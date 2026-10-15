@@ -37,17 +37,22 @@ pub(super) fn platform_secret_map(manifest: &JsonValue) -> Vec<(String, String)>
 }
 
 pub(crate) async fn query_installed_integrations(pool: &sqlx::PgPool) -> Result<Vec<JsonValue>, sqlx::Error> {
-    let rows: Vec<(String, String, String, Option<JsonValue>)> = sqlx::query_as(
-        "SELECT id, name, version, manifest FROM rootcx_system.apps
-         WHERE manifest->>'type' = 'integration' AND status = 'installed' ORDER BY name",
+    let rows: Vec<(String, String, String, Option<JsonValue>, String)> = sqlx::query_as(
+        "SELECT a.id, a.name, a.version, a.manifest,
+                CASE WHEN r.app_id IS NULL THEN 'legacy'
+                     WHEN r.digest IS NULL THEN 'incomplete' ELSE 'ready' END
+         FROM rootcx_system.apps a
+         LEFT JOIN rootcx_system.backend_releases r ON r.app_id = a.id
+         WHERE a.manifest->>'type' = 'integration' AND a.status = 'installed' ORDER BY a.name",
     )
     .fetch_all(pool)
     .await?;
 
-    Ok(rows.into_iter().map(|(id, name, version, m)| {
+    Ok(rows.into_iter().map(|(id, name, version, m, deployment_status)| {
         let m = m.unwrap_or(JsonValue::Null);
         json!({
             "id": id, "name": name, "version": version,
+            "deploymentStatus": deployment_status,
             "description": m.get("description").and_then(|v| v.as_str()).unwrap_or(""),
             "actions": m.get("actions").unwrap_or(&json!([])),
             "configSchema": m.get("configSchema"),

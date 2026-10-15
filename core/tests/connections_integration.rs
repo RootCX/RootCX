@@ -561,3 +561,37 @@ async fn managed_connectors_isolate_operator_configuration_and_keep_tenant_fallb
     assert!(!integrations.to_string().contains("fixture-operator-secret"));
     rt.shutdown().await;
 }
+
+
+#[tokio::test]
+async fn failed_catalog_install_is_incomplete_until_redeployment_and_preserves_legacy() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+    let catalog = rt.runtime.resources_dir().join("integrations/broken_install");
+    std::fs::create_dir_all(&catalog).unwrap();
+    std::fs::write(catalog.join("manifest.json"), json!({
+        "appId": "broken_install", "name": "Installation fixture", "version": "1.0.0",
+        "type": "integration", "dataContract": []
+    }).to_string()).unwrap();
+    std::fs::write(catalog.join("index.ts"), "serve({rpc: {}});").unwrap();
+    // A malformed dependency manifest makes the real Bun subprocess fail after DB registration.
+    std::fs::write(catalog.join("package.json"), "{invalid").unwrap();
+    let (status, _) = rt.post_json("/api/v1/integrations/catalog/broken_install/deploy", &json!({})).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    for expected in ["incomplete", "ready"] {
+        if expected == "ready" {
+            std::fs::write(catalog.join("package.json"), r#"{"private":true}"#).unwrap();
+            let (status, body) = rt.post_json("/api/v1/integrations/catalog/broken_install/deploy", &json!({})).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        let (status, body) = rt.get_json("/api/v1/integrations").await;
+        assert_eq!(status, StatusCode::OK);
+        let integrations = body.as_array().unwrap();
+        let failed = integrations.iter().find(|item| item["id"] == "broken_install").unwrap();
+        assert_eq!(failed["deploymentStatus"], expected, "{body}");
+        let legacy = integrations.iter().find(|item| item["id"] == "test_integ").unwrap();
+        assert_eq!(legacy["deploymentStatus"], "legacy", "{body}");
+    }
+    rt.shutdown().await;
+}
