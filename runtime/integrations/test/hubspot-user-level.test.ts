@@ -27,6 +27,7 @@ test('HubSpot user-level contact actions use supported routes while preserving r
     expect(h.calls[0].url.pathname, action).toBe(`/crm/objects/2026-09/contacts${suffix}`);
     expect(h.calls[0].init.method, action).toBe(method);
     if (action === 'list_contacts') expect(h.calls[0].url.searchParams.get('after')).toBe('next');
+    if (action === 'create_contact') expect(JSON.parse(String(h.calls[0].init.body))).toEqual({ properties: input.properties, associations: [] });
     if (action === 'search_contacts') expect(JSON.parse(String(h.calls[0].init.body)).after).toBe(50);
   }
 });

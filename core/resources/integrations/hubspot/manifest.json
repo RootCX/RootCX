@@ -1,7 +1,7 @@
 {
   "appId": "hubspot",
   "name": "HubSpot",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "type": "integration",
   "description": "Connect HubSpot and operate on live data.",
   "entities": [],
