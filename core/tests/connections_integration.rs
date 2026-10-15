@@ -544,7 +544,10 @@ async fn managed_connectors_isolate_operator_configuration_and_keep_tenant_fallb
         let callback = rt.client.get(rt.url("/api/v1/integrations/auth/callback"))
             .query(&[("error", "access_denied"), ("state", params["state"].as_str())]).send().await.unwrap();
         assert_eq!(callback.status(), StatusCode::OK, "{id}");
-        assert!(!callback.text().await.unwrap().contains("fixture-operator-secret"), "{id}");
+        let html = callback.text().await.unwrap();
+        assert!(!html.contains("fixture-operator-secret"), "{id}");
+        assert!(html.contains("Authorization was not completed"), "{id}");
+        assert!(!html.contains("Connected, but sync failed"), "{id}");
         let (status, receipt) = rt.get_json(&format!("/api/v1/integrations/{id}/auth/attempts/{}", start["attemptId"].as_str().unwrap())).await;
         assert_eq!(status, StatusCode::OK, "{id}");
         assert_eq!(receipt["status"], "cancelled", "{id}");

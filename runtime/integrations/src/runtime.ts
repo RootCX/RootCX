@@ -56,6 +56,7 @@ export function createRuntime(plugin: Plugin, fetcher: typeof fetch = fetch) {
         fields.code_verifier = params.codeVerifier;
       }
       const headers: Record<string, string> = {};
+      if (oauth.tokenUrl === 'https://api.notion.com/v1/oauth/token') headers['Notion-Version'] = '2025-09-03';
       if (oauth.clientAuth === 'basic') headers.Authorization = `Basic ${Buffer.from(`${params.config.clientId}:${params.config.clientSecret}`).toString('base64')}`;
       else { fields.client_id = params.config.clientId; fields.client_secret = params.config.clientSecret; }
       headers['Content-Type'] = oauth.tokenEncoding === 'json' ? 'application/json' : 'application/x-www-form-urlencoded';
@@ -63,7 +64,8 @@ export function createRuntime(plugin: Plugin, fetcher: typeof fetch = fetch) {
       if (!response.ok) { await response.body?.cancel(); throw new Error(`Authorization exchange failed (HTTP ${response.status})`); }
       const token = JSON.parse(new TextDecoder().decode(await bytes(response))) as ObjectValue;
       if (!token || typeof token !== 'object' || typeof token.access_token !== 'string' || !token.access_token.trim() || /[\r\n]/.test(token.access_token) || token.ok === false) throw new Error('Authorization exchange did not issue an access token');
-      if (token.refresh_token !== undefined && (typeof token.refresh_token !== 'string' || !token.refresh_token.trim())) throw new Error('Authorization exchange returned an invalid refresh token');
+      const notionNonexpiring = plugin.id === 'notion' && token.refresh_token === null && token.expires_in === undefined;
+      if (!notionNonexpiring && token.refresh_token !== undefined && (typeof token.refresh_token !== 'string' || !token.refresh_token.trim())) throw new Error('Authorization exchange returned an invalid refresh token');
       if (token.expires_in !== undefined && (!Number.isFinite(Number(token.expires_in)) || Number(token.expires_in) <= 0)) throw new Error('Authorization exchange returned an invalid token lifetime');
       const credentials = { accessToken: token.access_token, ...(token.refresh_token ? { refreshToken: token.refresh_token } : {}), ...(token.expires_in ? { _expiresAt: Math.floor(Date.now() / 1000) + Number(token.expires_in) } : {}), ...(token.instance_url ? { instanceUrl: token.instance_url } : {}) };
       const account = await oauth.account(token, context(plugin, credentials, params.userId, fetcher));

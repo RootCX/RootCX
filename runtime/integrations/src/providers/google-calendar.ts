@@ -31,4 +31,9 @@ export default provider('google_calendar', 'Google Calendar', 'https://www.googl
   get_event: action('Get event', 'Read an existing event', 'read', { calendarId, eventId: id() }, ['calendarId', 'eventId'], (ctx, input) => ctx.request({ path: `/calendar/v3/calendars/${segment(input.calendarId)}/events/${segment(input.eventId)}` })),
   create_event: action('Create event', 'Create an event using a stable client-generated base32hex ID; reconcile conflicts', 'write', { calendarId, eventId: string('Stable ID: lowercase a-v and digits 0-9', { pattern: '^[a-v0-9]{5,1024}$', maxLength: 1024 }), ...event }, ['calendarId', 'eventId', 'summary', 'start', 'end'], (ctx, input) => ctx.request({ path: `/calendar/v3/calendars/${segment(input.calendarId)}/events`, method: 'POST', json: { ...body(input), id: input.eventId } })),
   update_event: action('Update event', 'Patch the selected event without replacing other fields', 'write', { calendarId, eventId: id(), ...event }, ['calendarId', 'eventId'], (ctx, input) => ctx.request({ path: `/calendar/v3/calendars/${segment(input.calendarId)}/events/${segment(input.eventId)}`, method: 'PATCH', json: body(input) })),
-}, { services: googleServices, oauth: googleOAuth(['https://www.googleapis.com/auth/calendar']), discovery: { action: 'list_calendars', itemsPath: 'items', idPath: 'id', labelPath: 'summary' } });
+}, { services: googleServices, oauth: googleOAuth([
+  'https://www.googleapis.com/auth/calendar.events',
+  'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
+  // The retained legacy freebusy action uses a separate Calendar API permission.
+  'https://www.googleapis.com/auth/calendar.events.freebusy',
+]), discovery: { action: 'list_calendars', itemsPath: 'items', idPath: 'id', labelPath: 'summary' } });

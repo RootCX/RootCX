@@ -5,6 +5,21 @@ import { plugins } from '../src/registry';
 
 const stripe = plugins.find(plugin => plugin.id === 'stripe')!;
 
+test.each([204, 205])('Successful HTTP %s writes do not consume a nonexistent response body', async status => {
+  let read = false;
+  let cancelled = false;
+  const response = new Response(null, { status });
+  // Bun can expose a stream even for a no-content response.
+  Object.defineProperty(response, 'body', { value: new ReadableStream({
+    pull(controller) { read = true; controller.error(new Error('No response content')); },
+    cancel() { cancelled = true; },
+  }, { highWaterMark: 0 }) });
+  const ctx = context(stripe, { accessToken: 'fixture' }, crypto.randomUUID(), (async () => response) as unknown as typeof fetch, 'write');
+  await expect(ctx.request({ path: '/fixture', method: 'PATCH', json: {} })).resolves.toEqual({});
+  expect(read).toBe(false);
+  expect(cancelled).toBe(true);
+});
+
 test.each(['read', 'write'] as const)('POST %s failures preserve action semantics', async effect => {
   let calls = 0;
   const ctx = context(stripe, { accessToken: 'fixture' }, crypto.randomUUID(), (async () => {

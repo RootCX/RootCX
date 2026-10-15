@@ -70,9 +70,13 @@ impl Provider {
     pub(super) async fn callback(&self, config: &Value, query: &HashMap<String, String>, callback: &str, verifier: &str) -> Result<Value, ApiError> {
         if query.contains_key("error") { return Err(error("Provider authorization declined")); }
         let code = query.get("code").filter(|s| !s.is_empty()).ok_or_else(|| error("Missing authorization code"))?;
-        let token = response(self.exchange_request(config, code, callback, verifier)?.send().await).await?;
-        let credentials = self.credentials(&token)?;
-        let (id, label) = self.verify(&credentials).await?;
+        let diagnostic = |stage: &'static str| move |failure: &ApiError| {
+            tracing::warn!(integration_id = self.id, stage, category = super::super::auth::callback_error_category(failure), "managed OAuth callback failed");
+        };
+        let request = self.exchange_request(config, code, callback, verifier).inspect_err(diagnostic("token_request"))?;
+        let token = response(request.send().await).await.inspect_err(diagnostic("token_exchange"))?;
+        let credentials = self.credentials(&token).inspect_err(diagnostic("credentials"))?;
+        let (id, label) = self.verify(&credentials).await.inspect_err(diagnostic("identity"))?;
         Ok(json!({"credentials": credentials, "label": format!("{label} [{id}]")}))
     }
     fn exchange_request(&self, config: &Value, code: &str, callback: &str, verifier: &str) -> Result<reqwest::RequestBuilder, ApiError> {
@@ -82,7 +86,8 @@ impl Provider {
             if verifier.is_empty() { return Err(error("PKCE verifier missing")); }
             body["code_verifier"] = json!(verifier);
         }
-        let mut request = client()?.post(field(&oauth, "tokenUrl")?);
+        let token_url = field(&oauth, "tokenUrl")?;
+        let mut request = super::super::oauth::token_request(client()?.post(token_url), token_url);
         if oauth["tokenAuthMethod"] == "basic" {
             request = request.basic_auth(field(config, "clientId")?, Some(field(config, "clientSecret")?));
         } else {
@@ -94,7 +99,8 @@ impl Provider {
     fn credentials(&self, token: &Value) -> Result<Value, ApiError> {
         if token.get("error").is_some() || token["ok"] == false { return Err(error("Provider authorization rejected")); }
         let mut credentials = json!({"accessToken": field(token, "access_token")?});
-        if self.id != "slack" || token.get("refresh_token").is_some() {
+        let notion_nonexpiring = self.id == "notion" && token.get("refresh_token") == Some(&Value::Null) && token.get("expires_in").is_none();
+        if !notion_nonexpiring && (self.id != "slack" || token.get("refresh_token").is_some()) {
             credentials["refreshToken"] = json!(field(token, "refresh_token")?);
         }
         if let Some(expiry) = token.get("expires_in") {
@@ -155,7 +161,10 @@ fn client() -> Result<reqwest::Client, ApiError> {
 }
 async fn response(result: Result<reqwest::Response, reqwest::Error>) -> Result<Value, ApiError> {
     let mut response = result.map_err(|_| error("Provider temporarily unavailable"))?;
-    if !response.status().is_success() { return Err(error("Provider authorization or permissions rejected")); }
+    if !response.status().is_success() {
+        tracing::warn!(status = response.status().as_u16(), "managed OAuth provider rejected request");
+        return Err(error("Provider authorization or permissions rejected"));
+    }
     let mut bytes = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|_| error("Provider response interrupted"))? {
         if bytes.len() + chunk.len() > 1_048_576 { return Err(error("Provider response too large")); }
@@ -211,6 +220,7 @@ mod tests {
             let body: Value = if id == "notion" { serde_json::from_str(raw).unwrap() }
                 else { json!(url::form_urlencoded::parse(raw.as_bytes()).into_owned().collect::<HashMap<_, _>>()) };
             assert_eq!(body["code"], "code", "{id}");
+            assert_eq!(request.headers().get("Notion-Version").and_then(|v| v.to_str().ok()), if id == "notion" { Some("2025-09-03") } else { None }, "{id}");
             assert_eq!(body.get("code_verifier").and_then(Value::as_str), if p.pkce { Some("verifier") } else { None }, "{id}");
             if matches!(id, "notion" | "airtable") {
                 assert!(request.headers().contains_key("authorization"), "{id}");
@@ -239,6 +249,17 @@ mod tests {
                 assert!(p.credentials(&partial).is_err(), "{id}");
             }
             if id == "salesforce" { assert_eq!(credentials["instanceUrl"], token["instance_url"]); }
+        }
+    }
+
+    #[test]
+    fn notion_nullable_refresh_requires_a_nonexpiring_access_token() {
+        let provider = provider("notion").unwrap();
+        assert_eq!(provider.credentials(&json!({"access_token":"access", "refresh_token":null})).unwrap(), json!({"accessToken":"access"}));
+        for token in [json!({"access_token":"access", "refresh_token":null, "expires_in":3600}),
+                      json!({"access_token":"access", "refresh_token":""}),
+                      json!({"access_token":"", "refresh_token":null}), json!({"access_token":"access"})] {
+            assert!(provider.credentials(&token).is_err(), "{token}");
         }
     }
 

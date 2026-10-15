@@ -142,6 +142,21 @@ async fn consume_state(pool: &sqlx::PgPool, secrets: &crate::secrets::SecretMana
         .map_err(|e| ApiError::Internal(e.to_string()))?).map_err(|e| ApiError::Internal(e.to_string()))
 }
 
+pub(super) fn callback_error_category(error: &ApiError) -> &'static str {
+    match error {
+        ApiError::BadRequest(message) => match message.as_str() {
+            "Provider returned incomplete authorization data" => "incomplete_credentials",
+            "Provider returned invalid token lifetime" => "invalid_lifetime",
+            "Provider authorization or permissions rejected" => "provider_rejected",
+            "Provider temporarily unavailable" | "Provider response interrupted" => "provider_unavailable",
+            _ => "invalid_request",
+        },
+        ApiError::Unauthorized(_) | ApiError::Forbidden(_) => "permission_denied",
+        ApiError::Internal(_) => "internal_failure",
+        _ => "callback_failure",
+    }
+}
+
 pub async fn callback(
     State(rt): State<SharedRuntime>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
@@ -154,7 +169,8 @@ pub async fn callback(
     let status = if outcome.is_ok() { "connected" } else if params.get("error").map(String::as_str) == Some("access_denied") { "cancelled" } else { "failed" };
     sqlx::query("UPDATE rootcx_system.integration_oauth_attempts SET status = $2 WHERE id = $1")
         .bind(&attempt_hash).bind(status).execute(&pool).await?;
-    if outcome.is_err() {
+    if let Err(ref failure) = outcome {
+        warn!(integration_id = %pending.integration_id, stage = "callback", category = callback_error_category(failure), "OAuth authorization was not completed");
         return Ok(Html(callback_html(&pending.integration_id, &pending.callback_url, Some((status, "Authorization was not completed")))));
     }
     Ok(Html(callback_html(&pending.integration_id, &pending.callback_url, None)))
@@ -300,7 +316,7 @@ fn callback_html(integration_id: &str, callback_url: &str, error: Option<(&str, 
     let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;");
     let body = match error {
         Some((code, msg)) => format!(
-            r#"<div style="text-align:center;max-width:560px;padding:24px"><h2 style="color:#ff6b6b;margin:0 0 12px">Connected, but sync failed</h2><p style="color:#aaa;margin:0 0 16px">{}</p><p style="font-family:monospace;background:#2a2a2a;padding:12px;border-radius:6px;font-size:13px;text-align:left;color:#ddd;word-break:break-word">[{}] {}</p><p style="color:#888;font-size:13px;margin-top:16px">You can close this tab and retry from the app settings.</p></div>"#,
+            r#"<div style="text-align:center;max-width:560px;padding:24px"><h2 style="color:#ff6b6b;margin:0 0 12px">Authorization was not completed</h2><p style="color:#aaa;margin:0 0 16px">{}</p><p style="font-family:monospace;background:#2a2a2a;padding:12px;border-radius:6px;font-size:13px;text-align:left;color:#ddd;word-break:break-word">[{}] {}</p><p style="color:#888;font-size:13px;margin-top:16px">You can close this tab and retry from the app settings.</p></div>"#,
             escape(integration_id), escape(code), escape(msg),
         ),
         None => format!(
@@ -444,6 +460,17 @@ pub async fn disconnect(
 mod tests {
     use super::*;
     use crate::auth::identity::Identity;
+
+    #[test]
+    fn callback_diagnostics_never_return_provider_error_content() {
+        for (error, category) in [
+            (ApiError::BadRequest("Provider returned incomplete authorization data".into()), "incomplete_credentials"),
+            (ApiError::BadRequest("access_token=private-provider-body".into()), "invalid_request"),
+            (ApiError::Internal("client_secret=private-config".into()), "internal_failure"),
+        ] {
+            assert_eq!(callback_error_category(&error), category);
+        }
+    }
 
     fn identity(id: &str) -> Identity {
         Identity { user_id: Uuid::parse_str(id).unwrap(), email: String::new() }

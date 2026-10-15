@@ -94,6 +94,11 @@ export function context(plugin: Plugin, credential: Credential, connection: stri
         const code = response.status === 401 ? 'unauthorized' : response.status === 403 ? 'FORBIDDEN' : response.status === 429 ? 'RATE_LIMITED' : response.status >= 500 ? 'PROVIDER_UNAVAILABLE' : 'PROVIDER_REJECTED';
         throw new IntegrationError(code, `${plugin.name} returned HTTP ${response.status}`, response.status, response.status === 429 ? delay : undefined, write && response.status >= 500 ? 'unknown' : 'rejected');
       }
+      // No-content statuses complete the write at headers, even if Bun exposes a stream.
+      if (response.status === 204 || response.status === 205) {
+        await response.body?.cancel().catch(() => {});
+        return {} as T;
+      }
       const content = await bytes(response);
       if (request.response === 'binary') return { contentBase64: Buffer.from(content).toString('base64'), contentType: response.headers.get('content-type'), size: content.length } as T;
       if (!content.length) return {} as T;

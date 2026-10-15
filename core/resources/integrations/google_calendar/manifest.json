@@ -81,7 +81,9 @@
       "scopes": [
         "openid",
         "email",
-        "https://www.googleapis.com/auth/calendar"
+        "https://www.googleapis.com/auth/calendar.events",
+        "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+        "https://www.googleapis.com/auth/calendar.events.freebusy"
       ],
       "tokenUrl": "https://oauth2.googleapis.com/token",
       "tokenAuthMethod": "body",

@@ -31,7 +31,7 @@ describe('vendor pagination contracts', () => {
     ['google_calendar', 'list_events', { calendarId: 'a@example.com' }, { items: [{ id: '123' }], nextPageToken: 'next' }, '/calendar/v3/calendars/a%40example.com/events', 'GET', 'next'],
     ['google_sheets', 'list_spreadsheets', {}, { files: [{ id: '123' }], nextPageToken: 'next' }, '/drive/v3/files', 'GET', 'next'],
     ['google_drive', 'list_files', {}, { files: [{ id: '123' }], nextPageToken: 'next' }, '/drive/v3/files', 'GET', 'next'],
-    ['slack', 'list_channels', {}, { ok: true, channels: [{ id: 'C123' }], response_metadata: { next_cursor: 'next' } }, '/api/conversations.list', 'POST', 'next'],
+    ['slack', 'list_channels', {}, { ok: true, channels: [{ id: 'C123' }], response_metadata: { next_cursor: 'next' } }, '/api/conversations.list', 'GET', 'next'],
   ];
   test.each(cases)('%s returns explicit continuation without silently fetching extra pages', async (id, action, input, response, path, method, cursor) => {
     const h = harness(byId(id), [response]);
@@ -43,6 +43,18 @@ describe('vendor pagination contracts', () => {
     expect(new Headers(h.calls[0].init.headers).get('authorization')).toBe('Bearer fixture-token');
     expect(h.calls[0].init.redirect).toBe('error');
   });
+});
+
+test('Slack channel listing sends pagination as URL parameters, not an ignored JSON body', async () => {
+  const h = harness(byId('slack'), [{ ok: true, channels: [{ id: 'C123' }], response_metadata: { next_cursor: 'after' } }]);
+  expect(await h.run('list_channels', { limit: 1, cursor: 'before+/=' })).toMatchObject({ ok: true, data: { nextCursor: 'after' } });
+  expect(h.calls[0].init.method).toBe('GET');
+  expect(h.calls[0].init.body).toBeUndefined();
+  expect(Object.fromEntries(h.calls[0].url.searchParams)).toEqual({ limit: '1', cursor: 'before+/=', types: 'public_channel,private_channel', exclude_archived: 'true' });
+  for (const error of ['invalid_auth', 'token_revoked', 'token_expired', 'missing_scope']) {
+    const rejected = harness(byId('slack'), [{ ok: false, error }]);
+    expect(await rejected.run('list_channels'), error).toMatchObject({ ok: false, error: { code: error === 'missing_scope' ? 'PROVIDER_REJECTED' : 'unauthorized', outcome: 'rejected' } });
+  }
 });
 
 test('Notion writes use data-source parents and reject computed properties before creating', async () => {

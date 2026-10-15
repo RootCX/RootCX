@@ -26,6 +26,13 @@ for (const plugin of plugins.filter(p => p.oauth)) {
     expect(url.searchParams.get('state')).toBe('state1');
     if (plugin.id === 'notion') expect(url.searchParams.get('owner')).toBe('user');
     if (plugin.id === 'gmail') expect(url.searchParams.get('scope')?.split(' ')).toEqual(['openid', 'email', 'https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.compose']);
+    // Legacy freeBusy.query needs its own permission; events alone does not authorize it.
+    if (plugin.id === 'google_calendar') expect(url.searchParams.get('scope')?.split(' ')).toEqual([
+      'openid', 'email',
+      'https://www.googleapis.com/auth/calendar.events',
+      'https://www.googleapis.com/auth/calendar.calendarlist.readonly',
+      'https://www.googleapis.com/auth/calendar.events.freebusy',
+    ]);
     expect(url.searchParams.get('scope')).toBe(plugin.oauth!.scopes.join(plugin.oauth!.scopeSeparator ?? ' '));
     if (plugin.oauth!.pkce) {
       expect(url.searchParams.get('code_challenge_method')).toBe('S256');
@@ -34,6 +41,8 @@ for (const plugin of plugins.filter(p => p.oauth)) {
     const result = await rpc.__auth_callback({ ...params, query: { code: 'code1' }, codeVerifier: 'verifier1' });
     expect(requests).toHaveLength(plugin.id === 'google_drive' ? 3 : 2);
     expect(requests[0].url.toString()).toBe(plugin.oauth!.tokenUrl);
+    expect(new Headers(requests[0].init.headers).get('Notion-Version')).toBe(plugin.id === 'notion' ? '2025-09-03' : null);
+    if (plugin.id === 'notion') expect(new Headers(requests[1].init.headers).get('Notion-Version')).toBe('2025-09-03');
     const fields = plugin.oauth!.tokenEncoding === 'json' ? JSON.parse(String(requests[0].init.body)) : Object.fromEntries(new URLSearchParams(String(requests[0].init.body)));
     expect(fields.code).toBe('code1');
     if (plugin.oauth!.pkce) expect(fields.code_verifier).toBe('verifier1');
@@ -74,4 +83,26 @@ test('A reviewed plugin can sign requests without a Bearer-only factory constrai
   expect(headers.get('authorization')).toBeNull();
   expect(headers.get('x-api-key')).toBe('fixture-key');
   expect(headers.get('x-signed-target')).toBe('POST /v1/customers');
+});
+
+
+test('Notion accepts an explicit null refresh only without expiry and still verifies identity', async () => {
+  const plugin = plugins.find(p => p.id === 'notion')!;
+  for (const token of [
+    { access_token: 'access', refresh_token: null },
+    { access_token: 'access', refresh_token: null, expires_in: 3600 },
+    { access_token: 'access', refresh_token: '' },
+  ]) {
+    let calls = 0;
+    const rpc = createRuntime(plugin, (async () => Response.json(++calls === 1 ? token : identities.notion)) as unknown as typeof fetch);
+    const pending = rpc.__auth_callback({ config: { clientId: 'client', clientSecret: 'secret' }, query: { code: 'code' }, callbackUrl: 'https://example.com/callback' });
+    if (token.refresh_token === null && !('expires_in' in token)) {
+      const result = await pending;
+      expect(result.credentials).toEqual({ accessToken: 'access' });
+      expect(calls).toBe(2);
+    } else {
+      await expect(pending).rejects.toThrow('invalid refresh token');
+      expect(calls).toBe(1);
+    }
+  }
 });

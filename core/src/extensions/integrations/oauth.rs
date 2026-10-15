@@ -208,6 +208,12 @@ fn merge(blob: &JsonValue, renewed: Renewed) -> JsonValue {
     out
 }
 
+pub(super) fn token_request(request: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
+    if url == "https://api.notion.com/v1/oauth/token" {
+        request.header("Notion-Version", "2025-09-03")
+    } else { request }
+}
+
 async fn exchange(config: &JsonValue, refresh_token: &str) -> Result<Renewed, RenewError> {
     let raw = str_field(config, "tokenUrl").ok_or_else(|| RenewError::Transient("no tokenUrl".into()))?;
     let url = reqwest::Url::parse(raw)
@@ -232,7 +238,7 @@ async fn exchange(config: &JsonValue, refresh_token: &str) -> Result<Renewed, Re
         }
     }
 
-    let mut request = client.post(url);
+    let mut request = token_request(client.post(url), raw);
     if basic {
         request = request.basic_auth(str_field(config, "clientId").unwrap_or(""), str_field(config, "clientSecret"));
     }
@@ -376,6 +382,15 @@ mod stub {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn notion_version_is_scoped_to_its_exact_token_endpoint() {
+        for url in ["https://api.notion.com/v1/oauth/token", "https://example.com/v1/oauth/token", "https://api.notion.com/v1/oauth/token?other=true"] {
+            let request = super::token_request(reqwest::Client::new().post(url), url).build().unwrap();
+            assert_eq!(request.headers().get("Notion-Version").and_then(|v| v.to_str().ok()),
+                if url == "https://api.notion.com/v1/oauth/token" { Some("2025-09-03") } else { None });
+        }
+    }
+
     use super::*;
 
     fn cfg() -> JsonValue { json!({ "tokenUrl": "https://p.example.com/token" }) }
