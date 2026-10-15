@@ -305,7 +305,7 @@ async fn exchange(config: &JsonValue, refresh_token: &str, stripe_account: Optio
         if body.len() + chunk.len() > 1024 * 1024 { return Err(RenewError::Transient("token response exceeds 1 MiB".into())); }
         body.extend_from_slice(&chunk);
     }
-    interpret(status.as_u16(), &String::from_utf8_lossy(&body))
+    interpret_provider_response(status.as_u16(), &String::from_utf8_lossy(&body), raw)
 }
 
 /// An HTTP client pinned to the addresses the destination resolved to, refusing
@@ -327,6 +327,29 @@ async fn client_for(_url: &reqwest::Url) -> Result<reqwest::Client, RenewError> 
         .timeout(std::time::Duration::from_millis(TIMEOUT_MS))
         .build()
         .map_err(|e| RenewError::Transient(e.to_string()))
+}
+
+// HubSpot retains its precise legacy status alongside the generic OAuth error.
+// Only a known refresh-token rejection is terminal; invalid_request alone may
+// instead indicate malformed client configuration and must preserve the grant.
+fn interpret_provider_response(status: u16, body: &str, token_url: &str) -> Result<Renewed, RenewError> {
+    let hubspot = reqwest::Url::parse(token_url).ok().is_some_and(|u|
+        u.scheme() == "https" && u.host_str() == Some("api.hubapi.com")
+            && matches!(u.path(), "/oauth/v1/token" | "/oauth/2026-09/token"));
+    if hubspot && matches!(status, 400 | 401) {
+        let parsed = serde_json::from_str::<JsonValue>(body).ok();
+        let provider_status = match parsed.as_ref().and_then(|v| v["status"].as_str()) {
+            Some("BAD_REFRESH_TOKEN") => "BAD_REFRESH_TOKEN",
+            Some("BAD_CLIENT_ID") => "BAD_CLIENT_ID",
+            Some("BAD_CLIENT_SECRET") => "BAD_CLIENT_SECRET",
+            _ => "UNCLASSIFIED",
+        };
+        tracing::warn!(provider = "hubspot", http_status = status, provider_status, "OAuth refresh rejected");
+        if provider_status == "BAD_REFRESH_TOKEN" {
+            return Err(RenewError::Rejected("the provider rejected the refresh token: BAD_REFRESH_TOKEN".into()));
+        }
+    }
+    interpret(status, body)
 }
 
 /// The provider's answer, classified. Split from the network call so the rules that
@@ -565,6 +588,21 @@ mod tests {
             assert_eq!(r.refresh.as_deref(), *rotated, "case: {case}");
             // Absolute, not relative: a restart must still be able to judge it.
             assert!(r.expires_at >= now_secs() + min_lifetime, "case: {case}");
+        }
+    }
+
+    #[test]
+    fn hubspot_legacy_refresh_status_is_terminal_only_for_that_provider() {
+        let url = "https://api.hubapi.com/oauth/2026-09/token";
+        let rejected = r#"{"error":"invalid_request","status":"BAD_REFRESH_TOKEN"}"#;
+        assert!(matches!(interpret_provider_response(400, rejected, url), Err(RenewError::Rejected(_))));
+        for (status, body, endpoint) in [
+            (503, rejected, url),
+            (400, rejected, "https://other.example/token"),
+            (400, r#"{"error":"invalid_request","status":"BAD_CLIENT_SECRET"}"#, url),
+            (400, r#"{"error":"invalid_request"}"#, url),
+        ] {
+            assert!(matches!(interpret_provider_response(status, body, endpoint), Err(RenewError::Transient(_))));
         }
     }
 
