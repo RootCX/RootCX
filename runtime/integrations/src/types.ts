@@ -9,6 +9,8 @@ export type Request = {
   headers?: Record<string, string>; body?: BodyInit; response?: 'json' | 'binary';
 };
 export interface Context {
+  readonly hubspotUserLevel?: boolean;
+  readonly hubspotUserIdentity?: { id: string; label: string };
   request<T = ObjectValue>(request: Request): Promise<T>;
 }
 export interface Action {

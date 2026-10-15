@@ -60,7 +60,14 @@ export function context(plugin: Plugin, credential: Credential, connection: stri
   const origin = new URL(typeof plugin.origin === 'function' ? plugin.origin(credential) : plugin.origin);
   if (origin.protocol !== 'https:' || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) throw new IntegrationError('CONFIGURATION_ERROR', 'Invalid provider origin');
   const key = `${plugin.id}:${connection}`;
-  return { async request<T>(request: Request): Promise<T> {
+  let hubspotUserIdentity: Context['hubspotUserIdentity'];
+  const hubspotUserLevel = plugin.id === 'hubspot' && credential.hubspotUserLevel === true;
+  if (hubspotUserLevel) {
+    const identity = credential.hubspotUserIdentity as Context['hubspotUserIdentity'];
+    if (!identity || typeof identity.id !== 'string' || !identity.id.trim() || typeof identity.label !== 'string' || !identity.label.trim()) throw new IntegrationError('unauthorized', 'Reconnect the HubSpot user account');
+    hubspotUserIdentity = { id: identity.id, label: identity.label };
+  }
+  return { hubspotUserLevel, hubspotUserIdentity, async request<T>(request: Request): Promise<T> {
     const method = request.method ?? 'GET';
     const write = effect ? effect === 'write' && method !== 'GET' : method !== 'GET';
     const base = request.service ? plugin.services?.[request.service] : origin.origin;
