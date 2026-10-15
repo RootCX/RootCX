@@ -1,7 +1,7 @@
 {
   "appId": "google_calendar",
   "name": "Google Calendar",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "integration",
   "description": "Google Calendar integration with per-user, per-calendar sync. Owns calendar data (calendars, events, attendees, attachments). Consumer apps read via the collections API.",
   "crons": [
@@ -854,7 +854,7 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 4096,
-                "description": "RFC3339 timestamp"
+                "description": "RFC3339 timestamp with explicit UTC offset"
               },
               "timeZone": {
                 "type": "string",
@@ -902,7 +902,7 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 4096,
-                "description": "RFC3339 timestamp"
+                "description": "RFC3339 timestamp with explicit UTC offset"
               },
               "timeZone": {
                 "type": "string",
@@ -1021,7 +1021,7 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 4096,
-                "description": "RFC3339 timestamp"
+                "description": "RFC3339 timestamp with explicit UTC offset"
               },
               "timeZone": {
                 "type": "string",
@@ -1069,7 +1069,7 @@
                 "type": "string",
                 "minLength": 1,
                 "maxLength": 4096,
-                "description": "RFC3339 timestamp"
+                "description": "RFC3339 timestamp with explicit UTC offset"
               },
               "timeZone": {
                 "type": "string",

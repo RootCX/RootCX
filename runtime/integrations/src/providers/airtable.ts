@@ -6,7 +6,7 @@ const target = { baseId: id(), tableId: id() };
 const fields = { ...map, minProperties: 1 };
 const verify = async (ctx: Context) => {
   const user = await ctx.request({ path: '/v0/meta/whoami' });
-  if (!user.id) throw new Error('Airtable account identifier missing');
+  if (typeof user.id !== 'string' || !user.id) throw new Error('Airtable account identifier missing');
   return { id: user.id, label: user.email ?? user.id };
 };
 export default provider('airtable', 'Airtable', 'https://api.airtable.com', {

@@ -509,3 +509,55 @@ async fn simultaneous_reconnections_do_not_duplicate_an_account() {
     assert_eq!(rows.as_array().unwrap().len(), 1);
     rt.shutdown().await;
 }
+
+#[tokio::test]
+async fn managed_connectors_isolate_operator_configuration_and_keep_tenant_fallback() {
+    const PROVIDERS: [(&str, &str); 8] = [("notion", "NOTION"), ("hubspot", "HUBSPOT"), ("salesforce", "SALESFORCE"), ("airtable", "AIRTABLE"), ("slack", "SLACK"), ("gmail", "GMAIL"), ("google_calendar", "GOOGLE_CALENDAR"), ("google_sheets", "GOOGLE_SHEETS")];
+    if std::env::var("MANAGED_CONNECTORS_TEST_CHILD").as_deref() != Ok("true") {
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "managed_connectors_isolate_operator_configuration_and_keep_tenant_fallback", "--nocapture"])
+            .env("MANAGED_CONNECTORS_TEST_CHILD", "true")
+            .env_remove("ROOTCX_MANAGED_GOOGLE_OAUTH")
+            .env("ROOTCX_GOOGLE_CLIENT_ID", "fixture-google")
+            .env("ROOTCX_GOOGLE_CLIENT_SECRET", "fixture-operator-secret");
+        for (_, namespace) in PROVIDERS {
+            command.env(format!("ROOTCX_MANAGED_{namespace}_OAUTH"), "true")
+                .env(format!("ROOTCX_{namespace}_CLIENT_ID"), "fixture-client")
+                .env(format!("ROOTCX_{namespace}_CLIENT_SECRET"), "fixture-operator-secret");
+        }
+        let output = command.output().await.unwrap();
+        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    let rt = TestRuntime::boot().await;
+    for (id, _) in PROVIDERS {
+        rt.install_manifest(&json!({"appId":id,"name":id,"version":"1.0.0","type":"integration","dataContract":[]})).await;
+        let (status, _) = rt.request_as(Method::PUT, &format!("/api/v1/integrations/{id}/config"), &rt.token, Some(&json!({"clientSecret":"tenant-override"}))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{id}");
+        let (status, _) = rt.post_json(&format!("/api/v1/integrations/{id}/configs"), &json!({"label":"alternate","credentials":{}})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{id}");
+        let (status, start) = rt.post_json(&format!("/api/v1/integrations/{id}/auth/start"), &json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{id}: {start}");
+        assert!(!start.to_string().contains("fixture-operator-secret"), "{id}");
+        let url = reqwest::Url::parse(start["url"].as_str().unwrap()).unwrap();
+        let params: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+        let callback = rt.client.get(rt.url("/api/v1/integrations/auth/callback"))
+            .query(&[("error", "access_denied"), ("state", params["state"].as_str())]).send().await.unwrap();
+        assert_eq!(callback.status(), StatusCode::OK, "{id}");
+        assert!(!callback.text().await.unwrap().contains("fixture-operator-secret"), "{id}");
+        let (status, receipt) = rt.get_json(&format!("/api/v1/integrations/{id}/auth/attempts/{}", start["attemptId"].as_str().unwrap())).await;
+        assert_eq!(status, StatusCode::OK, "{id}");
+        assert_eq!(receipt["status"], "cancelled", "{id}");
+    }
+    setup_integration(&rt).await;
+    let (status, _) = rt.request_as(Method::PUT, "/api/v1/integrations/test_integ/config", &rt.token, Some(&json!({"apiKey":"tenant-key"}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, integrations) = rt.get_json("/api/v1/integrations").await;
+    for (id, _) in PROVIDERS {
+        let item = integrations.as_array().unwrap().iter().find(|i| i["id"] == id).unwrap();
+        assert_eq!(item["managedOAuth"], true, "{id}");
+        assert_eq!(item["configured"], true, "{id}");
+    }
+    assert!(!integrations.to_string().contains("fixture-operator-secret"));
+    rt.shutdown().await;
+}

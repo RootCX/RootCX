@@ -1,13 +1,16 @@
 //! Operator-owned OAuth applications; never writable by tenant administrators.
+mod providers;
 use serde_json::{json, Value};
 use crate::api_error::ApiError;
 
 pub fn enabled(id: &str) -> bool {
-    id == "google_drive" && std::env::var("ROOTCX_MANAGED_GOOGLE_OAUTH").as_deref() == Ok("true")
+    (id == "google_drive" && std::env::var("ROOTCX_MANAGED_GOOGLE_OAUTH").as_deref() == Ok("true"))
+        || providers::provider(id).is_some_and(|provider| provider.enabled())
 }
 
 pub fn config(id: &str) -> Result<Option<Value>, ApiError> {
     if !enabled(id) { return Ok(None); }
+    if let Some(provider) = providers::provider(id) { return provider.config().map(Some); }
     let read = |key| std::env::var(key).ok().filter(|s| !s.trim().is_empty())
         .ok_or_else(|| ApiError::BadRequest("managed OAuth is not configured by the operator".into()));
     Ok(Some(json!({
@@ -27,7 +30,8 @@ pub fn worker_config(id: &str, config: Value) -> Value {
     if enabled(id) { json!({}) } else { config }
 }
 
-pub fn start(config: &Value, callback: &str, state: &str, challenge: &str) -> Value {
+pub fn start(id: &str, config: &Value, callback: &str, state: &str, challenge: &str) -> Value {
+    if let Some(provider) = providers::provider(id) { return provider.start(config, callback, state, challenge); }
     let mut url = reqwest::Url::parse("https://accounts.google.com/o/oauth2/v2/auth").unwrap();
     url.query_pairs_mut().extend_pairs([
         ("client_id", config["clientId"].as_str().unwrap_or("")),
@@ -50,7 +54,8 @@ async fn response_json(response: reqwest::Response) -> Result<Value, ApiError> {
     serde_json::from_slice(&bytes).map_err(|_| ApiError::BadRequest("Invalid Google response".into()))
 }
 
-pub async fn callback(config: &Value, query: &std::collections::HashMap<String, String>, callback: &str, verifier: &str) -> Result<Value, ApiError> {
+pub async fn callback(integration_id: &str, config: &Value, query: &std::collections::HashMap<String, String>, callback: &str, verifier: &str) -> Result<Value, ApiError> {
+    if let Some(provider) = providers::provider(integration_id) { return provider.callback(config, query, callback, verifier).await; }
     if query.contains_key("error") { return Err(ApiError::BadRequest("Google authorization declined".into())); }
     let code = query.get("code").ok_or_else(|| ApiError::BadRequest("Missing authorization code".into()))?;
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20))
@@ -68,6 +73,16 @@ pub async fn callback(config: &Value, query: &std::collections::HashMap<String, 
     Ok(json!({ "credentials": { "accessToken": access, "refreshToken": refresh,
         "_expiresAt": now + token["expires_in"].as_u64().unwrap_or(300).min(86400) },
         "label": format!("{email} [{id}]") }))
+}
+
+pub async fn verify(integration_id: &str, credentials: &Value) -> Result<(), ApiError> {
+    if let Some(provider) = providers::provider(integration_id) {
+        provider.verify(credentials).await?;
+    } else {
+        let access = credentials["accessToken"].as_str().ok_or_else(|| ApiError::BadRequest("Reconnect your account".into()))?;
+        verify_access(access).await?;
+    }
+    Ok(())
 }
 
 pub async fn verify_access(access: &str) -> Result<(String, String), ApiError> {

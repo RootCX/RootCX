@@ -1,7 +1,7 @@
 {
   "appId": "hubspot",
   "name": "HubSpot",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "integration",
   "description": "Connect HubSpot and operate on live data.",
   "entities": [],
@@ -27,7 +27,7 @@
         "minLength": 1,
         "maxLength": 4096,
         "description": "",
-        "const": "https://api.hubapi.com/oauth/v1/token",
+        "const": "https://api.hubspot.com/oauth/v3/token",
         "platformSecret": "HUBSPOT_TOKEN_URL"
       },
       "tokenAuthMethod": {
@@ -72,7 +72,7 @@
         "crm.objects.contacts.write",
         "crm.schemas.contacts.read"
       ],
-      "tokenUrl": "https://api.hubapi.com/oauth/v1/token",
+      "tokenUrl": "https://api.hubspot.com/oauth/v3/token",
       "tokenAuthMethod": "body",
       "tokenEncoding": "form"
     },

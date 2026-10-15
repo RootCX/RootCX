@@ -16,7 +16,7 @@ async function validateProperties(ctx: Context, dataSourceId: string, values: Ob
 const properties = { ...map, minProperties: 1, description: 'Native Notion property objects keyed by property name or ID; get_schema returns the expected types.' };
 const verify = async (ctx: Context) => {
   const user = await ctx.request({ path: '/v1/users/me' });
-  if (!user.id) throw new Error('Notion account identifier missing');
+  if (typeof user.id !== 'string' || !user.id) throw new Error('Notion account identifier missing');
   return { id: user.id, label: user.bot?.workspace_name ?? user.name ?? 'Notion' };
 };
 
@@ -30,7 +30,16 @@ export default provider('notion', 'Notion', 'https://api.notion.com', {
     const result = await ctx.request({ path: `/v1/data_sources/${segment(input.dataSourceId)}/query`, method: 'POST', json: { ...pick(input, ['filter', 'sorts']), page_size: input.limit ?? 50, start_cursor: input.cursor } });
     return page(result.results, result.next_cursor);
   }),
-  get_entry: action('Get entry', 'Read a page and its native properties', 'read', { pageId: id() }, ['pageId'], (ctx, input) => ctx.request({ path: `/v1/pages/${segment(input.pageId)}` })),
+  get_entry: action('Get entry', 'Read a page; use get_entry_property to retrieve all values of paginated properties', 'read', { pageId: id() }, ['pageId'], (ctx, input) => ctx.request({ path: `/v1/pages/${segment(input.pageId)}` })),
+  get_entry_property: action('Get entry property', 'Read one page of property values; accepts the encoded property ID returned by Notion', 'read', { pageId: id(), propertyId: string('Property ID returned by Notion', { maxLength: 256 }), ...pagination }, ['pageId', 'propertyId'], async (ctx, input) => {
+    let propertyId: string;
+    try { propertyId = decodeURIComponent(input.propertyId); } catch { throw new IntegrationError('INVALID_INPUT', 'Invalid Notion property ID encoding'); }
+    if (!propertyId || propertyId === '.' || propertyId === '..' || /[\/\\\x00-\x1f]/.test(propertyId)) throw new IntegrationError('INVALID_INPUT', 'Invalid Notion property ID');
+    const result = await ctx.request({ path: `/v1/pages/${segment(input.pageId)}/properties/${segment(propertyId)}`, query: { page_size: input.limit ?? 50, start_cursor: input.cursor } });
+    if (result.object !== 'property_item' && result.object !== 'list') throw new IntegrationError('INVALID_RESPONSE', 'Notion returned an invalid property');
+    if (result.object === 'list' && (typeof result.has_more !== 'boolean' || (result.has_more && !result.next_cursor))) throw new IntegrationError('INVALID_RESPONSE', 'Notion returned an invalid property continuation');
+    return result.object === 'list' ? { ...page(result.results, result.next_cursor), propertyItem: result.property_item } : { ...page([result]), propertyItem: null };
+  }),
   create_entry: action('Create entry', 'Create a page in a data source. Never automatically retry an uncertain creation.', 'write', { dataSourceId: id(), properties, children: array(map) }, ['dataSourceId', 'properties'], async (ctx, input) => {
     await validateProperties(ctx, input.dataSourceId, input.properties);
     return ctx.request({ path: '/v1/pages', method: 'POST', json: { parent: { type: 'data_source_id', data_source_id: input.dataSourceId }, ...pick(input, ['properties', 'children']) } });

@@ -12,16 +12,20 @@ export function salesforceOrigin(credential: Credential): string {
 }
 const verify = async (ctx: Context) => {
   const account = await ctx.request({ path: '/services/oauth2/userinfo' });
-  if (!account.organization_id || !account.user_id) throw new Error('Salesforce account identifier missing');
+  if (typeof account.organization_id !== 'string' || !account.organization_id || typeof account.user_id !== 'string' || !account.user_id) throw new Error('Salesforce account identifier missing');
   return { id: `${account.organization_id}:${account.user_id}`, label: account.preferred_username ?? account.user_id };
 };
 export default provider('salesforce', 'Salesforce', salesforceOrigin, {
   get_schema: action('Get object schema', 'Discover fields, types and writable properties', 'read', { objectType }, ['objectType'], (ctx, input) => ctx.request({ path: `${API}/sobjects/${input.objectType}/describe` })),
   query_records: action('Query records', 'Execute read-only SOQL, or follow the previous nextCursor. Queries must target Contact or Opportunity.', 'read', { query: string('SOQL SELECT query', { maxLength: 10000 }), cursor: pagination.cursor }, [], async (ctx, input) => {
+    const statement = (input.query ?? '').replace(/'(?:\\.|[^'\\])*'/g, "''");
     if (input.cursor) {
       if (input.query || !/^\/services\/data\/v61\.0\/query\/[A-Za-z0-9_-]+$/.test(input.cursor)) throw new IntegrationError('INVALID_INPUT', 'Invalid Salesforce query cursor');
-    } else if (!/^\s*SELECT\s+[\s\S]+\s+FROM\s+(Contact|Opportunity)\b/i.test(input.query ?? '') || /\bFROM\s+(?!Contact\b|Opportunity\b)[A-Za-z_]/i.test(input.query ?? '')) throw new IntegrationError('INVALID_INPUT', 'Expected a SELECT query on Contact or Opportunity');
+    } else if (!/^\s*SELECT\s+[\s\S]+\s+FROM\s+(Contact|Opportunity)\b/i.test(statement) || /\bFROM\s+(?!Contact\b|Opportunity\b)[A-Za-z_]/i.test(statement)) throw new IntegrationError('INVALID_INPUT', 'Expected a SELECT query on Contact or Opportunity');
+    // SOQL can mutate usage metadata or acquire locks despite using the query endpoint.
+    if (/\b(?:FOR\s+(?:UPDATE|VIEW|REFERENCE)|UPDATE\s+(?:TRACKING|VIEWSTAT))\b/i.test(statement)) throw new IntegrationError('INVALID_INPUT', 'Only read-only SOQL is supported');
     const result = await ctx.request({ path: input.cursor ?? `${API}/query`, query: input.cursor ? {} : { q: input.query } });
+    if (typeof result.done !== 'boolean' || (!result.done && (typeof result.nextRecordsUrl !== 'string' || !/^\/services\/data\/v61\.0\/query\/[A-Za-z0-9_-]+$/.test(result.nextRecordsUrl)))) throw new IntegrationError('INVALID_RESPONSE', 'Salesforce returned an invalid continuation');
     return page(result.records, result.done ? null : result.nextRecordsUrl);
   }),
   get_record: action('Get record', 'Read a contact or opportunity', 'read', { objectType, recordId: id() }, ['objectType', 'recordId'], (ctx, input) => ctx.request({ path: `${API}/sobjects/${input.objectType}/${segment(input.recordId)}` })),

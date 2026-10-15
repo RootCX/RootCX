@@ -1,7 +1,7 @@
 {
   "appId": "slack",
   "name": "Slack",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "integration",
   "description": "Connect Slack and operate on live data.",
   "entities": [],
@@ -142,7 +142,7 @@
     {
       "id": "get_history",
       "name": "Read channel history",
-      "description": "Read one page of messages in a channel accessible to this bot [read]",
+      "description": "Read up to 15 messages; non-Marketplace commercial apps may be limited to one request per minute [read]",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -156,7 +156,7 @@
           "limit": {
             "type": "integer",
             "minimum": 1,
-            "maximum": 100
+            "maximum": 15
           },
           "cursor": {
             "type": "string",

@@ -24,6 +24,8 @@ for (const plugin of plugins.filter(p => p.oauth)) {
     const url = new URL(start.url!);
     expect(url.origin + url.pathname).toBe(plugin.oauth!.authorizeUrl);
     expect(url.searchParams.get('state')).toBe('state1');
+    if (plugin.id === 'notion') expect(url.searchParams.get('owner')).toBe('user');
+    if (plugin.id === 'gmail') expect(url.searchParams.get('scope')?.split(' ')).toEqual(['openid', 'email', 'https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.compose']);
     expect(url.searchParams.get('scope')).toBe(plugin.oauth!.scopes.join(plugin.oauth!.scopeSeparator ?? ' '));
     if (plugin.oauth!.pkce) {
       expect(url.searchParams.get('code_challenge_method')).toBe('S256');

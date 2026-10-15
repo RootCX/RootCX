@@ -117,7 +117,7 @@ pub async fn start(
         .bind(state_hash(&nonce)).bind(iv).bind(ciphertext).execute(&pool).await?;
 
     let mut result = if super::managed::enabled(&integration_id) {
-        super::managed::start(&config, &cb, &state, &code_challenge)
+        super::managed::start(&integration_id, &config, &cb, &state, &code_challenge)
     } else { wm.rpc(
         &integration_id, Uuid::new_v4().to_string(), "__auth_start".into(),
         json!({ "config": config, "callbackUrl": cb, "state": state, "codeChallenge": code_challenge, "userId": identity.user_id }),
@@ -181,9 +181,8 @@ pub async fn verify_managed_connection(
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
     super::connections::verify_owner(&pool, &connection_id, &integration_id, &identity).await?;
     let (_, credentials, _, _) = super::connections::resolve_by_connection_id(&secrets, &pool, &integration_id, &connection_id, &identity.user_id.to_string())
-        .await.map_err(|_| ApiError::BadRequest("Reconnect your Google account".into()))?;
-    let access = credentials["accessToken"].as_str().ok_or_else(|| ApiError::BadRequest("Reconnect your Google account".into()))?;
-    super::managed::verify_access(access).await?;
+        .await.map_err(|_| ApiError::BadRequest("Reconnect your account".into()))?;
+    super::managed::verify(&integration_id, &credentials).await?;
     Ok(Json(json!({"verified": true})))
 }
 
@@ -195,7 +194,7 @@ async fn finish_callback(
     let config = super::routes::resolve_config_scoped(&pool, &secrets, &pending.integration_id, pending.config_id.as_deref()).await?;
 
     let result = if super::managed::enabled(&pending.integration_id) {
-        super::managed::callback(&config, params, &pending.callback_url, &pending.code_verifier).await?
+        super::managed::callback(&pending.integration_id, &config, params, &pending.callback_url, &pending.code_verifier).await?
     } else { wm.rpc(
         &pending.integration_id, Uuid::new_v4().to_string(), "__auth_callback".into(),
         json!({ "config": config, "query": params, "userId": pending.user_id, "callbackUrl": pending.callback_url, "codeVerifier": pending.code_verifier }),
@@ -274,7 +273,7 @@ async fn try_auto_sync_connect(
 }
 
 fn callback_html(integration_id: &str, callback_url: &str, error: Option<(&str, &str)>) -> String {
-    if super::managed::enabled(integration_id) {
+    if integration_id == "google_drive" && super::managed::enabled(integration_id) {
         // Use the server-owned OAuth callback origin, never a user-provided redirect.
         let return_url = url::Url::parse(callback_url)
             .ok().filter(|url| matches!(url.scheme(), "http" | "https"))

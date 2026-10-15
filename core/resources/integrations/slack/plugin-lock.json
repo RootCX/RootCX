@@ -1,8 +1,8 @@
 {
   "protocolVersion": 1,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "artifacts": {
-    "index.ts": "39225abbd4bc735822aa1c8adeeab92f8fe8232e3d07277dfb1dbc1a46a7bbfc",
-    "manifest.json": "4543ddf34cd18005f45fa67cba903aaee8aaa9b30493e70aec7f86f7e5ff9384"
+    "index.ts": "d9215435b90faf8c66712cf7f8fc01b48e80e29cb84531a2d80f9c048eac137b",
+    "manifest.json": "fc8444ece4c66d5bf660313b68c88e105faf32334811f9285728244d8edf3d52"
   }
 }

@@ -11,6 +11,30 @@ No test accounts or OAuth applications were available for the implementation ses
 Every generated manifest says `requires-live-verification`. Neither a fixture test nor
 successfully saving a connection is a complete production qualification.
 
+## 1.1.0 qualification candidate — 15 October 2026
+
+Ten rebuilt plugins, 62 actions including ten account checks. Local evidence:
+77 plugin/contract/artifact tests, TypeScript and artifact integrity checks passed;
+26 Core integration library and 17 HTTP connection tests passed against disposable
+PostgreSQL. No live provider accounts were available for the nine non-Drive services.
+No production deployment or provider qualification is claimed for this candidate.
+
+Hardening covers OAuth client-vs-grant failures, Slack HTTP-200 token errors,
+extreme expiration values, malformed OAuth grants, bounded cooldowns, uncertain
+writes and POST read semantics. Provider changes add paginated Notion property
+reads, numeric HubSpot search offsets, read-only Salesforce queries, folded Gmail
+headers, strict Calendar dates, Slack commercial history limits and Stripe metadata
+validation. Sheets RAW behavior was checked; no adapter change was necessary.
+
+Migration notes: re-save existing HubSpot OAuth configuration with
+`https://api.hubspot.com/oauth/v3/token`; persisted v1 URLs are not migrated by the
+manifest. Calendar dateTime requires an explicit UTC offset even with timeZone.
+Slack history limit is now at most 15. Stripe metadata values must be strings.
+Local disconnect removes stored credentials atomically; it does not revoke the
+remote provider consent. Operator-managed Google OAuth still covers Drive only.
+The SHAPP operator setup and per-provider live recipe are recorded in
+`rootcx-website/docs/shapp/integrations.md` (15 October section).
+
 ## Build and verification
 
 From this directory, using Bun 1.3.10:

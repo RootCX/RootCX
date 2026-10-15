@@ -1,7 +1,7 @@
 {
   "appId": "stripe",
   "name": "Stripe",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "integration",
   "description": "Connect Stripe and operate on live data.",
   "entities": [],
@@ -137,8 +137,18 @@
           },
           "metadata": {
             "type": "object",
-            "maxProperties": 200,
-            "additionalProperties": true
+            "maxProperties": 50,
+            "propertyNames": {
+              "minLength": 1,
+              "maxLength": 40,
+              "pattern": "^[^\\[\\]]+$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 500,
+              "description": "Metadata value; empty string removes this key"
+            }
           },
           "idempotencyKey": {
             "type": "string",
@@ -191,8 +201,18 @@
           },
           "metadata": {
             "type": "object",
-            "maxProperties": 200,
-            "additionalProperties": true
+            "maxProperties": 50,
+            "propertyNames": {
+              "minLength": 1,
+              "maxLength": 40,
+              "pattern": "^[^\\[\\]]+$"
+            },
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 0,
+              "maxLength": 500,
+              "description": "Metadata value; empty string removes this key"
+            }
           }
         },
         "required": [

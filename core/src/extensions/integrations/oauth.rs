@@ -73,7 +73,7 @@ fn str_field<'a>(v: &'a JsonValue, key: &str) -> Option<&'a str> {
 /// Present and not within the renewal margin.
 fn is_live(blob: &JsonValue, now: i64) -> bool {
     str_field(blob, F_ACCESS).is_some()
-        && blob.get(F_EXPIRES).and_then(JsonValue::as_i64).is_some_and(|exp| now < exp - MARGIN_SECS)
+        && blob.get(F_EXPIRES).and_then(JsonValue::as_i64).is_some_and(|exp| now < exp.saturating_sub(MARGIN_SECS))
 }
 
 /// Config fields the Core acts on itself, so no worker may set them through
@@ -275,18 +275,23 @@ async fn client_for(_url: &reqwest::Url) -> Result<reqwest::Client, RenewError> 
 /// The provider's answer, classified. Split from the network call so the rules that
 /// decide "this grant is gone" can be tested without one.
 fn interpret(status: u16, body: &str) -> Result<Renewed, RenewError> {
-    if !(200..300).contains(&status) {
+    let parsed = serde_json::from_str::<JsonValue>(body);
+    // Slack reports OAuth failures as HTTP 200. Client authentication failures,
+    // including HTTP 401, do not prove that the user's grant has been revoked.
+    let provider_error = parsed.as_ref().ok().is_some_and(|v|
+        v.get("error").is_some() || v.get("ok").and_then(JsonValue::as_bool) == Some(false));
+    if !(200..300).contains(&status) || provider_error {
         let detail = describe(body);
-        // A rejected grant will keep being rejected; anything else may not.
-        return Err(if status == 401 || (status == 400 && detail.contains("invalid_grant")) {
+        let rejected = (matches!(status, 400 | 401) || (200..300).contains(&status))
+            && matches!(detail.as_str(), "invalid_grant" | "invalid_refresh_token" | "token_revoked");
+        return Err(if rejected {
             RenewError::Rejected(format!("the provider rejected the refresh token: {detail}"))
         } else {
             RenewError::Transient(format!("token endpoint returned {status}: {detail}"))
         });
     }
 
-    let parsed: JsonValue = serde_json::from_str(body)
-        .map_err(|e| RenewError::Transient(format!("token endpoint returned non-JSON: {e}")))?;
+    let parsed = parsed.map_err(|_| RenewError::Transient("token endpoint returned non-JSON".into()))?;
     let access = str_field(&parsed, "access_token")
         .ok_or_else(|| RenewError::Transient("token endpoint returned no access_token".into()))?
         .to_string();
@@ -304,7 +309,7 @@ fn interpret(status: u16, body: &str) -> Result<Renewed, RenewError> {
 fn describe(body: &str) -> String {
     serde_json::from_str::<JsonValue>(body).ok()
         .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
-        .filter(|s| matches!(s.as_str(), "invalid_grant" | "invalid_client" | "invalid_request" | "unauthorized_client" | "invalid_scope" | "temporarily_unavailable"))
+        .filter(|s| matches!(s.as_str(), "invalid_grant" | "invalid_refresh_token" | "token_revoked" | "invalid_client" | "invalid_request" | "unauthorized_client" | "invalid_scope" | "temporarily_unavailable"))
         .unwrap_or_else(|| "provider error".into())
 }
 
@@ -403,6 +408,8 @@ mod tests {
         assert!(!is_live(&json!({ "accessToken": "a", "_expiresAt": now + MARGIN_SECS }), now),
             "inside the margin counts as expired, so renewal never races the provider");
         assert!(!is_live(&json!({ "accessToken": "a" }), now), "no expiry known");
+        assert!(!is_live(&json!({ "accessToken": "a", "_expiresAt": i64::MIN }), now),
+            "untrusted expiry must not overflow the renewal margin");
         assert!(!is_live(&json!({ "_expiresAt": now + 99_999 }), now), "no token");
     }
 
@@ -488,7 +495,14 @@ mod tests {
     fn only_a_rejected_grant_is_terminal() {
         let cases: &[(&str, u16, &str, bool)] = &[
             ("invalid_grant on 400 is terminal", 400, r#"{"error":"invalid_grant"}"#, true),
-            ("401 is terminal whatever the body", 401, "", true),
+            ("unclassified 401 does not revoke the user grant", 401, "", false),
+            ("client secret failure must not kill connections", 401, r#"{"error":"invalid_client"}"#, false),
+            ("invalid grant on 401 is terminal", 401, r#"{"error":"invalid_grant"}"#, true),
+            ("Slack expired refresh token is terminal", 200, r#"{"ok":false,"error":"invalid_refresh_token"}"#, true),
+            ("Slack revoked token is terminal", 200, r#"{"ok":false,"error":"token_revoked"}"#, true),
+            ("Slack client setup failure is not terminal", 200, r#"{"ok":false,"error":"invalid_client_id"}"#, false),
+            ("an error response must not smuggle a usable token", 200, r#"{"ok":false,"error":"ratelimited","access_token":"untrusted"}"#, false),
+            ("outage status takes precedence over a grant error", 503, r#"{"error":"invalid_grant"}"#, false),
             ("another 400 is not terminal", 400, r#"{"error":"invalid_request"}"#, false),
             ("429 is not terminal", 429, "", false),
             ("500 is not terminal", 500, "", false),

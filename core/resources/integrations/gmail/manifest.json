@@ -1,7 +1,7 @@
 {
   "appId": "gmail",
   "name": "Gmail",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "integration",
   "description": "Gmail integration with per-user sync. Owns email data (messages, threads, participants, attachments). Consumer apps read via the collections API.",
   "crons": [
@@ -86,11 +86,7 @@
         "openid",
         "email",
         "https://www.googleapis.com/auth/gmail.readonly",
-        "https://www.googleapis.com/auth/gmail.compose",
-        "https://www.googleapis.com/auth/gmail.send",
-        "https://www.googleapis.com/auth/gmail.settings.basic",
-        "https://www.googleapis.com/auth/gmail.modify",
-        "https://www.googleapis.com/auth/profile.emails.read"
+        "https://www.googleapis.com/auth/gmail.compose"
       ],
       "tokenUrl": "https://oauth2.googleapis.com/token",
       "tokenAuthMethod": "body",
@@ -496,7 +492,7 @@
             "items": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 4096,
+              "maxLength": 254,
               "description": "Bare email address",
               "pattern": "^[^\\s<>@,;]+@[^\\s<>@,;]+\\.[^\\s<>@,;]+$"
             },
@@ -540,7 +536,7 @@
             "items": {
               "type": "string",
               "minLength": 1,
-              "maxLength": 4096,
+              "maxLength": 254,
               "description": "Bare email address",
               "pattern": "^[^\\s<>@,;]+@[^\\s<>@,;]+\\.[^\\s<>@,;]+$"
             },

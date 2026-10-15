@@ -1,8 +1,13 @@
 import { provider, pick } from './shared';
-import { action, id, map, pagination, page, segment, string } from '../schema';
+import { action, id, pagination, page, segment, string } from '../schema';
 import type { Context } from '../types';
 
-const fields = { name: string(), email: string(), description: string(), metadata: map };
+const metadata = {
+  type: 'object', maxProperties: 50,
+  propertyNames: { minLength: 1, maxLength: 40, pattern: '^[^\\[\\]]+$' },
+  additionalProperties: string('Metadata value; empty string removes this key', { minLength: 0, maxLength: 500 }),
+};
+const fields = { name: string(), email: string(), description: string(), metadata };
 const verify = async (ctx: Context) => {
   const account = await ctx.request({ path: '/v1/account' });
   if (!account.id) throw new Error('Stripe account identifier missing');

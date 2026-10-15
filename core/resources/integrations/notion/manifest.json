@@ -1,7 +1,7 @@
 {
   "appId": "notion",
   "name": "Notion",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "integration",
   "description": "Connect Notion and operate on live data.",
   "entities": [],
@@ -215,7 +215,7 @@
     {
       "id": "get_entry",
       "name": "Get entry",
-      "description": "Read a page and its native properties [read]",
+      "description": "Read a page; use get_entry_property to retrieve all values of paginated properties [read]",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -229,6 +229,48 @@
         },
         "required": [
           "pageId"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "get_entry_property",
+      "name": "Get entry property",
+      "description": "Read one page of property values; accepts the encoded property ID returned by Notion [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "pageId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Provider identifier",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          },
+          "propertyId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "Property ID returned by Notion"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "cursor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "Opaque cursor from the previous response"
+          }
+        },
+        "required": [
+          "pageId",
+          "propertyId"
         ],
         "additionalProperties": false
       },

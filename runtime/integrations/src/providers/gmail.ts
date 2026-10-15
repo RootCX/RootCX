@@ -3,7 +3,7 @@ import { action, array, id, pagination, page, segment, string } from '../schema'
 import type { ObjectValue } from '../types';
 
 const mail = {
-  to: { ...array(string('Bare email address', { pattern: '^[^\\s<>@,;]+@[^\\s<>@,;]+\\.[^\\s<>@,;]+$' }), 50), minItems: 1 },
+  to: { ...array(string('Bare email address', { maxLength: 254, pattern: '^[^\\s<>@,;]+@[^\\s<>@,;]+\\.[^\\s<>@,;]+$' }), 50), minItems: 1 },
   subject: string('Subject', { maxLength: 998, pattern: '^[^\\r\\n]*$' }),
   text: string('Plain text body', { minLength: 0, maxLength: 100000 }),
 };
@@ -17,7 +17,7 @@ function message(input: ObjectValue) {
   }
   if (chunk) words.push(chunk);
   const subject = words.map(word => `=?UTF-8?B?${Buffer.from(word).toString('base64')}?=`).join('\r\n ');
-  return { raw: Buffer.from(`To: ${input.to.join(', ')}\r\nSubject: ${subject}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${body}\r\n`).toString('base64url') };
+  return { raw: Buffer.from(`To: ${input.to.join(',\r\n ')}\r\nSubject: ${subject}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n${body}\r\n`).toString('base64url') };
 }
 export default provider('gmail', 'Gmail', 'https://www.googleapis.com', {
   search_messages: action('Search messages', 'Search Gmail using native q syntax', 'read', { ...pagination, query: string() }, [], async (ctx, input) => {
@@ -27,4 +27,4 @@ export default provider('gmail', 'Gmail', 'https://www.googleapis.com', {
   get_message: action('Get message', 'Read a message including headers and MIME payload', 'read', { messageId: id() }, ['messageId'], (ctx, input) => ctx.request({ path: `/gmail/v1/users/me/messages/${segment(input.messageId)}`, query: { format: 'full' } })),
   create_draft: action('Create draft', 'Create a plain-text email draft. Does not send it.', 'write', mail, ['to', 'subject', 'text'], (ctx, input) => ctx.request({ path: '/gmail/v1/users/me/drafts', method: 'POST', json: { message: message(input) } })),
   send_message: action('Send message', 'Send a plain-text email. Never automatically retry an uncertain send.', 'write', mail, ['to', 'subject', 'text'], (ctx, input) => ctx.request({ path: '/gmail/v1/users/me/messages/send', method: 'POST', json: message(input) })),
-}, { services: googleServices, oauth: googleOAuth(['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.compose', 'https://www.googleapis.com/auth/gmail.send', 'https://www.googleapis.com/auth/gmail.settings.basic', 'https://www.googleapis.com/auth/gmail.modify', 'https://www.googleapis.com/auth/profile.emails.read']) });
+}, { services: googleServices, oauth: googleOAuth(['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/gmail.compose']) });
