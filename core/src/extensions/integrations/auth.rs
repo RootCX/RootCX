@@ -286,29 +286,8 @@ async fn try_auto_sync_connect(
 }
 
 fn callback_html(integration_id: &str, callback_url: &str, error: Option<(&str, &str)>) -> String {
-    if integration_id == "google_drive" && super::managed::enabled(integration_id) {
-        // Use the server-owned OAuth callback origin, never a user-provided redirect.
-        let return_url = url::Url::parse(callback_url)
-            .ok().filter(|url| matches!(url.scheme(), "http" | "https"))
-            .and_then(|url| url.join("/shapp/companies").ok())
-            .map(|url| url.to_string()).unwrap_or_else(|| "/".into());
-        let return_url = return_url.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
-        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
-        let cancelled = error.is_some();
-        return include_str!("callback-assets/connected.html")
-            .replace("{{TITLE}}", if cancelled { "Connexion non terminée" } else { "Google Drive connecté" })
-            .replace("{{HEADING}}", if cancelled { "Google Drive n’est pas encore connecté." } else { "Google Drive rejoint votre espace SHAPP." })
-            .replace("{{DESCRIPTION}}", if cancelled { "La connexion n’a pas été activée. Retournez dans votre application pour réessayer." } else { "Votre compte est connecté. Retrouvez-le dans les intégrations de votre application." })
-            .replace("{{RESULT}}", if cancelled { "Connexion non terminée" } else { "Connexion réussie" })
-            .replace("{{SUMMARY}}", if cancelled { "Aucun nouvel accès Google Drive n’a été activé dans SHAPP." } else { "Google Drive est maintenant connecté à SHAPP." })
-            .replace("{{STATUS}}", if cancelled { "À reconnecter" } else { "Connecté" })
-            .replace("{{ICON}}", if cancelled { "M12 7v6m0 4h.01" } else { "m5 12 4 4 10-10" })
-            .replace("{{MARK}}", if cancelled { "·" } else { "✓" })
-            .replace("{{SHAPPY}}", &encode(include_bytes!("callback-assets/shappy.webp")))
-            .replace("{{DRIVE}}", &encode(include_bytes!("callback-assets/google-drive.png")))
-            .replace("{{FONT}}", &encode(include_bytes!("callback-assets/inter-latin.woff2")))
-            .replace("{{THEME}}", include_str!("callback-assets/shapp-theme.css"))
-            .replace("{{RETURN_URL}}", &return_url);
+    if super::managed::enabled(integration_id) {
+        return shapp_callback_html(integration_id, callback_url, error.is_some());
     }
     let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;");
     let body = match error {
@@ -325,6 +304,43 @@ fn callback_html(integration_id: &str, callback_url: &str, error: Option<(&str, 
         r#"<!DOCTYPE html><html><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#1a1a1a;color:#fff">{}<script>window.close()</script></body></html>"#,
         body,
     )
+}
+
+fn shapp_callback_html(integration_id: &str, callback_url: &str, failed: bool) -> String {
+    let provider = match integration_id {
+        "google_drive" => "Google Drive", "google_sheets" => "Google Sheets",
+        "google_calendar" => "Google Calendar", "gmail" => "Gmail", "notion" => "Notion",
+        "airtable" => "Airtable", "hubspot" => "HubSpot", "salesforce" => "Salesforce",
+        "slack" => "Slack", "stripe" => "Stripe", _ => "Votre compte",
+    };
+    // The return origin comes from server-owned OAuth configuration, never callback query data.
+    let return_url = url::Url::parse(callback_url).ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+        .map(|url| format!("{}/shapp/companies", url.origin().ascii_serialization()))
+        .unwrap_or_else(|| "/".into())
+        .replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let visual = if integration_id == "google_drive" {
+        format!(r#"<img src="data:image/png;base64,{}" alt="" width="64" height="64">"#, encode(include_bytes!("callback-assets/google-drive.png")))
+    } else {
+        r#"<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m10 13 4-4m-6 7-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m2-2 1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0"/></svg>"#.into()
+    };
+    include_str!("callback-assets/connected.html")
+        .replace("{{TITLE}}", if failed { "Connexion non terminée" } else { "Connexion réussie" })
+        .replace("{{PROVIDER}}", provider)
+        .replace("{{HEADING}}", &if failed { format!("{provider} n’est pas encore connecté.") } else { format!("{provider} rejoint votre espace SHAPP.") })
+        .replace("{{DESCRIPTION}}", if failed { "La connexion n’a pas été activée. Retournez dans votre application pour réessayer." } else { "Votre compte est connecté. Retrouvez-le dans les intégrations de votre application." })
+        .replace("{{RESULT}}", if failed { "Connexion non terminée" } else { "Connexion réussie" })
+        .replace("{{SUMMARY}}", &if failed { format!("Aucun nouvel accès {provider} n’a été activé dans SHAPP.") } else { format!("{provider} est maintenant connecté à SHAPP.") })
+        .replace("{{STATUS}}", if failed { "À reconnecter" } else { "Connecté" })
+        .replace("{{ICON}}", if failed { "M12 7v6m0 4h.01" } else { "m5 12 4 4 10-10" })
+        .replace("{{MARK}}", if failed { "·" } else { "✓" })
+        .replace("{{SHAPPY}}", &encode(include_bytes!("callback-assets/shappy.webp")))
+        .replace("{{PROVIDER_VISUAL}}", &visual)
+        .replace("{{FONT}}", &encode(include_bytes!("callback-assets/inter-latin.woff2")))
+        .replace("{{THEME}}", include_str!("callback-assets/shapp-theme.css"))
+        .replace("{{RETURN_URL}}", &return_url)
+        .replace("{{CLOSE_SCRIPT}}", if integration_id == "google_drive" { "" } else { "<script>window.close()</script>" })
 }
 
 pub async fn status(
@@ -503,6 +519,31 @@ mod tests {
             assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), if expired { 0 } else { 1 });
             if let Ok(pending) = a.or(b) { assert_eq!(pending.code_verifier, "private-verifier"); assert_eq!(pending.user_id, "owner"); }
         }
+    }
+
+    #[test]
+    fn managed_callbacks_show_the_actual_provider_and_preserve_popup_completion() {
+        for (id, name) in [("google_drive", "Google Drive"), ("google_sheets", "Google Sheets"), ("google_calendar", "Google Calendar"), ("gmail", "Gmail"), ("notion", "Notion"), ("airtable", "Airtable"), ("hubspot", "HubSpot"), ("salesforce", "Salesforce"), ("slack", "Slack"), ("stripe", "Stripe")] {
+            let html = shapp_callback_html(id, "https://app.shapp.ai/api/integrations/auth/callback?next=https://evil.example", false);
+            assert!(html.contains(&format!("{name} rejoint votre espace SHAPP.")), "{id}");
+            assert!(html.contains("href=\"https://app.shapp.ai/shapp/companies\""), "{id}");
+            assert!(!html.contains("evil.example") && !html.contains("window.location") && !html.contains("{{"), "{id}");
+            assert_eq!(html.contains("window.close()"), id != "google_drive", "{id}");
+            if id != "google_drive" { assert!(!html.contains("Google Drive"), "{id}"); }
+        }
+    }
+
+    #[test]
+    fn managed_callback_failure_and_return_link_do_not_leak_callback_data() {
+        for callback in ["not a URL", "javascript:alert(1)", "data:text/html,example"] {
+            let html = shapp_callback_html("hubspot", callback, true);
+            assert!(html.contains("href=\"/\""));
+            assert!(html.contains("Connexion non terminée"));
+            assert!(!html.contains("Connexion réussie"));
+        }
+        let html = shapp_callback_html("<script>bad</script>", "https://user:password@app.shapp.ai/callback?code=secret#fragment", false);
+        assert!(!html.contains("password") && !html.contains("code=secret") && !html.contains("<script>bad"));
+        assert!(html.contains("href=\"https://app.shapp.ai/shapp/companies\""));
     }
 
 }
