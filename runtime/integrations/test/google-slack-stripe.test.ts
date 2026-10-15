@@ -61,11 +61,11 @@ test('Slack history respects commercial app page limits and continuation', async
 test('Stripe rejects invalid metadata before constructing form keys', async () => {
   for (const metadata of [{ 'x][y': 'value' }, { ['x'.repeat(41)]: 'value' }, { key: 'x'.repeat(501) }, { key: { nested: 'value' } }, { key: null }, Object.fromEntries(Array.from({ length: 51 }, (_, i) => [`k${i}`, 'v']))]) {
     const h = harness(stripe);
-    expect(await h.run('update_customer', { customerId: 'cus_1', metadata }), JSON.stringify(metadata)).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect(await h.run('update_customer', { customerId: 'cus_1', idempotencyKey: 'update-fixture', metadata }), JSON.stringify(metadata)).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
     expect(h.calls).toHaveLength(0);
   }
   const h = harness(stripe);
-  expect(await h.run('update_customer', { customerId: 'cus_1', metadata: { ['x'.repeat(40)]: 'v'.repeat(500), remove: '' } })).toMatchObject({ ok: true });
+  expect(await h.run('update_customer', { customerId: 'cus_1', idempotencyKey: 'update-fixture', metadata: { ['x'.repeat(40)]: 'v'.repeat(500), remove: '' } })).toMatchObject({ ok: true });
   expect(new URLSearchParams(String(h.calls[0].body)).get('metadata[remove]')).toBe('');
 });
 

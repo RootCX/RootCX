@@ -8,10 +8,10 @@ const COOLDOWN = new Map<string, number>();
 const RATE = new Map<string, { tokens: number; at: number }>();
 const IN_FLIGHT = new Map<string, number>();
 
-export async function bytes(response: Response): Promise<Uint8Array> {
-  if (Number(response.headers.get('content-length')) > MAX_BYTES) {
+export async function bytes(response: Response, maximumBytes = MAX_BYTES): Promise<Uint8Array> {
+  if (Number(response.headers.get('content-length')) > maximumBytes) {
     await response.body?.cancel().catch(() => {});
-    throw new IntegrationError('RESPONSE_TOO_LARGE', 'Response exceeds 10 MiB');
+    throw new IntegrationError('RESPONSE_TOO_LARGE', 'Response exceeds allowed size');
   }
   const reader = response.body?.getReader();
   if (!reader) return new Uint8Array();
@@ -21,13 +21,26 @@ export async function bytes(response: Response): Promise<Uint8Array> {
       const { done, value } = await reader.read();
       if (done) break;
       length += value.length;
-      if (length > MAX_BYTES) throw new IntegrationError('RESPONSE_TOO_LARGE', 'Response exceeds 10 MiB');
+      if (length > maximumBytes) throw new IntegrationError('RESPONSE_TOO_LARGE', 'Response exceeds allowed size');
       chunks.push(value);
     }
   } finally { await reader.cancel().catch(() => {}); }
   const output = new Uint8Array(length); let offset = 0;
   for (const chunk of chunks) { output.set(chunk, offset); offset += chunk.length; }
   return output;
+}
+
+const GOOGLE_ERROR_REASONS = new Set([
+  'insufficientPermissions', 'forbidden', 'accessNotConfigured', 'domainPolicy',
+  'dailyLimitExceeded', 'userRateLimitExceeded', 'rateLimitExceeded', 'quotaExceeded',
+  'PERMISSION_DENIED', 'RESOURCE_EXHAUSTED', 'UNAUTHENTICATED', 'FAILED_PRECONDITION',
+]);
+async function googleErrorReason(response: Response): Promise<string | undefined> {
+  try {
+    const payload = JSON.parse(new TextDecoder().decode(await bytes(response, 64 * 1024)));
+    const reasons = Array.isArray(payload?.error?.errors) ? payload.error.errors.map((item: unknown) => item && typeof item === 'object' ? (item as { reason?: unknown }).reason : undefined) : [];
+    return [...reasons, payload?.error?.status].find(reason => typeof reason === 'string' && GOOGLE_ERROR_REASONS.has(reason));
+  } catch { return undefined; }
 }
 
 export function formBody(values: Record<string, unknown>): URLSearchParams {
@@ -86,13 +99,15 @@ export function context(plugin: Plugin, credential: Credential, connection: stri
     try {
       response = await fetcher(url, { method, headers, body, redirect: 'error', signal: AbortSignal.timeout(20000) });
       if (!response.ok) {
-        await response.body?.cancel().catch(() => {});
+        const google = ['gmail', 'google_calendar', 'google_sheets', 'google_drive'].includes(plugin.id) && (url.hostname === 'googleapis.com' || url.hostname.endsWith('.googleapis.com'));
+        const reason = google ? await googleErrorReason(response) : undefined;
+        if (!google) await response.body?.cancel().catch(() => {});
         const retry = response.headers.get('retry-after');
         const seconds = retry && /^\d+$/.test(retry) ? Number(retry) : retry ? Math.ceil((Date.parse(retry) - Date.now()) / 1000) : NaN;
         const delay = Number.isFinite(seconds) ? Math.min(86400, Math.max(1, seconds)) : 60;
         if (response.status === 429) COOLDOWN.set(key, Date.now() + delay * 1000);
         const code = response.status === 401 ? 'unauthorized' : response.status === 403 ? 'FORBIDDEN' : response.status === 429 ? 'RATE_LIMITED' : response.status >= 500 ? 'PROVIDER_UNAVAILABLE' : 'PROVIDER_REJECTED';
-        throw new IntegrationError(code, `${plugin.name} returned HTTP ${response.status}`, response.status, response.status === 429 ? delay : undefined, write && response.status >= 500 ? 'unknown' : 'rejected');
+        throw new IntegrationError(code, `${plugin.name} returned HTTP ${response.status}${reason ? ` [${reason}]` : ''}`, response.status, response.status === 429 ? delay : undefined, write && response.status >= 500 ? 'unknown' : 'rejected');
       }
       // No-content statuses complete the write at headers, even if Bun exposes a stream.
       if (response.status === 204 || response.status === 205) {

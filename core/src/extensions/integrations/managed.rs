@@ -1,15 +1,18 @@
 //! Operator-owned OAuth applications; never writable by tenant administrators.
 mod providers;
+pub(crate) mod stripe;
 use serde_json::{json, Value};
 use crate::api_error::ApiError;
 
 pub fn enabled(id: &str) -> bool {
     (id == "google_drive" && std::env::var("ROOTCX_MANAGED_GOOGLE_OAUTH").as_deref() == Ok("true"))
+        || (id == "stripe" && stripe::enabled())
         || providers::provider(id).is_some_and(|provider| provider.enabled())
 }
 
 pub fn config(id: &str) -> Result<Option<Value>, ApiError> {
     if !enabled(id) { return Ok(None); }
+    if id == "stripe" { return stripe::config().map(Some); }
     if let Some(provider) = providers::provider(id) { return provider.config().map(Some); }
     let read = |key| std::env::var(key).ok().filter(|s| !s.trim().is_empty())
         .ok_or_else(|| ApiError::BadRequest("managed OAuth is not configured by the operator".into()));
@@ -31,6 +34,7 @@ pub fn worker_config(id: &str, config: Value) -> Value {
 }
 
 pub fn start(id: &str, config: &Value, callback: &str, state: &str, challenge: &str) -> Value {
+    if id == "stripe" { return stripe::start(config, callback, state); }
     if let Some(provider) = providers::provider(id) { return provider.start(config, callback, state, challenge); }
     let mut url = reqwest::Url::parse("https://accounts.google.com/o/oauth2/v2/auth").unwrap();
     url.query_pairs_mut().extend_pairs([
@@ -55,6 +59,7 @@ async fn response_json(response: reqwest::Response) -> Result<Value, ApiError> {
 }
 
 pub async fn callback(integration_id: &str, config: &Value, query: &std::collections::HashMap<String, String>, callback: &str, verifier: &str) -> Result<Value, ApiError> {
+    if integration_id == "stripe" { return stripe::callback(config, query).await; }
     if let Some(provider) = providers::provider(integration_id) { return provider.callback(config, query, callback, verifier).await; }
     if query.contains_key("error") { return Err(ApiError::BadRequest("Google authorization declined".into())); }
     let code = query.get("code").ok_or_else(|| ApiError::BadRequest("Missing authorization code".into()))?;
@@ -76,7 +81,8 @@ pub async fn callback(integration_id: &str, config: &Value, query: &std::collect
 }
 
 pub async fn verify(integration_id: &str, credentials: &Value) -> Result<(), ApiError> {
-    if let Some(provider) = providers::provider(integration_id) {
+    if integration_id == "stripe" { stripe::verify(credentials).await?; }
+    else if let Some(provider) = providers::provider(integration_id) {
         provider.verify(credentials).await?;
     } else {
         let access = credentials["accessToken"].as_str().ok_or_else(|| ApiError::BadRequest("Reconnect your account".into()))?;

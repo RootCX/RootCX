@@ -81,7 +81,7 @@ fn is_live(blob: &JsonValue, now: i64) -> bool {
 /// `__bind`'s `mergeConfig`. Only an admin writes these
 /// (`save_platform_config`), which is what keeps the renewal destination out of
 /// reach of application code.
-pub(crate) const CORE_OWNED_CONFIG: [&str; 5] = ["tokenUrl", "clientId", "clientSecret", "tokenAuthMethod", "tokenEncoding"];
+pub(crate) const CORE_OWNED_CONFIG: [&str; 6] = ["tokenUrl", "clientId", "clientSecret", "tokenAuthMethod", "tokenEncoding", "stripeLivemode"];
 
 /// The Core renews for this connection only when an admin configured a token
 /// endpoint and the credential actually carries a refresh token.
@@ -171,7 +171,7 @@ pub(crate) async fn credentials_for_worker_versioned(
         .to_string();
     // Flagged here, not at each caller: this is the only layer that knows both the
     // connection and whether the provider's answer was terminal.
-    let renewed = match exchange(config, &refresh).await {
+    let renewed = match exchange(config, &refresh, str_field(&blob, "stripeAccountId")).await {
         Ok(renewed) => renewed,
         Err(e) => {
             if matches!(e, RenewError::Rejected(_)) {
@@ -244,7 +244,15 @@ pub(super) fn token_request(request: reqwest::RequestBuilder, url: &str) -> reqw
     } else { request }
 }
 
-async fn exchange(config: &JsonValue, refresh_token: &str) -> Result<Renewed, RenewError> {
+async fn exchange(config: &JsonValue, refresh_token: &str, stripe_account: Option<&str>) -> Result<Renewed, RenewError> {
+    if str_field(config, "tokenAuthMethod") == Some("stripe-apps") {
+        let grant = super::managed::stripe::refresh(config, refresh_token, stripe_account).await?;
+        return Ok(Renewed {
+            access: grant["accessToken"].as_str().unwrap().to_string(),
+            refresh: Some(grant["refreshToken"].as_str().unwrap().to_string()),
+            expires_at: grant["_expiresAt"].as_i64().unwrap(),
+        });
+    }
     let raw = str_field(config, "tokenUrl").ok_or_else(|| RenewError::Transient("no tokenUrl".into()))?;
     let url = reqwest::Url::parse(raw)
         .map_err(|e| RenewError::Transient(format!("invalid tokenUrl: {e}")))?;
