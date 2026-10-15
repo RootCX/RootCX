@@ -210,7 +210,7 @@ pub async fn execute_action(
         .await
         .map_err(|e| {
             tracing::error!(integration = %integration_id, action = %action_id, "action failed: {e}");
-            ApiError::Internal(e.to_string())
+            ApiError::from(e)
         })?;
 
     super::connections::flag_if_auth_failed(&pool, &secrets, &integration_id, conn_id.as_deref(), credential_version.as_ref(), &result).await;

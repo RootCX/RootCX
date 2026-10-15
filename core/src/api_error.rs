@@ -38,6 +38,7 @@ fn app_rule_violation(db_err: &dyn sqlx::error::DatabaseError) -> Option<ApiErro
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let retry_later = matches!(&self, Self::Unavailable(_));
         let (status, message) = match self {
             Self::RuleViolation { entity, rule } => return (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -65,7 +66,11 @@ impl IntoResponse for ApiError {
         if status.is_server_error() {
             tracing::error!(status = status.as_u16(), error = %message, "request failed");
         }
-        (status, axum::Json(json!({ "error": message }))).into_response()
+        let mut response = (status, axum::Json(json!({ "error": message }))).into_response();
+        if retry_later {
+            response.headers_mut().insert(axum::http::header::RETRY_AFTER, axum::http::HeaderValue::from_static("1"));
+        }
+        response
     }
 }
 
@@ -134,10 +139,9 @@ mod tests {
     /// a genuine worker failure must stay a 500.
     #[test]
     fn running_out_of_worker_slots_is_retryable_not_a_fault() {
-        assert_eq!(
-            status_of(crate::RuntimeError::Capacity("worker capacity reached".into())),
-            StatusCode::SERVICE_UNAVAILABLE,
-        );
+        let response = ApiError::from(crate::RuntimeError::Capacity("worker capacity reached".into())).into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()[axum::http::header::RETRY_AFTER], "1");
         assert_eq!(
             status_of(crate::RuntimeError::Worker("spawn failed".into())),
             StatusCode::INTERNAL_SERVER_ERROR,

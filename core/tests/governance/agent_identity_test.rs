@@ -1158,6 +1158,14 @@ serve({ rpc: {
     ).await;
     assert_eq!(deploy_status, StatusCode::OK, "deploy failed: {deploy_body}");
 
+    rt.install_manifest(&json!({
+        "appId": "capacity_integ", "name": "Capacity integration", "version": "1.0.0",
+        "type": "integration", "dataContract": [], "actions": []
+    })).await;
+    let (status, body) = rt.post_json("/api/v1/integrations/capacity_integ/auth/credentials",
+        &json!({"credentials": {"apiKey": "synthetic"}})).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
     let invoke = format!("app:{app_id}:invoke");
     let mut holders = Vec::new();
     for i in 0..2 {
@@ -1193,6 +1201,13 @@ serve({ rpc: {
         body["error"].as_str().unwrap_or("").contains("capacity"),
         "the refusal must say why, or an operator cannot tell it from a crash: {body}",
     );
+
+    // The integration route previously discarded Capacity and returned 500,
+    // even though ordinary app RPC correctly returned 503 for the same pool.
+    let response = rt.client.post(rt.url("/api/v1/integrations/capacity_integ/actions/verify_connection"))
+        .bearer_auth(&rt.token).json(&json!({})).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.headers()[reqwest::header::RETRY_AFTER], "1");
 
     for h in holders {
         let (status, body) = h.await.unwrap();
