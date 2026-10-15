@@ -421,30 +421,26 @@ pub async fn disconnect(
     Path(integration_id): Path<String>,
     axum::extract::Query(qs): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
+    let pool = crate::routes::pool(&rt);
     if qs.contains_key("agent_app_id") {
         require_admin(&pool, identity.user_id).await?;
     }
     let target_user = resolve_target_user(&identity, &qs);
-
+    let mut tx = pool.begin().await?;
     let conn_ids: Vec<(String,)> = sqlx::query_as(
         "SELECT id FROM rootcx_system.integration_connections
-         WHERE integration_id = $1 AND user_id = $2"
-    )
-    .bind(&integration_id)
-    .bind(&target_user)
-    .fetch_all(&pool).await?;
+         WHERE integration_id = $1 AND user_id = $2 FOR UPDATE"
+    ).bind(&integration_id).bind(&target_user).fetch_all(&mut *tx).await?;
 
-    for (conn_id,) in &conn_ids {
-        let _ = secrets.delete(&pool, &integration_id, &super::connections::credential_key(conn_id)).await;
+    // Delete exactly this snapshot, so a concurrent new connection keeps its credential.
+    for (conn_id,) in conn_ids {
+        sqlx::query("DELETE FROM rootcx_system.secrets WHERE app_id = $1 AND key_name = $2")
+            .bind(&integration_id).bind(super::connections::credential_key(&conn_id))
+            .execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM rootcx_system.integration_connections WHERE id = $1")
+            .bind(&conn_id).execute(&mut *tx).await?;
     }
-    sqlx::query(
-        "DELETE FROM rootcx_system.integration_connections
-         WHERE integration_id = $1 AND user_id = $2"
-    )
-    .bind(&integration_id)
-    .bind(&target_user)
-    .execute(&pool).await?;
+    tx.commit().await?;
 
     Ok(Json(json!({ "message": "disconnected" })))
 }

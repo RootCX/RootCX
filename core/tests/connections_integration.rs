@@ -449,27 +449,30 @@ async fn managed_google_configuration_and_cancelled_callback_stay_server_owned()
 
 #[tokio::test]
 async fn disconnect_is_atomic_when_the_connection_delete_fails() {
-    let rt = TestRuntime::boot().await;
-    setup_integration(&rt).await;
-    let id = create_connection(&rt, &rt.token, "test_integ", "disconnect-test").await;
-    sqlx::query("CREATE FUNCTION rootcx_system.reject_disconnect() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture storage failure'; END $$")
-        .execute(rt.pool()).await.unwrap();
-    sqlx::query("CREATE TRIGGER reject_disconnect BEFORE DELETE ON rootcx_system.integration_connections FOR EACH ROW EXECUTE FUNCTION rootcx_system.reject_disconnect()")
-        .execute(rt.pool()).await.unwrap();
-    let path = format!("/api/v1/integrations/test_integ/connections/{id}");
-    let (status, _) = rt.delete_json(&path).await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    let key = format!("_conn.{id}");
-    let remains: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM rootcx_system.secrets WHERE app_id='test_integ' AND key_name=$1)")
-        .bind(&key).fetch_one(rt.pool()).await.unwrap();
-    assert!(remains, "a failed disconnect must roll back the secret deletion too");
-    sqlx::query("DROP TRIGGER reject_disconnect ON rootcx_system.integration_connections").execute(rt.pool()).await.unwrap();
-    let (status, _) = rt.delete_json(&path).await;
-    assert_eq!(status, StatusCode::OK);
-    let remains: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM rootcx_system.secrets WHERE app_id='test_integ' AND key_name=$1)")
-        .bind(&key).fetch_one(rt.pool()).await.unwrap();
-    assert!(!remains, "a successful disconnect must erase the stored credential");
-    rt.shutdown().await;
+    for bulk in [false, true] {
+        let rt = TestRuntime::boot().await;
+        setup_integration(&rt).await;
+        let id = create_connection(&rt, &rt.token, "test_integ", "disconnect-test").await;
+        sqlx::query("CREATE FUNCTION rootcx_system.reject_disconnect() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture storage failure'; END $$")
+            .execute(rt.pool()).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_disconnect BEFORE DELETE ON rootcx_system.integration_connections FOR EACH ROW EXECUTE FUNCTION rootcx_system.reject_disconnect()")
+            .execute(rt.pool()).await.unwrap();
+        let path = if bulk { "/api/v1/integrations/test_integ/auth".to_string() }
+            else { format!("/api/v1/integrations/test_integ/connections/{id}") };
+        let (status, _) = rt.delete_json(&path).await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let key = format!("_conn.{id}");
+        let remains: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM rootcx_system.secrets WHERE app_id='test_integ' AND key_name=$1)")
+            .bind(&key).fetch_one(rt.pool()).await.unwrap();
+        assert!(remains, "a failed disconnect must roll back the secret deletion too");
+        sqlx::query("DROP TRIGGER reject_disconnect ON rootcx_system.integration_connections").execute(rt.pool()).await.unwrap();
+        let (status, _) = rt.delete_json(&path).await;
+        assert_eq!(status, StatusCode::OK);
+        let remains: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM rootcx_system.secrets WHERE app_id='test_integ' AND key_name=$1)")
+            .bind(&key).fetch_one(rt.pool()).await.unwrap();
+        assert!(!remains, "a successful disconnect must erase the stored credential");
+        rt.shutdown().await;
+    }
 }
 
 #[tokio::test]

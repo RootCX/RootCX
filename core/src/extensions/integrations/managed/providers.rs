@@ -49,13 +49,14 @@ impl Provider {
         let namespace = if self.google() { "GOOGLE" } else { self.namespace };
         let secret = |suffix| read(&format!("ROOTCX_{namespace}_{suffix}"))
             .filter(|s| !s.trim().is_empty()).ok_or_else(|| error("Managed OAuth is not configured by the operator"));
-        let mut config = self.oauth();
+        let mut config = self.effective_oauth(&json!({"hubspotUserLevel":
+            self.id == "hubspot" && read("ROOTCX_HUBSPOT_USER_LEVEL").as_deref() == Some("true")}));
         config["clientId"] = json!(secret("CLIENT_ID")?);
         config["clientSecret"] = json!(secret("CLIENT_SECRET")?);
         Ok(config)
     }
     pub(super) fn start(&self, config: &Value, callback: &str, state: &str, challenge: &str) -> Value {
-        let oauth = self.oauth();
+        let oauth = self.effective_oauth(config);
         let scopes: Vec<_> = oauth["scopes"].as_array().expect("bundled scopes").iter().filter_map(Value::as_str).collect();
         let mut url = reqwest::Url::parse(self.authorize).expect("provider URL");
         let mut query = url.query_pairs_mut();
@@ -75,12 +76,18 @@ impl Provider {
         };
         let request = self.exchange_request(config, code, callback, verifier).inspect_err(diagnostic("token_request"))?;
         let token = response(request.send().await).await.inspect_err(diagnostic("token_exchange"))?;
-        let credentials = self.credentials(&token).inspect_err(diagnostic("credentials"))?;
-        let (id, label) = self.verify(&credentials).await.inspect_err(diagnostic("identity"))?;
+        let mut credentials = self.credentials(&token).inspect_err(diagnostic("credentials"))?;
+        let (id, label) = if self.id == "hubspot" && config["hubspotUserLevel"] == true {
+            let identity = self.hubspot_identity(config, &credentials).await.inspect_err(diagnostic("identity"))?;
+            credentials["hubspotUserLevel"] = json!(true);
+            credentials["hubspotClientId"] = config["clientId"].clone();
+            credentials["hubspotUserIdentity"] = json!({"id": identity.0, "label": identity.1});
+            identity
+        } else { self.verify(&credentials).await.inspect_err(diagnostic("identity"))? };
         Ok(json!({"credentials": credentials, "label": format!("{label} [{id}]")}))
     }
     fn exchange_request(&self, config: &Value, code: &str, callback: &str, verifier: &str) -> Result<reqwest::RequestBuilder, ApiError> {
-        let oauth = self.oauth();
+        let oauth = self.effective_oauth(config);
         let mut body = json!({"grant_type": "authorization_code", "code": code, "redirect_uri": callback});
         if self.pkce {
             if verifier.is_empty() { return Err(error("PKCE verifier missing")); }
@@ -95,6 +102,22 @@ impl Provider {
             body["client_secret"] = json!(field(config, "clientSecret")?);
         }
         Ok(if oauth["tokenEncoding"] == "json" { request.json(&body) } else { request.form(&body) })
+    }
+    fn effective_oauth(&self, config: &Value) -> Value {
+        let mut oauth = self.oauth();
+        if self.id == "hubspot" && config["hubspotUserLevel"] == true {
+            oauth["hubspotUserLevel"] = json!(true);
+            oauth["tokenUrl"] = json!("https://api.hubapi.com/oauth/2026-09/token");
+            oauth["scopes"] = json!(["oauth", "crm.objects.contacts.read", "crm.objects.contacts.write"]);
+        }
+        oauth
+    }
+    async fn hubspot_identity(&self, config: &Value, credentials: &Value) -> Result<(String, String), ApiError> {
+        let account = response(client()?.post("https://api.hubapi.com/oauth/2026-09/token/introspect").form(&[
+            ("client_id", field(config, "clientId")?), ("client_secret", field(config, "clientSecret")?),
+            ("token", field(credentials, "accessToken")?), ("token_type_hint", "access_token"),
+        ]).send().await).await?;
+        hubspot_user_identity(&account, field(config, "clientId")?)
     }
     fn credentials(&self, token: &Value) -> Result<Value, ApiError> {
         if token.get("error").is_some() || token["ok"] == false { return Err(error("Provider authorization rejected")); }
@@ -124,6 +147,16 @@ impl Provider {
     }
     pub(super) async fn verify(&self, credentials: &Value) -> Result<(String, String), ApiError> {
         let access = field(credentials, "accessToken")?;
+        if self.id == "hubspot" && (credentials["hubspotUserLevel"] == true || std::env::var("ROOTCX_HUBSPOT_USER_LEVEL").as_deref() == Ok("true")) {
+            let config = self.config()?;
+            if config["hubspotUserLevel"] == true {
+                if credentials["hubspotUserLevel"] != true || credentials["hubspotClientId"] != config["clientId"] {
+                    return Err(error("Reconnect HubSpot with the user-level application"));
+                }
+                return self.hubspot_identity(&config, credentials).await;
+            }
+            return Err(error("Reconnect HubSpot with the configured application"));
+        }
         let url = match self.id {
             "notion" => "https://api.notion.com/v1/users/me".to_string(),
             "hubspot" => "https://api.hubapi.com/account-info/v3/details".to_string(),
@@ -155,6 +188,19 @@ impl Provider {
         Ok(identity)
     }
 }
+fn hubspot_user_identity(account: &Value, client_id: &str) -> Result<(String, String), ApiError> {
+    let positive = |key: &str| account[key].as_u64().filter(|n| *n > 0)
+        .ok_or_else(|| error("Missing HubSpot user identity"));
+    let portal = positive("hub_id")?;
+    let user = positive("user_id")?;
+    let signed = &account["signed_access_token"];
+    if account["active"] != true || account["client_id"] != client_id || account["token_use"] != "access_token"
+        || signed["isUserLevel"] != true || signed["hubId"].as_u64() != Some(portal)
+        || signed["userId"].as_u64() != Some(user) {
+        return Err(error("HubSpot did not grant user-level access"));
+    }
+    Ok((format!("{portal}:{user}"), format!("HubSpot {portal} / user {user}")))
+}
 fn client() -> Result<reqwest::Client, ApiError> {
     reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).redirect(reqwest::redirect::Policy::none())
         .build().map_err(|_| error("OAuth client unavailable"))
@@ -184,6 +230,37 @@ fn salesforce_url(raw: &str) -> Result<reqwest::Url, ApiError> {
 mod tests {
     use super::*;
     const IDS: [&str; 8] = ["notion", "hubspot", "salesforce", "airtable", "slack", "gmail", "google_calendar", "google_sheets"];
+
+    #[test]
+    fn hubspot_user_mode_uses_supported_scopes_and_server_owned_protocol() {
+        let p = provider("hubspot").unwrap();
+        for enabled in [false, true] {
+            let cfg = p.config_with(|key| Some(match key {
+                "ROOTCX_HUBSPOT_USER_LEVEL" => enabled.to_string(),
+                "ROOTCX_HUBSPOT_CLIENT_ID" => "client".into(), _ => "secret".into(),
+            })).unwrap();
+            let start = p.start(&cfg, "https://app.example/cb", "state", "challenge");
+            let url = reqwest::Url::parse(start["url"].as_str().unwrap()).unwrap();
+            let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+            assert_eq!(query["scope"].contains("crm.schemas.contacts.read"), !enabled);
+            let request = p.exchange_request(&cfg, "code", "https://app.example/cb", "verifier").unwrap().build().unwrap();
+            assert_eq!(request.url().path(), if enabled { "/oauth/2026-09/token" } else { "/oauth/v3/token" });
+        }
+    }
+
+    #[test]
+    fn hubspot_user_identity_rejects_account_grants_and_mismatched_subjects() {
+        let account = json!({"active":true,"client_id":"client","token_use":"access_token",
+            "hub_id":42,"user_id":7,"signed_access_token":{"isUserLevel":true,"hubId":42,"userId":7}});
+        assert_eq!(hubspot_user_identity(&account, "client").unwrap().0, "42:7");
+        for (pointer, invalid) in [("/active",json!(false)), ("/client_id",json!("other")),
+            ("/token_use",json!("refresh_token")), ("/hub_id",json!(0)), ("/user_id",json!(null)),
+            ("/signed_access_token/isUserLevel",json!(false)), ("/signed_access_token/userId",json!(8)),
+            ("/signed_access_token/hubId",json!(43))] {
+            let mut bad = account.clone(); *bad.pointer_mut(pointer).unwrap() = invalid;
+            assert!(hubspot_user_identity(&bad, "client").is_err(), "{pointer}");
+        }
+    }
 
     #[test]
     fn provider_secrets_use_operator_namespaces_and_fail_closed() {

@@ -81,7 +81,7 @@ fn is_live(blob: &JsonValue, now: i64) -> bool {
 /// `__bind`'s `mergeConfig`. Only an admin writes these
 /// (`save_platform_config`), which is what keeps the renewal destination out of
 /// reach of application code.
-pub(crate) const CORE_OWNED_CONFIG: [&str; 7] = ["tokenUrl", "clientId", "clientSecret", "tokenAuthMethod", "tokenEncoding", "stripeLivemode", "stripeExternalTestLinkId"];
+pub(crate) const CORE_OWNED_CONFIG: [&str; 8] = ["tokenUrl", "clientId", "clientSecret", "tokenAuthMethod", "tokenEncoding", "stripeLivemode", "stripeExternalTestLinkId", "hubspotUserLevel"];
 
 /// The Core renews for this connection only when an admin configured a token
 /// endpoint and the credential actually carries a refresh token.
@@ -136,6 +136,7 @@ pub(crate) async fn credentials_for_worker_versioned(
     blob: JsonValue,
     config_snapshot: Option<&str>,
 ) -> Result<(JsonValue, CredentialVersion), RenewError> {
+    validate_grant_client(config, &blob)?;
     if !manages(config, &blob) || is_live(&blob, now_secs()) {
         return Ok((for_worker(&blob, config), CredentialVersion::of(&blob)));
     }
@@ -164,6 +165,7 @@ pub(crate) async fn credentials_for_worker_versioned(
     let (old_nonce, old_ciphertext) = stored.ok_or_else(|| RenewError::Transient("the credential is gone".into()))?;
     let blob: JsonValue = serde_json::from_str(&secrets.decrypt(&old_nonce, &old_ciphertext)
         .map_err(|e| RenewError::Transient(e.to_string()))?).map_err(|e| RenewError::Transient(e.to_string()))?;
+    validate_grant_client(config, &blob)?;
     if !manages(config, &blob) || is_live(&blob, now_secs()) { return Ok((for_worker(&blob, config), CredentialVersion::of(&blob))); }
 
     let refresh = str_field(&blob, F_REFRESH)
@@ -200,6 +202,17 @@ pub(crate) async fn credentials_for_worker_versioned(
     tx.commit().await.map_err(|e| RenewError::Transient(e.to_string()))?;
 
     Ok((for_worker(&merged, config), CredentialVersion::of(&merged)))
+}
+
+fn validate_grant_client(config: &JsonValue, credential: &JsonValue) -> Result<(), RenewError> {
+    if config["hubspotUserLevel"] == true || credential["hubspotUserLevel"] == true {
+        if config["hubspotUserLevel"] != true || credential["hubspotUserLevel"] != true
+            || str_field(config, "clientId").is_none()
+            || config["clientId"] != credential["hubspotClientId"] {
+            return Err(RenewError::Transient("Reconnect HubSpot with the configured user-level application".into()));
+        }
+    }
+    Ok(())
 }
 
 /// The stored credential. `Ok(None)` means absent, which is revoked; an `Err`
@@ -432,6 +445,19 @@ mod tests {
     use super::*;
 
     fn cfg() -> JsonValue { json!({ "tokenUrl": "https://p.example.com/token" }) }
+
+    #[test]
+    fn user_level_grants_never_fall_back_to_another_client_or_account_mode() {
+        let config = json!({"hubspotUserLevel":true,"clientId":"new-client"});
+        let credential = json!({"hubspotUserLevel":true,"hubspotClientId":"new-client"});
+        assert!(validate_grant_client(&config, &credential).is_ok());
+        for (cfg, blob) in [(config.clone(), json!({})), (json!({}), credential.clone()),
+            (json!({"hubspotUserLevel":true,"clientId":"other-client"}), credential.clone()),
+            (json!({"hubspotUserLevel":true}), json!({"hubspotUserLevel":true}))] {
+            assert!(validate_grant_client(&cfg, &blob).is_err());
+        }
+        assert!(validate_grant_client(&json!({}), &json!({})).is_ok());
+    }
 
     #[test]
     fn manages_requires_both_an_endpoint_and_a_refresh_token() {

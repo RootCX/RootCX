@@ -463,6 +463,7 @@ pub(crate) async fn resolve_by_connection_id(
             .map_err(|_| super::oauth::RenewError::Transient("Connection credential unavailable".into()))?;
         let creds: JsonValue = serde_json::from_str(&raw)
             .map_err(|_| super::oauth::RenewError::Transient("Connection credential invalid".into()))?;
+        require_grant_owner(&creds, &effective_user, fallback_user)?;
         let (creds, version) = super::oauth::credentials_for_worker_versioned(
             pool, secrets, integration_id, connection_id, &config, creds, config_id.as_deref(),
         ).await?;
@@ -470,6 +471,13 @@ pub(crate) async fn resolve_by_connection_id(
     } else {
         Ok((super::managed::worker_config(integration_id, config), JsonValue::Null, fallback_user.to_string(), None, None))
     }
+}
+
+fn require_grant_owner(credentials: &JsonValue, owner: &str, requester: &str) -> Result<(), super::oauth::RenewError> {
+    if credentials["hubspotUserLevel"] == true && owner != requester {
+        return Err(super::oauth::RenewError::Rejected("Connect your own HubSpot account; user-level grants cannot be shared".into()));
+    }
+    Ok(())
 }
 
 pub(super) async fn verify_owner(
@@ -709,6 +717,15 @@ pub async fn connected_connections(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_level_grants_cannot_be_borrowed_through_shared_bindings_or_delegation() {
+        for personal in [false, true] {
+            let credentials = json!({"hubspotUserLevel": personal});
+            assert!(require_grant_owner(&credentials, "owner", "owner").is_ok());
+            assert_eq!(require_grant_owner(&credentials, "owner", "another-user").is_err(), personal);
+        }
+    }
 
     #[test]
     fn auth_failure_message_classifies_worker_envelope() {
