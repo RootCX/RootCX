@@ -180,6 +180,66 @@ pub async fn undeploy(
     Ok(Json(json!({ "message": format!("integration '{id}' removed") })))
 }
 
+/// Brings installed bundled connectors up to the version shipped with this Core.
+/// Without it a fix in a connector only reaches workspaces created afterwards.
+/// Runs at boot before workers start; failures leave the previous installation.
+pub(crate) async fn upgrade_bundled(
+    pool: &sqlx::PgPool,
+    resources_dir: &std::path::Path,
+    apps_dir: &std::path::Path,
+    extensions: &[Box<dyn crate::extensions::RuntimeExtension>],
+    secrets: &crate::secrets::SecretManager,
+) {
+    let installed: Vec<(String, Option<JsonValue>)> = match sqlx::query_as("SELECT id, manifest FROM rootcx_system.apps").fetch_all(pool).await {
+        Ok(rows) => rows,
+        Err(error) => { tracing::warn!(%error, "bundled integration upgrade skipped"); return; }
+    };
+    for (id, manifest) in installed {
+        let catalog_path = resources_dir.join("integrations").join(&id);
+        let Ok(raw) = tokio::fs::read_to_string(catalog_path.join("manifest.json")).await else { continue };
+        let Ok(shipped) = serde_json::from_str::<JsonValue>(&raw) else { continue };
+        let current = manifest.as_ref().and_then(|m| m.get("version")).and_then(|v| v.as_str());
+        if !upgradable(&shipped) || current.is_none() || current == shipped.get("version").and_then(|v| v.as_str()) { continue; }
+        match reinstall_bundled(pool, &catalog_path, &apps_dir.join(&id), &id, &raw, extensions, secrets).await {
+            Ok(()) => info!(id = %id, from = ?current, to = ?shipped.get("version"), "bundled integration upgraded"),
+            Err(error) => tracing::warn!(id = %id, ?error, "bundled integration upgrade failed"),
+        }
+    }
+}
+
+// Only self-contained plugin bundles: no dependency install, cron or webhook to re-own.
+fn upgradable(manifest: &JsonValue) -> bool {
+    manifest.pointer("/userAuth/plugin/protocolVersion").is_some()
+        && manifest.pointer("/userAuth/plugin/legacySync") != Some(&json!(true))
+        && manifest.get("webhooks").and_then(|v| v.as_array()).is_none_or(|v| v.is_empty())
+        && manifest.get("crons").and_then(|v| v.as_array()).is_none_or(|v| v.is_empty())
+}
+
+async fn reinstall_bundled(
+    pool: &sqlx::PgPool,
+    catalog_path: &std::path::Path,
+    app_dir: &std::path::Path,
+    id: &str,
+    raw: &str,
+    extensions: &[Box<dyn crate::extensions::RuntimeExtension>],
+    secrets: &crate::secrets::SecretManager,
+) -> Result<(), ApiError> {
+    let manifest: rootcx_types::AppManifest = serde_json::from_str(raw).map_err(|e| ApiError::Internal(format!("parse manifest: {e}")))?;
+    verify_package(catalog_path, id, raw).await?;
+    // The platform performs this upgrade; no person installed it.
+    let system = uuid::Uuid::nil();
+    crate::manifest::install_app(pool, &manifest, extensions, system, secrets).await?;
+    sync_integration_permissions(pool, id, &manifest).await?;
+    let _lifecycle = crate::governance::cross_app::lock_app_lifecycle(pool, id).await?;
+    let revision = crate::governance::approved_actions::begin_deployment(pool, id, system).await?;
+    if app_dir.exists() {
+        tokio::fs::remove_dir_all(app_dir).await.map_err(|e| ApiError::Internal(format!("clear: {e}")))?;
+    }
+    copy_dir_recursive(catalog_path, app_dir).await?;
+    crate::governance::approved_actions::finish_deployment(pool, id, revision, app_dir).await?;
+    Ok(())
+}
+
 async fn sync_integration_permissions(
     pool: &sqlx::PgPool,
     integration_id: &str,
@@ -257,6 +317,20 @@ async fn verify_package(path: &std::path::Path, id: &str, raw: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boot_upgrades_only_self_contained_plugin_bundles() {
+        let plugin = json!({"userAuth": {"plugin": {"protocolVersion": 1}}, "webhooks": [], "crons": []});
+        assert!(upgradable(&plugin));
+        assert!(!upgradable(&json!({"userAuth": {"plugin": {"protocolVersion": 1, "legacySync": true}}})));
+        assert!(!upgradable(&json!({"userAuth": {"plugin": {"protocolVersion": 1}}, "webhooks": [{"id": "x"}]})));
+        assert!(!upgradable(&json!({"name": "imap"})));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/integrations");
+        for id in ["hubspot", "salesforce", "slack", "notion", "airtable", "stripe", "google_drive", "google_sheets"] {
+            let raw = std::fs::read_to_string(root.join(id).join("manifest.json")).unwrap();
+            assert!(upgradable(&serde_json::from_str(&raw).unwrap()), "{id}");
+        }
+    }
     #[tokio::test]
     async fn shipped_plugins_are_locked_and_tampered_packages_are_rejected() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/integrations");

@@ -1,5 +1,5 @@
 pub(crate) mod auth;
-mod catalog;
+pub(crate) mod catalog;
 mod managed;
 pub(crate) mod connections;
 pub(crate) mod oauth;
