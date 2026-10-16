@@ -2,7 +2,7 @@
   "protocolVersion": 1,
   "version": "1.1.0",
   "artifacts": {
-    "plugin.ts": "2b030c5e9c9b003d3d9dbf7eb9dde2b57ba75ca5c73ffd165e17f254a299d7f8",
+    "plugin.ts": "8b60847a0681eba967932f9a6c1535dc5430fdb381bfad7f7635780e270aea7c",
     "manifest.json": "7f060f1656620dcdfc5f96ec1da8479ca3c68598f45d1defd0b77aa0edcbcc0b"
   }
 }

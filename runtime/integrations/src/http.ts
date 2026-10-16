@@ -43,6 +43,26 @@ async function googleErrorReason(response: Response): Promise<string | undefined
   } catch { return undefined; }
 }
 
+const HUBSPOT_ERROR_CATEGORIES = new Set(['VALIDATION_ERROR', 'OBJECT_NOT_FOUND', 'CONFLICT', 'MISSING_SCOPES', 'OBJECT_ALREADY_EXISTS']);
+const HUBSPOT_PROPERTY = /^[a-z][a-z0-9_]{0,99}$/;
+
+// Category and property names tell the app which field to fix; provider messages may echo submitted values.
+async function hubspotErrorReason(response: Response): Promise<string | undefined> {
+  try {
+    const payload = JSON.parse(new TextDecoder().decode(await bytes(response, 64 * 1024)));
+    if (!HUBSPOT_ERROR_CATEGORIES.has(payload?.category)) return undefined;
+    const names: unknown[] = [];
+    for (const item of Array.isArray(payload.errors) ? payload.errors : []) {
+      const value = item?.context?.propertyName;
+      names.push(...(Array.isArray(value) ? value : [value]));
+    }
+    const embedded = typeof payload.message === 'string' ? payload.message.match(/(\[\{.*\}\])\s*$/s)?.[1] : undefined;
+    if (embedded) try { for (const item of JSON.parse(embedded)) names.push(item?.name); } catch {}
+    const properties = [...new Set(names.filter((name): name is string => typeof name === 'string' && HUBSPOT_PROPERTY.test(name)))].slice(0, 5);
+    return [payload.category, ...properties].join(' ');
+  } catch { return undefined; }
+}
+
 export function formBody(values: Record<string, unknown>): URLSearchParams {
   const output = new URLSearchParams();
   const add = (key: string, value: unknown) => {
@@ -107,8 +127,9 @@ export function context(plugin: Plugin, credential: Credential, connection: stri
       response = await fetcher(url, { method, headers, body, redirect: 'error', signal: AbortSignal.timeout(20000) });
       if (!response.ok) {
         const google = ['gmail', 'google_calendar', 'google_sheets', 'google_drive'].includes(plugin.id) && (url.hostname === 'googleapis.com' || url.hostname.endsWith('.googleapis.com'));
-        const reason = google ? await googleErrorReason(response) : undefined;
-        if (!google) await response.body?.cancel().catch(() => {});
+        const hubspot = plugin.id === 'hubspot' && url.hostname === 'api.hubapi.com' && [400, 404, 409].includes(response.status);
+        const reason = google ? await googleErrorReason(response) : hubspot ? await hubspotErrorReason(response) : undefined;
+        if (!google && !hubspot) await response.body?.cancel().catch(() => {});
         const retry = response.headers.get('retry-after');
         const seconds = retry && /^\d+$/.test(retry) ? Number(retry) : retry ? Math.ceil((Date.parse(retry) - Date.now()) / 1000) : NaN;
         const delay = Number.isFinite(seconds) ? Math.min(86400, Math.max(1, seconds)) : 60;

@@ -44,6 +44,13 @@ Responses verified against live providers:
   \`append_rows\` takes \`values: string[][]\`. Ranges use A1 notation, for example \`A1:C100\`.
 - \`google_drive\` \`list_files\` items are \`{ id, name, mimeType, modifiedTime, size, webViewLink }\`;
   \`query\` uses Drive search syntax, for example \`name contains 'Dupont'\` (plain words are rejected).
+- \`hubspot\` contacts are \`{ id, properties }\`; pass \`properties: ['firstname', 'lastname', 'email', 'phone']\`
+  to choose the fields returned. Search results can lag a few seconds behind a create or update.
+  Accounts with GDPR enabled reject a new contact without \`hs_legal_basis\` (error message ends with
+  \`[VALIDATION_ERROR hs_legal_basis]\`): let the user pick one of these exact values, never a default:
+  \`Legitimate interest – prospect/lead\`, \`Legitimate interest – existing customer\`,
+  \`Legitimate interest - other\`, \`Performance of a contract\`, \`Freely given consent from contact\`, \`Not applicable\`.
+  Show HubSpot's error to the user instead of failing silently.
 
 ${sections.join('\n\n')}
 `;
