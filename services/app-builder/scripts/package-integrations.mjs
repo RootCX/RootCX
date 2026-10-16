@@ -4,11 +4,19 @@ import { join } from 'node:path';
 // Plumbing every connector shares; apps never call it directly.
 const hidden = /^(sync_|watch$|stop_watch$|verify_connection$|live_verify_connection$|api_read$|api_write$)/;
 
+// Ranges and allowed values are part of the contract: inputs outside them are rejected.
+function type(spec) {
+  if (Array.isArray(spec.enum)) return spec.enum.map(value => JSON.stringify(value)).join('|');
+  const base = Array.isArray(spec.type) ? spec.type.join('|') : spec.type ?? 'any';
+  return spec.minimum !== undefined && spec.maximum !== undefined ? `${base} ${spec.minimum}-${spec.maximum}`
+    : spec.maximum !== undefined ? `${base} ≤${spec.maximum}` : base;
+}
+
 function parameters(schema) {
   const properties = schema?.properties ?? {};
   const required = new Set(schema?.required ?? []);
   return Object.entries(properties)
-    .map(([name, spec]) => `${name}${required.has(name) ? '' : '?'}: ${Array.isArray(spec.type) ? spec.type.join('|') : spec.type ?? 'any'}`)
+    .map(([name, spec]) => `${name}${required.has(name) ? '' : '?'}: ${type(spec)}`)
     .join(', ');
 }
 

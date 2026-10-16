@@ -19,6 +19,8 @@ test('catalog lists the real integration and action IDs the agent must use', asy
     assert.match(catalog, new RegExp(`\`${action}\`\\(`));
   }
   assert.match(catalog, /spreadsheetId: string, range: string/);
+  assert.match(catalog, /`get_history`\(channelId: string, limit\?: integer 1-15/);
+  assert.match(catalog, /objectType: "Contact"\|"Opportunity"/);
 });
 
 test('catalog hides plumbing and legacy sync actions superseded by live actions', async () => {
