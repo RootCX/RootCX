@@ -11,7 +11,9 @@ WORKDIR /opt/rootcx-builder
 COPY services/app-builder/package.json services/app-builder/package-lock.json ./
 RUN npm ci --ignore-scripts --omit=dev && npm cache clean --force
 COPY services/app-builder/ ./
-RUN node scripts/package-docs.mjs \
+COPY core/resources/integrations /tmp/integrations
+RUN node scripts/package-integrations.mjs /tmp/integrations integrations.md && rm -rf /tmp/integrations \
+    && node scripts/package-docs.mjs \
     && mkdir -p /opt/rootcx-builder/empty-config /var/lib/rootcx-builder /var/lib/rootcx-backups \
     && chown node:node /var/lib/rootcx-builder /var/lib/rootcx-backups
 USER node

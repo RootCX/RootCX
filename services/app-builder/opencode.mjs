@@ -157,12 +157,19 @@ async function startEngine(root, config) {
     } finally { signal.removeEventListener('abort', wake); subscriptions.delete(subscription); }
   }
   try {
-    child.stdin.write(JSON.stringify({ root, home, providerUrl, proxyKey, model: config.model, instructions: await readFile(new URL('./instructions.md', import.meta.url), 'utf8') }) + '\n');
+    child.stdin.write(JSON.stringify({ root, home, providerUrl, proxyKey, model: config.model, instructions: await instructions() }) + '\n');
     const deadline = setTimeout(() => { failed(new Error(`OpenCode SDK startup timed out: ${diagnostics}`)); void close(); }, 60000);
     try { await ready; } finally { clearTimeout(deadline); }
     const session = await conversationSession(api, home);
     return { api, subscribe, session, conversation: id => conversationSession(api, home, id), close };
   } catch (error) { await close(); throw error; }
+}
+
+// The image bundles the integration catalog built from Core's manifests; local runs may lack it.
+export async function instructions() {
+  const base = await readFile(new URL('./instructions.md', import.meta.url), 'utf8');
+  try { return `${base}\n${await readFile(new URL('./integrations.md', import.meta.url), 'utf8')}`; }
+  catch (error) { if (error.code === 'ENOENT') return base; throw error; }
 }
 
 export async function conversationSession(api, home, id) {
