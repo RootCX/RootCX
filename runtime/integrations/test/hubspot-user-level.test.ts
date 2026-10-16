@@ -58,6 +58,7 @@ test('Missing or malformed user identity cannot fall back to account-wide routes
 
 test('HubSpot validation errors name the rejected properties without echoing submitted values', async () => {
   for (const reply of [
+    { status: 'error', category: 'VALIDATION_ERROR', message: 'Cannot create object with type: CONTACT. The following required properties were missing: [hs_legal_basis]' },
     { status: 'error', category: 'VALIDATION_ERROR', message: 'Property values were not valid: [{"isValid":false,"message":"private-value is required","error":"REQUIRED","name":"hs_legal_basis"}]' },
     { status: 'error', category: 'VALIDATION_ERROR', message: 'private-value', errors: [{ message: 'private-detail', context: { propertyName: ['hs_legal_basis'] } }] },
     { status: 'error', category: 'VALIDATION_ERROR', message: 'private-summary', errors: [{ message: 'Property values were not valid: [{"isValid":false,"message":"private-value","error":"REQUIRED","name":"hs_legal_basis"}]' }] },

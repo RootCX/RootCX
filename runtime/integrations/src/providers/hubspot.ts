@@ -32,6 +32,6 @@ export default provider('hubspot', 'HubSpot', 'https://api.hubapi.com', {
   get_contact: action('Get contact', 'Read an existing contact', 'read', { contactId: id(), properties: array(string()) }, ['contactId'], (ctx, input) => ctx.request({ path: `${contactsPath(ctx)}/${segment(input.contactId)}`, query: { properties: input.properties?.join(',') } })),
   create_contact: action('Create contact', 'Create a contact; reconcile an uncertain write before retrying', 'write', { properties }, ['properties'], (ctx, input) => ctx.request({ path: contactsPath(ctx), method: 'POST', json: ctx.hubspotUserLevel ? { ...input, associations: [] } : input })),
   update_contact: action('Update contact', 'Update the existing contact by its ID', 'write', { contactId: id(), properties }, ['contactId', 'properties'], (ctx, input) => ctx.request({ path: `${contactsPath(ctx)}/${segment(input.contactId)}`, method: 'PATCH', json: { properties: input.properties } })),
-}, { version: '1.2.3', verify, tokenAuth: { label: 'HubSpot private app token', helpUrl: 'https://developers.hubspot.com/docs/apps/legacy-apps/private-apps/overview' },
+}, { version: '1.2.4', verify, tokenAuth: { label: 'HubSpot private app token', helpUrl: 'https://developers.hubspot.com/docs/apps/legacy-apps/private-apps/overview' },
   oauth: { authorizeUrl: 'https://app.hubspot.com/oauth/authorize', tokenUrl: 'https://api.hubspot.com/oauth/v3/token', scopes: ['oauth', 'crm.objects.contacts.read', 'crm.objects.contacts.write', 'crm.schemas.contacts.read'], account: async (_token, ctx) => verify(ctx) },
 });

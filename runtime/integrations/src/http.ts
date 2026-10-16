@@ -63,6 +63,8 @@ function hubspotErrorReason(payload: any): string | undefined {
     names.push(...(Array.isArray(value) ? value : [value]));
     const embedded = typeof item?.message === 'string' ? item.message.match(/(\[\{.*\}\])/s)?.[1] : undefined;
     if (embedded) try { for (const entry of JSON.parse(embedded)) names.push(entry?.name); } catch {}
+    const missing = typeof item?.message === 'string' ? item.message.match(/required properties were missing: \[([^\]]*)\]/)?.[1] : undefined;
+    if (missing) names.push(...missing.split(',').map((name: string) => name.trim()));
   }
   return reason(payload.category, names.filter(name => typeof name === 'string' && /^[a-z]/.test(name)));
 }
