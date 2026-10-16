@@ -34,4 +34,4 @@ export default provider('salesforce', 'Salesforce', salesforceOrigin, {
     await ctx.request({ path: `${API}/sobjects/${input.objectType}/${segment(input.recordId)}`, method: 'PATCH', json: input.fields });
     return { id: input.recordId, updated: true };
   }),
-}, { verify, oauth: { authorizeUrl: 'https://login.salesforce.com/services/oauth2/authorize', tokenUrl: 'https://login.salesforce.com/services/oauth2/token', scopes: ['api', 'refresh_token', 'openid'], pkce: true, account: async (_token, ctx) => verify(ctx) } });
+}, { version: '1.1.1', verify, oauth: { authorizeUrl: 'https://login.salesforce.com/services/oauth2/authorize', tokenUrl: 'https://login.salesforce.com/services/oauth2/token', scopes: ['api', 'refresh_token', 'openid'], pkce: true, account: async (_token, ctx) => verify(ctx) } });

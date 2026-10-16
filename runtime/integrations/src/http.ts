@@ -44,23 +44,32 @@ async function googleErrorReason(response: Response): Promise<string | undefined
 }
 
 const HUBSPOT_ERROR_CATEGORIES = new Set(['VALIDATION_ERROR', 'OBJECT_NOT_FOUND', 'CONFLICT', 'MISSING_SCOPES', 'OBJECT_ALREADY_EXISTS']);
-const HUBSPOT_PROPERTY = /^[a-z][a-z0-9_]{0,99}$/;
+const SALESFORCE_ERROR_CODES = new Set(['REQUIRED_FIELD_MISSING', 'INVALID_FIELD', 'INVALID_EMAIL_ADDRESS', 'STRING_TOO_LONG', 'DUPLICATES_DETECTED', 'DUPLICATE_VALUE', 'FIELD_CUSTOM_VALIDATION_EXCEPTION', 'INVALID_OR_NULL_FOR_RESTRICTED_PICKLIST', 'INVALID_TYPE_ON_FIELD_IN_RECORD', 'MALFORMED_QUERY', 'INVALID_FIELD_FOR_INSERT_UPDATE', 'NOT_FOUND', 'ENTITY_IS_DELETED']);
+const FIELD_NAME = /^[A-Za-z][A-Za-z0-9_]{0,99}$/;
 
-// Category and property names tell the app which field to fix; provider messages may echo submitted values.
-async function hubspotErrorReason(response: Response): Promise<string | undefined> {
-  try {
-    const payload = JSON.parse(new TextDecoder().decode(await bytes(response, 64 * 1024)));
-    if (!HUBSPOT_ERROR_CATEGORIES.has(payload?.category)) return undefined;
-    const names: unknown[] = [];
-    for (const item of Array.isArray(payload.errors) ? payload.errors : []) {
-      const value = item?.context?.propertyName;
-      names.push(...(Array.isArray(value) ? value : [value]));
-    }
-    const embedded = typeof payload.message === 'string' ? payload.message.match(/(\[\{.*\}\])\s*$/s)?.[1] : undefined;
-    if (embedded) try { for (const item of JSON.parse(embedded)) names.push(item?.name); } catch {}
-    const properties = [...new Set(names.filter((name): name is string => typeof name === 'string' && HUBSPOT_PROPERTY.test(name)))].slice(0, 5);
-    return [payload.category, ...properties].join(' ');
-  } catch { return undefined; }
+// Codes and field names tell the app which field to fix; provider messages may echo submitted values.
+const reason = (code: string, fields: unknown[]) => [code, ...new Set(fields.filter((name): name is string => typeof name === 'string' && FIELD_NAME.test(name)))].slice(0, 6).join(' ');
+
+async function errorPayload(response: Response): Promise<any> {
+  try { return JSON.parse(new TextDecoder().decode(await bytes(response, 64 * 1024))); } catch { return undefined; }
+}
+
+function hubspotErrorReason(payload: any): string | undefined {
+  if (!HUBSPOT_ERROR_CATEGORIES.has(payload?.category)) return undefined;
+  const names: unknown[] = [];
+  // Properties appear in errors[].context or in a JSON list embedded in a message, depending on the API.
+  for (const item of [payload, ...(Array.isArray(payload.errors) ? payload.errors : [])]) {
+    const value = item?.context?.propertyName;
+    names.push(...(Array.isArray(value) ? value : [value]));
+    const embedded = typeof item?.message === 'string' ? item.message.match(/(\[\{.*\}\])/s)?.[1] : undefined;
+    if (embedded) try { for (const entry of JSON.parse(embedded)) names.push(entry?.name); } catch {}
+  }
+  return reason(payload.category, names.filter(name => typeof name === 'string' && /^[a-z]/.test(name)));
+}
+
+function salesforceErrorReason(payload: any): string | undefined {
+  const first = Array.isArray(payload) ? payload.find(item => SALESFORCE_ERROR_CODES.has(item?.errorCode)) : undefined;
+  return first && reason(first.errorCode, Array.isArray(first.fields) ? first.fields : []);
 }
 
 export function formBody(values: Record<string, unknown>): URLSearchParams {
@@ -127,9 +136,13 @@ export function context(plugin: Plugin, credential: Credential, connection: stri
       response = await fetcher(url, { method, headers, body, redirect: 'error', signal: AbortSignal.timeout(20000) });
       if (!response.ok) {
         const google = ['gmail', 'google_calendar', 'google_sheets', 'google_drive'].includes(plugin.id) && (url.hostname === 'googleapis.com' || url.hostname.endsWith('.googleapis.com'));
-        const hubspot = plugin.id === 'hubspot' && url.hostname === 'api.hubapi.com' && [400, 404, 409].includes(response.status);
-        const reason = google ? await googleErrorReason(response) : hubspot ? await hubspotErrorReason(response) : undefined;
-        if (!google && !hubspot) await response.body?.cancel().catch(() => {});
+        const detailed = response.status === 400 || response.status === 404 || response.status === 409;
+        const hubspot = detailed && plugin.id === 'hubspot' && url.hostname === 'api.hubapi.com';
+        const salesforce = detailed && plugin.id === 'salesforce' && url.hostname.endsWith('.salesforce.com');
+        const reason = google ? await googleErrorReason(response)
+          : hubspot ? hubspotErrorReason(await errorPayload(response))
+          : salesforce ? salesforceErrorReason(await errorPayload(response)) : undefined;
+        if (!google && !hubspot && !salesforce) await response.body?.cancel().catch(() => {});
         const retry = response.headers.get('retry-after');
         const seconds = retry && /^\d+$/.test(retry) ? Number(retry) : retry ? Math.ceil((Date.parse(retry) - Date.now()) / 1000) : NaN;
         const delay = Number.isFinite(seconds) ? Math.min(86400, Math.max(1, seconds)) : 60;

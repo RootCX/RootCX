@@ -60,6 +60,7 @@ test('HubSpot validation errors name the rejected properties without echoing sub
   for (const reply of [
     { status: 'error', category: 'VALIDATION_ERROR', message: 'Property values were not valid: [{"isValid":false,"message":"private-value is required","error":"REQUIRED","name":"hs_legal_basis"}]' },
     { status: 'error', category: 'VALIDATION_ERROR', message: 'private-value', errors: [{ message: 'private-detail', context: { propertyName: ['hs_legal_basis'] } }] },
+    { status: 'error', category: 'VALIDATION_ERROR', message: 'private-summary', errors: [{ message: 'Property values were not valid: [{"isValid":false,"message":"private-value","error":"REQUIRED","name":"hs_legal_basis"}]' }] },
   ]) {
     const result = await harness(reply, 400).run('create_contact', { properties: { firstname: 'private-value' } });
     expect(result).toMatchObject({ ok: false, error: { code: 'PROVIDER_REJECTED', message: 'HubSpot returned HTTP 400 [VALIDATION_ERROR hs_legal_basis]' } });

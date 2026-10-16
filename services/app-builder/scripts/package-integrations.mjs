@@ -46,11 +46,23 @@ Responses verified against live providers:
   \`query\` uses Drive search syntax, for example \`name contains 'Dupont'\` (plain words are rejected).
 - \`hubspot\` contacts are \`{ id, properties }\`; pass \`properties: ['firstname', 'lastname', 'email', 'phone']\`
   to choose the fields returned. Search results can lag a few seconds behind a create or update.
-  Accounts with GDPR enabled reject a new contact without \`hs_legal_basis\` (error message ends with
-  \`[VALIDATION_ERROR hs_legal_basis]\`): let the user pick one of these exact values, never a default:
+  Errors end with \`[CATEGORY property…]\`, for example \`[VALIDATION_ERROR hs_legal_basis]\` or \`[CONFLICT]\`
+  for an existing email. Accounts with GDPR enabled reject a new contact without \`hs_legal_basis\`:
+  always offer it in contact creation forms, letting the user pick one of these exact values, never a default:
   \`Legitimate interest – prospect/lead\`, \`Legitimate interest – existing customer\`,
   \`Legitimate interest - other\`, \`Performance of a contract\`, \`Freely given consent from contact\`, \`Not applicable\`.
   Show HubSpot's error to the user instead of failing silently.
+- \`slack\` \`list_channels\` items have \`id, name, is_member, is_private\`. Shappy can only read or post in
+  channels where \`is_member\` is true; others fail with \`not_in_channel\`. Offer only member channels and
+  tell the user to type \`/invite @Shappy\` in Slack to add another one. \`get_history\` items have
+  \`ts, text, user, thread_ts\`; \`send_message\` returns \`{ ts }\` (pass it as \`threadTs\` to reply in a thread).
+  Slack limits history reads to about one request per minute: load history on demand, never in a loop.
+- \`salesforce\` \`query_records\` takes SOQL on \`Contact\` or \`Opportunity\` only, for example
+  \`SELECT Id, FirstName, LastName, Email, Phone FROM Contact ORDER BY LastModifiedDate DESC LIMIT 50\`;
+  items are records with their field names. Escape quotes in user text placed inside SOQL strings.
+  \`create_record\` returns \`{ id }\`. A Contact requires \`LastName\`; an Opportunity requires \`Name\`,
+  \`StageName\` and \`CloseDate\` (YYYY-MM-DD). Errors end with \`[ERROR_CODE Field…]\`, for example
+  \`[REQUIRED_FIELD_MISSING LastName]\`; show them to the user.
 
 ${sections.join('\n\n')}
 `;

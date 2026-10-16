@@ -93,3 +93,12 @@ test('Notion property responses cannot silently lose continuation or return inva
     expect(await h.run('get_entry_property', { pageId: 'page', propertyId: 'value' })).toMatchObject({ ok: false, error: { code: 'INVALID_RESPONSE' } });
   }
 });
+
+test('Salesforce rejections name the error code and fields without echoing submitted values', async () => {
+  const rpc = createRuntime(salesforce, (async () => Response.json([{ message: 'private-value is invalid', errorCode: 'REQUIRED_FIELD_MISSING', fields: ['LastName'] }], { status: 400 })) as unknown as typeof fetch);
+  const result = await rpc.__integration({ action: 'create_record', input: { objectType: 'Contact', fields: { FirstName: 'private-value' } }, connectionId: crypto.randomUUID(), userCredentials: { accessToken: 'fixture', instanceUrl: 'https://fixture.my.salesforce.com' } });
+  expect(result).toMatchObject({ ok: false, error: { code: 'PROVIDER_REJECTED', message: 'Salesforce returned HTTP 400 [REQUIRED_FIELD_MISSING LastName]' } });
+  expect(JSON.stringify(result)).not.toContain('private-');
+  const unknown = createRuntime(salesforce, (async () => Response.json([{ message: 'private', errorCode: 'PRIVATE_CODE', fields: ['LastName'] }], { status: 400 })) as unknown as typeof fetch);
+  expect(await unknown.__integration({ action: 'create_record', input: { objectType: 'Contact', fields: { LastName: 'x' } }, connectionId: crypto.randomUUID(), userCredentials: { accessToken: 'fixture', instanceUrl: 'https://fixture.my.salesforce.com' } })).toMatchObject({ error: { message: 'Salesforce returned HTTP 400' } });
+});
