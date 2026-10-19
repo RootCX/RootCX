@@ -1,11 +1,14 @@
 import { businessText, narrator, narrationGateway } from './narrator.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { collect, validateFiles } from './workspace.mjs';
-import { build } from './sandbox.mjs';
+import { build, isolated } from './sandbox.mjs';
+import { coherenceGateway, settlePlan } from './plan.mjs';
 import { closeEngine, engine, progressFor, narrationFact, providerError } from './opencode.mjs';
 
-export async function code({ root, appId, prompt, narrationPrompt = prompt, conversationId, signal, config, onProgress = () => {}, compile = build }) {
+export async function code({ root, appId, prompt, narrationPrompt = prompt, conversationId, signal, config, onProgress = () => {}, compile = build, planTool = (args, signal) => isolated(root, args, { signal }), review = coherenceGateway(config) }) {
   const initial = await collect(root);
+  // Survives repair turns: an approved plan is not reviewed again for this request.
+  const planReview = {};
   onProgress('understanding');
   const runtime = await engine(root, config);
   const session = await runtime.conversation(conversationId);
@@ -35,7 +38,7 @@ export async function code({ root, appId, prompt, narrationPrompt = prompt, conv
   }
   signal.addEventListener('abort', abort, { once: true });
   try {
-    let request = `Use the rootcx skill for this request. The files in the current workspace are the current published sources; they supersede previous session edits. Application: ${appId}. User request: ${prompt}`;
+    let request = `Use the rootcx skill, and the OpenSpec skills when the application has an openspec/ directory, for this request. The files in the current workspace are the current published sources; they supersede previous session edits. Application: ${appId}. User request: ${prompt}`;
     for (let attempt = 0; attempt < 3; attempt++) {
       const result = await Promise.race([
         runtime.api(`/session/${session}/message`, {
@@ -61,6 +64,7 @@ export async function code({ root, appId, prompt, narrationPrompt = prompt, conv
       onProgress('checking');
       voice.observe({ phase: 'checking', status: 'running' });
       try {
+        await settlePlan({ root, initial, collect, run: planTool, review, state: planReview, signal });
         const before = await collect(root);
         validateFiles(before);
         const frontend = await compile(root, appId, signal);
@@ -71,11 +75,11 @@ export async function code({ root, appId, prompt, narrationPrompt = prompt, conv
         // Core emits this business summary only after successful publication.
         return { files, frontend, summary: businessText(answer) || 'Votre modification est disponible dans votre application.' };
       } catch (error) {
-        if (signal.aborted) throw error;
+        if (signal.aborted || error.fatal) throw error;
         if (attempt === 2) { error.code = 'BUILD_FAILED'; throw error; }
         onProgress('repairing');
         voice.observe({ phase: 'repairing', status: 'running' });
-        request = `The publication verification failed. Correct the real source files and run the checks again. Do not claim success until fixed. Diagnostic:\n${String(error.message).slice(-24000)}`;
+        request = `The publication verification failed. Correct the real source files and run the checks again. Do not claim success until fixed. Then answer the owner in concise French about their business outcome. Diagnostic:\n${String(error.message).slice(-24000)}`;
       }
     }
   } finally {

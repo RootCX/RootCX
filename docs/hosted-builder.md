@@ -348,3 +348,33 @@ policy out of the coding loop. This concentrates Locality and gives Leverage
 to both engine observations and publication verification. Core remains the
 only authority for completion: phase-only events preserve the current message,
 and the companion shows the current response rather than the activity history.
+
+## Living plan
+
+An application may carry an [OpenSpec](https://github.com/Fission-AI/OpenSpec)
+directory. `openspec/specs/<domain>/spec.md`, written in French in BDD form
+(WHEN/THEN), is the single current description of its behaviour; dated changes
+under `openspec/changes/archive/` are history only. Applications without
+`openspec/` keep the previous publication path.
+
+The image installs the pinned OpenSpec CLI (1.14.3, `tools/openspec`) and the
+official OpenSpec skills it generates for OpenCode (explore, propose,
+apply-change, update-change). `instructions.md` adds only the platform rules:
+French BDD scenarios with concrete figures, one requirement per behaviour, one
+backend test per scenario, one clarifying question when a rule is ambiguous, and
+never archiving from the coding session. Per-application guidance belongs in the
+application's `openspec/config.yaml` (`context`, `rules`).
+
+Before the normal build, `plan.mjs`, inside the publication sandbox:
+
+1. validates (`--strict`) and archives each pending change, which merges it into
+   `openspec/specs`; archive refuses a requirement added twice under the same name
+   and a MODIFIED or REMOVED requirement that does not exist;
+2. validates the merged specs;
+3. sends the whole of `openspec/specs` (never the archive) to one model
+   call that reports contradictions, duplicates under different names and examples
+   that do not follow their rule. A review failure is fatal, never skipped.
+
+The application's tests then run in the normal build. Findings return to the
+coding session for repair within the existing three attempts. OpenSpec's English
+RFC 2119 keyword warning is tolerated for French specs. Telemetry is disabled.

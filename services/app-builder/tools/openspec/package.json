@@ -1,0 +1,8 @@
+{
+  "name": "@rootcx/builder-openspec",
+  "private": true,
+  "description": "Pinned OpenSpec CLI installed under /usr/local/lib/openspec so both sandboxes can read it.",
+  "dependencies": {
+    "@fission-ai/openspec": "1.14.3"
+  }
+}

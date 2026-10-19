@@ -71,6 +71,7 @@ export async function isolated(root, args, { network = false, signal } = {}) {
     '--bind', root, '/workspace', ...dependencies, '--chdir', '/workspace',
     '--setenv', 'PATH', '/usr/local/bin:/usr/bin:/bin', '--setenv', 'HOME', '/tmp',
     '--setenv', 'CI', 'true', '--setenv', 'npm_config_cache', '/tmp/npm-cache',
+    '--setenv', 'OPENSPEC_TELEMETRY', '0', '--setenv', 'DO_NOT_TRACK', '1',
     '--', ...args,
   ], { signal });
 }
