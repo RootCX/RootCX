@@ -144,13 +144,13 @@ test('the coherence review reads the whole plan once per version and fails close
   const requests = [];
   const review = coherenceGateway({ endpoint: 'https://ai.example/v1/messages', apiKey: 'key', model: 'model' }, async (url, init) => {
     requests.push(JSON.parse(init.body));
-    return new Response(JSON.stringify({ content: [{ type: 'tool_use', name: 'report_coherence', input: { issues: [{ kind: 'duplicate', requirements: ['A', 'B'], explanation: 'Même règle.' }] } }] }));
+    return new Response(JSON.stringify({ content: [{ type: 'thinking', thinking: '' }, { type: 'text', text: JSON.stringify({ issues: [{ kind: 'duplicate', requirements: ['A', 'B'], explanation: 'Même règle.' }] }) }] }));
   });
   assert.deepEqual(await review('<plan/>'), [{ kind: 'duplicate', requirements: ['A', 'B'], explanation: 'Même règle.' }]);
-  assert.deepEqual(requests[0].tool_choice, { type: 'auto' });
-  assert.equal(requests[0].tools[0].strict, true);
+  assert.equal(requests[0].output_config.format.type, 'json_schema');
+  assert.equal(requests[0].tool_choice, undefined);
   assert.equal(requests[0].temperature, undefined);
-  for (const [response, code] of [[new Response('', { status: 402 }), 'AI_CREDITS_EXHAUSTED'], [new Response('{"content":[]}'), 'AI_UNAVAILABLE']]) {
+  for (const [response, code] of [[new Response('', { status: 402 }), 'AI_CREDITS_EXHAUSTED'], [new Response('{"content":[]}'), 'AI_UNAVAILABLE'], [new Response('{"content":[{"type":"text","text":"Le plan est cohérent."}]}'), 'AI_UNAVAILABLE']]) {
     await assert.rejects(coherenceGateway({}, async () => response)('<plan/>'), error => error.fatal && error.code === code);
   }
 });

@@ -92,23 +92,18 @@ Report every problem that makes the plan contradictory or ambiguous:
 - duplicate: two requirements that govern the same behaviour, even with different names, wording or domains;
 - inconsistent_example: a scenario whose WHEN/THEN does not follow from its requirement (check every calculation).
 Report a contradiction only when you can name one concrete situation in which the two rules demand different outcomes. A rule that only restricts when another rule can apply is not a contradiction. Verify every calculation before reporting it, and never report something you verified as correct.
-Do not report style, wording, missing features, or behaviour the plan does not describe. When the plan is coherent, report an empty list.
-Always answer by calling report_coherence exactly once.`;
+Do not report style, wording, missing features, or behaviour the plan does not describe. When the plan is coherent, report an empty list.`;
 
-const reportTool = {
-  name: 'report_coherence', strict: true,
-  description: 'Report every coherence problem found in the plan.',
-  input_schema: {
-    type: 'object', additionalProperties: false, required: ['issues'],
-    properties: { issues: { type: 'array', items: {
-      type: 'object', additionalProperties: false, required: ['kind', 'requirements', 'explanation'],
-      properties: {
-        kind: { enum: ['contradiction', 'duplicate', 'inconsistent_example'] },
-        requirements: { type: 'array', items: { type: 'string' }, minItems: 1 },
-        explanation: { type: 'string' },
-      },
-    } } },
-  },
+const reportSchema = {
+  type: 'object', additionalProperties: false, required: ['issues'],
+  properties: { issues: { type: 'array', items: {
+    type: 'object', additionalProperties: false, required: ['kind', 'requirements', 'explanation'],
+    properties: {
+      kind: { type: 'string', enum: ['contradiction', 'duplicate', 'inconsistent_example'] },
+      requirements: { type: 'array', items: { type: 'string' } },
+      explanation: { type: 'string' },
+    },
+  } } },
 };
 
 // One model call without workspace access: the reviewer reads the whole plan and cannot change any file.
@@ -121,8 +116,8 @@ export function coherenceGateway({ endpoint, apiKey, model } = {}, transport = f
         headers: { 'content-type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
         body: JSON.stringify({
           model, max_tokens: 16000, system: reviewInstructions,
-          // Current Opus models reject forced tool choice and sampling parameters; a strict schema keeps the report valid.
-          tools: [reportTool], tool_choice: { type: 'auto' }, output_config: { effort: 'high' },
+          // Structured output guarantees a report; current Opus models reject forced tool choice.
+          output_config: { effort: 'high', format: { type: 'json_schema', schema: reportSchema } },
           messages: [{ role: 'user', content: plan }],
         }),
       });
@@ -132,7 +127,8 @@ export function coherenceGateway({ endpoint, apiKey, model } = {}, transport = f
     }
     if (!response.ok) throw fatal(`Plan review failed (${response.status})`, reviewErrorCode(response.status));
     const result = await response.json();
-    const report = result.content?.find(part => part.type === 'tool_use' && part.name === reportTool.name)?.input;
+    let report;
+    try { report = JSON.parse(result.content?.find(part => part.type === 'text')?.text ?? ''); } catch {}
     if (!Array.isArray(report?.issues)) throw fatal('Plan review returned no report', 'AI_UNAVAILABLE');
     return report.issues.filter(issue => typeof issue?.explanation === 'string' && Array.isArray(issue.requirements));
   };
