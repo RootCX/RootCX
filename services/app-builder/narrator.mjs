@@ -4,7 +4,7 @@ const phases = new Set(['understanding', 'editing', 'checking', 'repairing', 'wa
 export function businessText(value) {
   if (typeof value !== 'string') return null;
   const text = value.trim();
-  if (!text || text.length > 500 || /[`{}<>]|https?:|\b(?:rootcx|opencode|sql|postgres|typescript|javascript|npm|bun|vite|backend|frontend|migration|api|sdk|git|terminal|commit|deploy|déploiement|compil\w*)\b|(?:src|public|backend)\//i.test(text)) return null;
+  if (!text || text.length > 500 || /[`{}<>]|https?:|\b(?:rootcx|opencode|sql|postgres|typescript|javascript|npm|bun|vite|rebuilt|rebuild|typecheck|backend|frontend|migration|api|sdk|git|terminal|commit|deploy|déploiement|compil\w*)\b|(?:src|public|backend)\//i.test(text)) return null;
   return text;
 }
 

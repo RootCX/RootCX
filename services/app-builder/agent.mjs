@@ -38,7 +38,8 @@ export async function code({ root, appId, prompt, narrationPrompt = prompt, conv
   }
   signal.addEventListener('abort', abort, { once: true });
   try {
-    let request = `The files in the current workspace are the current published sources; they supersede previous session edits. Application: ${appId}. User request: ${prompt}`;
+    let request = `The files in the current workspace are the current published sources; they supersede previous session edits. Application: ${appId}. User request: ${prompt}
+Réponds au client en français courant, uniquement sur sa demande et le résultat métier. Aucun compte rendu de ton travail interne. Exemple après un changement de titre : « Le titre affiche désormais “Mes devis traiteur”. » Ne raconte ni les outils, ni les fichiers, ni les vérifications, ni les réparations.`;
     for (let attempt = 0; attempt < 3; attempt++) {
       const result = await Promise.race([
         runtime.api(`/session/${session}/message`, {
@@ -80,7 +81,8 @@ export async function code({ root, appId, prompt, narrationPrompt = prompt, conv
         if (attempt === 2) { error.code = 'BUILD_FAILED'; throw error; }
         onProgress('repairing');
         voice.observe({ phase: 'repairing', status: 'running' });
-        request = `The publication verification failed. Correct the real source files and run the checks again. Do not claim success until fixed. Then answer the owner in concise French about their business outcome. Diagnostic:\n${String(error.message).slice(-24000)}`;
+        request = `The publication verification failed. Correct the real source files and run the checks again. Do not claim success until fixed. Then answer the owner in concise French about their business outcome. Diagnostic:\n${String(error.message).slice(-24000)}
+Le diagnostic ci-dessus est privé. Une fois le problème corrigé, réponds uniquement à la demande métier originale : ${narrationPrompt}. En une ou deux phrases françaises, décris le comportement obtenu, jamais le problème interne ou sa réparation. Exemple : « L’acompte est de 40 %, soit 400 € pour un devis de 1 000 €. » Ne mentionne ni construction, ni vérifications, ni fichiers, ni publication à venir.`;
       }
     }
   } finally {
