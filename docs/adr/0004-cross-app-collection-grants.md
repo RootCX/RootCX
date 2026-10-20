@@ -56,3 +56,23 @@ remain effective. Public execution cannot mutate data or acquire ordinary
 worker capabilities. Local and remote publications use the same read executor.
 
 Developer contract and approval lifecycle: [Public data](../publications.md).
+
+## Amendment: native delegated agent collection tools
+
+A Core-dispatched AI agent is an RBAC principal with a responsible human, not
+an ordinary module consumer. Its fixed collection tools use the existing
+`AgentAuthority` ceiling and native collection RLS. Module grants continue to
+express trust between applications; they neither constrain nor elevate this
+agent-principal path. Worker SQL, workflows and caller-supplied app IDs cannot
+select it.
+
+This makes an intentional distinction: native `app:<id>:*` includes future
+collections and non-sensitive fields of that app, while module grants retain
+frozen field scopes and installation-bound approval. Native `.own` and `.shared`
+semantics remain available for narrower delegation. The Core does not assign
+admin or broaden provisioning defaults as part of this change.
+
+The two paths share mutation validation and atomic write audit; the journal
+records their authority kinds separately. A Core-only exact mutation marker
+supports SQL targeting/return values without adding general read authority.
+See [delegated agent details](../cross-app-collections.md#delegated-agents-and-application-modules).

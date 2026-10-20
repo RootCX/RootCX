@@ -21,7 +21,7 @@ impl Tool for ListAppsTool {
         let source = ctx
             .core_bound_app_id
             .as_deref()
-            .filter(|source| *source == ctx.app_id);
+            .filter(|source| *source == ctx.app_id && ctx.delegated_authority().is_none());
         let grants: Vec<(String, String, Vec<String>)> = if let Some(source) = source {
             sqlx::query_as(
                 "SELECT g.provider_app, g.entity, g.field_snapshot
@@ -50,8 +50,10 @@ impl Tool for ListAppsTool {
         }
         let rows: Vec<(String, String, JsonValue)> = sqlx::query_as(
             "SELECT id, name, COALESCE(manifest->'dataContract', '[]'::jsonb) \
-             FROM rootcx_system.apps WHERE status = 'installed' ORDER BY name",
+             FROM rootcx_system.apps a WHERE status = 'installed' \
+             AND (NOT $1 OR EXISTS (SELECT 1 FROM rootcx_system.app_installations i WHERE i.app_id = a.id AND i.active)) ORDER BY name",
         )
+        .bind(ctx.delegated_authority().is_some())
         .fetch_all(&ctx.pool)
         .await
         .map_err(|e| e.to_string())?;

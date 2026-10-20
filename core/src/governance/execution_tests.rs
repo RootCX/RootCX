@@ -14,6 +14,94 @@ const READ_OWN: &str = "app:business:records.read.own";
 const UPDATE: &str = "app:business:records.update";
 const DELETE: &str = "app:business:records.delete";
 
+#[tokio::test]
+async fn delegated_collection_mutation_retains_parent_owned_scope_without_read_permission() {
+    use crate::tools::{mutate_data::MutateDataTool, query_data::QueryDataTool, Tool};
+    use serde_json::json;
+
+    let fixture = Fixture::new().await;
+    let provider = fixture.install_collection_app().await;
+    for principal in 0..4 {
+        fixture.permissions(principal, &["*".into()]).await;
+    }
+    let mut scope = vec!["tool:*".into(), format!("app:{provider}:records.update.own")];
+    scope.extend(fixture.apps.iter().map(|app| format!("app:{app}:invoke")));
+    let chain = fixture.chain(Some(scope), AgentSource::Direct).await;
+    let mine = Uuid::new_v4();
+    let theirs = Uuid::new_v4();
+    let another_owner = Uuid::new_v4();
+    sqlx::query(&format!("INSERT INTO \"{provider}\".records (id, owner_id, name) VALUES ($1,$2,'mine'),($3,$4,'theirs')"))
+        .bind(mine).bind(fixture.principals[0]).bind(theirs).bind(another_owner)
+        .execute(&fixture.pool).await.unwrap();
+    let single_connection = sqlx::postgres::PgPoolOptions::new().max_connections(1)
+        .connect(&std::env::var("TEST_DATABASE_URL").unwrap()).await.unwrap();
+    for (label, id, patch, allowed) in [
+        ("update own row without read", mine, json!({"name": "changed"}), true),
+        ("update someone else's row", theirs, json!({"name": "stolen"}), false),
+        ("transfer own row", mine, json!({"owner_id": another_owner}), false),
+    ] {
+        let mut ctx = fixture.collection_context(&chain[2], json!({
+            "app": provider, "entity": "records", "action": "update", "id": id, "data": patch,
+        })).await;
+        ctx.pool = single_connection.clone();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), MutateDataTool.execute(&ctx))
+            .await.expect("collection execution must not reacquire its transaction's sole pool connection");
+        assert_eq!(result.is_ok(), allowed, "{label}: {result:?}");
+    }
+    single_connection.close().await;
+    let read = fixture.collection_context(&chain[2], json!({"app": provider, "entity": "records"})).await;
+    assert!(QueryDataTool.execute(&read).await.is_err(), "a mutation's internal SELECT cannot authorize a separate read");
+    let delete = fixture.collection_context(&chain[2], json!({
+        "app": provider, "entity": "records", "action": "delete", "id": mine,
+    })).await;
+    assert!(MutateDataTool.execute(&delete).await.is_err(), "child admin cannot exceed parent task scope");
+    let rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(&format!("SELECT id, owner_id, name FROM \"{provider}\".records ORDER BY name"))
+        .fetch_all(&fixture.pool).await.unwrap();
+    assert_eq!(rows, vec![(mine, fixture.principals[0], "changed".into()), (theirs, another_owner, "theirs".into())]);
+    crate::manifest::uninstall_app(&fixture.pool, &provider, Some(fixture.principals[0])).await.unwrap();
+    fixture.cleanup().await;
+}
+
+#[tokio::test]
+async fn delegated_mutation_sql_marker_cannot_expand_its_collection_or_operation() {
+    use super::enforcement::{ContextState, DataAccess, TIMEOUT_AGENT_TOOL_MS};
+
+    let fixture = Fixture::new().await;
+    let provider = fixture.install_collection_app().await;
+    let state = ContextState {
+        user_id: Some(fixture.principals[0]), is_delegated: true,
+        effective_perms: vec![format!("app:{provider}:records.update.own"), format!("app:{provider}:other.update.own")],
+        ..ContextState::default()
+    };
+    let types = crate::manifest::field_type_map(&fixture.pool, &provider, "records").await.unwrap();
+    for marked in [false, true] {
+        let access = DataAccess::app(&provider, &state, "agent_tool", TIMEOUT_AGENT_TOOL_MS);
+        let access = if marked { access.for_delegated_collection("records", "update", &types) } else { access };
+        let mut tx = access.begin(&fixture.pool).await.unwrap();
+        for (key, expected) in [
+            (format!("app:{provider}:records.read.own"), marked),
+            (format!("app:{provider}:records.read"), false),
+            (format!("app:{provider}:records.read.shared"), false),
+            (format!("app:{provider}:other.read.own"), false),
+            ("app:another:records.read.own".into(), false),
+            (format!("app:{provider}:records.delete.own"), false),
+        ] {
+            let allowed: bool = sqlx::query_scalar("SELECT rootcx_system.check_access($1)")
+                .bind(&key).fetch_one(&mut *tx).await.unwrap();
+            assert_eq!(allowed, expected, "marked={marked}, key={key}");
+        }
+        tx.rollback().await.unwrap();
+    }
+    let mut tx = DataAccess::app(&provider, &state, "worker", TIMEOUT_AGENT_TOOL_MS)
+        .begin(&fixture.pool).await.unwrap();
+    let forged = sqlx::query("SELECT set_config('rootcx.agent_collection_mutation', 'update', true)")
+        .execute(&mut *tx).await;
+    assert!(forged.is_err(), "untrusted worker SQL must not pose any Core authority marker");
+    tx.rollback().await.unwrap();
+    crate::manifest::uninstall_app(&fixture.pool, &provider, Some(fixture.principals[0])).await.unwrap();
+    fixture.cleanup().await;
+}
+
 struct Fixture {
     pool: PgPool,
     principals: [Uuid; 4],
@@ -23,6 +111,43 @@ struct Fixture {
 }
 
 impl Fixture {
+    async fn install_collection_app(&self) -> String {
+        use crate::extensions::RuntimeExtension;
+        static HOOKS: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+        HOOKS.get_or_init(|| async {
+            crate::extensions::hooks::HooksExtension.bootstrap(&self.pool).await.unwrap();
+        }).await;
+        let app = format!("data_{}", Uuid::new_v4().simple());
+        let manifest = serde_json::from_value(serde_json::json!({
+            "appId": app, "name": app, "version": "1.0.0",
+            "dataContract": [{"entityName": "records", "fields": [
+                {"name": "owner_id", "type": "uuid", "owner": true},
+                {"name": "name", "type": "text"}
+            ]}]
+        })).unwrap();
+        crate::manifest::install_app(
+            &self.pool, &manifest, &[], self.principals[0],
+            &crate::secrets::SecretManager::with_key(&[7; 32]),
+        ).await.unwrap();
+        super::row_access::install(&self.pool, &manifest).await.unwrap();
+        app
+    }
+
+    async fn collection_context(&self, authority: &AgentAuthority, args: serde_json::Value) -> crate::tools::ToolContext {
+        crate::tools::ToolContext {
+            authority: Some(authority.clone()),
+            pool: self.pool.clone(),
+            core_bound_app_id: Some(authority.app().into()),
+            app_id: authority.app().into(),
+            user_id: crate::extensions::agents::agent_user_id(authority.app()),
+            invoker_user_id: Some(authority.human()),
+            permissions: authority.revalidate(&self.pool).await.unwrap(),
+            task_scope: authority.task_scope(), args,
+            agent_dispatch: None, integration_caller: None, action_caller: None,
+            stream_tx: None, idempotency_key: None,
+        }
+    }
+
     async fn new() -> Self {
         let pool = crate::extensions::test_db::pool().await;
         let prefix = format!("execution_{}", Uuid::new_v4().simple());

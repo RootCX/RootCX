@@ -54,18 +54,25 @@ impl Tool for MutateDataTool {
             approved_action: None,
         };
 
+        let mutation_data = || -> Result<JsonValue, String> {
+            match action {
+                "create" | "bulk_create" => Ok(ctx.args.get("data").cloned().unwrap_or(JsonValue::Null)),
+                "update" => Ok(json!({"id": ctx.args.get("id"), "data": ctx.args.get("data")})),
+                "delete" => Ok(json!({"id": ctx.args.get("id")})),
+                _ => Err(format!("unknown action: '{action}'")),
+            }
+        };
+        if ctx.delegated_authority().is_some() {
+            return crate::governance::cross_app_operations::execute_agent(
+                ctx, app, action, entity, mutation_data()?,
+            ).await;
+        }
         if app != ctx.app_id {
             let source = ctx.core_bound_app_id.as_deref()
                 .filter(|source| *source == ctx.app_id)
                 .ok_or("cross-app access requires a Core-bound application worker")?;
-            let data = match action {
-                "create" | "bulk_create" => ctx.args.get("data").cloned().unwrap_or(JsonValue::Null),
-                "update" => json!({"id": ctx.args.get("id"), "data": ctx.args.get("data")}),
-                "delete" => json!({"id": ctx.args.get("id")}),
-                _ => return Err(format!("unknown action: '{action}'")),
-            };
             return crate::governance::cross_app_operations::execute(
-                &ctx.pool, source, app, action, entity, data,
+                &ctx.pool, source, app, action, entity, mutation_data()?,
                 crate::governance::cross_app_operations::OperationContext::collection(
                     Some(state), &enforcement::InvocationContext::default(), ctx.idempotency_key.as_deref(),
                 ),

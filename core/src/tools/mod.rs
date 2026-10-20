@@ -77,6 +77,17 @@ pub struct ToolContext {
 }
 
 impl ToolContext {
+    /// Only Core agent dispatch can supply this authority; app IDs, roles and
+    /// responsible-human fields alone never turn a module into an agent.
+    pub(crate) fn delegated_authority(&self) -> Option<&crate::governance::execution::AgentAuthority> {
+        self.authority.as_ref().filter(|authority| {
+            self.core_bound_app_id.as_deref() == Some(authority.app())
+                && self.app_id == authority.app()
+                && self.user_id == crate::extensions::agents::agent_user_id(authority.app())
+                && self.invoker_user_id == Some(authority.human())
+        })
+    }
+
     /// Human HTTP calls use their authenticated user. A bound agent still needs
     /// its responsible human; missing delegation must not become actor authority.
     pub fn data_user_id(&self) -> Option<Uuid> {

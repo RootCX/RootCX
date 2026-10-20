@@ -336,6 +336,7 @@ impl RbacExtension {
             "CREATE OR REPLACE FUNCTION rootcx_system.check_access(p_required TEXT)
              RETURNS BOOLEAN AS $$
              DECLARE v_user_id UUID; v_delegated TEXT; v_perms TEXT;
+                     v_read_key TEXT; v_action TEXT; v_required TEXT;
              BEGIN
                  IF coalesce(current_setting('rootcx.approved_action_id', true), '') <> '' THEN
                      RETURN rootcx_system.check_approved_action_access(p_required);
@@ -364,7 +365,21 @@ impl RbacExtension {
                  IF v_delegated = '1' THEN
                      v_perms := current_setting('rootcx.effective_perms', true);
                      IF v_perms IS NULL OR v_perms = '' THEN RETURN FALSE; END IF;
-                     RETURN rootcx_system.match_permission(string_to_array(v_perms, ','), p_required);
+                     v_required := p_required;
+                     v_read_key := current_setting('rootcx.agent_collection_read_key', true);
+                     v_action := current_setting('rootcx.agent_collection_mutation', true);
+                     -- Only the fixed agent mutation executor poses these keys.
+                     -- SELECT needed for targeting/RETURNING uses that exact
+                     -- collection operation, preserving its native .own scope.
+                     -- No standalone query or other entity acquires read access.
+                     IF v_action IN ('create', 'update', 'delete') THEN
+                         IF p_required = v_read_key THEN
+                             v_required := left(v_read_key, length(v_read_key) - 5) || '.' || v_action;
+                         ELSIF p_required = v_read_key || '.own' THEN
+                             v_required := left(v_read_key, length(v_read_key) - 5) || '.' || v_action || '.own';
+                         END IF;
+                     END IF;
+                     RETURN rootcx_system.match_permission(string_to_array(v_perms, ','), v_required);
                  END IF;
                  RETURN rootcx_system.has_permission(v_user_id, p_required);
              END;
