@@ -255,7 +255,14 @@ async fn do_invoke(
         "SELECT config FROM rootcx_system.agents WHERE app_id = $1",
     ).bind(&app_id).fetch_one(pool).await.map_err(&e)?;
     let memory = agent_cfg.pointer("/memory/enabled").and_then(JsonValue::as_bool) == Some(true);
-    let history = agent_config::load_history(pool, memory, &app_id, &session_id).await.map_err(&e)?;
+    let mut history = agent_config::load_history(pool, memory, &app_id, &session_id).await.map_err(&e)?;
+    history.insert(0, json!({"role": "system", "content": format!(
+        "Reply entirely in the language of the user's current message, unless they request another language. \
+         Do not narrate tool use or announce what you are about to check; give the result directly.{}",
+        if provider_name == "whatsapp" {
+            " This conversation is on WhatsApp. Use short paragraphs and simple lists. For emphasis use WhatsApp's native *bold* or _italic_. Do not use Markdown tables, headings, double-asterisk bold, or HTML."
+        } else { "" }
+    )}));
     let llm = fetch_default_llm(pool).await.map_err(&e)?
         .map(|(p, m)| LlmModelRef { provider: p, model: m });
 
