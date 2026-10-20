@@ -46,7 +46,10 @@ prompt and filtered prepared reply enter this journal, never SDK prompts or repa
 diagnostics. Prepared replies explicitly have unknown publication status. A missing
 or corrupt journal disables context only; it cannot stop coding.
 
-Native tool descriptions carry untrusted intent separately from action/status facts.
+An outward business statement followed by a native tool carries untrusted intent
+separately from action/status facts. Final text with no following tool is not progress;
+private reasoning is never consumed. This uses the existing OpenCode text events,
+not a custom reporting tool or another model.
 The build pipeline reports its own check start, success and failure without output.
 Nova may describe a successful verification only with a completed platform check;
 a later failure or edit invalidates earlier evidence. Every new observation invalidates

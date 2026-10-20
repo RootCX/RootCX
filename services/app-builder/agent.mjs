@@ -1,4 +1,4 @@
-import { conversationContext } from './narration-context.mjs';
+import { conversationContext, contextText } from './narration-context.mjs';
 import { businessText, narrator, narrationGateway } from './narrator.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { collect, validateFiles } from './workspace.mjs';
@@ -18,15 +18,23 @@ export async function code({ root, appId, prompt, narrationPrompt = prompt, conv
   const context = await conversationContext(root, session, runId, narrationPrompt);
   const voice = narrator({ context: context.previous, translate: narrationGateway(config), prompt: narrationPrompt, signal, onProgress });
   let skillLoaded = false;
+  let intent = '';
   async function observeProgress() {
     for await (const event of runtime.subscribe(combined)) {
       const part = event.properties?.part;
       if ((part?.sessionID ?? event.properties?.sessionID) !== session) continue;
+      if (part?.type === 'text' && part.time?.end) { intent = businessText(contextText(part.text, 240)) || ''; continue; }
       if (part?.type === 'tool' && part.tool === 'skill' && part.state?.input?.name === 'rootcx' && part.state.status === 'completed') skillLoaded = true;
       if (event.type === 'session.status') voice.working(event.properties.status?.type === 'busy');
       const phase = progressFor(event);
       if (phase) onProgress(phase);
-      if (phase) voice.observe(narrationFact(event, phase));
+      if (phase) {
+        const fact = narrationFact(event, phase);
+        // Only an outward statement followed by actual tool activity is an intention.
+        // Final replies and private reasoning never become progress evidence.
+        if (part?.type === 'tool' && part.state?.status === 'running' && intent) { fact.intent = intent; intent = ''; }
+        voice.observe(fact);
+      }
     }
     throw new Error('OpenCode event stream disconnected');
   }

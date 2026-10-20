@@ -383,7 +383,7 @@ RFC 2119 keyword warning is tolerated for French specs. Telemetry is disabled.
 Nova receives at most three recent business exchanges (800 characters per message),
 not OpenCode's technical session history. The separate narration journal is optional,
 scoped by the actual session and deduplicated by Core run ID. Replies are explicitly
-prepared context, not publication evidence. Native descriptions are untrusted intentions;
+prepared context, not publication evidence. Outward statements followed by tool activity are untrusted intentions;
 only the build pipeline supplies verification outcomes. The observer discards stale
 same-phase translations and can report a genuinely ongoing operation after 20 seconds.
 No third model, intent router or raw tool output is introduced.
