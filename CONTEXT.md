@@ -9,6 +9,7 @@
 | Core | The trusted runtime that authorizes app operations and reconciles their database contracts |
 | Execution authority | Core-owned responsible human, agent lineage, frozen permission ceiling, task scope and live origin for an agent run; inherited descendants can only narrow it |
 | Execution origin | The authenticated entry context of a run; a channel origin pins the exact linked identity and delegation and provides its live validity check |
+| Agent attachment | An app-scoped file admitted by Core for one agent invocation, delivered to the worker through a one-use download capability; images share validation across Web and communication channels |
 | Agent confirmation | A single-use, expiring decision about one exact tool request, owned by its responsible human and execution origin; distinct from an Approved action |
 | Build narration | Optional, bounded business-language progress derived from observed builder facts; never controls execution or announces publication |
 | Platform companion | An optional host-owned browser companion loaded by Core independently of an App release |
@@ -50,3 +51,5 @@ is outside this deployment model; platform test coverage requires actual runs.
 
 [ADR 0011](docs/adr/0011-agent-execution-authority.md) records transport-independent
 Execution authority and Agent confirmation ownership.
+
+[ADR 0013](docs/adr/0013-agent-attachments.md) records the shared Agent attachment Module.

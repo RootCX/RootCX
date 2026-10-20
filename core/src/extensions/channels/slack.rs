@@ -11,7 +11,7 @@ use serde_json::{json, Value as JsonValue};
 use sha2::Sha256;
 use tracing::warn;
 
-use super::types::{ChannelError, ChannelProvider, InboundEvent, MediaRef};
+use super::types::{ChannelError, ChannelProvider, InboundEvent, MediaRef, MediaSource};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -174,7 +174,7 @@ fn validate_response_url(url: Option<String>) -> Result<String, ChannelError> {
 
 fn extract_media(files: Option<Vec<File>>) -> Vec<MediaRef> {
     files.unwrap_or_default().into_iter().map(|f| MediaRef {
-        provider_file_id: f.id,
+        source: MediaSource::Provider(f.id),
         content_type: f.mimetype,
         name: f.name,
     }).collect()
@@ -277,15 +277,15 @@ impl ChannelProvider for SlackProvider {
         let token = Self::token(config).ok()?;
         // Slack doesn't expose url_private in the event payload reliably; fetch via files.info
         let info: JsonValue = HTTP
-            .get(format!("{SLACK_API}/files.info?file={}", media_ref.provider_file_id))
+            .get(format!("{SLACK_API}/files.info?file={}", media_ref.provider_file_id()?))
             .bearer_auth(token).send().await.ok()?
             .json().await.ok()?;
         let url = info.pointer("/file/url_private")?.as_str()?;
-        let bytes = HTTP.get(url).bearer_auth(token)
-            .send().await.ok()?.bytes().await.ok()?;
         let content_type = media_ref.content_type.clone()
             .unwrap_or_else(|| "application/octet-stream".into());
         let name = media_ref.name.clone().unwrap_or_else(|| "file".into());
+        let response = HTTP.get(url).bearer_auth(token).send().await.ok()?;
+        let bytes = crate::extensions::agents::attachments::read_download(response, &content_type).await?;
         Some((bytes, content_type, name))
     }
 
@@ -577,7 +577,7 @@ mod tests {
         let event = parse_with(cfg, headers, body.into()).await.unwrap();
         let InboundEvent::Message { media, .. } = event else { panic!("expected Message") };
         assert_eq!(media.len(), 1);
-        assert_eq!(media[0].provider_file_id, "F1");
+        assert_eq!(media[0].provider_file_id().unwrap(), "F1");
         assert_eq!(media[0].name.as_deref(), Some("report.pdf"));
     }
 

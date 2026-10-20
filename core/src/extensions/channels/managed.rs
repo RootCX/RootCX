@@ -1,4 +1,4 @@
-use super::types::{ChannelError, ChannelProvider, InboundEvent};
+use super::types::{ChannelError, ChannelProvider, InboundEvent, MediaRef};
 use crate::{api_error::ApiError, auth::identity::Identity, routes::SharedRuntime};
 use async_trait::async_trait;
 use axum::{
@@ -300,8 +300,14 @@ impl ChannelProvider for ManagedProvider {
         Ok(InboundEvent::Message {
             chat_id: chat.into(),
             text: text.into(),
-            media: vec![],
+            media: super::media::parse(&payload)?,
         })
+    }
+
+    async fn download_media(
+        &self, _: &Value, media: &MediaRef,
+    ) -> Option<(Bytes, String, String)> {
+        super::media::download(media)
     }
 
     async fn send_response(
