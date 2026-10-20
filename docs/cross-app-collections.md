@@ -5,6 +5,65 @@ The grant names both installation generations, one collection, its allowed
 operations, its readable response fields, and its writable fields. Installing
 two apps never creates a grant.
 
+## Delegated agents and application modules
+
+Collection grants govern **application modules**: ordinary workers, workflows,
+and their remote collection calls. A Core-dispatched AI agent instead acts as
+an identified principal under a responsible human's native RBAC delegation.
+This distinction applies to `query_data`, `mutate_data`, `list_apps`, and
+`describe_app`; it does not grant a worker new SQL or IPC authority.
+
+For example, assign the agent a native role containing `app:shapp_btp:*` and
+its required `tool:*` permissions. Its data tools can use all declared
+collections of that app, including future collections and non-sensitive fields,
+without creating collection grants. Use `app:shapp_btp:projects.read`,
+`app:shapp_btp:projects.update.own`, etc. for narrower authority. The existing
+permission syntax and APIs are unchanged. Roles remain additive: replacing a
+wildcard requires removing it, not adding a narrower role alongside it.
+
+Core verifies a genuine `AgentAuthority`, the Core-bound app and agent identity,
+and the responsible human. Before execution, the existing authority framework
+revalidates the human, every parent agent, invocation origin and cancellation,
+then intersects their current rights with the admitted run/task ceiling.
+Permission changes cannot expand an existing run. A denied agent operation does
+not fall back to a module grant. Generic HTTP tool arguments cannot supply this
+authority. No agent or assistant receives an automatic admin role from this change.
+
+Native collection RLS remains authoritative: unscoped rights cover all rows,
+`.own` covers the responsible human's rows, and `.read.shared` follows native
+sharing. Unlike a module grant, unscoped native rights are not implicitly
+restricted to ownership. Sensitive columns remain excluded from returned data
+and rejected in filters and writes. System and unknown fields are rejected by
+the fixed mutation executor. A mutation-only permission supports targeting and
+`RETURNING` through a Core-only marker pinned to that collection and operation;
+it does not enable a standalone read, another collection, or raw SQL access.
+
+The target must have an active installation and a declared collection. Core
+locks its current installation and manifest through the operation and rejects
+a concurrent field-contract change. Discovery exposes only readable entities
+and non-sensitive field names/types, even for the agent's own app. Defaults,
+checks and references are not copied. A write-only role does not gain readable
+schema discovery merely through its mutation permission.
+
+Both paths share strict CRUD execution and the append-only operation journal
+`cross_app_read_audit`. `authorization_kind` distinguishes `agent_delegation`
+from `application_grant`; agent entries have no fictitious grant ID. Both retain
+source, target, operation, agent actor, responsible human, correlation, outcome,
+and row count. Successful writes and their success audit commit atomically.
+Read results are released only after their success audit is recorded.
+
+This requires the additive `20261021000000_agent_collection_authority.sql`
+migration and the RBAC function bootstrap. Existing module grants, frozen field
+scopes and approval/revocation lifecycle are unchanged. Provisioning Shappy or
+changing any tenant's assigned roles is a separate rollout step.
+
+Before deploying this semantic change, review existing agent roles: an already
+assigned `app:*` or `app:<id>:*` now authorizes native collection tools without
+module grants. Revoking a module grant no longer revokes an agent's independently
+authorized data tools; revoke or narrow the native agent/human role instead.
+No SQL migration rewrites assignments, but existing broad roles become effective
+on this path. Keep the provisioning rollout and its tenant review explicit.
+
 ## Terms
 
 | Term | Meaning |
@@ -26,7 +85,8 @@ cross-app grant alone never makes its data public.
 
 | Intent | API | Authority |
 | --- | --- | --- |
-| Query or change provider records | Worker `ctx.remote(app).collection(entity)`; agent/workflow `query_data` or `mutate_data` | Approved collection grant for the consumer installation, exact operation and fields, plus applicable RLS/delegated permissions |
+| Query or change provider records from a module | Worker `ctx.remote(app).collection(entity)`; workflow `query_data` or `mutate_data` | Approved collection grant for the consumer installation, exact operation and fields, plus applicable RLS/delegated permissions |
+| Query or change records as a delegated agent | Core-dispatched `query_data` or `mutate_data` | Native target collection permission within the live agent/human/parent/task ceiling, plus native RLS |
 | Execute provider business logic | Agent tool `call_action` | Tool permission and target action/invoke permission; target must declare the action |
 | Delegate a task to another agent | Agent tool `invoke_agent` | Tool permission and target invoke permission; child authority narrows against the parent |
 | Call an integration with user credentials | Worker `ctx.callIntegration(...)` | Integration binding and the integration's governed action path |
@@ -224,8 +284,9 @@ are supplied and `{ data, total }` when any query option is present. Use
 `query_data` retain the complete array result, with no implicit 100-row cap.
 Use explicit pagination for large collections to bound response size; unpaginated
 reads still obey query timeouts and return an error rather than a truncated result.
-Remote `query_data` needs the `list`
-grant action, including when filtering by ID.
+For module/workflow execution, remote `query_data` needs the `list` grant
+action, including when filtering by ID. Core-dispatched agents instead require
+the native collection read permission within their delegation ceiling.
 
 Every tool requires `tool:<tool-name>`. `call_action` currently accepts the
 target's `app:<app>:invoke` permission or the specific
@@ -249,8 +310,8 @@ containing these tools (or unknown tools) with HTTP 400 and the node/tool name;
 enabling a legacy saved graph checks it too. Generic HTTP execution returns
 HTTP 400 with `requires agent execution context` after authentication and tool
 permission checks. Collection grants cannot enable these tools in those
-executors. `query_data` and `mutate_data` remain available with their existing
-grant and permission requirements; worker `ctx.callIntegration` is unaffected.
+executors. `query_data` and `mutate_data` remain available in those executors with their
+existing grant and permission requirements; worker `ctx.callIntegration` is unaffected.
 
 A grant never widens an agent or workflow's frozen delegated permission
 intersection. Tool permission and the provider operation permission must both
@@ -272,6 +333,7 @@ reject rather than returning `null`.
 | Error or symptom | Check next |
 | --- | --- |
 | Grant creation: `create/update grants require explicit nonempty writeFields` | Supply the exact payload fields in `writeFields`, independently of `fields`. |
+| `delegated collection permission denied` | Check the native operation permission and the effective human/agent/parent/task ceiling. A module grant cannot widen it. |
 | `cross-app collection access is not authorized` | Check the actual consumer, provider, entity, active grant, expiry, exact action and readable/writable field scopes. A matching permission key alone is insufficient. |
 | `cross-app collection is not available` / `is unavailable` | Have an authorized administrator check installed apps, active generations and fresh approvals after governance-contract updates. Public errors intentionally hide target details. |
 | `cross-app collection query failed` | Check query envelope shape, UUIDs, value types, required provider fields, constraints and RLS. Core currently uses this same message for mutation execution failures. |
@@ -286,7 +348,8 @@ An administrator can inspect `GET /api/v1/cross-app/grants/<grant-id>` for
 `GET /api/v1/cross-app/audit` for operation outcomes and denial categories.
 The operation audit requires `admin:cross_app.grants.manage` and accepts
 `?grantId=<grant-id>&limit=100`. Its `correlationId` groups operation records; use
-consumer, provider, entity, action and time to find the attempt. Execution failures currently expose
+consumer, provider, entity, action and time to find the attempt. The returned
+`authorizationKind` identifies module grants versus native agent delegation. Execution failures currently expose
 the category `query_validation_or_execution`, not the underlying SQL error.
 Do not automatically retry creates after a timeout: the caller may have lost
 the response after commit. The public remote worker API takes no idempotency key.
@@ -318,9 +381,9 @@ grants. Workflow deletion and revocation commit together.
 
 ## Migration
 
-Existing agents and workflows that used foreign collection tools must receive
-explicit grants. No migration automatically converts user permissions into
-application authority.
+Workflows and ordinary modules using foreign collections require explicit
+grants. Core-dispatched agents use native delegated RBAC as described above.
+No migration creates application grants or broadens assigned agent roles.
 
 ### Queue upgrade and delegated continuations
 

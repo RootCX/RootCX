@@ -135,6 +135,8 @@ async fn set_rls_context(
                 set_config('rootcx.cross_app_grant_id', '', true), \
                 set_config('rootcx.cross_app_source_app', '', true), \
                 set_config('rootcx.cross_app_action', '', true), \
+                set_config('rootcx.agent_collection_read_key', '', true), \
+                set_config('rootcx.agent_collection_mutation', '', true), \
                 set_config('rootcx.human_data_request', '', true), \
                 set_config('rootcx.approved_action_id', '', true), \
                 set_config('rootcx.publication_id', '', true), \
@@ -210,6 +212,7 @@ pub struct DataAccess<'a> {
     timeout_ms: u32,
     cross_app: Option<&'a crate::governance::cross_app::AuthorizedRead>,
     origin: DataOrigin,
+    delegated_collection: Option<(&'a str, &'a str, &'a crate::data_types::FieldTypes)>,
     publication: Option<&'a crate::governance::publications::ApprovedPublication>,
 }
 
@@ -225,6 +228,7 @@ impl<'a> DataAccess<'a> {
             timeout_ms,
             cross_app: None,
             origin: DataOrigin::App,
+            delegated_collection: None,
             publication: None,
         }
     }
@@ -251,6 +255,12 @@ impl<'a> DataAccess<'a> {
         Self { cross_app: authority, ..self }
     }
 
+    /// Only the fixed Core agent collection executor uses this constructor.
+    /// No SQL, worker invocation or tool payload can select this transaction mode.
+    pub(crate) fn for_delegated_collection(self, entity: &'a str, action: &'a str, types: &'a crate::data_types::FieldTypes) -> Self {
+        Self { delegated_collection: Some((entity, action, types)), ..self }
+    }
+
     fn published(self, publication: &'a crate::governance::publications::ApprovedPublication) -> Self {
         Self { publication: Some(publication), ..self }
     }
@@ -261,7 +271,7 @@ impl<'a> DataAccess<'a> {
     ) -> Result<sqlx::Transaction<'p, sqlx::Postgres>, sqlx::Error> {
         let Self {
             app_schema, state, invocation, audit, trigger_ref, timeout_ms,
-            cross_app, origin, publication,
+            cross_app, origin, publication, delegated_collection,
         } = self;
         if state.public_execution.is_some() && publication.is_none() {
             return Err(sqlx::Error::Protocol("public execution requires a publication read".into()));
@@ -290,6 +300,38 @@ impl<'a> DataAccess<'a> {
         if matches!(origin, DataOrigin::HumanHttp) {
             sqlx::query("SELECT set_config('rootcx.human_data_request', '1', true)")
                 .execute(&mut *tx).await?;
+        }
+        if let Some((entity, action, types)) = delegated_collection {
+            if !state.is_delegated || state.user_id.is_none() || cross_app.is_some()
+                || state.public_execution.is_some() || state.approved_action.is_some() {
+                return Err(sqlx::Error::Protocol("invalid delegated collection context".into()));
+            }
+            // Hold the current installation and manifest stable through execution.
+            // Role scopes refer to the app ID, like human RBAC; no module grant is minted.
+            let contract: Option<JsonValue> = sqlx::query_scalar(
+                "SELECT a.manifest FROM rootcx_system.app_installations i
+                 JOIN rootcx_system.apps a ON a.id = i.app_id
+                 WHERE i.app_id = $1 AND i.active AND a.status IN ('installed', 'system')
+                   AND EXISTS (SELECT 1 FROM jsonb_array_elements(a.manifest->'dataContract') e
+                               WHERE e->>'entityName' = $2)
+                 FOR SHARE OF i, a",
+            ).bind(app_schema).bind(entity).fetch_optional(&mut *tx).await?;
+            // Compare preloaded types under the lock, without reacquiring a pool
+            // connection or using a stale sensitivity/type map during deployment.
+            let current_types = contract
+                .and_then(|value| serde_json::from_value::<rootcx_types::AppManifest>(value).ok())
+                .and_then(|manifest| manifest.data_contract.into_iter().find(|e| e.entity_name == entity))
+                .and_then(|entity| crate::data_types::field_types(&entity).ok());
+            if current_types.as_ref() != Some(types) {
+                return Err(sqlx::Error::Protocol("delegated collection unavailable or changed".into()));
+            }
+            if matches!(action, "create" | "update" | "delete") {
+                sqlx::query(
+                    "SELECT set_config('rootcx.agent_collection_read_key', $1, true),
+                            set_config('rootcx.agent_collection_mutation', $2, true)",
+                ).bind(format!("app:{app_schema}:{entity}.read")).bind(action)
+                    .execute(&mut *tx).await?;
+            }
         }
         // Lifecycle transitions take installation locks before grant locks.
         if let Some(publication) = publication {
