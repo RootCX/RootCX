@@ -53,7 +53,7 @@ export function narrationFact(event, phase) {
   if (['bash', 'shell'].includes(part?.tool) && !/^\s*(?:cat|ls|pwd|rg|grep|find|head|tail|sed)\b/.test(command)) {
     if (/\b(?:tsc|typecheck)\b/.test(command)) action = 'typecheck';
     else if (/\b(?:vitest|jest|pytest|test)\b/.test(command)) action = 'test';
-    else if (/\bopenspec\b/.test(command)) action = 'plan';
+    else if (/(?:^|[;&|])\s*(?:(?:npx|bunx)\s+)?openspec\s+(?:new|init|archive|update)\b/.test(command)) action = 'plan';
     else if (/\bbuild\b/.test(command)) action = 'build';
     else if (/\b(?:install|ci)\b/.test(command)) action = 'dependencies';
   }

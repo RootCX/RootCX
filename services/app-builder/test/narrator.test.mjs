@@ -186,7 +186,7 @@ test('a duplicate old tool cannot invalidate the current translation', async t =
 
 
 test('reading rules or tests does not announce preparation or verification', () => {
-  for (const command of ['cat openspec/specs/devis/spec.md', 'cat backend/pricing.test.ts', 'rg test package.json', "sed -n '1,20p' backend/test.ts"]) {
+  for (const command of ['cat openspec/specs/devis/spec.md', 'cd /workspace && cat openspec/specs/devis/spec.md', 'openspec instructions explore --json', 'cat backend/pricing.test.ts', 'rg test package.json', "sed -n '1,20p' backend/test.ts"]) {
     const event = { properties: { part: { type: 'tool', tool: 'shell', state: { status: 'running', input: { command } } } } };
     assert.equal(progressFor(event), 'understanding', command);
     assert.equal(narrationFact(event, progressFor(event)).action, 'inspect', command);
