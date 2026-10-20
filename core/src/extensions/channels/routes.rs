@@ -256,6 +256,13 @@ async fn do_invoke(
     ).bind(&app_id).fetch_one(pool).await.map_err(&e)?;
     let memory = agent_cfg.pointer("/memory/enabled").and_then(JsonValue::as_bool) == Some(true);
     let history = agent_config::load_history(pool, memory, &app_id, &session_id).await.map_err(&e)?;
+    let message = format!(
+        "Channel response instructions: Reply entirely in the language of the user message below, unless the user requests another language. \
+         Do not narrate tool use or announce what you are about to check; give the result directly.{}\n\nUser message:\n{text}",
+        if provider_name == "whatsapp" {
+            " This conversation is on WhatsApp. Use short paragraphs and simple lists. For emphasis use WhatsApp's native *bold* or _italic_. Do not use Markdown tables, headings, double-asterisk bold, or HTML."
+        } else { "" }
+    );
     let llm = fetch_default_llm(pool).await.map_err(&e)?
         .map(|(p, m)| LlmModelRef { provider: p, model: m });
 
@@ -282,7 +289,7 @@ async fn do_invoke(
     let payload = AgentInvokePayload {
         invoke_id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.clone(),
-        message: text.to_string(),
+        message,
         history, is_sub_invoke: false, llm, invoker_user_id,
         attachments,
         task_scope: None,
