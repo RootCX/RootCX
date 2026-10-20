@@ -2,6 +2,7 @@ pub(crate) mod routes;
 mod slack;
 mod origin;
 mod intake;
+mod media;
 mod telegram;
 pub(crate) mod managed;
 pub(crate) mod types;
@@ -94,7 +95,8 @@ impl RuntimeExtension for ChannelExtension {
             .route("/api/v1/channels/{channel_id}/managed-link", post(managed::link))
             .route("/api/v1/channels/{channel_id}/link", post(routes::create_link_token))
             .route("/api/v1/channels/{channel_id}/identity", get(routes::identity_status).delete(routes::unlink_identity))
-            .route("/api/v1/channels/{provider}/{channel_id}/webhook", post(routes::webhook)))
+            .route("/api/v1/channels/{provider}/{channel_id}/webhook", post(routes::webhook)
+                .layer(axum::extract::DefaultBodyLimit::max(6 * 1024 * 1024))))
     }
 }
 

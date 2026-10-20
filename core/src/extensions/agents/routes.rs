@@ -15,7 +15,7 @@ use super::persistence::PersistCtx;
 use super::streaming;
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::ipc::{AgentInvokePayload, FileAttachment, LlmModelRef};
+use crate::ipc::{AgentInvokePayload, LlmModelRef};
 use crate::routes::{self, SharedRuntime, llm_models::fetch_default_llm};
 
 #[derive(Deserialize)]
@@ -182,26 +182,9 @@ pub async fn invoke_agent(
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .map(|(provider, model)| LlmModelRef { provider, model });
 
-    // Resolve file_ids → nonce download URLs (worker fetches bytes via HTTP, no base64 in IPC).
-    let attachments = if let Some(ids) = body.file_ids.as_deref() {
-        let mut list = Vec::with_capacity(ids.len());
-        for raw_id in ids {
-            let file_id = raw_id.parse::<uuid::Uuid>()
-                .map_err(|_| ApiError::BadRequest(format!("invalid file_id: {raw_id}")))?;
-            let (name, content_type): (String, String) = sqlx::query_as(
-                "SELECT name, content_type FROM rootcx_system.files WHERE id = $1 AND app_id = $2",
-            ).bind(file_id).bind(&app_id).fetch_optional(&pool).await?
-            .ok_or_else(|| ApiError::NotFound(format!("file {file_id}")))?;
-
-            let nonce = rt.upload_nonces().lock().unwrap_or_else(|e| e.into_inner())
-                .create_download(file_id, &app_id);
-            let url = crate::extensions::storage::download_url(rt.runtime_url(), &nonce);
-            list.push(FileAttachment { name, content_type, url });
-        }
-        Some(list)
-    } else {
-        None
-    };
+    let attachments = super::attachments::stored(
+        &rt, &app_id, identity.user_id, body.file_ids.as_deref().unwrap_or_default(),
+    ).await?;
 
     let payload = AgentInvokePayload {
         invoke_id: uuid::Uuid::new_v4().to_string(),
