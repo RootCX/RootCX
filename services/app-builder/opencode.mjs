@@ -20,6 +20,17 @@ export function providerError(error) {
   return 'BUILD_FAILED';
 }
 
+// Classify the invoked command, never words in file names or OpenSpec change names.
+function shellAction(raw) {
+  const command = String(raw).trim().replace(/^(?:cd\s+[^;&|\n]+&&\s*)+/, '').replace(/^(?:npx|bunx)\s+/, '');
+  if (/^openspec\s+(?:new|init|archive|update)\b/.test(command)) return 'plan';
+  if (/^(?:tsc\b|(?:npm|bun|pnpm|yarn)\s+(?:run\s+)?(?:typecheck|check)\b)/.test(command)) return 'typecheck';
+  if (/^(?:(?:vitest|jest|pytest)\b|node\s+--test\b|(?:npm|bun|pnpm|yarn)\s+(?:run\s+)?test\b)/.test(command)) return 'test';
+  if (/^(?:(?:npm|bun|pnpm|yarn)\s+(?:run\s+)?build\b|vite\s+build\b)/.test(command)) return 'build';
+  if (/^(?:npm|bun|pnpm|yarn)\s+(?:install|ci)\b/.test(command)) return 'dependencies';
+  return 'inspect';
+}
+
 // Raw model text, reasoning, paths and command output never become public progress.
 export function progressFor(event) {
   if (event.type === 'session.status' && event.properties.status?.type === 'retry') return 'waiting';
@@ -29,10 +40,7 @@ export function progressFor(event) {
   if (part.state?.status === 'error') return 'repairing';
   if (['edit', 'write', 'apply_patch', 'patch'].includes(part.tool)) return 'editing';
   if (['bash', 'shell'].includes(part.tool)) {
-    const command = String(part.state?.input?.command ?? '');
-    if (/^\s*(?:cat|ls|pwd|rg|grep|find|head|tail|sed)\b/.test(command)) return 'understanding';
-    if (/\b(?:tsc|vitest|jest|pytest|test|check|typecheck|build)\b/.test(command)) return 'checking';
-    return 'understanding';
+    return ['typecheck', 'test', 'build'].includes(shellAction(part.state?.input?.command ?? '')) ? 'checking' : 'understanding';
   }
   if (['skill', 'read', 'glob', 'grep', 'list', 'webfetch'].includes(part.tool)) return 'understanding';
   return null;
@@ -50,13 +58,7 @@ export function narrationFact(event, phase) {
   else if (/(?:^|\/)openspec\//.test(path)) area = 'rules';
   let action = 'inspect';
   if (['edit', 'write', 'apply_patch', 'patch'].includes(part?.tool)) action = area === 'rules' ? 'plan' : 'edit';
-  if (['bash', 'shell'].includes(part?.tool) && !/^\s*(?:cat|ls|pwd|rg|grep|find|head|tail|sed)\b/.test(command)) {
-    if (/\b(?:tsc|typecheck)\b/.test(command)) action = 'typecheck';
-    else if (/\b(?:vitest|jest|pytest|test)\b/.test(command)) action = 'test';
-    else if (/(?:^|[;&|])\s*(?:(?:npx|bunx)\s+)?openspec\s+(?:new|init|archive|update)\b/.test(command)) action = 'plan';
-    else if (/\bbuild\b/.test(command)) action = 'build';
-    else if (/\b(?:install|ci)\b/.test(command)) action = 'dependencies';
-  }
+  if (['bash', 'shell'].includes(part?.tool)) action = shellAction(command);
   return { id: part?.id, phase, status: part?.state?.status, area, action };
 }
 
