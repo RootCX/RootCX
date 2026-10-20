@@ -12,8 +12,11 @@ use crate::worker_manager::WorkerManager;
 
 const APP_ID: &str = "assistant";
 const RELEASE_URL: &str = "https://github.com/RootCX/ai-agent-base/releases/latest/download/backend.tar.gz";
-const SANDBOX_RELEASE_URL: &str = "https://github.com/RootCX/ai-agent-base/releases/download/v0.4.1/backend.tar.gz";
-const SANDBOX_RELEASE_SHA256: &str = "d32d0bf35238654308c9542b8aeced12cfccd6cdda8fe6b9af7c01c9624d8385";
+const SANDBOX_RELEASE_URL: &str = "https://github.com/RootCX/ai-agent-base/releases/download/v0.4.2/backend.tar.gz";
+const SANDBOX_RELEASE_SHA256: &str = "d1bd04d7105caec0c8f6a26605e778eba3896b0eabb403c7f14aabffbef08d33";
+const LEGACY_BACKEND_SHA256: &str = "87292a21feaa8317200295d400bea89abc49d1c1bb0fee6aca8cdceaa2996162";
+const BACKEND_PATCH_URL: &str = "https://github.com/RootCX/ai-agent-base/releases/download/v0.4.2/index.ts";
+const BACKEND_PATCH_SHA256: &str = "f249cc21581d04ccaf60b5b33e1ed4285a5832d6179a2b6fe4b1805a41c2eca9";
 const LOCAL_OVERRIDE_ENV: &str = "ROOTCX_ASSISTANT_DIR";
 
 fn w(msg: impl std::fmt::Display) -> RuntimeError { RuntimeError::Worker(msg.to_string()) }
@@ -43,13 +46,30 @@ pub async fn seed_assistant(
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM rootcx_system.apps WHERE id = $1)",
     ).bind(APP_ID).fetch_one(pool).await.map_err(RuntimeError::Schema)?;
-    if exists { return Ok(()); }
-
     let app_dir = data_dir.join("apps").join(APP_ID);
-    std::fs::create_dir_all(&app_dir).map_err(w)?;
-
     let env_dir = std::env::var_os(LOCAL_OVERRIDE_ENV).map(std::path::PathBuf::from);
     let sandboxed = crate::worker_sandbox::enabled()?;
+    if exists {
+        // Upgrade only the unmodified bundled backend, preserving prompts, data and custom agents.
+        if sandboxed && local_dir.is_none() && env_dir.is_none() {
+            let path = app_dir.join("index.ts");
+            if let Ok(bytes) = std::fs::read(&path) {
+                if hex::encode(Sha256::digest(&bytes)) == LEGACY_BACKEND_SHA256 {
+                    let bytes = reqwest::get(BACKEND_PATCH_URL).await.map_err(w)?
+                        .error_for_status().map_err(w)?.bytes().await.map_err(w)?;
+                    if hex::encode(Sha256::digest(&bytes)) != BACKEND_PATCH_SHA256 {
+                        return Err(w("assistant patch checksum mismatch"));
+                    }
+                    let temporary = app_dir.join("index.ts.upgrade");
+                    std::fs::write(&temporary, &bytes).map_err(w)?;
+                    std::fs::rename(&temporary, &path).map_err(w)?;
+                    info!("bundled assistant error handling upgraded to v0.4.2");
+                }
+            }
+        }
+        return Ok(());
+    }
+    std::fs::create_dir_all(&app_dir).map_err(w)?;
     let bundled_dependencies = sandboxed && local_dir.is_none() && env_dir.is_none();
     if let Some(src) = local_dir.or(env_dir.as_deref()) {
         info!("seeding assistant from local override: {}", src.display());

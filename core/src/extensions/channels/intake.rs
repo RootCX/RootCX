@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 pub(super) enum Admission {
     Ready,
-    Duplicate(String),
+    Duplicate(String, Option<String>),
     Busy,
 }
 
@@ -18,6 +18,8 @@ pub(super) async fn bootstrap(pool: &PgPool) -> Result<(), sqlx::Error> {
     )
     .execute(pool)
     .await?;
+    sqlx::query("ALTER TABLE rootcx_system.channel_receipts ADD COLUMN IF NOT EXISTS error_code TEXT")
+        .execute(pool).await?;
     sqlx::query(
         "CREATE UNIQUE INDEX IF NOT EXISTS channel_receipts_running_chat
         ON rootcx_system.channel_receipts(channel_id, chat_id)
@@ -45,15 +47,15 @@ pub(super) async fn admit(
         .bind(format!("channel-intake:{channel}:{chat}"))
         .execute(&mut *tx)
         .await?;
-    if let Some(status) = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM rootcx_system.channel_receipts WHERE channel_id=$1 AND delivery_id=$2",
+    if let Some((status, code)) = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT status, error_code FROM rootcx_system.channel_receipts WHERE channel_id=$1 AND delivery_id=$2",
     )
     .bind(channel)
     .bind(delivery)
     .fetch_optional(&mut *tx)
     .await?
     {
-        return Ok(Admission::Duplicate(status));
+        return Ok(Admission::Duplicate(status, code));
     }
     if is_message
         && sqlx::query_scalar::<_, bool>(
@@ -80,9 +82,9 @@ pub(super) async fn admit(
     .rows_affected();
     tx.commit().await?;
     if inserted == 0 {
-        let status = sqlx::query_scalar("SELECT status FROM rootcx_system.channel_receipts WHERE channel_id=$1 AND delivery_id=$2")
+        let (status, code) = sqlx::query_as("SELECT status, error_code FROM rootcx_system.channel_receipts WHERE channel_id=$1 AND delivery_id=$2")
             .bind(channel).bind(delivery).fetch_one(pool).await?;
-        return Ok(Admission::Duplicate(status));
+        return Ok(Admission::Duplicate(status, code));
     }
     Ok(Admission::Ready)
 }
@@ -92,14 +94,16 @@ pub(super) async fn finish(
     channel: Uuid,
     delivery: &str,
     succeeded: bool,
+    error_code: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE rootcx_system.channel_receipts SET status=$3
+        "UPDATE rootcx_system.channel_receipts SET status=$3, error_code=$4
         WHERE channel_id=$1 AND delivery_id=$2 AND status='processing'",
     )
     .bind(channel)
     .bind(delivery)
     .bind(if succeeded { "done" } else { "failed" })
+    .bind(error_code)
     .execute(pool)
     .await?;
     Ok(())
@@ -152,9 +156,9 @@ mod tests {
                 .unwrap(),
             Admission::Ready
         ));
-        finish(&pool, channels[0], "same", false).await.unwrap();
+        finish(&pool, channels[0], "same", false, Some("AI_CREDITS_EXHAUSTED")).await.unwrap();
         assert!(
-            matches!(admit(&pool, channels[0], "same", "chat", true).await.unwrap(), Admission::Duplicate(s) if s == "failed")
+            matches!(admit(&pool, channels[0], "same", "chat", true).await.unwrap(), Admission::Duplicate(s, Some(code)) if s == "failed" && code == "AI_CREDITS_EXHAUSTED")
         );
         assert!(matches!(
             admit(&pool, channels[0], "second", "chat", true)
