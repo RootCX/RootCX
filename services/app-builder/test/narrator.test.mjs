@@ -262,3 +262,18 @@ test('batched outcomes stay chronological and a later failure invalidates earlie
   assert.deepEqual(facts.map(fact => fact.status), ['completed', 'error']);
   assert.deepEqual(delivered, []);
 });
+
+test('opaque shell work invalidates a prior check even without an editing phase', async t => {
+  let now = 0; let timer; const delivered = [];
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(globalThis, 'setInterval', fn => { timer = fn; return { unref() {} }; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  let calls = 0;
+  const voice = narrator({ prompt: 'Acompte', signal: signal(), onProgress: (...args) => delivered.push(args), translate: async () => ++calls === 1 ? null : { message: 'Les contrôles ont réussi.', kind: 'verified' } });
+  t.after(() => voice.close());
+  voice.observe({ id: 'first', phase: 'understanding', action: 'inspect', status: 'running' }); await tick();
+  voice.observe({ phase: 'checking', source: 'platform', action: 'test', status: 'completed' });
+  voice.observe({ id: 'shell', phase: 'understanding', source: 'tool', action: 'work', status: 'running' });
+  now = 4001; timer(); await tick();
+  assert.deepEqual(delivered, []);
+});

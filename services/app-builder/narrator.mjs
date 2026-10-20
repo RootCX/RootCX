@@ -74,7 +74,7 @@ export function narrator({ translate, prompt, context = [], signal, onProgress }
       const message = businessText(typeof result === 'string' ? result : result?.message);
       if (typeof result === 'object' && result !== null && !['progress', 'verified'].includes(result.kind)) return;
       const verified = result?.kind === 'verified';
-      const invalidated = facts.findLastIndex(fact => fact.status === 'error' || ['editing', 'repairing'].includes(fact.phase));
+      const invalidated = facts.findLastIndex(fact => fact.status === 'error' || ['editing', 'repairing'].includes(fact.phase) || (fact.source === 'tool' && ['work', 'plan', 'edit'].includes(fact.action)));
       const verificationAllowed = facts.slice(invalidated + 1).some(fact => fact.source === 'platform' && fact.status === 'completed' && ['test', 'typecheck', 'review'].includes(fact.action));
       if (verified && !verificationAllowed) return;
       if (!verified && message && /(?:\b(?:validé(?:e|s|es)?|vérifié(?:e|s|es)?|testé(?:e|s|es)?|succès|corrects?|conformes?|fonctionne|réussi[es]*)\b|tout est bon)/iu.test(message)) return;
