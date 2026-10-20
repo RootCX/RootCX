@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::{json, Value as JsonValue};
 use tracing::warn;
 
-use super::types::{ChannelError, ChannelProvider, InboundEvent, MediaRef};
+use super::types::{ChannelError, ChannelProvider, InboundEvent, MediaRef, MediaSource};
 
 pub struct TelegramProvider {
     http: reqwest::Client,
@@ -160,7 +160,7 @@ impl ChannelProvider for TelegramProvider {
             // Telegram sends multiple resolutions; pick largest by file_size
             if let Some(best) = photos.into_iter().max_by_key(|p| p.file_size.unwrap_or(0)) {
                 media.push(MediaRef {
-                    provider_file_id: best.file_id,
+                    source: MediaSource::Provider(best.file_id),
                     content_type: Some("image/jpeg".into()),
                     name: Some("photo.jpg".into()),
                 });
@@ -169,7 +169,7 @@ impl ChannelProvider for TelegramProvider {
 
         if let Some(audio) = msg.audio {
             media.push(MediaRef {
-                provider_file_id: audio.file_id,
+                source: MediaSource::Provider(audio.file_id),
                 content_type: audio.mime_type.or(Some("audio/mpeg".into())),
                 name: Some("audio".into()),
             });
@@ -177,7 +177,7 @@ impl ChannelProvider for TelegramProvider {
 
         if let Some(voice) = msg.voice {
             media.push(MediaRef {
-                provider_file_id: voice.file_id,
+                source: MediaSource::Provider(voice.file_id),
                 content_type: Some("audio/ogg".into()),
                 name: Some("voice.ogg".into()),
             });
@@ -185,7 +185,7 @@ impl ChannelProvider for TelegramProvider {
 
         if let Some(doc) = msg.document {
             media.push(MediaRef {
-                provider_file_id: doc.file_id,
+                source: MediaSource::Provider(doc.file_id),
                 content_type: doc.mime_type,
                 name: doc.file_name,
             });
@@ -206,19 +206,20 @@ impl ChannelProvider for TelegramProvider {
 
         // Telegram files aren't directly URL-addressable; must call getFile first to resolve the path.
         let resp: JsonValue = self.http
-            .get(Self::bot_url(token, &format!("getFile?file_id={}", media_ref.provider_file_id)))
+            .get(Self::bot_url(token, &format!("getFile?file_id={}", media_ref.provider_file_id()?)))
             .send().await.ok()?
             .json().await.ok()?;
         let file_path = resp.pointer("/result/file_path")?.as_str()?;
 
         let url = format!("https://api.telegram.org/file/bot{token}/{file_path}");
-        let bytes = self.http.get(&url).send().await.ok()?.bytes().await.ok()?;
 
         let content_type = media_ref.content_type.clone()
             .unwrap_or_else(|| "application/octet-stream".into());
         let name = media_ref.name.clone()
             .unwrap_or_else(|| "file".into());
 
+        let response = self.http.get(&url).send().await.ok()?;
+        let bytes = crate::extensions::agents::attachments::read_download(response, &content_type).await?;
         Some((bytes, content_type, name))
     }
 
@@ -423,7 +424,7 @@ mod tests {
         })).await.unwrap();
         let InboundEvent::Message { text, media, .. } = event else { panic!("expected Message") };
         assert_eq!(text, "");
-        assert_eq!(media[0].provider_file_id, "f1");
+        assert_eq!(media[0].provider_file_id().unwrap(), "f1");
     }
 
     #[tokio::test]
@@ -437,7 +438,7 @@ mod tests {
             ]}
         })).await.unwrap();
         let InboundEvent::Message { media, .. } = event else { panic!("expected Message") };
-        assert_eq!(media[0].provider_file_id, "large");
+        assert_eq!(media[0].provider_file_id().unwrap(), "large");
     }
 
     #[tokio::test]
@@ -449,9 +450,9 @@ mod tests {
         })).await.unwrap();
         let InboundEvent::Message { media, .. } = event else { panic!("expected Message") };
         assert_eq!(media.len(), 2);
-        let voice = media.iter().find(|m| m.provider_file_id == "v1").unwrap();
+        let voice = media.iter().find(|m| m.provider_file_id().unwrap() == "v1").unwrap();
         assert_eq!(voice.content_type.as_deref(), Some("audio/ogg"));
-        let doc = media.iter().find(|m| m.provider_file_id == "d1").unwrap();
+        let doc = media.iter().find(|m| m.provider_file_id().unwrap() == "d1").unwrap();
         assert_eq!(doc.name.as_deref(), Some("report.pdf"));
     }
 

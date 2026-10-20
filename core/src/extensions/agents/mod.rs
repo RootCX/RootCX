@@ -1,4 +1,5 @@
 pub(crate) mod approvals;
+pub(crate) mod attachments;
 pub(crate) mod config;
 pub(crate) mod persistence;
 pub(crate) mod routes;

@@ -3,12 +3,23 @@ use axum::body::Bytes;
 use axum::http::HeaderMap;
 use serde_json::Value as JsonValue;
 
-/// Provider-agnostic reference to a media file from an inbound message.
-/// Contains only metadata — bytes are fetched later via `download_media`.
+/// Provider-owned media reference. Native providers use remote file IDs;
+/// managed relays carry bounded, authenticated inline bytes.
+pub enum MediaSource {
+    Provider(String),
+    Inline(Bytes),
+}
+
 pub struct MediaRef {
-    pub provider_file_id: String,
+    pub source: MediaSource,
     pub content_type: Option<String>,
     pub name: Option<String>,
+}
+
+impl MediaRef {
+    pub fn provider_file_id(&self) -> Option<&str> {
+        match &self.source { MediaSource::Provider(id) => Some(id), MediaSource::Inline(_) => None }
+    }
 }
 
 pub enum InboundEvent {

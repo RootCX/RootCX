@@ -19,8 +19,7 @@ use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::extensions::agents::{self, config as agent_config, persistence};
 use crate::extensions::agents::approvals::ApprovalResponse;
-use crate::extensions::storage::backend::{PostgresBackend, StorageBackend};
-use crate::ipc::{AgentInvokePayload, FileAttachment, LlmModelRef};
+use crate::ipc::{AgentInvokePayload, LlmModelRef};
 use crate::routes::{self, SharedRuntime, llm_models::fetch_default_llm};
 
 #[derive(Deserialize)]
@@ -268,24 +267,11 @@ async fn do_invoke(
         .map(|(p, m)| LlmModelRef { provider: p, model: m });
 
     let provider = super::provider_for(provider_name, config).ok_or("unknown channel provider")?;
-    let storage = PostgresBackend;
-    let downloaded: Vec<_> = join_all(
-        media.iter().map(|m| provider.download_media(config, m))
-    ).await;
-    let mut attachment_list: Vec<FileAttachment> = Vec::new();
-    for result in downloaded.into_iter().flatten() {
-        let (bytes, content_type, name) = result;
-        let file_id = uuid::Uuid::new_v4();
-        if let Err(err) = storage.put(pool, file_id, &app_id, &name, &content_type, &bytes, None).await {
-            error!(channel_id, "failed to store media: {err}");
-            continue;
-        }
-        let nonce = rt.upload_nonces().lock().unwrap_or_else(|e| e.into_inner())
-            .create_download(file_id, &app_id);
-        let url = crate::extensions::storage::download_url(rt.runtime_url(), &nonce);
-        attachment_list.push(FileAttachment { name, content_type, url });
-    }
-    let attachments = if attachment_list.is_empty() { None } else { Some(attachment_list) };
+    agents::attachments::validate_count(media.len()).map_err(&e)?;
+    let downloaded: Vec<_> = join_all(media.iter().map(|m| provider.download_media(config, m))).await;
+    let files = downloaded.into_iter().collect::<Option<Vec<_>>>()
+        .ok_or("Could not load the attached media; no model invocation was made")?;
+    let attachments = agents::attachments::received(rt, &app_id, human, files).await.map_err(&e)?;
 
     let payload = AgentInvokePayload {
         invoke_id: uuid::Uuid::new_v4().to_string(),
