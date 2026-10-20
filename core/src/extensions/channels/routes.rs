@@ -190,20 +190,21 @@ pub async fn webhook(
     if delivery.is_empty() || delivery.len() > 512 { return Err(ApiError::BadRequest("invalid delivery id".into())); }
     let channel = channel_id.parse().map_err(|_| ApiError::BadRequest("invalid channel".into()))?;
     match super::intake::admit(rt.pool(), channel, &delivery, &chat, is_message).await? {
-        super::intake::Admission::Duplicate(status) => return Ok(Json(json!({"ok":true,"duplicate":true,"status":status}))),
+        super::intake::Admission::Duplicate(status, code) => return Ok(Json(json!({"ok":true,"duplicate":true,"status":status,"errorCode":code}))),
         super::intake::Admission::Busy => return Err(ApiError::Conflict("conversation busy; resend after the current request".into())),
         super::intake::Admission::Ready => {}
     }
     // Managed gateways wait for a terminal receipt; native webhooks acknowledge promptly.
     if config["managed"] == true {
         let result = process_event(&rt, &channel_id, &provider_name, &config, provider.as_ref(), event).await;
-        super::intake::finish(rt.pool(), channel, &delivery, result.is_ok()).await?;
-        return Ok(Json(json!({"ok":true,"status":if result.is_ok() {"done"} else {"failed"}})));
+        let code = result.as_ref().err().map(|error| channel_error_code(error));
+        super::intake::finish(rt.pool(), channel, &delivery, result.is_ok(), code).await?;
+        return Ok(Json(json!({"ok":true,"status":if result.is_ok() {"done"} else {"failed"},"errorCode":code})));
     }
     tokio::spawn(async move {
         let result = process_event(&rt, &channel_id, &provider_name, &config, provider.as_ref(), event).await;
         if let Err(error) = &result { error!(channel_id, %error, "channel processing failed; do not replay actions"); }
-        if let Err(error) = super::intake::finish(rt.pool(), channel, &delivery, result.is_ok()).await {
+        if let Err(error) = super::intake::finish(rt.pool(), channel, &delivery, result.is_ok(), None).await {
             error!(channel_id, %error, "channel receipt remains processing; operator reconciliation required");
         }
     });
@@ -312,7 +313,9 @@ async fn do_invoke(
             crate::worker::AgentEvent::Error { error: e } => {
                 if let Some(h) = &typing { h.abort(); }
                 error!(channel_id, chat_id, "agent error: {e}");
-                let _ = provider.send_response(config, chat_id, "La demande a échoué. Vérifiez le résultat dans SHAPP avant de réessayer.").await;
+                if config["managed"] != true {
+                    let _ = provider.send_response(config, chat_id, "La demande a échoué. Vérifiez le résultat dans SHAPP avant de réessayer.").await;
+                }
                 return Err(format!("agent failed: {e}"));
             }
             _ => {}
@@ -335,6 +338,16 @@ async fn do_invoke(
 }
 
 const DEFAULT_AGENT: &str = "assistant";
+
+fn channel_error_code(error: &str) -> &'static str {
+    match error.strip_prefix("agent failed: ") {
+        Some("AI_CREDITS_EXHAUSTED") => "AI_CREDITS_EXHAUSTED",
+        Some("AI_CREDITS_RESERVED") => "AI_CREDITS_RESERVED",
+        Some("AI_RATE_LIMITED") => "AI_RATE_LIMITED",
+        Some("AI_UNAVAILABLE") => "AI_UNAVAILABLE",
+        _ => "AGENT_FAILED",
+    }
+}
 const MSG_LINK_OK: &str = "Account linked! Your integrations are now available.";
 const MSG_LINK_INVALID: &str = "Link expired or invalid. Please try again from the dashboard.";
 const ACTION_APPROVE: &str = "approve";
@@ -673,6 +686,14 @@ async fn resolve_invoker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn channel_errors_require_an_exact_agent_code() {
+        for code in ["AI_CREDITS_EXHAUSTED", "AI_CREDITS_RESERVED", "AI_RATE_LIMITED", "AI_UNAVAILABLE"] {
+            assert_eq!(channel_error_code(&format!("agent failed: {code}")), code);
+            assert_eq!(channel_error_code(&format!("upstream details mention {code}")), "AGENT_FAILED");
+        }
+    }
 
     #[test]
     fn config_patch_strips_protected_keys() {
