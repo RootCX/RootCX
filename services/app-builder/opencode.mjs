@@ -30,8 +30,8 @@ export function progressFor(event) {
   if (['edit', 'write', 'apply_patch', 'patch'].includes(part.tool)) return 'editing';
   if (['bash', 'shell'].includes(part.tool)) {
     const command = String(part.state?.input?.command ?? '');
+    if (/^\s*(?:cat|ls|pwd|rg|grep|find|head|tail|sed)\b/.test(command)) return 'understanding';
     if (/\b(?:tsc|vitest|jest|pytest|test|check|typecheck|build)\b/.test(command)) return 'checking';
-    if (/^\s*(?:cat|ls|pwd|rg|grep|find|head|tail)\b/.test(command)) return 'understanding';
     return 'understanding';
   }
   if (['skill', 'read', 'glob', 'grep', 'list', 'webfetch'].includes(part.tool)) return 'understanding';
@@ -50,7 +50,7 @@ export function narrationFact(event, phase) {
   else if (/(?:^|\/)openspec\//.test(path)) area = 'rules';
   let action = 'inspect';
   if (['edit', 'write', 'apply_patch', 'patch'].includes(part?.tool)) action = area === 'rules' ? 'plan' : 'edit';
-  if (['bash', 'shell'].includes(part?.tool)) {
+  if (['bash', 'shell'].includes(part?.tool) && !/^\s*(?:cat|ls|pwd|rg|grep|find|head|tail|sed)\b/.test(command)) {
     if (/\b(?:tsc|typecheck)\b/.test(command)) action = 'typecheck';
     else if (/\b(?:vitest|jest|pytest|test)\b/.test(command)) action = 'test';
     else if (/\bopenspec\b/.test(command)) action = 'plan';

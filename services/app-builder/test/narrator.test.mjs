@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { narrator, businessText, narrationGateway } from '../narrator.mjs';
-import { narrationFact } from '../opencode.mjs';
+import { narrationFact, progressFor } from '../opencode.mjs';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const signal = () => new AbortController().signal;
@@ -182,4 +182,13 @@ test('a duplicate old tool cannot invalidate the current translation', async t =
   voice.observe(old);
   release('Je vérifie le calcul de votre acompte.'); await tick();
   assert.deepEqual(messages, [['checking', 'Je vérifie le calcul de votre acompte.']]);
+});
+
+
+test('reading rules or tests does not announce preparation or verification', () => {
+  for (const command of ['cat openspec/specs/devis/spec.md', 'cat backend/pricing.test.ts', 'rg test package.json', "sed -n '1,20p' backend/test.ts"]) {
+    const event = { properties: { part: { type: 'tool', tool: 'shell', state: { status: 'running', input: { command } } } } };
+    assert.equal(progressFor(event), 'understanding', command);
+    assert.equal(narrationFact(event, progressFor(event)).action, 'inspect', command);
+  }
 });
