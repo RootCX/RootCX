@@ -78,6 +78,17 @@ impl Tool for QueryDataTool {
         let has_query = PAGE_OPTION_KEYS
             .iter()
             .any(|key| ctx.args.get(*key).is_some());
+        let query_options = || -> JsonValue {
+            JsonValue::Object(PAGE_OPTION_KEYS.iter().filter_map(|key| {
+                ctx.args.get(*key).map(|value| ((*key).into(), value.clone()))
+            }).collect())
+        };
+        if ctx.delegated_authority().is_some() {
+            return cross_app_operations::execute_agent(
+                ctx, app, if has_query { "findPage" } else { "findAll" },
+                entity, query_options(),
+            ).await;
+        }
         if app != ctx.app_id {
             let Some(source_app) = ctx
                 .core_bound_app_id
@@ -99,6 +110,7 @@ impl Tool for QueryDataTool {
                     Some("unbound_context"),
                     None,
                     uuid::Uuid::new_v4(),
+                    "application_grant",
                 )
                 .await
                 .is_err()
@@ -107,21 +119,13 @@ impl Tool for QueryDataTool {
                 }
                 return Err("cross-app access requires a Core-bound application worker".into());
             };
-            let options: serde_json::Map<String, JsonValue> = PAGE_OPTION_KEYS
-                .iter()
-                .filter_map(|key| {
-                    ctx.args
-                        .get(*key)
-                        .map(|value| ((*key).into(), value.clone()))
-                })
-                .collect();
             return cross_app_operations::execute(
                 &ctx.pool,
                 source_app,
                 app,
                 if has_query { "findPage" } else { "findAll" },
                 entity,
-                JsonValue::Object(options),
+                query_options(),
                 OperationContext::query_tool(state),
             )
             .await;

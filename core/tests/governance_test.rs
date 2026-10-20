@@ -10,6 +10,9 @@ mod collection_reads_test;
 #[path = "governance/sensitive_sql_test.rs"]
 mod sensitive_sql_test;
 
+#[path = "governance/agent_collection_permissions_test.rs"]
+mod agent_collection_permissions_test;
+
 #[path = "governance/agent_identity_test.rs"]
 mod agent_identity_test;
 #[path = "governance/cross_app_crud_test.rs"]

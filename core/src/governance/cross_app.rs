@@ -689,6 +689,7 @@ pub async fn record_read_audit(
     denial_category: Option<&str>,
     row_count: Option<i64>,
     correlation_id: Uuid,
+    authorization_kind: &str,
 ) -> Result<(), ApiError> {
     let mut connection = pool.acquire().await?;
     insert_read_audit(
@@ -704,6 +705,7 @@ pub async fn record_read_audit(
         denial_category,
         row_count,
         correlation_id,
+        authorization_kind,
     )
     .await
     .map_err(|error| ApiError::Internal(format!("cross-app audit unavailable: {error}")))
@@ -722,6 +724,7 @@ pub(crate) async fn insert_read_audit(
     denial_category: Option<&str>,
     row_count: Option<i64>,
     correlation_id: Uuid,
+    authorization_kind: &str,
 ) -> Result<(), sqlx::Error> {
     let (consumer_installation_id, provider_installation_id, grant_id, grant_version, projection) =
         authority.map_or((None, None, None, None, Vec::new()), |a| {
@@ -738,8 +741,8 @@ pub(crate) async fn insert_read_audit(
             (consumer_app, provider_app, consumer_installation_id,
              provider_installation_id, entity, action, grant_id, grant_version,
              principal_id, responsible_human_id, outcome, denial_category,
-             row_count, correlation_id, projection)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+             row_count, correlation_id, projection, authorization_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)",
     )
     .bind(consumer_app)
     .bind(provider_app)
@@ -756,6 +759,7 @@ pub(crate) async fn insert_read_audit(
     .bind(row_count)
     .bind(correlation_id)
     .bind(projection)
+    .bind(authorization_kind)
     .execute(&mut *connection)
     .await
     .map(|_| ())
@@ -1490,6 +1494,7 @@ pub struct CrossAppReadAudit {
     pub responsible_human_id: Option<Uuid>,
     pub outcome: String,
     pub denial_category: Option<String>,
+    pub authorization_kind: String,
     pub row_count: Option<i64>,
     pub correlation_id: Uuid,
     pub projection: Vec<String>,
@@ -1522,7 +1527,7 @@ pub async fn list_read_audit(
             "SELECT id, consumer_app, provider_app, consumer_installation_id,
                     provider_installation_id, entity, action, grant_id,
                     grant_version, principal_id, responsible_human_id, outcome,
-                    denial_category, row_count, correlation_id, projection, created_at
+                    denial_category, authorization_kind, row_count, correlation_id, projection, created_at
                FROM rootcx_system.cross_app_read_audit
               WHERE grant_id = $1 ORDER BY created_at DESC LIMIT $2",
         )
@@ -1535,7 +1540,7 @@ pub async fn list_read_audit(
             "SELECT id, consumer_app, provider_app, consumer_installation_id,
                     provider_installation_id, entity, action, grant_id,
                     grant_version, principal_id, responsible_human_id, outcome,
-                    denial_category, row_count, correlation_id, projection, created_at
+                    denial_category, authorization_kind, row_count, correlation_id, projection, created_at
                FROM rootcx_system.cross_app_read_audit
               ORDER BY created_at DESC LIMIT $1",
         )
