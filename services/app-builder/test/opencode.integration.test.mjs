@@ -85,4 +85,6 @@ test('real OpenCode loads RootCX skill, edits, cancels running tools and resumes
   turn = 2;
   const resumed = await code({ root, appId: 'sample', prompt: 'Resume our conversation', signal: AbortSignal.timeout(10000), config, compile });
   assert.equal(resumed.summary, 'La modification est préparée.');
+  assert.equal(resumed.frontend, '');
+  assert.equal(publications, 1, 'a reply with unchanged sources must not build');
 });

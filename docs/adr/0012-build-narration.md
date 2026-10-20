@@ -29,3 +29,9 @@ it would spread those rules back across the engine, Core and the companion.
 Observations deliberately carry categories rather than raw source or logs;
 updates can describe the requested work and actual stage, not assert unverified
 feature completion. Existing execution-authority ADRs remain unchanged.
+
+The observer now distinguishes bounded action categories (rules, edits, tests,
+version preparation) and deduplicates tool events by private identity and status
+in a bounded recent set. Returning to the same phase remains observable. Tool
+identity never reaches Nova or the user. Calls are separated by four seconds
+and capped at forty per execution; no timed update is invented without evidence.

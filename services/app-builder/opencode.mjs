@@ -23,7 +23,7 @@ export function providerError(error) {
 // Raw model text, reasoning, paths and command output never become public progress.
 export function progressFor(event) {
   if (event.type === 'session.status' && event.properties.status?.type === 'retry') return 'waiting';
-  if (event.type === 'session.status' && event.properties.status?.type === 'busy') return 'understanding';
+  if (event.type === 'session.status' && event.properties.status?.type === 'busy') return null;
   const part = event.properties?.part;
   if (part?.type !== 'tool') return null;
   if (part.state?.status === 'error') return 'repairing';
@@ -32,7 +32,7 @@ export function progressFor(event) {
     const command = String(part.state?.input?.command ?? '');
     if (/\b(?:tsc|vitest|jest|pytest|test|check|typecheck|build)\b/.test(command)) return 'checking';
     if (/^\s*(?:cat|ls|pwd|rg|grep|find|head|tail)\b/.test(command)) return 'understanding';
-    return 'editing';
+    return 'understanding';
   }
   if (['skill', 'read', 'glob', 'grep', 'list', 'webfetch'].includes(part.tool)) return 'understanding';
   return null;
@@ -41,11 +41,23 @@ export function progressFor(event) {
 // Engine-specific evidence is reduced before crossing the narration Interface.
 export function narrationFact(event, phase) {
   const part = event.properties?.part;
-  const path = String(part?.state?.input?.filePath ?? part?.state?.input?.path ?? '');
+  const input = part?.state?.input ?? {};
+  const path = String(input.filePath ?? input.path ?? '');
+  const command = String(input.command ?? '');
   let area = 'application';
   if (/\.(?:tsx|jsx|css|html)$/.test(path)) area = 'screen';
   else if (/manifest\.json$|(?:^|\/)backend\//.test(path)) area = 'data';
-  return { phase, status: part?.state?.status, area };
+  else if (/(?:^|\/)openspec\//.test(path)) area = 'rules';
+  let action = 'inspect';
+  if (['edit', 'write', 'apply_patch', 'patch'].includes(part?.tool)) action = area === 'rules' ? 'plan' : 'edit';
+  if (['bash', 'shell'].includes(part?.tool)) {
+    if (/\b(?:tsc|typecheck)\b/.test(command)) action = 'typecheck';
+    else if (/\b(?:vitest|jest|pytest|test)\b/.test(command)) action = 'test';
+    else if (/\bopenspec\b/.test(command)) action = 'plan';
+    else if (/\bbuild\b/.test(command)) action = 'build';
+    else if (/\b(?:install|ci)\b/.test(command)) action = 'dependencies';
+  }
+  return { id: part?.id, phase, status: part?.state?.status, area, action };
 }
 
 export async function engine(root, config) {

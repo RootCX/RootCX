@@ -34,7 +34,6 @@ export function createBuilder(config, coding = code) {
     const emit = value => { if (!res.destroyed) res.write(JSON.stringify(value) + '\n'); };
     const onProgress = (next, text) => {
       if (!['understanding', 'editing', 'checking', 'repairing', 'waiting'].includes(next)) return;
-      if (next === 'understanding' && !['understanding', 'waiting'].includes(phase)) return;
       if (phase === next && !text) return;
       phase = next;
       if (streaming) emit({ type: 'progress', phase, message: text });

@@ -33,12 +33,13 @@ export function narrator({ translate, prompt, signal, onProgress }) {
   const previous = [];
   const pending = new Set();
   const observed = new Set();
+  let lastObservation;
   const controller = new AbortController();
-  const timer = setInterval(() => void flush(), 8000);
+  const timer = setInterval(() => void flush(), 4000);
   timer.unref();
 
   async function flush() {
-    if (closed || signal.aborted || inFlight || !pending.size || calls >= 20 || Date.now() - lastSent < 8000) return;
+    if (closed || signal.aborted || inFlight || !pending.size || calls >= 40 || Date.now() - lastSent < 4000) return;
     inFlight = true;
     calls++;
     lastSent = Date.now();
@@ -65,23 +66,28 @@ export function narrator({ translate, prompt, signal, onProgress }) {
         onProgress(phase, message);
       }
     } catch (error) {
-      if ([401, 402, 403, 404].includes(error?.status)) calls = 20;
+      if ([401, 402, 403, 404].includes(error?.status)) calls = 40;
     } finally { inFlight = false; }
   }
   return {
     observe(fact) {
       if (closed || !phases.has(fact.phase)) return;
       const next = fact.phase;
-      if (next !== 'understanding' || ['understanding', 'waiting'].includes(phase)) {
-        if (phase !== next) { phase = next; revision++; pending.clear(); }
-      }
       // A finite vocabulary bounds memory and prevents logs, paths or secrets entering the prompt.
       const status = ['pending', 'running', 'completed', 'error'].includes(fact.status) ? fact.status : 'observed';
-      const area = ['screen', 'data'].includes(fact.area) ? fact.area : 'application';
-      const key = JSON.stringify({ phase: next, status, area });
-      if (observed.has(key)) return;
-      observed.add(key);
-      pending.add(key);
+      const area = ['screen', 'data', 'rules'].includes(fact.area) ? fact.area : 'application';
+      const action = ['inspect', 'plan', 'edit', 'typecheck', 'test', 'build', 'dependencies', 'review'].includes(fact.action) ? fact.action : 'inspect';
+      const evidence = JSON.stringify({ phase: next, status, area, action });
+      // Tool identity stays private; only bounded categories reach the translator.
+      const key = fact.id ? `${fact.id}:${status}` : evidence;
+      if (fact.id ? observed.has(key) : lastObservation === key) return;
+      if (phase !== next) { phase = next; revision++; pending.clear(); }
+      lastObservation = key;
+      if (fact.id) {
+        observed.add(key);
+        if (observed.size > 128) observed.delete(observed.values().next().value);
+      }
+      pending.add(evidence);
       void flush();
     },
     close() { closed = true; clearInterval(timer); controller.abort(); },

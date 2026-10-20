@@ -2,7 +2,7 @@ import { businessText, narrator, narrationGateway } from './narrator.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { collect, validateFiles } from './workspace.mjs';
 import { build, isolated } from './sandbox.mjs';
-import { coherenceGateway, settlePlan } from './plan.mjs';
+import { coherenceGateway, planActive, settlePlan } from './plan.mjs';
 import { closeEngine, engine, progressFor, narrationFact, providerError } from './opencode.mjs';
 
 export async function code({ root, appId, prompt, narrationPrompt = prompt, conversationId, signal, config, onProgress = () => {}, compile = build, planTool = (args, signal) => isolated(root, args, { signal }), review = coherenceGateway(config) }) {
@@ -38,7 +38,7 @@ export async function code({ root, appId, prompt, narrationPrompt = prompt, conv
   }
   signal.addEventListener('abort', abort, { once: true });
   try {
-    let request = `Use the rootcx skill, and the OpenSpec skills when the application has an openspec/ directory, for this request. The files in the current workspace are the current published sources; they supersede previous session edits. Application: ${appId}. User request: ${prompt}`;
+    let request = `The files in the current workspace are the current published sources; they supersede previous session edits. Application: ${appId}. User request: ${prompt}`;
     for (let attempt = 0; attempt < 3; attempt++) {
       const result = await Promise.race([
         runtime.api(`/session/${session}/message`, {
@@ -62,11 +62,12 @@ export async function code({ root, appId, prompt, narrationPrompt = prompt, conv
       // The native engine owns all coding/tool/reasoning loops. Publication verifies
       // the final revision and returns concrete failures to that same session.
       onProgress('checking');
-      voice.observe({ phase: 'checking', status: 'running' });
+      if (planActive(initial, current)) voice.observe({ phase: 'checking', status: 'running', action: 'review' });
       try {
         await settlePlan({ root, initial, collect, run: planTool, review, state: planReview, signal });
         const before = await collect(root);
         validateFiles(before);
+        voice.observe({ phase: 'checking', status: 'running', action: 'build' });
         const frontend = await compile(root, appId, signal);
         const files = await collect(root);
         validateFiles(files);

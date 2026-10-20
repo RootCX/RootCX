@@ -309,8 +309,8 @@ is reported, not silently replayed. A publication requiring recovery blocks that
 application. Requests without a conversation retain the previous conflict behavior.
 
 Each conversation selects a persisted native OpenCode session. The independent
-narrator uses the dedicated narration gateway with at most 20 short calls per builder execution,
-8 seconds between calls and a 3-second deadline. Narration failure never blocks
+narrator uses the dedicated narration gateway with at most 40 short calls per builder execution,
+4 seconds between calls and a 3-second deadline. Narration failure never blocks
 coding. Only reduced action/status/area facts are summarized with the original
 request; model text, tool outputs and private reasoning are excluded. Core alone confirms publication.
 The UI retrieves persisted updates while active and backs off when idle; unchanged
@@ -327,9 +327,9 @@ conversation requests remain on the tenant Core origin.
 
 ## Build narration
 
-The Build narration Module exposes `observe({phase, status, area})` and `close()`.
-Its Implementation owns coalescing, duplicate suppression, a 20-call budget per
-builder execution, an eight-second minimum interval, a three-second end-to-end
+The Build narration Module exposes `observe({id?, phase, status, area, action})` and `close()`.
+Its Implementation owns coalescing, duplicate suppression, a 40-call budget per
+builder execution, an four-second minimum interval, a three-second end-to-end
 deadline, late-response rejection and business-text validation. Core repair
 attempts are separate builder executions. Closing cancels pending narration;
 no caller awaits it. The finite observation vocabulary excludes source text,

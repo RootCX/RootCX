@@ -74,7 +74,7 @@ test('duplicate events and messages do not consume calls or repeat updates', asy
   });
   t.after(() => voice.close());
   voice.observe({ phase: 'editing', status: 'running' }); await tick();
-  now += 8001;
+  now += 4001;
   voice.observe({ phase: 'editing', status: 'running' }); await tick();
   assert.equal(calls, 1);
   voice.observe({ phase: 'editing', status: 'completed' }); await tick();
@@ -92,11 +92,11 @@ test('narration coalesces bursts and stops spending after its request budget', a
       for (const area of ['screen', 'data', 'application']) {
         voice.observe({ phase, status, area });
         await tick();
-        now += 8001;
+        now += 4001;
       }
     }
   }
-  assert.equal(calls, 20);
+  assert.equal(calls, 40);
 });
 
 test('authorization or credit refusal disables further narration', async t => {
@@ -107,7 +107,7 @@ test('authorization or credit refusal disables further narration', async t => {
     const voice = narrator({ prompt: 'Clients', signal: signal(), onProgress() {},
       translate: async () => { calls++; throw Object.assign(new Error('Unavailable'), { status }); },
     });
-    voice.observe({ phase: 'editing' }); await tick(); now += 8001;
+    voice.observe({ phase: 'editing' }); await tick(); now += 4001;
     voice.observe({ phase: 'checking' }); await tick(); voice.close();
     assert.equal(calls, 1, String(status));
   }
@@ -138,8 +138,48 @@ test('a hung translator releases the slot at the deadline without blocking later
   t.after(() => voice.close());
   voice.observe({ phase: 'editing' });
   await new Promise(resolve => setTimeout(resolve, 3100));
-  now = 8001;
+  now = 4001;
   voice.observe({ phase: 'checking' }); await tick();
   assert.equal(calls, 2);
   assert.deepEqual(messages, [['checking', 'Je vérifie la page.']]);
+});
+
+
+test('distinct tools and returning phases remain observable without exposing tool identity', async t => {
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  const inputs = [];
+  const voice = narrator({ prompt: 'Acompte', signal: signal(), onProgress() {},
+    translate: async input => { inputs.push(input); return null; },
+  });
+  t.after(() => voice.close());
+  for (const fact of [
+    { id: 'private-1', phase: 'checking', status: 'running', action: 'typecheck' },
+    { id: 'private-2', phase: 'checking', status: 'running', action: 'test' },
+    { id: 'private-3', phase: 'repairing', status: 'error', action: 'test' },
+    { id: 'private-4', phase: 'checking', status: 'running', action: 'test' },
+  ]) {
+    voice.observe(fact); await tick(); now += 4001;
+    voice.observe(fact); await tick();
+  }
+  assert.equal(inputs.length, 4);
+  assert.deepEqual(inputs.map(input => JSON.parse(input.observation).action), ['typecheck', 'test', 'test', 'test']);
+  assert.doesNotMatch(JSON.stringify(inputs), /private/);
+});
+
+
+test('a duplicate old tool cannot invalidate the current translation', async t => {
+  let now = 0; let release;
+  const messages = [];
+  t.mock.method(Date, 'now', () => now);
+  const voice = narrator({ prompt: 'Acompte', signal: signal(), onProgress: (...args) => messages.push(args),
+    translate: input => input.phase === 'editing' ? Promise.resolve(null) : new Promise(resolve => { release = resolve; }),
+  });
+  t.after(() => voice.close());
+  const old = { id: 'edit-1', phase: 'editing', status: 'running' };
+  voice.observe(old); await tick(); now += 4001;
+  voice.observe({ id: 'test-1', phase: 'checking', status: 'running', action: 'test' }); await tick();
+  voice.observe(old);
+  release('Je vérifie le calcul de votre acompte.'); await tick();
+  assert.deepEqual(messages, [['checking', 'Je vérifie le calcul de votre acompte.']]);
 });
