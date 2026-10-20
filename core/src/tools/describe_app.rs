@@ -103,7 +103,7 @@ impl Tool for DescribeAppTool {
         let source = ctx
             .core_bound_app_id
             .as_deref()
-            .filter(|source| *source == ctx.app_id);
+            .filter(|source| *source == ctx.app_id && ctx.delegated_authority().is_none());
         let grants: Vec<(String, Vec<String>)> =
             if let Some(source) = source.filter(|source| *source != app) {
                 sqlx::query_as(
@@ -134,9 +134,11 @@ impl Tool for DescribeAppTool {
         }
         let (name, dc): (String, JsonValue) = sqlx::query_as(
             "SELECT name, COALESCE(manifest->'dataContract', '[]'::jsonb) \
-             FROM rootcx_system.apps WHERE id = $1 AND status IN ('installed', 'system')",
+             FROM rootcx_system.apps a WHERE id = $1 AND status IN ('installed', 'system') \
+             AND (NOT $2 OR EXISTS (SELECT 1 FROM rootcx_system.app_installations i WHERE i.app_id = a.id AND i.active))",
         )
         .bind(app)
+        .bind(ctx.delegated_authority().is_some())
         .fetch_optional(&ctx.pool)
         .await
         .map_err(|e| e.to_string())?
