@@ -35,3 +35,23 @@ version preparation) and deduplicates tool events by private identity and status
 in a bounded recent set. Returning to the same phase remains observable. Tool
 identity never reaches Nova or the user. Calls are separated by four seconds
 and capped at forty per execution; no timed update is invented without evidence.
+
+## Conversation context and evidence, 20 October 2026
+
+No intermediary model prepares narration. The server keeps the last three business
+exchanges in a bounded four-turn journal outside both application sources and the
+coding sandbox. It keys the journal by the real OpenCode session and upserts Core's
+run ID, so repair attempts never become new user turns. Only the original narration
+prompt and filtered prepared reply enter this journal, never SDK prompts or repair
+diagnostics. Prepared replies explicitly have unknown publication status. A missing
+or corrupt journal disables context only; it cannot stop coding.
+
+Native tool descriptions carry untrusted intent separately from action/status facts.
+The build pipeline reports its own check start, success and failure without output.
+Nova may describe a successful verification only with a completed platform check;
+a later failure or edit invalidates earlier evidence. Every new observation invalidates
+a pending translation, including same-phase outcomes. Batched facts preserve actual
+arrival order. A running operation or busy engine may trigger a factual reminder after
+20 seconds without activity; neither an idle engine nor a completed operation may do so.
+The route accepts this optional context during rolling upgrades and requires structured
+output for enriched requests. Publication remains exclusively Core's responsibility.

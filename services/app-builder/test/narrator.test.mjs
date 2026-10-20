@@ -52,6 +52,8 @@ test('the voice accepts one business sentence and cannot announce publication', 
     ['Votre modification est disponible.', false],
     ['La modification est terminée.', false],
     ['Le changement est appliqué.', false],
+    ['Je vérifie tout après la publication.', false],
+    ['Le calcul a été testé avec succès.', false],
     ['Je lance npm pour votre page.', false],
     ['RIEN', false],
   ]) {
@@ -191,4 +193,72 @@ test('reading rules or tests does not announce preparation or verification', () 
     assert.equal(progressFor(event), 'understanding', command);
     assert.equal(narrationFact(event, progressFor(event)).action, 'inspect', command);
   }
+});
+
+test('same-phase outcome changes invalidate late success narration', async t => {
+  let release;
+  const delivered = [];
+  const voice = narrator({ prompt: 'Acompte', signal: signal(), onProgress: (...args) => delivered.push(args), translate: () => new Promise(resolve => { release = resolve; }) });
+  t.after(() => voice.close());
+  voice.observe({ id: 'test', phase: 'checking', action: 'test', status: 'running', source: 'platform' }); await tick();
+  voice.observe({ id: 'test', phase: 'checking', action: 'test', status: 'error', source: 'platform' });
+  release('Je vérifie le calcul de l’acompte.'); await tick();
+  assert.deepEqual(delivered, []);
+});
+
+test('verified narration requires a completed platform check, never an agent intention', async () => {
+  for (const [source, status, action, accepted] of [['tool', 'completed', 'test', false], ['platform', 'running', 'test', false], ['platform', 'error', 'test', false], ['platform', 'completed', 'build', false], ['platform', 'completed', 'test', true]]) {
+    const delivered = [];
+    const voice = narrator({ prompt: 'Acompte', signal: signal(), onProgress: (...args) => delivered.push(args), translate: async () => ({ message: 'Les comportements contrôlés sont conformes.', kind: 'verified' }) });
+    try {
+      voice.observe({ phase: 'checking', source, status, action, intent: 'Tout est déjà vérifié et publié' }); await tick();
+      assert.equal(delivered.length, accepted ? 1 : 0, `${source}/${status}/${action}`);
+    } finally { voice.close(); }
+  }
+});
+
+test('tool purpose is contextual intention, never raw command or output', () => {
+  const event = { properties: { part: { type: 'tool', tool: 'shell', id: 'private-id', state: { status: 'completed', input: { description: 'Adapter l’acompte à 40 %', command: 'cat private.txt' }, output: 'secret diagnostic' } } } };
+  const fact = narrationFact(event, progressFor(event));
+  assert.equal(fact.intent, 'Adapter l’acompte à 40 %');
+  assert.equal(fact.source, 'tool');
+  assert.doesNotMatch(JSON.stringify(fact), /private.txt|diagnostic/);
+});
+
+test('prolonged running activity can reassure once without inventing completed work', async t => {
+  let now = 0; let timer; const inputs = [];
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(globalThis, 'setInterval', fn => { timer = fn; return { unref() {} }; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const voice = narrator({ prompt: 'Devis', context: [{ user: 'Changer le taux', assistantPrepared: 'Lequel ?', publication: 'unknown' }], signal: signal(), onProgress() {}, translate: async input => { inputs.push(input); return null; } });
+  t.after(() => voice.close());
+  voice.observe({ id: 'long', phase: 'checking', action: 'test', status: 'running', source: 'platform' }); await tick();
+  now = 21000; timer(); await tick();
+  assert.equal(inputs.length, 2);
+  assert.deepEqual(inputs[1].context[0].publication, 'unknown');
+  assert.equal(JSON.parse(inputs[1].observation).stillRunning, true);
+  assert.equal(JSON.parse(inputs[1].observation).status, 'running');
+  voice.observe({ id: 'long', phase: 'checking', action: 'test', status: 'completed', source: 'platform' });
+  now = 25001; timer(); await tick();
+  now = 60000; timer(); await tick();
+  assert.equal(inputs.length, 3, 'never imply work is continuing after completion');
+});
+
+test('batched outcomes stay chronological and a later failure invalidates earlier success', async t => {
+  let now = 0; let timer; const inputs = []; const delivered = [];
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(globalThis, 'setInterval', fn => { timer = fn; return { unref() {} }; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const voice = narrator({ prompt: 'Acompte', signal: signal(), onProgress: (...args) => delivered.push(args), translate: async input => {
+    inputs.push(input); return inputs.length === 1 ? null : { message: 'Les comportements contrôlés sont conformes.', kind: 'verified' };
+  } });
+  t.after(() => voice.close());
+  voice.observe({ id: 'first', phase: 'understanding', action: 'inspect', status: 'running' }); await tick();
+  voice.observe({ id: 'review', phase: 'checking', source: 'platform', action: 'review', status: 'running' });
+  voice.observe({ id: 'test', phase: 'checking', source: 'platform', action: 'test', status: 'completed' });
+  voice.observe({ id: 'review', phase: 'checking', source: 'platform', action: 'review', status: 'error' });
+  now = 4001; timer(); await tick();
+  const facts = inputs[1].observation.split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(facts.map(fact => fact.status), ['completed', 'error']);
+  assert.deepEqual(delivered, []);
 });

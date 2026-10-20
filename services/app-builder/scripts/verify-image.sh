@@ -8,7 +8,7 @@ docker run --rm --network none \
   test/engine.test.mjs test/provider-proxy.test.mjs \
   test/opencode.integration.test.mjs test/sdk.test.mjs test/sandbox.test.mjs \
   test/network-sandbox.test.mjs test/backup.test.mjs test/startup.test.mjs test/tls.test.mjs \
-  test/plan.test.mjs test/narrator.test.mjs
+  test/plan.test.mjs test/narrator.test.mjs test/narration-context.test.mjs
 # Qualify dependency installation separately; only the public registry is allowed
 # from the sandbox even though this disposable container has external networking.
 docker run --rm \

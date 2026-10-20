@@ -1,3 +1,4 @@
+import { contextText } from './narration-context.mjs';
 import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -28,7 +29,8 @@ function shellAction(raw) {
   if (/^(?:(?:vitest|jest|pytest)\b|node\s+--test\b|(?:npm|bun|pnpm|yarn)\s+(?:run\s+)?test\b)/.test(command)) return 'test';
   if (/^(?:(?:npm|bun|pnpm|yarn)\s+(?:run\s+)?build\b|vite\s+build\b)/.test(command)) return 'build';
   if (/^(?:npm|bun|pnpm|yarn)\s+(?:install|ci)\b/.test(command)) return 'dependencies';
-  return 'inspect';
+  if (/^(?:cat|ls|pwd|rg|grep|find|head|tail|sed|openspec)\b/.test(command)) return 'inspect';
+  return 'work';
 }
 
 // Raw model text, reasoning, paths and command output never become public progress.
@@ -59,7 +61,9 @@ export function narrationFact(event, phase) {
   let action = 'inspect';
   if (['edit', 'write', 'apply_patch', 'patch'].includes(part?.tool)) action = area === 'rules' ? 'plan' : 'edit';
   if (['bash', 'shell'].includes(part?.tool)) action = shellAction(command);
-  return { id: part?.id, phase, status: part?.state?.status, area, action };
+  const description = contextText(input.description, 240);
+  const intent = /[`{}<>]|(?:^|\s)(?:[./~]|[a-z]+\/)|\b(?:npm|bun|node|tsc|git|openspec|sql)\b/i.test(description) ? '' : description;
+  return { id: part?.id, phase, status: part?.state?.status, area, action, source: 'tool', intent };
 }
 
 export async function engine(root, config) {

@@ -45,6 +45,7 @@ export function createBuilder(config, coding = code) {
       // Internal repairs include the original request plus Core's bounded diagnostic.
       if (!/^[a-z][a-z0-9_]{0,49}$/.test(input.appId) || typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 48000) throw new Error('Invalid application change');
       if (input.narrationPrompt != null && (typeof input.narrationPrompt !== 'string' || input.narrationPrompt.length > 2000)) throw new Error('Invalid narration request');
+      if (input.runId != null && (typeof input.runId !== 'string' || input.runId.length > 100)) throw new Error('Invalid run');
       if (input.conversationId != null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.conversationId)) throw new Error('Invalid conversation');
       if (activeApps.has(input.appId)) throw new Error('An application build is already running');
       appId = input.appId; activeApps.add(appId);
@@ -65,7 +66,7 @@ export function createBuilder(config, coding = code) {
         emit({ type: 'progress', phase });
         heartbeat = setInterval(() => emit({ type: 'progress', phase }), 10_000);
       }
-      const result = await coding({ root, appId: input.appId, prompt: input.prompt, narrationPrompt: input.narrationPrompt, conversationId: input.conversationId, signal: controller.signal, config, onProgress });
+      const result = await coding({ root, appId: input.appId, prompt: input.prompt, narrationPrompt: input.narrationPrompt, conversationId: input.conversationId, runId: input.runId, signal: controller.signal, config, onProgress });
       if (streaming) { emit({ type: 'result', ...result }); res.end(); }
       else respond(200, result);
     } catch (error) {
