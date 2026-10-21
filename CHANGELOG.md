@@ -8,6 +8,11 @@ Releases marked **Breaking** need the matching guide in
 
 ## Unreleased
 
+- `describe_app` returns the actions the caller may invoke (description and
+  `inputSchema`) and the manifest `instructions`; `list_apps` lists their IDs.
+  Actions follow the `call_action` permissions and are never shown through
+  collection grants. Tool descriptions steer agents to actions over raw writes.
+
 ## 0.30.0 - 2026-09-23 - Breaking
 
 See [ADR 0010](docs/adr/0010-governed-declarative-rules.md) and the updated

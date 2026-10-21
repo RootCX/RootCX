@@ -3,6 +3,24 @@ use serde_json::{json, Value as JsonValue};
 use rootcx_types::ToolDescriptor;
 
 use super::{Tool, ToolContext};
+use crate::governance::authority::has_permission;
+
+/// Same two grains as `call_action`, so metadata never advertises an action the caller cannot run.
+pub(crate) fn invocable_actions(actions: &JsonValue, app: &str, permissions: &[String]) -> Vec<JsonValue> {
+    let invoke = has_permission(permissions, &format!("app:{app}:invoke"));
+    actions.as_array().into_iter().flatten().filter_map(|action| {
+        let id = action.get("id")?.as_str()?;
+        if !invoke && !has_permission(permissions, &format!("app:{app}:action:{id}")) {
+            return None;
+        }
+        Some(json!({
+            "id": id,
+            "name": action.get("name"),
+            "description": action.get("description"),
+            "inputSchema": action.get("inputSchema"),
+        }))
+    }).collect()
+}
 
 pub struct ListActionsTool;
 
@@ -43,5 +61,39 @@ impl Tool for ListActionsTool {
             }
             entry
         }).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invocable_actions_follow_call_action_permission_grains() {
+        let actions = json!([
+            {"id": "create_item", "name": "Create", "description": "Creates.", "inputSchema": {"type": "object"}},
+            {"id": "create", "name": "Short"},
+            {"name": "missing id"},
+            {"id": 7, "name": "non-string id"}
+        ]);
+        for (permissions, expected) in [
+            (vec![], vec![]),
+            (vec!["app:catalog:invoke"], vec!["create_item", "create"]),
+            (vec!["app:catalog:action:create"], vec!["create"]),
+            (vec!["app:catalog:action:create_item"], vec!["create_item"]),
+            (vec!["app:other:invoke", "app:other:action:create_item"], vec![]),
+            (vec!["app:catalog:items.read", "tool:call_action"], vec![]),
+        ] {
+            let permissions: Vec<String> = permissions.into_iter().map(String::from).collect();
+            let ids: Vec<JsonValue> = invocable_actions(&actions, "catalog", &permissions)
+                .into_iter().map(|action| action["id"].clone()).collect();
+            assert_eq!(ids, expected, "{permissions:?}");
+        }
+        for malformed in [json!(null), json!({}), json!("create_item")] {
+            assert!(
+                invocable_actions(&malformed, "catalog", &["app:catalog:invoke".into()]).is_empty(),
+                "{malformed}"
+            );
+        }
     }
 }

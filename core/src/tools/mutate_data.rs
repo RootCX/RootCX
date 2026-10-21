@@ -15,7 +15,7 @@ impl Tool for MutateDataTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "mutate_data".into(),
-            description: "Create, update, or delete records. Use bulk_create to insert many records at once. Array fields (type [text], [number]) must be JSON arrays, not strings.".into(),
+            description: "Create, update, or delete records. Use bulk_create to insert many records at once. Array fields (type [text], [number]) must be JSON arrays, not strings. When the app declares an action for the task (see describe_app), use call_action instead: actions apply the app's business rules.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

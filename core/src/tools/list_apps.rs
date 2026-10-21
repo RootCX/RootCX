@@ -12,7 +12,7 @@ impl Tool for ListAppsTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "list_apps".into(),
-            description: "List accessible installed apps and their readable entity names.".into(),
+            description: "List accessible installed apps with their readable entity names and invocable action IDs. Use describe_app for fields, action inputs and app instructions.".into(),
             input_schema: json!({ "type": "object", "properties": {} }),
         }
     }
@@ -48,8 +48,8 @@ impl Tool for ListAppsTool {
         for (provider, entity, fields) in grants {
             granted.entry(provider).or_default().push((entity, fields));
         }
-        let rows: Vec<(String, String, JsonValue)> = sqlx::query_as(
-            "SELECT id, name, COALESCE(manifest->'dataContract', '[]'::jsonb) \
+        let rows: Vec<(String, String, JsonValue, JsonValue)> = sqlx::query_as(
+            "SELECT id, name, COALESCE(manifest->'dataContract', '[]'::jsonb), COALESCE(manifest->'actions', '[]'::jsonb) \
              FROM rootcx_system.apps a WHERE status = 'installed' \
              AND (NOT $1 OR EXISTS (SELECT 1 FROM rootcx_system.app_installations i WHERE i.app_id = a.id AND i.active)) ORDER BY name",
         )
@@ -60,7 +60,7 @@ impl Tool for ListAppsTool {
 
         Ok(rows
             .into_iter()
-            .filter_map(|(id, name, dc)| {
+            .filter_map(|(id, name, dc, actions)| {
                 let projected = match source {
                     Some(source) if source == id => dc,
                     Some(_) => {
@@ -78,10 +78,21 @@ impl Tool for ListAppsTool {
                     .iter()
                     .filter_map(|e| e.get("entityName").and_then(|v| v.as_str()))
                     .collect();
-                if entities.is_empty() {
+                let actions: Vec<JsonValue> = match source {
+                    None => crate::tools::list_actions::invocable_actions(&actions, &id, &ctx.permissions)
+                        .into_iter()
+                        .map(|action| action["id"].clone())
+                        .collect(),
+                    Some(_) => Vec::new(),
+                };
+                if entities.is_empty() && actions.is_empty() {
                     return None;
                 }
-                Some(json!({ "id": id, "name": name, "entities": entities }))
+                let mut app = json!({ "id": id, "name": name, "entities": entities });
+                if !actions.is_empty() {
+                    app["actions"] = json!(actions);
+                }
+                Some(app)
             })
             .collect())
     }
