@@ -347,6 +347,52 @@ async fn inactive_installations_hide_agent_metadata_and_refuse_collection_reads(
 }
 
 #[tokio::test]
+async fn metadata_advertises_only_invocable_actions_with_app_instructions() {
+    let rt = setup().await;
+    let schema = json!({"type":"object","properties":{"name":{"type":"string"}},"required":["name"]});
+    rt.install_manifest(&json!({
+        "appId":"catalog", "name":"Catalog", "version":"1.0.0",
+        "instructions":"Create items with create_item.",
+        "dataContract":[{"entityName":"items","fields":[{"name":"name","type":"text"}]}],
+        "actions":[
+            {"id":"create_item","name":"Create item","description":"Creates a priced item.","inputSchema":schema},
+            {"id":"archive_item","name":"Archive item","description":"Archives an item."}
+        ]
+    }))
+    .await;
+    agent_permissions(&rt, &["app:catalog:action:create_item", "tool:*"]).await;
+    let apps = invoke(&rt, &rt.token, "list_apps", json!({})).await;
+    assert_eq!(
+        apps["result"],
+        json!([{"id":"catalog","name":"Catalog","entities":[],"actions":["create_item"]}]),
+        "an action-only scope must surface the app without its unreadable entities: {apps}"
+    );
+    let metadata = invoke(&rt, &rt.token, "describe_app", json!({"app":"catalog"})).await;
+    assert_eq!(
+        metadata["result"],
+        json!({
+            "app":"catalog", "name":"Catalog", "dataContract":[],
+            "actions":[{"id":"create_item","name":"Create item","description":"Creates a priced item.","inputSchema":schema}],
+            "instructions":"Create items with create_item."
+        }),
+        "{metadata}"
+    );
+
+    agent_permissions(&rt, &["app:catalog:items.read", "tool:*"]).await;
+    let metadata = invoke(&rt, &rt.token, "describe_app", json!({"app":"catalog"})).await;
+    assert_eq!(
+        metadata["result"],
+        json!({
+            "app":"catalog", "name":"Catalog",
+            "dataContract":[{"entityName":"items","fields":[{"name":"name","type":"text"}]}],
+            "instructions":"Create items with create_item."
+        }),
+        "a read scope must not advertise actions: {metadata}"
+    );
+    rt.shutdown().await;
+}
+
+#[tokio::test]
 async fn delegated_writes_validate_sensitive_fields_and_roll_back_invalid_batches() {
     let rt = setup().await;
     agent_permissions(&rt, &["app:helper:invoke", "app:business:*", "tool:*"]).await;
