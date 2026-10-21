@@ -87,7 +87,12 @@ impl Tool for DescribeAppTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "describe_app".into(),
-            description: "Get readable entity and field metadata for an app. Core-bound workers receive the full contract for their own app.".into(),
+            description: concat!(
+                "Get readable entity and field metadata for an app, the actions you may invoke with call_action ",
+                "(description and inputSchema) and the app's usage instructions. Prefer an action over writing records ",
+                "directly when one covers the task: actions apply the app's business rules. ",
+                "Core-bound workers receive the full contract for their own app."
+            ).into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -132,8 +137,9 @@ impl Tool for DescribeAppTool {
         if source.is_some_and(|source| source != app) && grants.is_empty() {
             return Err(format!("app '{app}' not found"));
         }
-        let (name, dc): (String, JsonValue) = sqlx::query_as(
-            "SELECT name, COALESCE(manifest->'dataContract', '[]'::jsonb) \
+        let (name, dc, actions, instructions): (String, JsonValue, JsonValue, Option<String>) = sqlx::query_as(
+            "SELECT name, COALESCE(manifest->'dataContract', '[]'::jsonb), \
+             COALESCE(manifest->'actions', '[]'::jsonb), manifest->>'instructions' \
              FROM rootcx_system.apps a WHERE id = $1 AND status IN ('installed', 'system') \
              AND (NOT $2 OR EXISTS (SELECT 1 FROM rootcx_system.app_installations i WHERE i.app_id = a.id AND i.active))",
         )
@@ -149,10 +155,22 @@ impl Tool for DescribeAppTool {
             Some(_) => project_contract(dc, &grants),
             None => project_human_contract(dc, app, &ctx.permissions),
         };
-        if dc.as_array().is_none_or(Vec::is_empty) {
+        // Collection grants never authorize call_action, so only permission-based callers see actions.
+        let actions = match source {
+            None => crate::tools::list_actions::invocable_actions(&actions, app, &ctx.permissions),
+            Some(_) => Vec::new(),
+        };
+        if dc.as_array().is_none_or(Vec::is_empty) && actions.is_empty() {
             return Err(format!("app '{app}' not found"));
         }
-        Ok(json!({ "app": app, "name": name, "dataContract": dc }))
+        let mut out = json!({ "app": app, "name": name, "dataContract": dc });
+        if !actions.is_empty() {
+            out["actions"] = json!(actions);
+        }
+        if let Some(instructions) = instructions.filter(|_| source.is_none()) {
+            out["instructions"] = json!(instructions);
+        }
+        Ok(out)
     }
 }
 
