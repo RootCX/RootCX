@@ -406,7 +406,7 @@ async fn process(
     Ok(())
 }
 
-pub(super) async fn finish(
+async fn finish(
     rt: &SharedRuntime,
     id: Uuid,
     app: &str,
