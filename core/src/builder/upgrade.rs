@@ -15,6 +15,62 @@ use uuid::Uuid;
 /// Tracks the release each upgrade merged, so the next one diffs from it.
 const RELEASE_REF: &str = "refs/rootcx/release";
 
+fn pending_ref(id: Uuid) -> String {
+    format!("refs/rootcx/pending/{id}")
+}
+
+/// Backup then publication, as for a Builder change. The release ref moves only
+/// once the merged revision is live; until then the run stays recoverable.
+async fn publish(
+    rt: &SharedRuntime,
+    run: &Run,
+    user: Uuid,
+    released: &str,
+    frontend: Vec<u8>,
+) -> Result<(), ApiError> {
+    let root = rt.data_dir().join("sources").join(&run.app_id);
+    let commit = run
+        .commit_id
+        .as_deref()
+        .ok_or_else(|| ApiError::Internal("upgrade has no revision".into()))?;
+    let sources = files::snapshot(&root, commit).await?;
+    let version = files::manifest(&sources, &run.app_id)?.version;
+    let outcome = async {
+        pipeline::backup(&client()?, &root, &run.app_id, commit).await?;
+        pipeline::finish(
+            rt,
+            run.id,
+            &run.app_id,
+            user,
+            &run.base_commit,
+            commit,
+            &sources,
+            frontend,
+            &format!("L’application est passée à la version {version}."),
+        )
+        .await?;
+        files::git(&root, &["update-ref", RELEASE_REF, released]).await?;
+        files::git(&root, &["update-ref", "-d", &pending_ref(run.id)]).await
+    }
+    .await;
+    if outcome.is_err() {
+        let _ = sqlx::query("UPDATE rootcx_system.source_runs SET status='needs_recovery',error=$2,message='La mise à jour nécessite une intervention avant de continuer.',updated_at=now() WHERE id=$1")
+            .bind(run.id).bind(format!("{:?}", outcome.as_ref().err())).execute(rt.pool()).await;
+    }
+    outcome.map(|_| ())
+}
+
+async fn reload(rt: &SharedRuntime, id: Uuid) -> Result<Json<Run>, ApiError> {
+    Ok(Json(
+        sqlx::query_as(&format!(
+            "SELECT {RUN_COLUMNS} FROM rootcx_system.source_runs WHERE id=$1"
+        ))
+        .bind(id)
+        .fetch_one(rt.pool())
+        .await?,
+    ))
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct Upgrade {
@@ -117,7 +173,26 @@ pub(super) async fn upgrade(
     let existing = sqlx::query_as::<_, Run>(&format!("SELECT {RUN_COLUMNS} FROM rootcx_system.source_runs WHERE app_id=$1 AND requested_by=$2 AND request_id=$3"))
         .bind(&app).bind(identity.user_id).bind(input.request_id).fetch_optional(&mut *tx).await?;
     if let Some(run) = existing {
-        return Ok(Json(run));
+        if run.status != "needs_recovery" {
+            return Ok(Json(run));
+        }
+        // Retrying the same request resumes an interrupted publication.
+        let root = rt.data_dir().join("sources").join(&app);
+        let released = rev(
+            &root,
+            &["rev-parse", "--verify", "--quiet", &pending_ref(run.id)],
+        )
+        .await?;
+        let frontend = tokio::fs::read(
+            root.join(".git/prepared")
+                .join(run.id.to_string())
+                .join("frontend.tar.gz"),
+        )
+        .await
+        .map_err(files::io)?;
+        tx.commit().await?;
+        publish(&rt, &run, identity.user_id, &released, frontend).await?;
+        return reload(&rt, run.id).await;
     }
     let head: Option<String> = sqlx::query_scalar(
         "SELECT head_commit FROM rootcx_system.source_projects WHERE app_id=$1 FOR UPDATE",
@@ -248,13 +323,13 @@ pub(super) async fn upgrade(
             "release and application both change the interface; a rebuild is required".into(),
         ));
     };
-    let sources = files::snapshot(&root, &commit).await?;
-    files::manifest(&sources, &app)?;
+    files::manifest(&files::snapshot(&root, &commit).await?, &app)?;
     files::git(
         &root,
         &["update-ref", &format!("refs/changes/{id}"), &commit],
     )
     .await?;
+    files::git(&root, &["update-ref", &pending_ref(id), &released]).await?;
     let prepared = root.join(".git").join("prepared").join(id.to_string());
     tokio::fs::create_dir_all(&prepared)
         .await
@@ -267,42 +342,21 @@ pub(super) async fn upgrade(
         .bind(id).bind(&app).bind(identity.user_id).bind(input.request_id).bind(&head).bind(&prompt).bind(&commit)
         .execute(&mut *tx).await?;
     tx.commit().await?;
-    let client = reqwest::Client::builder()
+    let run: Run = sqlx::query_as(&format!(
+        "SELECT {RUN_COLUMNS} FROM rootcx_system.source_runs WHERE id=$1"
+    ))
+    .bind(id)
+    .fetch_one(rt.pool())
+    .await?;
+    publish(&rt, &run, identity.user_id, &released, frontend).await?;
+    reload(&rt, id).await
+}
+
+// Same transport as the source import next to it.
+fn client() -> Result<reqwest::Client, ApiError> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(120))
         .build()
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-    let outcome = async {
-        pipeline::backup(&client, &root, &app, &commit).await?;
-        pipeline::finish(
-            &rt,
-            id,
-            &app,
-            identity.user_id,
-            &head,
-            &commit,
-            &sources,
-            frontend,
-            &format!(
-                "L’application est passée à la version {}.",
-                manifest.version
-            ),
-        )
-        .await?;
-        files::git(&root, &["update-ref", RELEASE_REF, &released]).await
-    }
-    .await;
-    if let Err(error) = outcome {
-        // Same recovery contract as a Builder publication: retry-publication resumes it.
-        let _ = sqlx::query("UPDATE rootcx_system.source_runs SET status='needs_recovery',error=$2,message='La mise à jour nécessite une intervention avant de continuer.',updated_at=now() WHERE id=$1")
-            .bind(id).bind(format!("{error:?}")).execute(rt.pool()).await;
-        return Err(error);
-    }
-    Ok(Json(
-        sqlx::query_as(&format!(
-            "SELECT {RUN_COLUMNS} FROM rootcx_system.source_runs WHERE id=$1"
-        ))
-        .bind(id)
-        .fetch_one(rt.pool())
-        .await?,
-    ))
+        .map_err(|e| ApiError::Internal(e.to_string()))
 }
