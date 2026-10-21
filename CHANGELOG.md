@@ -6,13 +6,6 @@ Core versions. The CLI and the SDK are versioned and released separately; see
 Releases marked **Breaking** need the matching guide in
 [docs/](docs/README.md#migration-guides) before you upgrade.
 
-## 0.33.0 - 2026-10-21
-
-- `POST /api/v1/apps/{app}/sources/upgrade` merges a new release into a
-  source-managed application without a model, keeping its Builder changes.
-  Conflicts, and releases needing an interface rebuild, are refused with 409.
-  See [docs/hosted-builder.md](docs/hosted-builder.md#release-upgrades).
-
 ## 0.32.1 - 2026-10-21
 
 - `describe_app` returns the actions the caller may invoke (description and

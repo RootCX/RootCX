@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use reqwest::{Client, Method, StatusCode, multipart};
 use rootcx_core::{ReadyRuntime, Runtime, server};
 use serde_json::{Value, json};
-use sqlx::{Connection, PgConnection, postgres::PgConnectOptions};
 use tempfile::TempDir;
+use sqlx::{Connection, PgConnection, postgres::PgConnectOptions};
 
 // This harness is shared by integration targets with intentionally different
 // surfaces; each target uses only the helpers it needs.
@@ -80,19 +80,12 @@ impl TestRuntime {
         let health = format!("{base_url}/health");
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
-                if client
-                    .get(&health)
-                    .send()
-                    .await
-                    .is_ok_and(|r| r.status().is_success())
-                {
+                if client.get(&health).send().await.is_ok_and(|r| r.status().is_success()) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(25)).await;
             }
-        })
-        .await
-        .expect("Core HTTP server did not become healthy");
+        }).await.expect("Core HTTP server did not become healthy");
         timing("http readiness", started);
         let started = Instant::now();
 
@@ -163,8 +156,7 @@ impl TestRuntime {
     }
 
     pub async fn delete_json(&self, path: &str) -> (StatusCode, Value) {
-        self.request_as(Method::DELETE, path, &self.token, None)
-            .await
+        self.request_as(Method::DELETE, path, &self.token, None).await
     }
 
     pub async fn upload(
@@ -275,10 +267,7 @@ impl TestRuntime {
     }
 
     pub async fn create_user(&self, email: &str) -> String {
-        self.user_session(email).await["accessToken"]
-            .as_str()
-            .unwrap()
-            .to_string()
+        self.user_session(email).await["accessToken"].as_str().unwrap().to_string()
     }
 
     pub async fn user_session(&self, email: &str) -> Value {
@@ -317,20 +306,12 @@ async fn fixture_session(runtime: &ReadyRuntime, email: &str) -> Value {
     let user_id: uuid::Uuid = sqlx::query_scalar(
         "INSERT INTO rootcx_system.users (email) VALUES ($1)
          ON CONFLICT (email) DO UPDATE SET email = EXCLUDED.email RETURNING id",
-    )
-    .bind(email)
-    .fetch_one(runtime.pool())
-    .await
-    .unwrap();
+    ).bind(email).fetch_one(runtime.pool()).await.unwrap();
     let session_id = uuid::Uuid::new_v4();
     let config = runtime.auth_config();
     sqlx::query("INSERT INTO rootcx_system.sessions (id, user_id, expires_at) VALUES ($1, $2, $3)")
-        .bind(session_id)
-        .bind(user_id)
-        .bind(chrono::Utc::now() + config.refresh_ttl)
-        .execute(runtime.pool())
-        .await
-        .unwrap();
+        .bind(session_id).bind(user_id).bind(chrono::Utc::now() + config.refresh_ttl)
+        .execute(runtime.pool()).await.unwrap();
     json!({
         "accessToken": rootcx_core::auth::jwt::encode_access(config, user_id, email).unwrap(),
         "refreshToken": rootcx_core::auth::jwt::encode_refresh(config, user_id, session_id).unwrap(),
@@ -340,48 +321,30 @@ async fn fixture_session(runtime: &ReadyRuntime, email: &str) -> Value {
 
 fn timing(phase: &str, started: Instant) {
     if std::env::var_os("TEST_TIMINGS").is_some() {
-        let descriptors = std::fs::read_dir("/dev/fd")
-            .ok()
-            .map(|entries| entries.count());
+        let descriptors = std::fs::read_dir("/dev/fd").ok().map(|entries| entries.count());
         eprintln!(
             "[test timing] {} {phase}: {:?}, open descriptors: {descriptors:?}",
-            std::thread::current().name().unwrap_or("unknown"),
-            started.elapsed(),
+            std::thread::current().name().unwrap_or("unknown"), started.elapsed(),
         );
     }
 }
 
 async fn fresh_database() -> (PgConnection, String) {
-    let url = std::env::var("TEST_DATABASE_URL")
-        .expect("run integration tests with make test-integration");
+    let url = std::env::var("TEST_DATABASE_URL").expect("run integration tests with make test-integration");
     let options: PgConnectOptions = url.parse().expect("valid test database URL");
-    assert_eq!(
-        options.get_database(),
-        Some("rootcx_test"),
-        "refusing to reset a non-test database"
-    );
+    assert_eq!(options.get_database(), Some("rootcx_test"), "refusing to reset a non-test database");
     let database = tokio::time::timeout(Duration::from_secs(45), async {
-        let mut admin = PgConnection::connect_with(&options.database("postgres"))
-            .await
-            .unwrap();
+        let mut admin = PgConnection::connect_with(&options.database("postgres")).await.unwrap();
         // pg_cron owns one database per server. Keep it real and serialize resets,
         // including when the test binary is invoked without nextest.
         sqlx::query("SELECT pg_advisory_lock(82409125)")
-            .execute(&mut admin)
-            .await
-            .unwrap();
+            .execute(&mut admin).await.unwrap();
         sqlx::query("DROP DATABASE IF EXISTS rootcx_test WITH (FORCE)")
-            .execute(&mut admin)
-            .await
-            .unwrap();
+            .execute(&mut admin).await.unwrap();
         sqlx::query("CREATE DATABASE rootcx_test")
-            .execute(&mut admin)
-            .await
-            .unwrap();
+            .execute(&mut admin).await.unwrap();
         admin
-    })
-    .await
-    .expect("test database reset exceeded 45 seconds");
+    }).await.expect("test database reset exceeded 45 seconds");
     (database, url)
 }
 
