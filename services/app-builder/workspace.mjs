@@ -34,6 +34,16 @@ export async function materialize(root, files) {
   }
 }
 
+// Warm dependency caches survive; every source comes from the supplied revision.
+export async function replace(root, files) {
+  for (const entry of await readdir(root)) {
+    const path = join(root, entry);
+    if (entry === 'node_modules' && (await lstat(path)).isDirectory()) continue;
+    await rm(path, { recursive: true, force: true });
+  }
+  await materialize(root, files);
+}
+
 // Agent tools cannot follow build-created symlinks, including parent directories.
 export async function confined(root, name) {
   sourcePath(name);

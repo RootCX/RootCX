@@ -1,12 +1,13 @@
 import { serviceServer } from './service-server.mjs';
 import { timingSafeEqual } from 'node:crypto';
-import { mkdtemp, mkdir, rm, readdir, lstat } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { materialize } from './workspace.mjs';
+import { replace } from './workspace.mjs';
 import { code } from './agent.mjs';
 import { closeEngine } from './opencode.mjs';
 import { isolated, forgetDependencies } from './sandbox.mjs';
+import { applyUpdate, fetchPlan } from './update.mjs';
 
 export function createBuilder(config, coding = code) {
   let active = 0;
@@ -55,18 +56,15 @@ export function createBuilder(config, coding = code) {
         await mkdir(root, { recursive: true });
         workspaces.set(appId, root);
       }
-      for (const entry of await readdir(root)) {
-        const path = join(root, entry);
-        if (entry === 'node_modules' && (await lstat(path)).isDirectory()) continue;
-        await rm(path, { recursive: true, force: true });
-      }
-      await materialize(root, input.files);
+      await replace(root, input.files);
       if (streaming) {
         res.writeHead(200, { 'content-type': 'application/x-ndjson', 'cache-control': 'no-store', 'x-accel-buffering': 'no' });
         emit({ type: 'progress', phase });
         heartbeat = setInterval(() => emit({ type: 'progress', phase }), 10_000);
       }
-      const result = await coding({ root, appId: input.appId, prompt: input.prompt, narrationPrompt: input.narrationPrompt, conversationId: input.conversationId, runId: input.runId, signal: controller.signal, config, onProgress });
+      const request = { root, appId: input.appId, prompt: input.prompt, narrationPrompt: input.narrationPrompt, conversationId: input.conversationId, runId: input.runId, signal: controller.signal, config, onProgress };
+      const plan = await fetchPlan(config, request);
+      const result = plan ? await applyUpdate({ ...request, plan, coding }) : await coding(request);
       if (streaming) { emit({ type: 'result', ...result }); res.end(); }
       else respond(200, result);
     } catch (error) {
@@ -111,6 +109,7 @@ if (import.meta.url === new URL(process.argv[1], 'file:').href) {
     token: process.env.ROOTCX_BUILDER_TOKEN,
     endpoint: process.env.ROOTCX_BUILDER_LLM_ENDPOINT,
     narrationEndpoint: process.env.ROOTCX_BUILDER_NARRATION_ENDPOINT,
+    updatesEndpoint: process.env.ROOTCX_BUILDER_UPDATES_ENDPOINT,
     apiKey: process.env.ROOTCX_BUILDER_LLM_KEY,
     model: process.env.ROOTCX_BUILDER_MODEL,
     concurrency: Number(process.env.ROOTCX_BUILDER_CONCURRENCY ?? 1),
@@ -128,6 +127,8 @@ if (import.meta.url === new URL(process.argv[1], 'file:').href) {
     && endpoint.protocol === 'http:'
     && ['localhost', '127.0.0.1', '[::1]', 'host.docker.internal'].includes(endpoint.hostname);
   if ((endpoint.protocol !== 'https:' && !localHttp) || endpoint.username || endpoint.password) throw new Error('Coding endpoint must use HTTPS');
+  // The company key goes only to the portal that already serves the coding endpoint.
+  if (config.updatesEndpoint && new URL(config.updatesEndpoint).origin !== endpoint.origin) throw new Error('Updates endpoint must share the coding endpoint origin');
   // Refuse readiness if the host cannot enforce the sandbox. Never silently run builds on the host.
   const probe = await mkdtemp(join(tmpdir(), 'rootcx-probe-'));
   try {
