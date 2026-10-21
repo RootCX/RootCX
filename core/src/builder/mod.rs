@@ -3,6 +3,7 @@ mod conversations;
 mod files;
 mod pipeline;
 mod release;
+mod upgrade;
 #[cfg(test)]
 mod tests;
 
@@ -38,6 +39,7 @@ pub fn routes() -> Router<SharedRuntime> {
         )
         .route("/api/v1/apps/{app_id}/sources", get(sources).post(import))
         .route("/api/v1/apps/{app_id}/sources/bundle", get(bundle))
+        .route("/api/v1/apps/{app_id}/sources/upgrade", post(upgrade::upgrade))
         .route("/api/v1/apps/{app_id}/changes", get(history).post(start))
         .route("/api/v1/apps/{app_id}/changes/{id}", get(run))
         .route("/api/v1/apps/{app_id}/changes/{id}/events", get(events))
