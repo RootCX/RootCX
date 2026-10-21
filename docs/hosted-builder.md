@@ -182,6 +182,26 @@ Hosted changes use the standard RootCX manifest installation and schema reconcil
 including explicitly requested field removals. There is no builder-specific additive-only
 schema policy. Git revisions record source changes; they do not restore deleted database values.
 
+## Release upgrades
+
+A source-managed application can take a new catalog release without a model:
+
+```
+POST /api/v1/apps/<appId>/sources/upgrade
+{"requestId":"<uuid>","baseCommit":"<current head>","files":{...},"frontend":"<base64 tar.gz>"}
+```
+
+`files` and `frontend` are the release's `sources.json` files and prebuilt
+interface. Core commits the release on top of the previous one (the imported
+sources, then `refs/rootcx/release`) and merges it into the application's
+history, so its own Builder changes are kept. A merge conflict refuses the
+upgrade and leaves the revision untouched. The release interface is published
+when the application never changed interface files; the deployed interface is
+kept when the release does not change them (manifest, `backend/`, `openspec/`
+and Markdown are not interface inputs). When both changed, the upgrade is
+refused because a rebuild is required. Publication, recovery and history use
+the Builder run protocol above; it requires the same two permissions.
+
 Frontend artifacts are versioned and activated through a symlink rename on Unix.
 Old asset files remain available for already-open clients. Backend dependencies
 are prepared before the current worker is stopped, and the previous backend is
