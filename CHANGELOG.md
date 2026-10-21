@@ -6,7 +6,7 @@ Core versions. The CLI and the SDK are versioned and released separately; see
 Releases marked **Breaking** need the matching guide in
 [docs/](docs/README.md#migration-guides) before you upgrade.
 
-## Unreleased
+## 0.32.1 - 2026-10-21
 
 - `describe_app` returns the actions the caller may invoke (description and
   `inputSchema`) and the manifest `instructions`; `list_apps` lists their IDs.
