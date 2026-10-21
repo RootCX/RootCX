@@ -6,12 +6,6 @@ Core versions. The CLI and the SDK are versioned and released separately; see
 Releases marked **Breaking** need the matching guide in
 [docs/](docs/README.md#migration-guides) before you upgrade.
 
-## 0.33.1 - 2026-10-21
-
-- Retrying an interrupted release upgrade with the same `requestId` resumes its
-  backup and publication instead of leaving the application blocked.
-- Release upgrades use the same HTTP transport as source import.
-
 ## 0.33.0 - 2026-10-21
 
 - `POST /api/v1/apps/{app}/sources/upgrade` merges a new release into a
