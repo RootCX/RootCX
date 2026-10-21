@@ -162,8 +162,23 @@ async fn deploy_refuses_pending_sql_before_install_scripts_and_worker_start() {
             .is_err(),
         "refused deploy must not spawn a worker"
     );
-    // Failed archives remain on disk: the worker manager must enforce the same
-    // refusal on manual/lazy starts and after a Core restart.
+    // Staged deploys never publish refused archives. Existing files must still
+    // be checked on manual/lazy starts and after a Core restart.
+    let app_dir = rt.runtime.data_dir().join("apps/crm");
+    assert!(
+        !app_dir.join("index.ts").exists(),
+        "refused backend must not be published"
+    );
+    write_migration(
+        &app_dir,
+        "001_audit.sql",
+        "CREATE TABLE crm.audit_trail (note text);",
+    );
+    fs::write(
+        app_dir.join("index.ts"),
+        "serve({rpc: {ping: () => 'should not start'}});",
+    )
+    .unwrap();
     let error = rt
         .runtime
         .worker_manager()
