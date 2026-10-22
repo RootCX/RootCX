@@ -163,6 +163,8 @@ impl RuntimeExtension for IntegrationsExtension {
             .route("/api/v1/integrations/{integration_id}/connections/{connection_id}",
                 axum::routing::patch(connections::update_connection).delete(connections::delete_connection))
             .route("/api/v1/integrations/{integration_id}/connections/{connection_id}/verify", post(auth::verify_managed_connection))
+            .route("/api/v1/integrations/{integration_id}/connections/{connection_id}/default",
+                put(connections::set_default_connection).delete(connections::clear_default_connection))
             // App integration bindings
             .route("/api/v1/apps/{app_id}/integrations",
                 get(connections::list_app_bindings).post(connections::bind_app))

@@ -667,3 +667,157 @@ async fn reconnect_waits_for_refresh_before_publishing_new_credentials() {
     assert_eq!(status,"active");
     rt.shutdown().await;
 }
+
+async fn defaults(rt: &TestRuntime, token: &str) -> Vec<String> {
+    let (status, rows) = rt.request_as(Method::GET, "/api/v1/integrations/test_integ/connections", token, None).await;
+    assert_eq!(status, StatusCode::OK, "{rows}");
+    rows.as_array().unwrap().iter().filter(|c| c["isDefault"] == true).map(|c| c["id"].as_str().unwrap().to_string()).collect()
+}
+
+fn default_path(connection: &str) -> String {
+    format!("/api/v1/integrations/test_integ/connections/{connection}/default")
+}
+
+#[tokio::test]
+async fn a_person_has_at_most_one_default_and_only_among_their_own_accounts() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+    let colleague = rt.create_user("default-colleague@test.local").await;
+    let work = create_connection(&rt, &rt.token, "test_integ", "work@example.com").await;
+    let personal = create_connection(&rt, &rt.token, "test_integ", "personal@example.com").await;
+    let theirs = create_connection(&rt, &colleague, "test_integ", "colleague@example.com").await;
+
+    for chosen in [&work, &personal] {
+        let (status, body) = rt.request_as(Method::PUT, &default_path(chosen), &rt.token, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(defaults(&rt, &rt.token).await, vec![chosen.clone()], "switching replaces the previous default");
+    }
+    let (status, _) = rt.request_as(Method::PUT, &default_path(&personal), &colleague, None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "another person's account cannot become your default");
+    let (status, _) = rt.request_as(Method::PUT, &default_path("missing"), &rt.token, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(defaults(&rt, &colleague).await.is_empty(), "a refused attempt leaves the colleague without a default");
+
+    let (status, _) = rt.request_as(Method::PUT, &default_path(&theirs), &colleague, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = rt.request_as(Method::DELETE, &default_path(&personal), &rt.token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(defaults(&rt, &rt.token).await.is_empty(), "clearing removes the default");
+    assert_eq!(defaults(&rt, &colleague).await, vec![theirs], "one person's choice never touches another's");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn simultaneous_default_switches_leave_exactly_one_default() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+    let mut accounts = Vec::new();
+    for label in ["a@example.com", "b@example.com", "c@example.com"] {
+        accounts.push(create_connection(&rt, &rt.token, "test_integ", label).await);
+    }
+    let paths: Vec<String> = accounts.iter().map(|connection| default_path(connection)).collect();
+    let (a, b, c) = tokio::join!(
+        rt.request_as(Method::PUT, &paths[0], &rt.token, None),
+        rt.request_as(Method::PUT, &paths[1], &rt.token, None),
+        rt.request_as(Method::PUT, &paths[2], &rt.token, None),
+    );
+    for (status, body) in [a, b, c] {
+        assert_eq!(status, StatusCode::OK, "a concurrent switch must not fail: {body}");
+    }
+    let chosen = defaults(&rt, &rt.token).await;
+    assert_eq!(chosen.len(), 1, "exactly one default after concurrent switches: {chosen:?}");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn removing_an_account_or_an_app_leaves_no_binding_behind() {
+    for removal in ["delete the account", "disconnect every account", "uninstall the app"] {
+        let rt = TestRuntime::boot().await;
+        setup_integration(&rt).await;
+        rt.install("bound_app", "items").await;
+        let account = create_connection(&rt, &rt.token, "test_integ", "bound@example.com").await;
+        let (status, _) = rt.request_as(Method::PUT, &default_path(&account), &rt.token, None).await;
+        assert_eq!(status, StatusCode::OK);
+        for scope in [json!("user"), json!(null)] {
+            let (status, body) = rt.post_json("/api/v1/apps/bound_app/integrations",
+                &json!({"integrationId": "test_integ", "connectionId": account, "scope": scope})).await;
+            assert_eq!(status, StatusCode::OK, "{removal}: {body}");
+        }
+
+        let status = match removal {
+            "delete the account" => rt.delete(&format!("/api/v1/integrations/test_integ/connections/{account}")).await,
+            "disconnect every account" => rt.delete("/api/v1/integrations/test_integ/auth").await,
+            _ => rt.delete("/api/v1/apps/bound_app").await,
+        };
+        assert_eq!(status, StatusCode::OK, "{removal}");
+        let left: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM rootcx_system.app_integrations WHERE app_id = 'bound_app' OR connection_id = $1")
+            .bind(&account).fetch_one(rt.pool()).await.unwrap();
+        assert_eq!(left, 0, "{removal} left bindings behind");
+        rt.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn binding_an_app_that_is_not_installed_is_refused() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+    let account = create_connection(&rt, &rt.token, "test_integ", "nowhere@example.com").await;
+    let (status, body) = rt.post_json("/api/v1/apps/never_installed/integrations",
+        &json!({"integrationId": "test_integ", "connectionId": account, "scope": "user"})).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM rootcx_system.app_integrations")
+        .fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(stored, 0);
+    rt.shutdown().await;
+}
+
+/// Tenants upgrading from a Core without these keys may already hold bindings
+/// whose app or account is gone; the upgrade must drop them and keep the rest.
+#[tokio::test]
+async fn upgrading_drops_bindings_orphaned_before_the_keys_existed() {
+    use rootcx_core::extensions::{RuntimeExtension, integrations::IntegrationsExtension};
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+    rt.install("kept_app", "items").await;
+    let account = create_connection(&rt, &rt.token, "test_integ", "kept@example.com").await;
+    let (_, me) = rt.get_json("/api/v1/auth/me").await;
+    let me = me["id"].as_str().unwrap();
+    for constraint in ["fk_app_integrations_app", "fk_app_integrations_connection"] {
+        sqlx::query(&format!("ALTER TABLE rootcx_system.app_integrations DROP CONSTRAINT {constraint}"))
+            .execute(rt.pool()).await.unwrap();
+    }
+    for (app, connection) in [("kept_app", account.as_str()), ("removed_app", account.as_str()), ("kept_app", "removed-account")] {
+        let user = if connection == account { me.to_string() } else { uuid::Uuid::new_v4().to_string() };
+        sqlx::query("INSERT INTO rootcx_system.app_integrations (app_id, integration_id, user_id, connection_id) VALUES ($1, 'test_integ', $2, $3)")
+            .bind(app).bind(user).bind(connection).execute(rt.pool()).await.unwrap();
+    }
+
+    IntegrationsExtension.bootstrap(rt.pool()).await.unwrap();
+
+    let left: Vec<(String, String)> = sqlx::query_as("SELECT app_id, connection_id FROM rootcx_system.app_integrations")
+        .fetch_all(rt.pool()).await.unwrap();
+    assert_eq!(left, vec![("kept_app".to_string(), account.clone())], "only the binding whose app and account exist survives");
+    let status = rt.delete(&format!("/api/v1/integrations/test_integ/connections/{account}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM rootcx_system.app_integrations")
+        .fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(left, 0, "the restored keys remove bindings with their account again");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn reconnecting_the_default_account_keeps_it_the_default() {
+    let rt = TestRuntime::boot().await;
+    setup_integration(&rt).await;
+    let account = create_connection(&rt, &rt.token, "test_integ", "expired@example.com").await;
+    let (status, _) = rt.request_as(Method::PUT, &default_path(&account), &rt.token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    sqlx::query("UPDATE rootcx_system.integration_connections SET status = 'dead' WHERE id = $1")
+        .bind(&account).execute(rt.pool()).await.unwrap();
+
+    let reconnected = create_connection(&rt, &rt.token, "test_integ", "expired@example.com").await;
+    assert_eq!(reconnected, account);
+    assert_eq!(defaults(&rt, &rt.token).await, vec![account], "Shappy and every app keep using the reconnected account");
+    rt.shutdown().await;
+}
