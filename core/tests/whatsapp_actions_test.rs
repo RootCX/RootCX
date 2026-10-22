@@ -63,6 +63,11 @@ async fn permissions(rt: &harness::TestRuntime, role: &str, perms: &[&str]) {
         .bind(role).bind(perms).execute(rt.pool()).await.unwrap();
 }
 
+async fn channel_session(rt: &harness::TestRuntime, grant: &str) -> Option<Uuid> {
+    sqlx::query_scalar("SELECT session_id FROM rootcx_system.channel_sessions WHERE external_chat_id = $1")
+        .bind(grant).fetch_optional(rt.pool()).await.unwrap()
+}
+
 async fn count(rt: &harness::TestRuntime) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM business.records").fetch_one(rt.pool()).await.unwrap()
 }
@@ -166,6 +171,34 @@ async fn web_and_managed_channels_preserve_delegated_authority() {
         assert!(output[0]["result"].as_array().unwrap().iter().any(|app| app["appId"] == "business"),
             "discovery must not need collection grants");
         assert_eq!(discovery.await.unwrap().status(), StatusCode::OK);
+
+        // /newsession resets the conversation without reaching the agent; the gateway confirms it.
+        let first = channel_session(&rt, &grant).await.expect("chat has a session");
+        while messages.try_recv().is_ok() {}
+        let reset = webhook(&rt, provider, channel, json!({"id":Uuid::new_v4(),"chat_id":grant,"text":"/newsession"}))
+            .send().await.unwrap();
+        let reset = reset.json::<Value>().await.unwrap();
+        assert_eq!((&reset["status"], &reset["command"]), (&json!("done"), &json!("newsession")));
+        assert!(messages.try_recv().is_err(), "{provider}: reset must not reply on its own");
+        assert_eq!(channel_session(&rt, &grant).await, None);
+        let request = invoke(&rt, provider, channel, &grant, Value::Null);
+        results(&next_message(&mut messages).await);
+        assert_eq!(request.await.unwrap().status(), StatusCode::OK);
+        let fresh = channel_session(&rt, &grant).await.unwrap();
+        assert_ne!(fresh, first, "{provider}: next message opens a new session");
+
+        // A long pause also starts over, while an active conversation continues.
+        sqlx::query("UPDATE rootcx_system.agent_sessions SET updated_at = now() - interval '7 hours' WHERE id = $1")
+            .bind(fresh).execute(rt.pool()).await.unwrap();
+        let request = invoke(&rt, provider, channel, &grant, Value::Null);
+        results(&next_message(&mut messages).await);
+        assert_eq!(request.await.unwrap().status(), StatusCode::OK);
+        let resumed = channel_session(&rt, &grant).await.unwrap();
+        assert_ne!(resumed, fresh, "{provider}: idle session expires");
+        let request = invoke(&rt, provider, channel, &grant, Value::Null);
+        results(&next_message(&mut messages).await);
+        assert_eq!(request.await.unwrap().status(), StatusCode::OK);
+        assert_eq!(channel_session(&rt, &grant).await, Some(resumed), "{provider}: active session continues");
 
         // Untrusted worker code sees invocation IDs. Distinct origins must have
         // different processes even for the same human and identical permissions.
