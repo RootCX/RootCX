@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { collect, materialize } from '../workspace.mjs';
 import { createBuilder } from '../server.mjs';
-import { applyUpdate, fetchPlan } from '../update.mjs';
+import { applyUpdate, fetchPlan, replacementRequest } from '../update.mjs';
 
 const encoded = text => Buffer.from(text).toString('base64');
 const decoded = files => Object.fromEntries(Object.entries(files).map(([path, content]) => [path, Buffer.from(content, 'base64').toString()]));
@@ -35,15 +35,57 @@ function plan(mode, theirs) {
   return { mode, base: { version: '0.3.0', files: tree(base) }, release: { version: '0.4.1', files: tree(theirs) } };
 }
 
-async function update(t, { mode, ours, theirs, compile = async () => 'artifact', coding }) {
+async function update(t, { mode, ours, theirs, compile = async () => 'artifact', coding, prompt = 'Mettre à jour' }) {
   const root = await mkdtemp(join(tmpdir(), 'builder-update-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await materialize(root, tree(ours));
   const { config, seen } = await portal(t, () => ({ status: 500 }));
   const conversationId = randomUUID();
-  const run = applyUpdate({ plan: plan(mode, theirs), root, appId: 'btp', conversationId, prompt: 'Mettre à jour', signal: new AbortController().signal, config, compile, coding });
+  const run = applyUpdate({ plan: plan(mode, theirs), root, appId: 'btp', conversationId, prompt, signal: new AbortController().signal, config, compile, coding });
   return { run, root, seen, conversationId };
 }
+
+test('explicit replacement publishes exactly the requested release after verification, without the model', async t => {
+  const ours = { ...base, 'src/private-feature.ts': 'company customization' };
+  const theirs = { 'src/new-app.ts': 'new application' };
+  const { run, root, seen } = await update(t, {
+    mode: 'reconcile', ours, theirs, prompt: replacementRequest('0.4.1'),
+    compile: async dir => { assert.deepEqual(decoded(await collect(dir)), theirs); return 'verified'; },
+    coding: () => assert.fail('replacement must not regenerate the release'),
+  });
+  const result = await run;
+  assert.deepEqual(decoded(result.files), theirs);
+  assert.deepEqual(decoded(await collect(root)), theirs);
+  assert.equal(result.frontend, 'verified');
+  assert.match(result.summary, /personnalisations.*abandonnées/);
+  assert.deepEqual(seen.reports, []);
+});
+
+test('replacement requires the exact target version and the authorized reconciliation state', async t => {
+  for (const [mode, prompt] of [
+    ['merge', replacementRequest('0.4.1')],
+    ['reconcile', replacementRequest('0.3.0')],
+    ['reconcile', `Ne pas ${replacementRequest('0.4.1')}`],
+  ]) {
+    const ours = { ...base, 'src/sidebar.ts': sidebar('Company') };
+    const theirs = { ...base, 'src/sidebar.ts': sidebar('Release') };
+    const { run } = await update(t, { mode, prompt, ours, theirs,
+      compile: () => assert.fail('no replacement build'),
+      coding: async () => ({ files: tree(ours), frontend: 'kept', summary: 'Ordinary reconciliation' }),
+    });
+    assert.deepEqual((await run).files, tree(ours), `${mode}: ${prompt}`);
+  }
+});
+
+test('failed replacement verification reports failure and returns no publication', async t => {
+  const { run, seen } = await update(t, {
+    mode: 'reconcile', ours: base, theirs: { 'src/new.ts': 'invalid' },
+    prompt: replacementRequest('0.4.1'), compile: async () => { throw new Error('compile failed'); },
+    coding: () => assert.fail('no model'),
+  });
+  await assert.rejects(run, error => error.code === 'BUILD_FAILED');
+  assert.deepEqual(seen.reports.map(report => report.outcome), ['failed']);
+});
 
 test('no update plan leaves the ordinary coding path untouched', async t => {
   for (const [name, endpoint, conversationId, expectedQueries] of [

@@ -13,6 +13,8 @@ const markers = /^(?:<{7}|>{7})(?: |$)/m;
 // Git keeps both sides of a file/directory clash under these suffixes.
 const sideCopy = /~(?:HEAD|release)$/;
 
+export const replacementRequest = version => `Remplacer intégralement l’application par la version SHAPP ${version} et abandonner mes personnalisations.`;
+
 // Unmerged index stages: 1 base, 2 company, 3 release. Not every conflict leaves markers.
 export function describeConflicts(listing) {
   const stages = new Map();
@@ -100,6 +102,19 @@ export async function mergeRelease({ base, ours, theirs }) {
 export async function applyUpdate({ plan, root, appId, conversationId, runId, prompt, narrationPrompt, signal, config, onProgress = () => {}, coding = code, compile = build, report = reportUpdate }) {
   const ours = await collect(root);
   const { base, release } = plan;
+  // Only an explicit, version-bound owner request may discard company edits.
+  if (plan.mode === 'reconcile' && prompt.trim() === replacementRequest(release.version)) {
+    try {
+      await replace(root, release.files);
+      onProgress('checking');
+      const frontend = await compile(root, appId, signal);
+      return { files: release.files, frontend, summary: `Votre application a été remplacée intégralement par la version ${release.version}. Les anciennes personnalisations ont été abandonnées.` };
+    } catch (error) {
+      if (!signal.aborted) await report(config, { appId, conversationId, outcome: 'failed' });
+      error.code ??= 'BUILD_FAILED';
+      throw error;
+    }
+  }
   const merged = await mergeRelease({ base: base.files, ours, theirs: release.files });
   if (plan.mode === 'merge' && !merged.clean) {
     await report(config, { appId, conversationId, outcome: 'conflict', conflicts: merged.conflicts });
