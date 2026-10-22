@@ -28,6 +28,7 @@ test('publication checks report only operations actually run and never turn fail
   t.after(async () => { for (const path of [root, `${root}.sandbox`]) await rm(path, { recursive: true, force: true }); });
   await cp(new URL('./fixture/', import.meta.url), root, { recursive: true });
   await mkdir(join(root, 'backend'), { recursive: true });
+  await cp(new URL('./backend-fixture/', import.meta.url), join(root, 'backend'), { recursive: true });
   const file = join(root, 'backend', 'rule.test.ts');
   await writeFile(file, "import { test, expect } from 'bun:test'; test('acompte', () => expect(300).toBe(400));");
   const facts = [];

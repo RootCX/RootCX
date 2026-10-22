@@ -138,7 +138,7 @@ async function installDependencies(root, relative, signal) {
   try { present = (await lstat(join(directory, 'node_modules'))).isDirectory(); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   if (installedLocks.get(directory) === digest && present) return;
   const args = manager === 'bun'
-    ? ['bun', ...(relative ? ['--cwd', relative] : []), 'install', '--frozen-lockfile', '--ignore-scripts']
+    ? ['bun', 'install', ...(relative ? ['--cwd', relative] : []), '--frozen-lockfile', '--ignore-scripts']
     : ['npm', ...(relative ? ['--prefix', relative] : []), 'ci', '--ignore-scripts', '--no-audit', '--no-fund'];
   await isolated(root, args, { network: true, signal });
   installedLocks.set(directory, digest);
