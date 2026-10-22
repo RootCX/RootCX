@@ -195,10 +195,14 @@ pub async fn webhook(
     }
     // Managed gateways wait for a terminal receipt; native webhooks acknowledge promptly.
     if config["managed"] == true {
+        let reset = matches!(&event, InboundEvent::Message { text, .. } if is_new_session(text));
         let result = process_event(&rt, &channel_id, &provider_name, &config, provider.as_ref(), event).await;
         let code = result.as_ref().err().map(|error| channel_error_code(error));
         super::intake::finish(rt.pool(), channel, &delivery, result.is_ok(), code).await?;
-        return Ok(Json(json!({"ok":true,"status":if result.is_ok() {"done"} else {"failed"},"errorCode":code})));
+        // The gateway owns the localized confirmation, so a reset replies nothing here.
+        let mut body = json!({"ok":true,"status":if result.is_ok() {"done"} else {"failed"},"errorCode":code});
+        if reset && result.is_ok() { body["command"] = json!("newsession"); }
+        return Ok(Json(body));
     }
     tokio::spawn(async move {
         let result = process_event(&rt, &channel_id, &provider_name, &config, provider.as_ref(), event).await;
@@ -220,7 +224,11 @@ async fn process_event(
             Ok(())
         }
         InboundEvent::Message { chat_id, text, media } => {
-            if config["managed"] != true && handle_command(rt.pool(), channel, &chat_id, &text, config, provider).await {
+            if config["managed"] == true {
+                if is_new_session(&text) {
+                    return reset_session(rt.pool(), channel, &chat_id).await.map_err(|e| e.to_string());
+                }
+            } else if handle_command(rt.pool(), channel, &chat_id, &text, config, provider).await {
                 return Ok(());
             }
             if resolve_invoker(rt.pool(), channel, &chat_id).await.is_none() {
@@ -242,7 +250,7 @@ async fn do_invoke(
     let pool = rt.pool();
     let wm = rt.worker_manager();
     let ((app_id, session_id), invoker_user_id) = tokio::try_join!(
-        resolve_session(pool, channel_id, chat_id),
+        resolve_session(pool, channel_id, chat_id, config["managed"] == true),
         async { Ok(resolve_invoker(pool, channel_id, chat_id).await) },
     ).map_err(&e)?;
 
@@ -334,12 +342,26 @@ fn channel_error_code(error: &str) -> &'static str {
         _ => "AGENT_FAILED",
     }
 }
+
+// Managed chats are one endless thread; a long pause starts a fresh conversation.
+const MANAGED_IDLE_RESET: &str = "6 hours";
 const MSG_LINK_OK: &str = "Account linked! Your integrations are now available.";
 const MSG_LINK_INVALID: &str = "Link expired or invalid. Please try again from the dashboard.";
 const ACTION_APPROVE: &str = "approve";
 const ACTION_DENY: &str = "deny";
 const ACTION_AGENT: &str = "agent";
 const PROTECTED_CONFIG_KEYS: &[&str] = &["bot_token", "webhook_secret", "signing_secret"];
+
+fn is_new_session(text: &str) -> bool {
+    parse_command(text).is_some_and(|(cmd, parts)| parts.len() == 1 && cmd.eq_ignore_ascii_case("/newsession"))
+}
+
+async fn reset_session(pool: &sqlx::PgPool, channel_id: &str, chat_id: &str) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "DELETE FROM rootcx_system.channel_sessions
+         WHERE channel_id = $1::uuid AND external_chat_id = $2",
+    ).bind(channel_id).bind(chat_id).execute(pool).await.map(drop)
+}
 
 fn parse_command(text: &str) -> Option<(&str, Vec<&str>)> {
     let parts: Vec<&str> = text.split_whitespace().collect();
@@ -370,12 +392,15 @@ async fn create_session(
 }
 
 async fn resolve_session(
-    pool: &sqlx::PgPool, channel_id: &str, chat_id: &str,
+    pool: &sqlx::PgPool, channel_id: &str, chat_id: &str, expire_idle: bool,
 ) -> Result<(String, String), ApiError> {
     if let Some(row) = sqlx::query_as::<_, (String, String)>(
-        "SELECT app_id, session_id::text FROM rootcx_system.channel_sessions
-         WHERE channel_id = $1::uuid AND external_chat_id = $2",
-    ).bind(channel_id).bind(chat_id).fetch_optional(pool).await? {
+        "SELECT c.app_id, c.session_id::text FROM rootcx_system.channel_sessions c
+         JOIN rootcx_system.agent_sessions s ON s.id = c.session_id
+         WHERE c.channel_id = $1::uuid AND c.external_chat_id = $2
+           AND (NOT $3 OR s.updated_at > now() - $4::interval)",
+    ).bind(channel_id).bind(chat_id).bind(expire_idle).bind(MANAGED_IDLE_RESET)
+    .fetch_optional(pool).await? {
         return Ok(row);
     }
     let app_id: String = sqlx::query_scalar(
@@ -422,7 +447,7 @@ async fn reply_approval(
     rt: &SharedRuntime, channel: &str, chat: &str, approval: &str, response: ApprovalResponse,
 ) -> bool {
     let Some(human) = resolve_invoker(rt.pool(), channel, chat).await else { return false };
-    let Ok((app, _)) = resolve_session(rt.pool(), channel, chat).await else { return false };
+    let Ok((app, _)) = resolve_session(rt.pool(), channel, chat, false).await else { return false };
     let Ok(origin) = ChannelSession::load(rt.pool(), channel, chat, human, &app).await else { return false };
     rt.pending_approvals().reply(approval, &origin.owner(human), response).await
 }
@@ -448,10 +473,7 @@ async fn handle_command(
     let Some((cmd, parts)) = parse_command(text) else { return false };
     match cmd {
         "/newsession" => {
-            let _ = sqlx::query(
-                "DELETE FROM rootcx_system.channel_sessions
-                 WHERE channel_id = $1::uuid AND external_chat_id = $2",
-            ).bind(channel_id).bind(chat_id).execute(pool).await;
+            let _ = reset_session(pool, channel_id, chat_id).await;
             let _ = provider.send_response(config, chat_id, "New session started.").await;
             true
         }
@@ -619,7 +641,7 @@ async fn try_complete_link(
     // Phase 6b: linking grants a standing 'channel' delegation to the active
     // app's agent. The deterministic trigger_ref enables revoke_by_trigger on unlink.
     {
-        let (app_id, _) = resolve_session(pool, channel_id, chat_id).await.ok()?;
+        let (app_id, _) = resolve_session(pool, channel_id, chat_id, false).await.ok()?;
         let agent_uid = crate::extensions::agents::agent_user_id(&app_id);
         let trigger_ref = super::channel_delegation_ref(channel_id, user_id);
         // Relinking must replace the former agent, not retain its trigger-scoped grant.
