@@ -21,6 +21,7 @@ pub struct Connection {
     pub label: Option<String>,
     pub created_at: String,
     pub status: String,
+    pub is_default: bool,
 }
 
 pub async fn bootstrap(pool: &sqlx::PgPool) -> Result<(), crate::RuntimeError> {
@@ -106,6 +107,38 @@ pub async fn bootstrap(pool: &sqlx::PgPool) -> Result<(), crate::RuntimeError> {
                 ALTER TABLE rootcx_system.app_integrations
                     ADD CONSTRAINT chk_user_binding_has_connection
                     CHECK (user_id = '' OR connection_id IS NOT NULL);
+            END IF;
+        END $$",
+    ] {
+        sqlx::query(ddl).execute(pool).await.map_err(crate::RuntimeError::Schema)?;
+    }
+
+    // A user's default connection serves every app that has no account choice of
+    // its own. At most one per (integration × user); it lives on the connection
+    // row, so deleting the connection can never leave a default behind.
+    //
+    // A binding exists only while its app and its connection do: removing either
+    // removes the binding in the same statement, whichever path removes it.
+    // Rows orphaned before these keys existed are dropped once, when they are added.
+    for ddl in [
+        "ALTER TABLE rootcx_system.integration_connections ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT false",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_integration_default_connection
+         ON rootcx_system.integration_connections (integration_id, user_id) WHERE is_default",
+        "CREATE INDEX IF NOT EXISTS idx_app_integrations_connection
+         ON rootcx_system.app_integrations (connection_id) WHERE connection_id IS NOT NULL",
+        "DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_app_integrations_app') THEN
+                DELETE FROM rootcx_system.app_integrations b
+                    WHERE NOT EXISTS (SELECT 1 FROM rootcx_system.apps a WHERE a.id = b.app_id);
+                ALTER TABLE rootcx_system.app_integrations ADD CONSTRAINT fk_app_integrations_app
+                    FOREIGN KEY (app_id) REFERENCES rootcx_system.apps (id) ON DELETE CASCADE;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_app_integrations_connection') THEN
+                DELETE FROM rootcx_system.app_integrations b
+                    WHERE b.connection_id IS NOT NULL AND NOT EXISTS
+                        (SELECT 1 FROM rootcx_system.integration_connections c WHERE c.id = b.connection_id);
+                ALTER TABLE rootcx_system.app_integrations ADD CONSTRAINT fk_app_integrations_connection
+                    FOREIGN KEY (connection_id) REFERENCES rootcx_system.integration_connections (id) ON DELETE CASCADE;
             END IF;
         END $$",
     ] {
@@ -338,15 +371,19 @@ pub(super) async fn first_direct_connection(
 
 /// The binding-as-consent rule, owned by this module alongside the resolution
 /// rules: acting as oneself is allowed by one's own binding OR the app-wide
-/// one; acting as another user requires THAT user's own (app × user) binding.
+/// one; acting as another user requires THAT user's own consent. A user's own
+/// consent is their (app × user) binding or their default connection, which
+/// they chose for every app.
 pub(crate) async fn binding_allows(
     pool: &sqlx::PgPool, app_id: &str, integration_id: &str,
     requester: uuid::Uuid, effective: uuid::Uuid,
 ) -> Result<bool, String> {
     sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM rootcx_system.app_integrations
-         WHERE app_id = $1 AND integration_id = $2 AND enabled = true
-           AND (user_id = $3 OR ($4 AND user_id = $5)))")
+             WHERE app_id = $1 AND integration_id = $2 AND enabled = true
+               AND (user_id = $3 OR ($4 AND user_id = $5)))
+         OR EXISTS (SELECT 1 FROM rootcx_system.integration_connections
+             WHERE integration_id = $2 AND user_id = $3 AND is_default)")
         .bind(app_id).bind(integration_id)
         .bind(effective.to_string())
         .bind(effective == requester)
@@ -362,7 +399,8 @@ pub(crate) fn manage_perm(integration_id: &str) -> String {
 }
 
 /// Resolve which provider config + credentials to use for an integration action.
-/// Unified entry point: handles app binding lookup, delegation, and direct fallback.
+/// Unified entry point: handles app binding lookup, the user's default
+/// connection, delegation, and direct fallback.
 ///
 /// Returns `(config, credentials, effective_user_id, connection_id, credential_version)`. `config` is
 /// the OAuth client of the selected connection (pinned via its `config_id`), or
@@ -394,10 +432,24 @@ pub(crate) async fn resolve_credentials(
         }
     }
 
-    // 2. Fallback selection for the user. Only 'active' connections are
+    // 2. The user's default connection — their own choice for every app that
+    //    has none above.
+    let default: Option<(String,)> = sqlx::query_as(
+        "SELECT id FROM rootcx_system.integration_connections
+         WHERE integration_id = $1 AND user_id = $2 AND is_default"
+    )
+    .bind(integration_id)
+    .bind(user_id)
+    .fetch_optional(pool).await.ok().flatten();
+
+    if let Some((conn_id,)) = default {
+        return resolve_by_connection_id(secrets, pool, integration_id, &conn_id, user_id).await;
+    }
+
+    // 3. Fallback selection for the user. Only 'active' connections are
     //    eligible: a dead mailbox must never be auto-picked here. (An explicit
-    //    binding above, or a delegation source below, is resolved by id as-is —
-    //    we honor the deliberate choice rather than silently reroute.)
+    //    binding or default above, or a delegation source below, is resolved by
+    //    id as-is — we honor the deliberate choice rather than silently reroute.)
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT id, kind FROM rootcx_system.integration_connections
          WHERE integration_id = $1 AND user_id = $2 AND status = 'active'
@@ -411,7 +463,7 @@ pub(crate) async fn resolve_credentials(
     let delegation_row = rows.iter().find(|(_, k)| k == "delegation");
     let direct_row = rows.iter().find(|(_, k)| k == "direct");
 
-    // 3. Try delegation
+    // 4. Try delegation
     if let Some((delegate_conn_id, _)) = delegation_row {
         let conn_key = credential_key(delegate_conn_id);
         if let Ok(Some(raw)) = secrets.get(pool, integration_id, &conn_key).await {
@@ -422,7 +474,7 @@ pub(crate) async fn resolve_credentials(
         }
     }
 
-    // 4. Direct connection
+    // 5. Direct connection
     if let Some((conn_id, _)) = direct_row {
         return resolve_by_connection_id(secrets, pool, integration_id, conn_id, user_id).await;
     }
@@ -507,8 +559,8 @@ pub async fn list_connections(
     Path(integration_id): Path<String>,
 ) -> Result<Json<Vec<Connection>>, ApiError> {
     let pool = routes::pool(&rt);
-    let rows: Vec<(String, String, String, Option<String>, chrono::DateTime<chrono::Utc>, String)> = sqlx::query_as(
-        "SELECT id, integration_id, user_id, label, created_at, status
+    let rows: Vec<(String, String, String, Option<String>, chrono::DateTime<chrono::Utc>, String, bool)> = sqlx::query_as(
+        "SELECT id, integration_id, user_id, label, created_at, status, is_default
          FROM rootcx_system.integration_connections
          WHERE integration_id = $1 AND user_id = $2 AND kind = 'direct'
          ORDER BY created_at"
@@ -517,8 +569,8 @@ pub async fn list_connections(
     .bind(identity.user_id.to_string())
     .fetch_all(&pool).await?;
 
-    let connections: Vec<Connection> = rows.into_iter().map(|(id, iid, uid, label, created_at, status)| {
-        Connection { id, integration_id: iid, user_id: uid, label, created_at: created_at.to_rfc3339(), status }
+    let connections: Vec<Connection> = rows.into_iter().map(|(id, iid, uid, label, created_at, status, is_default)| {
+        Connection { id, integration_id: iid, user_id: uid, label, created_at: created_at.to_rfc3339(), status, is_default }
     }).collect();
 
     Ok(Json(connections))
@@ -541,6 +593,52 @@ pub async fn delete_connection(
     tx.commit().await?;
 
     Ok(Json(json!({ "message": "connection deleted" })))
+}
+
+/// Make one of your own accounts the default for every app without an account
+/// choice of its own; the previous default, if any, stops being one.
+pub async fn set_default_connection(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path((integration_id, connection_id)): Path<(String, String)>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let pool = routes::pool(&rt);
+    verify_owner(&pool, &connection_id, &integration_id, &identity).await?;
+
+    // Locking the owner's accounts serializes concurrent switches, so the one
+    // default per (integration × user) is never contended mid-transaction. Only
+    // direct accounts qualify: a delegation's secret is a pointer, not a credential.
+    let owner = identity.user_id.to_string();
+    let mut tx = pool.begin().await?;
+    let accounts: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM rootcx_system.integration_connections
+         WHERE integration_id = $1 AND user_id = $2 AND kind = 'direct' FOR UPDATE"
+    ).bind(&integration_id).bind(&owner).fetch_all(&mut *tx).await?;
+    if !accounts.contains(&connection_id) {
+        return Err(ApiError::NotFound("connection not found".into()));
+    }
+    sqlx::query(
+        "UPDATE rootcx_system.integration_connections SET is_default = false
+         WHERE integration_id = $1 AND user_id = $2 AND is_default AND id <> $3"
+    ).bind(&integration_id).bind(&owner).bind(&connection_id).execute(&mut *tx).await?;
+    sqlx::query("UPDATE rootcx_system.integration_connections SET is_default = true WHERE id = $1")
+        .bind(&connection_id).execute(&mut *tx).await?;
+    tx.commit().await?;
+
+    Ok(Json(json!({ "message": "default connection set" })))
+}
+
+pub async fn clear_default_connection(
+    identity: Identity,
+    State(rt): State<SharedRuntime>,
+    Path((integration_id, connection_id)): Path<(String, String)>,
+) -> Result<Json<JsonValue>, ApiError> {
+    let pool = routes::pool(&rt);
+    verify_owner(&pool, &connection_id, &integration_id, &identity).await?;
+    sqlx::query("UPDATE rootcx_system.integration_connections SET is_default = false WHERE id = $1")
+        .bind(&connection_id).execute(&pool).await?;
+
+    Ok(Json(json!({ "message": "default connection cleared" })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -757,5 +855,102 @@ mod tests {
     fn credential_key_format_is_stable() {
         assert_eq!(credential_key("abc-123"), "_conn.abc-123");
         assert_eq!(credential_key("legacy-gmail-user1"), "_conn.legacy-gmail-user1");
+    }
+
+    mod against_the_database {
+        use super::*;
+        use crate::extensions::test_db::pool;
+        use crate::secrets::SecretManager;
+
+        /// One integration and its apps, under ids no other test shares.
+        struct Tenant {
+            pool: sqlx::PgPool,
+            secrets: SecretManager,
+            integration: String,
+            tag: String,
+        }
+
+        impl Tenant {
+            async fn new() -> Self {
+                let tag = Uuid::new_v4().simple().to_string()[..12].to_string();
+                Self { pool: pool().await, secrets: SecretManager::with_key(&[0x3C; 32]), integration: format!("int_{tag}"), tag }
+            }
+
+            async fn install(&self, name: &str) -> String {
+                let id = format!("app_{}_{name}", self.tag);
+                sqlx::query("INSERT INTO rootcx_system.apps (id, name) VALUES ($1, $1)")
+                    .bind(&id).execute(&self.pool).await.unwrap();
+                id
+            }
+
+            /// A live account whose stored credential names it, so a resolution shows which one it reached.
+            async fn connect(&self, user: Uuid, account: &str) -> String {
+                let id = create_connection(&self.pool, &self.integration, &user.to_string(), Some(account), "direct", None).await.unwrap();
+                self.secrets.set(&self.pool, &self.integration, &credential_key(&id), &json!({ "account": account }).to_string())
+                    .await.unwrap();
+                id
+            }
+
+            async fn make_default(&self, connection: &str) {
+                sqlx::query("UPDATE rootcx_system.integration_connections SET is_default = true WHERE id = $1")
+                    .bind(connection).execute(&self.pool).await.unwrap();
+            }
+
+            async fn bind(&self, app: &str, user: &str, connection: &str) {
+                sqlx::query("INSERT INTO rootcx_system.app_integrations (app_id, integration_id, user_id, connection_id) VALUES ($1, $2, $3, $4)")
+                    .bind(app).bind(&self.integration).bind(user).bind(connection).execute(&self.pool).await.unwrap();
+            }
+
+            async fn account(&self, user: Uuid, app: &str) -> Option<String> {
+                let (_, credentials, ..) = resolve_credentials(&self.secrets, &self.pool, &self.integration, &user.to_string(), Some(app))
+                    .await.unwrap();
+                credentials["account"].as_str().map(str::to_string)
+            }
+        }
+
+        #[tokio::test]
+        async fn each_person_reaches_their_own_account_from_every_app() {
+            let t = Tenant::new().await;
+            let (plain, chosen, shared) = (t.install("plain").await, t.install("chosen").await, t.install("shared").await);
+            let [alice, bob, carol, dave, admin, agent] = [(); 6].map(|_| Uuid::new_v4());
+
+            let alice_main = t.connect(alice, "alice-main").await;
+            t.make_default(&alice_main).await;
+            // Alice uses a second account for one app.
+            let alice_other = t.connect(alice, "alice-other").await;
+            t.bind(&chosen, &alice.to_string(), &alice_other).await;
+            let bob_main = t.connect(bob, "bob-main").await;
+            t.make_default(&bob_main).await;
+            // One app runs on a shared mailbox chosen for everyone.
+            let mailbox = t.connect(admin, "shared-mailbox").await;
+            t.bind(&shared, APP_WIDE, &mailbox).await;
+            // Dave's default was rejected by the provider while another account still works.
+            let dave_main = t.connect(dave, "dave-main").await;
+            t.make_default(&dave_main).await;
+            t.connect(dave, "dave-other").await;
+            sqlx::query("UPDATE rootcx_system.integration_connections SET status = 'dead' WHERE id = $1")
+                .bind(&dave_main).execute(&t.pool).await.unwrap();
+
+            // (case, app, requester, acting for, account reached; None = refused)
+            let cases = [
+                ("a default serves an app without a choice of its own", &plain, alice, alice, Some("alice-main")),
+                ("an app's own account choice beats the default", &chosen, alice, alice, Some("alice-other")),
+                ("an app's shared account beats a personal default", &shared, alice, alice, Some("shared-mailbox")),
+                ("a colleague reaches their own default", &plain, bob, bob, Some("bob-main")),
+                ("another person's choice for an app never applies to a colleague", &chosen, bob, bob, Some("bob-main")),
+                ("an agent acting for a person reaches that person's default", &plain, agent, alice, Some("alice-main")),
+                ("the same agent acting for a colleague reaches the colleague's", &plain, agent, bob, Some("bob-main")),
+                ("a dead default is reported, never silently swapped", &plain, dave, dave, Some("dave-main")),
+                ("someone who never connected is refused", &plain, carol, carol, None),
+                ("an agent cannot act for someone who never connected", &plain, agent, carol, None),
+            ];
+            for (case, app, requester, effective, expected) in cases {
+                let allowed = binding_allows(&t.pool, app, &t.integration, requester, effective).await.unwrap();
+                assert_eq!(allowed, expected.is_some(), "consent: {case}");
+                if allowed {
+                    assert_eq!(t.account(effective, app).await.as_deref(), expected, "account: {case}");
+                }
+            }
+        }
     }
 }
