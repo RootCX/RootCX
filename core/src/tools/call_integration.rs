@@ -48,7 +48,10 @@ impl Tool for CallIntegrationTool {
             &ctx.pool, &ctx.app_id, integration_id, ctx.user_id, effective_user,
         ).await?;
         if !allowed {
-            return Err(format!("no binding allows {} to use {integration_id}", ctx.app_id));
+            // Read by the model, which relays it to the person: say what they can
+            // do about it, not which internal app id was refused.
+            return Err(format!("no binding allows this agent to use {integration_id}: the user has not connected \
+                their {integration_id} account; ask them to connect it in Integrations, then retry"));
         }
 
         // The integration runs under the human's RLS identity, but carrying the

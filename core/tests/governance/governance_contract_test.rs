@@ -965,9 +965,14 @@ async fn call_integration_requires_binding_consent() {
     let pool = rt.pool();
     let caller = RecordingCaller::new();
 
-    // The gate reads only app_integrations — no user rows needed.
+    // The gate reads only consent rows — no user rows needed. A binding needs its
+    // app and connection to exist, so the fixture creates them.
     let sandro = Uuid::new_v4();
     let colleague = Uuid::new_v4();
+    sqlx::query("INSERT INTO rootcx_system.apps (id, name, manifest) VALUES ('prospection', 'prospection', '{}')")
+        .execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.integration_connections (id, integration_id, user_id) VALUES ('conn-colleague', 'gmail', $1)")
+        .bind(colleague.to_string()).execute(pool).await.unwrap();
 
     let base = json!({"integrationId": "gmail", "action": "send_email", "input": {}});
 
@@ -2882,5 +2887,53 @@ async fn t6_8_sensitive_field_projection_is_reconciled_on_redeploy_and_uninstall
         projected_entities(&rt, "proj").await.is_empty(),
         "uninstall leaves no orphan projection"
     );
+    rt.shutdown().await;
+}
+
+/// The SHAPP promise end to end, through the real HTTP routes and consent gate:
+/// each colleague connects their own account once and every app, including one
+/// installed afterwards, may act for them with it, until they remove it.
+#[tokio::test]
+async fn each_colleagues_default_serves_apps_installed_later_until_removed() {
+    let rt = harness::TestRuntime::boot().await;
+    let pool = rt.pool();
+    let caller = RecordingCaller::new();
+    rt.install_manifest(&json!({"appId": "calendar", "name": "Calendar", "version": "1.0.0", "type": "integration", "dataContract": []})).await;
+    let worker = Uuid::new_v4();
+
+    let mut colleagues = Vec::new();
+    for email in ["anna@test.local", "ben@test.local"] {
+        let token = rt.create_user(email).await;
+        let (_, me) = rt.request_as(Method::GET, "/api/v1/auth/me", &token, None).await;
+        let (status, body) = rt.request_as(Method::POST, "/api/v1/integrations/calendar/auth/credentials", &token,
+            Some(&json!({"credentials": {"apiKey": email}, "label": email}))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let account = body["connectionId"].as_str().unwrap().to_string();
+        let (status, body) = rt.request_as(Method::PUT, &format!("/api/v1/integrations/calendar/connections/{account}/default"), &token, None).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        colleagues.push((token, me["id"].as_str().unwrap().parse::<Uuid>().unwrap(), account));
+    }
+    rt.install("installed_later", "items").await;
+    let act_for = |user: Uuid| {
+        let caller = &caller;
+        async move {
+            rootcx_core::extensions::integrations::execute_self_action(
+                pool, caller, "installed_later", "call_integration",
+                json!({"integrationId": "calendar", "action": "create_event", "input": {}, "asUser": user.to_string()}), &direct(worker),
+            ).await
+        }
+    };
+
+    for (_, user, _) in &colleagues {
+        assert!(act_for(*user).await.is_ok(), "an app installed after connecting must serve {user}");
+        assert_eq!(*caller.last_user.lock().unwrap(), Some(*user), "the call runs as that colleague, never another");
+    }
+
+    let (anna_token, anna, anna_account) = &colleagues[0];
+    let (status, _) = rt.request_as(Method::DELETE, &format!("/api/v1/integrations/calendar/connections/{anna_account}"), anna_token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    let refused = act_for(*anna).await;
+    assert!(refused.as_ref().is_err_and(|e| e.contains("no binding")), "a removed default must stop serving at once: {refused:?}");
+    assert!(act_for(colleagues[1].1).await.is_ok(), "removing one colleague's account leaves the other's untouched");
     rt.shutdown().await;
 }

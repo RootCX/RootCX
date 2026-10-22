@@ -8,6 +8,19 @@ Releases marked **Breaking** need the matching guide in
 
 ## Unreleased
 
+- A person can mark one of their own accounts as the default for an
+  integration (`PUT`/`DELETE /api/v1/integrations/{id}/connections/{connectionId}/default`,
+  `isDefault` in the connection list). The default serves every app and agent
+  acting for that person, unless the app has its own account choice (personal or
+  shared), which still wins. It is their consent, so an agent acting for them
+  may use it; nobody else's calls ever reach it.
+- App integration bindings now end with their app or account: uninstalling the
+  app, deleting the account or disconnecting removes them in the same
+  statement. Startup drops bindings already orphaned, then enforces it.
+  Binding an app that is not installed is refused (409).
+- `call_integration` tells the agent the person must connect the account,
+  without naming the internal app id.
+
 - `describe_app` returns the actions the caller may invoke (description and
   `inputSchema`) and the manifest `instructions`; `list_apps` lists their IDs.
   Actions follow the `call_action` permissions and are never shown through
