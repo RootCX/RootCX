@@ -162,8 +162,12 @@ async fn deploy_refuses_pending_sql_before_install_scripts_and_worker_start() {
             .is_err(),
         "refused deploy must not spawn a worker"
     );
-    // Failed archives remain on disk: the worker manager must enforce the same
-    // refusal on manual/lazy starts and after a Core restart.
+    // Rejected staged archives never replace the live backend. Reproduce a legacy
+    // on-disk backend to exercise the independent manual/lazy-start guard.
+    let app_dir = rt.runtime.data_dir().join("apps/crm");
+    std::fs::create_dir_all(app_dir.join("migrations")).unwrap();
+    std::fs::write(app_dir.join("index.ts"), b"serve({rpc: {ping: () => 'should not start'}});").unwrap();
+    std::fs::write(app_dir.join("migrations/001_audit.sql"), b"CREATE TABLE crm.audit_trail (note text);").unwrap();
     let error = rt
         .runtime
         .worker_manager()

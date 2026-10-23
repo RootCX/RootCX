@@ -135,7 +135,7 @@ async fn web_and_managed_channels_preserve_delegated_authority() {
       const m = JSON.parse(line);
       if (m.type === "discover") send({type:"discover",protocol:2});
       if (m.type === "agent_invoke") {
-        const tools = JSON.parse(m.message);
+        const tools = JSON.parse(m.message.split("\n\nUser message:\n").at(-1));
         if (tools === null) send({type:"agent_done",invoke_id:m.invoke_id,response:JSON.stringify([{pid:process.pid}]),tokens:0});
         else { runs.set(m.invoke_id,{tools,results:[]}); next(m.invoke_id); }
       }
