@@ -96,7 +96,8 @@ impl RuntimeExtension for ChannelExtension {
             .route("/api/v1/channels/{channel_id}/link", post(routes::create_link_token))
             .route("/api/v1/channels/{channel_id}/identity", get(routes::identity_status).delete(routes::unlink_identity))
             .route("/api/v1/channels/{provider}/{channel_id}/webhook", post(routes::webhook)
-                .layer(axum::extract::DefaultBodyLimit::max(6 * 1024 * 1024))))
+                // Three base64 files of at most 12 MiB together, plus the message.
+                .layer(axum::extract::DefaultBodyLimit::max(18 * 1024 * 1024))))
     }
 }
 

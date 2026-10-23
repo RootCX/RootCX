@@ -257,3 +257,40 @@ pub async fn revoke_share(
 
     Ok(Json(json!({ "message": format!("share '{share_id}' revoked") })))
 }
+
+/// Mints a fresh share for an app worker acting for its requester. An active
+/// share of the same context is revoked first: the worker only ever needs the
+/// raw token at creation, so it never meets the HTTP route's "already shared".
+pub(crate) async fn mint_share(
+    pool: &PgPool,
+    app_id: &str,
+    user_id: Uuid,
+    context: &JsonValue,
+) -> Result<String, sqlx::Error> {
+    let raw = tokens::generate();
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "UPDATE rootcx_system.public_shares SET revoked_at = now() \
+          WHERE app_id = $1 AND created_by = $2 \
+            AND md5(context::text) = md5($3::jsonb::text) AND revoked_at IS NULL",
+    )
+    .bind(app_id)
+    .bind(user_id)
+    .bind(context)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO rootcx_system.public_shares \
+           (app_id, token_hash, token_prefix, context, created_by) \
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(app_id)
+    .bind(&tokens::hash(&raw)[..])
+    .bind(tokens::prefix(&raw))
+    .bind(context)
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(raw)
+}
