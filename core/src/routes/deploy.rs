@@ -130,6 +130,9 @@ async fn install_deps(bun_bin: &Path, dir: &Path) -> Result<(), ApiError> {
         // An archive is untrusted even when an operator may deploy it. Package
         // scripts must not regain the Core authority removed from app migrations.
         .env_clear()
+        // Without HOME, bun caches inside node_modules of the staged directory;
+        // the rename then leaves dangling links that break the backend fingerprint.
+        .env("BUN_INSTALL_CACHE_DIR", std::env::temp_dir().join("rootcx-bun-cache"))
         .arg("install")
         .arg("--ignore-scripts")
         .kill_on_drop(true)

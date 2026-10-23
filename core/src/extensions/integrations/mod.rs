@@ -99,6 +99,23 @@ pub async fn execute_self_action(
             }
             caller.call(pool, effective, Some(app_id), integration_id, action_name, input, rpc).await
         }
+        "createPublicShare" => {
+            // Same authority as the owner HTTP route, for the requester only;
+            // a delegated worker keeps its frozen envelope.
+            let perms = match inherit {
+                Some(perms) => perms.to_vec(),
+                None => crate::governance::authority::resolve_permissions(pool, requester).await.map_err(|e| format!("{e:?}"))?.1,
+            };
+            if !crate::governance::authority::has_permission(&perms, &format!("app:{app_id}:public.share")) {
+                return Err(format!("permission denied: app:{app_id}:public.share"));
+            }
+            let context = params.get("context").filter(|c| c.is_object()).ok_or("createPublicShare: context must be an object")?;
+            if context.to_string().len() > 4096 {
+                return Err("createPublicShare: context too large".into());
+            }
+            let token = crate::extensions::sharing::routes::mint_share(pool, app_id, requester, context).await.map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "token": token, "publicUrl": std::env::var("ROOTCX_PUBLIC_URL").ok() }))
+        }
         other => Err(format!("unknown self_action: {other}")),
     }
 }

@@ -129,3 +129,31 @@ mod guard_tests {
         assert!(authorize_public_rpc(&decl, &auth, "shop", &json!({})).is_ok());
     }
 }
+
+mod mint_tests {
+    use crate::extensions::RuntimeExtension;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn a_worker_minted_share_replaces_the_previous_link_of_the_same_context() {
+        let pool = crate::extensions::test_db::pool().await;
+        super::super::SharingExtension.bootstrap(&pool).await.unwrap();
+        let user = Uuid::new_v4();
+        sqlx::query("INSERT INTO rootcx_system.users (id, email) VALUES ($1, $2)")
+            .bind(user).bind(format!("{user}@example.test")).execute(&pool).await.unwrap();
+        let quote = json!({ "quote_id": Uuid::new_v4().to_string() });
+        let first = super::super::routes::mint_share(&pool, "shapp_btp", user, &quote).await.unwrap();
+        let second = super::super::routes::mint_share(&pool, "shapp_btp", user, &quote).await.unwrap();
+        assert_ne!(first, second);
+        assert_eq!(super::super::resolve_app_id(&pool, &first).await, None);
+        assert_eq!(super::super::resolve_app_id(&pool, &second).await.as_deref(), Some("shapp_btp"));
+        let active: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM rootcx_system.public_shares WHERE created_by = $1 AND revoked_at IS NULL",
+        ).bind(user).fetch_one(&pool).await.unwrap();
+        assert_eq!(active, 1);
+        let other = json!({ "quote_id": Uuid::new_v4().to_string() });
+        super::super::routes::mint_share(&pool, "shapp_btp", user, &other).await.unwrap();
+        assert_eq!(super::super::resolve_app_id(&pool, &second).await.as_deref(), Some("shapp_btp"));
+    }
+}
