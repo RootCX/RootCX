@@ -1,6 +1,6 @@
-# ADR 0012: Build narration is an optional observer
+# ADR 0014: Build narration is an optional observer
 
-Status: implemented locally, 14 October 2026; not deployed.
+Status: implemented 14 October 2026; deployed with the hosted Builder on 20 October 2026.
 
 ## Context
 
