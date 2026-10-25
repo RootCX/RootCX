@@ -41,7 +41,7 @@ export function eventAdapter() {
     else if (event.type === 'session.tool.failed') status = 'error';
     else return null;
     if (status !== 'running') tools.delete(key);
-    return { type: 'message.part.updated', properties: { ...properties, part: { type: 'tool', sessionID: data.sessionID, tool: tool.tool, state: { status, input: tool.input } } } };
+    return { type: 'message.part.updated', properties: { ...properties, part: { type: 'tool', id: data.id, sessionID: data.sessionID, tool: tool.tool, state: { status, input: tool.input } } } };
   };
 }
 

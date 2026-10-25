@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { narrator, businessText, narrationGateway } from '../narrator.mjs';
-import { narrationFact } from '../opencode.mjs';
+import { narrationFact, progressFor } from '../opencode.mjs';
 
 const tick = () => new Promise(resolve => setImmediate(resolve));
 const signal = () => new AbortController().signal;
@@ -52,6 +52,8 @@ test('the voice accepts one business sentence and cannot announce publication', 
     ['Votre modification est disponible.', false],
     ['La modification est terminée.', false],
     ['Le changement est appliqué.', false],
+    ['Je vérifie tout après la publication.', false],
+    ['Le calcul a été testé avec succès.', false],
     ['Je lance npm pour votre page.', false],
     ['RIEN', false],
   ]) {
@@ -74,7 +76,7 @@ test('duplicate events and messages do not consume calls or repeat updates', asy
   });
   t.after(() => voice.close());
   voice.observe({ phase: 'editing', status: 'running' }); await tick();
-  now += 8001;
+  now += 4001;
   voice.observe({ phase: 'editing', status: 'running' }); await tick();
   assert.equal(calls, 1);
   voice.observe({ phase: 'editing', status: 'completed' }); await tick();
@@ -92,11 +94,11 @@ test('narration coalesces bursts and stops spending after its request budget', a
       for (const area of ['screen', 'data', 'application']) {
         voice.observe({ phase, status, area });
         await tick();
-        now += 8001;
+        now += 4001;
       }
     }
   }
-  assert.equal(calls, 20);
+  assert.equal(calls, 40);
 });
 
 test('authorization or credit refusal disables further narration', async t => {
@@ -107,7 +109,7 @@ test('authorization or credit refusal disables further narration', async t => {
     const voice = narrator({ prompt: 'Clients', signal: signal(), onProgress() {},
       translate: async () => { calls++; throw Object.assign(new Error('Unavailable'), { status }); },
     });
-    voice.observe({ phase: 'editing' }); await tick(); now += 8001;
+    voice.observe({ phase: 'editing' }); await tick(); now += 4001;
     voice.observe({ phase: 'checking' }); await tick(); voice.close();
     assert.equal(calls, 1, String(status));
   }
@@ -138,8 +140,140 @@ test('a hung translator releases the slot at the deadline without blocking later
   t.after(() => voice.close());
   voice.observe({ phase: 'editing' });
   await new Promise(resolve => setTimeout(resolve, 3100));
-  now = 8001;
+  now = 4001;
   voice.observe({ phase: 'checking' }); await tick();
   assert.equal(calls, 2);
   assert.deepEqual(messages, [['checking', 'Je vérifie la page.']]);
+});
+
+
+test('distinct tools and returning phases remain observable without exposing tool identity', async t => {
+  let now = 0;
+  t.mock.method(Date, 'now', () => now);
+  const inputs = [];
+  const voice = narrator({ prompt: 'Acompte', signal: signal(), onProgress() {},
+    translate: async input => { inputs.push(input); return null; },
+  });
+  t.after(() => voice.close());
+  for (const fact of [
+    { id: 'private-1', phase: 'checking', status: 'running', action: 'typecheck' },
+    { id: 'private-2', phase: 'checking', status: 'running', action: 'test' },
+    { id: 'private-3', phase: 'repairing', status: 'error', action: 'test' },
+    { id: 'private-4', phase: 'checking', status: 'running', action: 'test' },
+  ]) {
+    voice.observe(fact); await tick(); now += 4001;
+    voice.observe(fact); await tick();
+  }
+  assert.equal(inputs.length, 4);
+  assert.deepEqual(inputs.map(input => JSON.parse(input.observation).action), ['typecheck', 'test', 'test', 'test']);
+  assert.doesNotMatch(JSON.stringify(inputs), /private/);
+});
+
+
+test('a duplicate old tool cannot invalidate the current translation', async t => {
+  let now = 0; let release;
+  const messages = [];
+  t.mock.method(Date, 'now', () => now);
+  const voice = narrator({ prompt: 'Acompte', signal: signal(), onProgress: (...args) => messages.push(args),
+    translate: input => input.phase === 'editing' ? Promise.resolve(null) : new Promise(resolve => { release = resolve; }),
+  });
+  t.after(() => voice.close());
+  const old = { id: 'edit-1', phase: 'editing', status: 'running' };
+  voice.observe(old); await tick(); now += 4001;
+  voice.observe({ id: 'test-1', phase: 'checking', status: 'running', action: 'test' }); await tick();
+  voice.observe(old);
+  release('Je vérifie le calcul de votre acompte.'); await tick();
+  assert.deepEqual(messages, [['checking', 'Je vérifie le calcul de votre acompte.']]);
+});
+
+
+test('reading rules or tests does not announce preparation or verification', () => {
+  for (const command of ['cat openspec/specs/devis/spec.md', 'cd /workspace && cat openspec/specs/devis/spec.md', 'openspec instructions explore --json', 'cat backend/pricing.test.ts', 'cd /workspace && cat backend/pricing.test.ts', 'cd /workspace && openspec instructions apply --change test-devis --json', 'rg test package.json', "sed -n '1,20p' backend/test.ts"]) {
+    const event = { properties: { part: { type: 'tool', tool: 'shell', state: { status: 'running', input: { command } } } } };
+    assert.equal(progressFor(event), 'understanding', command);
+    assert.equal(narrationFact(event, progressFor(event)).action, 'inspect', command);
+  }
+});
+
+test('same-phase outcome changes invalidate late success narration', async t => {
+  let release;
+  const delivered = [];
+  const voice = narrator({ prompt: 'Acompte', signal: signal(), onProgress: (...args) => delivered.push(args), translate: () => new Promise(resolve => { release = resolve; }) });
+  t.after(() => voice.close());
+  voice.observe({ id: 'test', phase: 'checking', action: 'test', status: 'running', source: 'platform' }); await tick();
+  voice.observe({ id: 'test', phase: 'checking', action: 'test', status: 'error', source: 'platform' });
+  release('Je vérifie le calcul de l’acompte.'); await tick();
+  assert.deepEqual(delivered, []);
+});
+
+test('verified narration requires a completed platform check, never an agent intention', async () => {
+  for (const [source, status, action, accepted] of [['tool', 'completed', 'test', false], ['platform', 'running', 'test', false], ['platform', 'error', 'test', false], ['platform', 'completed', 'build', false], ['platform', 'completed', 'test', true]]) {
+    const delivered = [];
+    const voice = narrator({ prompt: 'Acompte', signal: signal(), onProgress: (...args) => delivered.push(args), translate: async () => ({ message: 'Les comportements contrôlés sont conformes.', kind: 'verified' }) });
+    try {
+      voice.observe({ phase: 'checking', source, status, action, intent: 'Tout est déjà vérifié et publié' }); await tick();
+      assert.equal(delivered.length, accepted ? 1 : 0, `${source}/${status}/${action}`);
+    } finally { voice.close(); }
+  }
+});
+
+test('tool purpose is contextual intention, never raw command or output', () => {
+  const event = { properties: { part: { type: 'tool', tool: 'shell', id: 'private-id', state: { status: 'completed', input: { description: 'Adapter l’acompte à 40 %', command: 'cat private.txt' }, output: 'secret diagnostic' } } } };
+  const fact = narrationFact(event, progressFor(event));
+  assert.equal(fact.intent, 'Adapter l’acompte à 40 %');
+  assert.equal(fact.source, 'tool');
+  assert.doesNotMatch(JSON.stringify(fact), /private.txt|diagnostic/);
+});
+
+test('prolonged running activity can reassure once without inventing completed work', async t => {
+  let now = 0; let timer; const inputs = [];
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(globalThis, 'setInterval', fn => { timer = fn; return { unref() {} }; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const voice = narrator({ prompt: 'Devis', context: [{ user: 'Changer le taux', assistantPrepared: 'Lequel ?', publication: 'unknown' }], signal: signal(), onProgress() {}, translate: async input => { inputs.push(input); return null; } });
+  t.after(() => voice.close());
+  voice.observe({ id: 'long', phase: 'checking', action: 'test', status: 'running', source: 'platform' }); await tick();
+  now = 21000; timer(); await tick();
+  assert.equal(inputs.length, 2);
+  assert.deepEqual(inputs[1].context[0].publication, 'unknown');
+  assert.equal(JSON.parse(inputs[1].observation).stillRunning, true);
+  assert.equal(JSON.parse(inputs[1].observation).status, 'running');
+  voice.observe({ id: 'long', phase: 'checking', action: 'test', status: 'completed', source: 'platform' });
+  now = 25001; timer(); await tick();
+  now = 60000; timer(); await tick();
+  assert.equal(inputs.length, 3, 'never imply work is continuing after completion');
+});
+
+test('batched outcomes stay chronological and a later failure invalidates earlier success', async t => {
+  let now = 0; let timer; const inputs = []; const delivered = [];
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(globalThis, 'setInterval', fn => { timer = fn; return { unref() {} }; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  const voice = narrator({ prompt: 'Acompte', signal: signal(), onProgress: (...args) => delivered.push(args), translate: async input => {
+    inputs.push(input); return inputs.length === 1 ? null : { message: 'Les comportements contrôlés sont conformes.', kind: 'verified' };
+  } });
+  t.after(() => voice.close());
+  voice.observe({ id: 'first', phase: 'understanding', action: 'inspect', status: 'running' }); await tick();
+  voice.observe({ id: 'review', phase: 'checking', source: 'platform', action: 'review', status: 'running' });
+  voice.observe({ id: 'test', phase: 'checking', source: 'platform', action: 'test', status: 'completed' });
+  voice.observe({ id: 'review', phase: 'checking', source: 'platform', action: 'review', status: 'error' });
+  now = 4001; timer(); await tick();
+  const facts = inputs[1].observation.split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(facts.map(fact => fact.status), ['completed', 'error']);
+  assert.deepEqual(delivered, []);
+});
+
+test('opaque shell work invalidates a prior check even without an editing phase', async t => {
+  let now = 0; let timer; const delivered = [];
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(globalThis, 'setInterval', fn => { timer = fn; return { unref() {} }; });
+  t.mock.method(globalThis, 'clearInterval', () => {});
+  let calls = 0;
+  const voice = narrator({ prompt: 'Acompte', signal: signal(), onProgress: (...args) => delivered.push(args), translate: async () => ++calls === 1 ? null : { message: 'Les contrôles ont réussi.', kind: 'verified' } });
+  t.after(() => voice.close());
+  voice.observe({ id: 'first', phase: 'understanding', action: 'inspect', status: 'running' }); await tick();
+  voice.observe({ phase: 'checking', source: 'platform', action: 'test', status: 'completed' });
+  voice.observe({ id: 'shell', phase: 'understanding', source: 'tool', action: 'work', status: 'running' });
+  now = 4001; timer(); await tick();
+  assert.deepEqual(delivered, []);
 });

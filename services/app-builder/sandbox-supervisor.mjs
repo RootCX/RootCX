@@ -29,7 +29,7 @@ try {
   const wrapped = await SandboxManager.wrapWithSandboxArgv(command, '/bin/bash', undefined, undefined, root);
   child = spawn(wrapped.argv[0], wrapped.argv.slice(1), {
     cwd: root, stdio: 'inherit',
-    env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: home, CI: 'true', ...wrapped.env },
+    env: { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: home, CI: 'true', OPENSPEC_TELEMETRY: '0', DO_NOT_TRACK: '1', ...wrapped.env },
   });
   const terminate = () => child.kill('SIGKILL');
   process.on('SIGTERM', terminate);

@@ -12,5 +12,8 @@
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.78",
     "@opencode/sdk": "2.0.24"
+  },
+  "devDependencies": {
+    "@fission-ai/openspec": "1.14.3"
   }
 }

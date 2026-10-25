@@ -1,3 +1,4 @@
+import { contextText } from './narration-context.mjs';
 import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -20,19 +21,28 @@ export function providerError(error) {
   return 'BUILD_FAILED';
 }
 
+// Classify the invoked command, never words in file names or OpenSpec change names.
+function shellAction(raw) {
+  const command = String(raw).trim().replace(/^(?:cd\s+[^;&|\n]+&&\s*)+/, '').replace(/^(?:npx|bunx)\s+/, '');
+  if (/^openspec\s+(?:new|init|archive|update)\b/.test(command)) return 'plan';
+  if (/^(?:tsc\b|(?:npm|bun|pnpm|yarn)\s+(?:run\s+)?(?:typecheck|check)\b)/.test(command)) return 'typecheck';
+  if (/^(?:(?:vitest|jest|pytest)\b|node\s+--test\b|(?:npm|bun|pnpm|yarn)\s+(?:run\s+)?test\b)/.test(command)) return 'test';
+  if (/^(?:(?:npm|bun|pnpm|yarn)\s+(?:run\s+)?build\b|vite\s+build\b)/.test(command)) return 'build';
+  if (/^(?:npm|bun|pnpm|yarn)\s+(?:install|ci)\b/.test(command)) return 'dependencies';
+  if (/^(?:cat|ls|pwd|rg|grep|find|head|tail|sed|openspec)\b/.test(command)) return 'inspect';
+  return 'work';
+}
+
 // Raw model text, reasoning, paths and command output never become public progress.
 export function progressFor(event) {
   if (event.type === 'session.status' && event.properties.status?.type === 'retry') return 'waiting';
-  if (event.type === 'session.status' && event.properties.status?.type === 'busy') return 'understanding';
+  if (event.type === 'session.status' && event.properties.status?.type === 'busy') return null;
   const part = event.properties?.part;
   if (part?.type !== 'tool') return null;
   if (part.state?.status === 'error') return 'repairing';
   if (['edit', 'write', 'apply_patch', 'patch'].includes(part.tool)) return 'editing';
   if (['bash', 'shell'].includes(part.tool)) {
-    const command = String(part.state?.input?.command ?? '');
-    if (/\b(?:tsc|vitest|jest|pytest|test|check|typecheck|build)\b/.test(command)) return 'checking';
-    if (/^\s*(?:cat|ls|pwd|rg|grep|find|head|tail)\b/.test(command)) return 'understanding';
-    return 'editing';
+    return ['typecheck', 'test', 'build'].includes(shellAction(part.state?.input?.command ?? '')) ? 'checking' : 'understanding';
   }
   if (['skill', 'read', 'glob', 'grep', 'list', 'webfetch'].includes(part.tool)) return 'understanding';
   return null;
@@ -41,11 +51,19 @@ export function progressFor(event) {
 // Engine-specific evidence is reduced before crossing the narration Interface.
 export function narrationFact(event, phase) {
   const part = event.properties?.part;
-  const path = String(part?.state?.input?.filePath ?? part?.state?.input?.path ?? '');
+  const input = part?.state?.input ?? {};
+  const path = String(input.filePath ?? input.path ?? '');
+  const command = String(input.command ?? '');
   let area = 'application';
   if (/\.(?:tsx|jsx|css|html)$/.test(path)) area = 'screen';
   else if (/manifest\.json$|(?:^|\/)backend\//.test(path)) area = 'data';
-  return { phase, status: part?.state?.status, area };
+  else if (/(?:^|\/)openspec\//.test(path)) area = 'rules';
+  let action = 'inspect';
+  if (['edit', 'write', 'apply_patch', 'patch'].includes(part?.tool)) action = area === 'rules' ? 'plan' : 'edit';
+  if (['bash', 'shell'].includes(part?.tool)) action = shellAction(command);
+  const description = contextText(input.description, 240);
+  const intent = /[`{}<>]|(?:^|\s)(?:[./~]|[a-z]+\/)|\b(?:npm|bun|node|tsc|git|openspec|sql)\b/i.test(description) ? '' : description;
+  return { id: part?.id, phase, status: part?.state?.status, area, action, source: 'tool', intent };
 }
 
 export async function engine(root, config) {
@@ -157,12 +175,19 @@ async function startEngine(root, config) {
     } finally { signal.removeEventListener('abort', wake); subscriptions.delete(subscription); }
   }
   try {
-    child.stdin.write(JSON.stringify({ root, home, providerUrl, proxyKey, model: config.model, instructions: await readFile(new URL('./instructions.md', import.meta.url), 'utf8') }) + '\n');
+    child.stdin.write(JSON.stringify({ root, home, providerUrl, proxyKey, model: config.model, instructions: await instructions() }) + '\n');
     const deadline = setTimeout(() => { failed(new Error(`OpenCode SDK startup timed out: ${diagnostics}`)); void close(); }, 60000);
     try { await ready; } finally { clearTimeout(deadline); }
     const session = await conversationSession(api, home);
     return { api, subscribe, session, conversation: id => conversationSession(api, home, id), close };
   } catch (error) { await close(); throw error; }
+}
+
+// The image bundles the integration catalog built from Core's manifests; local runs may lack it.
+export async function instructions() {
+  const base = await readFile(new URL('./instructions.md', import.meta.url), 'utf8');
+  try { return `${base}\n${await readFile(new URL('./integrations.md', import.meta.url), 'utf8')}`; }
+  catch (error) { if (error.code === 'ENOENT') return base; throw error; }
 }
 
 export async function conversationSession(api, home, id) {

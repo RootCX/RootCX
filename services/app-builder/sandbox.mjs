@@ -71,27 +71,36 @@ export async function isolated(root, args, { network = false, signal } = {}) {
     '--bind', root, '/workspace', ...dependencies, '--chdir', '/workspace',
     '--setenv', 'PATH', '/usr/local/bin:/usr/bin:/bin', '--setenv', 'HOME', '/tmp',
     '--setenv', 'CI', 'true', '--setenv', 'npm_config_cache', '/tmp/npm-cache',
+    '--setenv', 'OPENSPEC_TELEMETRY', '0', '--setenv', 'DO_NOT_TRACK', '1',
     '--', ...args,
   ], { signal });
 }
 
-export async function build(root, appId, signal) {
+export async function build(root, appId, signal, onCheck = () => {}) {
+  async function check(action, work) {
+    onCheck({ action, status: 'running' });
+    try {
+      const result = await work();
+      onCheck({ action, status: 'completed' });
+      return result;
+    } catch (error) { onCheck({ action, status: 'error' }); throw error; }
+  }
   const pkg = JSON.parse(await readFile(await confined(root, 'package.json'), 'utf8'));
   if (!pkg.devDependencies?.vite && !pkg.dependencies?.vite) throw new Error('RootCX frontend must declare Vite');
-  await installDependencies(root, '', signal);
+  await check('dependencies', () => installDependencies(root, '', signal));
   let backendPackage = false;
   try { await access(await confined(root, 'backend/package.json')); backendPackage = true; }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
-  if (backendPackage) await installDependencies(root, 'backend', signal);
-  await isolated(root, ['node', 'node_modules/typescript/bin/tsc', '--noEmit'], { signal });
+  if (backendPackage) await check('dependencies', () => installDependencies(root, 'backend', signal));
+  await check('typecheck', () => isolated(root, ['node', 'node_modules/typescript/bin/tsc', '--noEmit'], { signal }));
   try {
     await access(await confined(root, 'backend/index.ts'));
-    await isolated(root, ['node', 'node_modules/typescript/bin/tsc', '--noEmit', '--skipLibCheck', '--target', 'ES2022', '--module', 'preserve', '--moduleResolution', 'bundler', 'backend/index.ts'], { signal });
-    await isolated(root, ['bun', 'build', 'backend/index.ts', '--target=bun', '--packages=external', '--outfile=/tmp/rootcx-worker.js'], { signal });
+    await check('typecheck', () => isolated(root, ['node', 'node_modules/typescript/bin/tsc', '--noEmit', '--skipLibCheck', '--target', 'ES2022', '--module', 'preserve', '--moduleResolution', 'bundler', 'backend/index.ts'], { signal }));
+    await check('build', () => isolated(root, ['bun', 'build', 'backend/index.ts', '--target=bun', '--packages=external', '--outfile=/tmp/rootcx-worker.js'], { signal }));
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  if (pkg.scripts?.test) await isolated(root, ['npm', 'test', '--', '--run'], { signal });
-  else if (Object.keys(await collect(root)).some(path => /(?:^|\/)backend\/.*\.test\.ts$/.test(path))) await isolated(root, ['bun', 'test', 'backend'], { signal });
-  await isolated(root, ['node', 'node_modules/vite/bin/vite.js', 'build', '--base', `/apps/${appId}/`], { signal });
+  if (pkg.scripts?.test) await check('test', () => isolated(root, ['npm', 'test', '--', '--run'], { signal }));
+  else if (Object.keys(await collect(root)).some(path => /(?:^|\/)backend\/.*\.test\.ts$/.test(path))) await check('test', () => isolated(root, ['bun', 'test', 'backend'], { signal }));
+  await check('build', () => isolated(root, ['node', 'node_modules/vite/bin/vite.js', 'build', '--base', `/apps/${appId}/`], { signal }));
   // Archive traversal rejects links rather than dereferencing arbitrary files.
   const paths = [];
   async function walk(prefix) {
@@ -129,7 +138,7 @@ async function installDependencies(root, relative, signal) {
   try { present = (await lstat(join(directory, 'node_modules'))).isDirectory(); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   if (installedLocks.get(directory) === digest && present) return;
   const args = manager === 'bun'
-    ? ['bun', ...(relative ? ['--cwd', relative] : []), 'install', '--frozen-lockfile', '--ignore-scripts']
+    ? ['bun', 'install', ...(relative ? ['--cwd', relative] : []), '--frozen-lockfile', '--ignore-scripts']
     : ['npm', ...(relative ? ['--prefix', relative] : []), 'ci', '--ignore-scripts', '--no-audit', '--no-fund'];
   await isolated(root, args, { network: true, signal });
   installedLocks.set(directory, digest);

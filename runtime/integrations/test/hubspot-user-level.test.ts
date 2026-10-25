@@ -55,3 +55,28 @@ test('Missing or malformed user identity cannot fall back to account-wide routes
     expect(h.calls, JSON.stringify(value)).toHaveLength(0);
   }
 });
+
+test('HubSpot validation errors name the rejected properties without echoing submitted values', async () => {
+  for (const reply of [
+    { status: 'error', category: 'VALIDATION_ERROR', message: 'Cannot create object with type: CONTACT. The following required properties were missing: [hs_legal_basis]' },
+    { status: 'error', category: 'VALIDATION_ERROR', message: 'Property values were not valid: [{"isValid":false,"message":"private-value is required","error":"REQUIRED","name":"hs_legal_basis"}]' },
+    { status: 'error', category: 'VALIDATION_ERROR', message: 'private-value', errors: [{ message: 'private-detail', context: { propertyName: ['hs_legal_basis'] } }] },
+    { status: 'error', category: 'VALIDATION_ERROR', message: 'private-summary', errors: [{ message: 'Property values were not valid: [{"isValid":false,"message":"private-value","error":"REQUIRED","name":"hs_legal_basis"}]' }] },
+  ]) {
+    const result = await harness(reply, 400).run('create_contact', { properties: { firstname: 'private-value' } });
+    expect(result).toMatchObject({ ok: false, error: { code: 'PROVIDER_REJECTED', message: 'HubSpot returned HTTP 400 [VALIDATION_ERROR hs_legal_basis]' } });
+    expect(JSON.stringify(result)).not.toContain('private-');
+  }
+});
+
+test('HubSpot error parsing drops unknown categories and malformed property names', async () => {
+  for (const [reply, suffix] of [
+    [{ category: 'PRIVATE_CATEGORY', errors: [{ context: { propertyName: ['email'] } }] }, ''],
+    [{ category: 'VALIDATION_ERROR', errors: [{ context: { propertyName: ['private value\n'] } }] }, ' [VALIDATION_ERROR]'],
+    [{ category: 'VALIDATION_ERROR', message: 'Property values were not valid: [{broken' }, ' [VALIDATION_ERROR]'],
+  ] as const) {
+    const result = await harness(reply, 400).run('create_contact', { properties: { firstname: 'Fixture' } });
+    expect(result).toMatchObject({ ok: false, error: { message: `HubSpot returned HTTP 400${suffix}` } });
+    expect(JSON.stringify(result)).not.toContain('private');
+  }
+});

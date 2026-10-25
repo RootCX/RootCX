@@ -12,7 +12,7 @@ test('real OpenCode reports an offline gateway without pretending to wait', { sk
   await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve));
   const endpoint = `http://127.0.0.1:${reservation.address().port}/v1/messages`;
   await new Promise(resolve => reservation.close(resolve));
-  t.after(async () => { await closeEngine(root); await rm(root, { recursive: true, force: true }); await rm(`${root}.agent`, { recursive: true, force: true }); });
+  t.after(async () => { await closeEngine(root); await rm(root, { recursive: true, force: true }); await rm(`${root}.agent`, { recursive: true, force: true }); await rm(`${root}.narration`, { recursive: true, force: true }); });
   const stages = [];
   await assert.rejects(code({ root, appId: 'offline', prompt: 'Hello', signal: AbortSignal.timeout(20000), config: { model: 'claude-opus-4-6', endpoint, apiKey: 'test' }, onProgress: phase => stages.push(phase) }), { code: 'AI_CONFIGURATION' });
   assert.ok(!stages.includes('waiting'), JSON.stringify(stages));
@@ -21,11 +21,13 @@ test('real OpenCode reports an offline gateway without pretending to wait', { sk
 test('real OpenCode loads RootCX skill, edits, cancels running tools and resumes the conversation', { skip: process.platform !== 'linux', timeout: 120000 }, async t => {
   const root = await mkdtemp('/tmp/opencode-test-');
   await mkdir(`${root}/src`); await writeFile(`${root}/src/app.ts`, 'original');
+  const narration = [];
   let turn = 0; let skillResult = false; let skillError; const stages = [];
   let command = "printf 'changed' > src/app.ts";
   const provider = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     const input = JSON.parse(Buffer.concat(chunks));
+    if (req.url === '/narration') { narration.push(input); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ message: null, kind: 'progress' })); return; }
     const primary = input.tools?.some(tool => tool.name === 'skill');
     const responses = [
       { type: 'tool_use', id: 'tool_skill', name: 'skill', input: { id: 'rootcx' } },
@@ -42,20 +44,23 @@ test('real OpenCode loads RootCX skill, edits, cancels running tools and resumes
     }
     const block = primary ? responses[Math.min(turn++, 2)] : { type: 'text', text: 'Modification application' };
     const reason = block.type === 'tool_use' ? 'tool_use' : 'end_turn';
-    const message = { id: `msg_${Date.now()}`, type: 'message', role: 'assistant', model: input.model, content: [block], stop_reason: reason, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 10 } };
+    const content = block.type === 'tool_use' ? [{ type: 'text', text: 'Je vais adapter le calcul des acomptes.' }, block] : [block];
+    const message = { id: `msg_${Date.now()}`, type: 'message', role: 'assistant', model: input.model, content, stop_reason: reason, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 10 } };
     if (!input.stream) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(message)); return; }
     res.writeHead(200, { 'content-type': 'text/event-stream' });
     const emit = (type, data) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
     emit('message_start', { message: { ...message, content: [], stop_reason: null } });
-    emit('content_block_start', { index: 0, content_block: block.type === 'tool_use' ? { ...block, input: {} } : { type: 'text', text: '' } });
-    emit('content_block_delta', { index: 0, delta: block.type === 'tool_use' ? { type: 'input_json_delta', partial_json: JSON.stringify(block.input) } : { type: 'text_delta', text: block.text } });
-    emit('content_block_stop', { index: 0 });
+    for (const [index, part] of content.entries()) {
+      emit('content_block_start', { index, content_block: part.type === 'tool_use' ? { ...part, input: {} } : { type: 'text', text: '' } });
+      emit('content_block_delta', { index, delta: part.type === 'tool_use' ? { type: 'input_json_delta', partial_json: JSON.stringify(part.input) } : { type: 'text_delta', text: part.text } });
+      emit('content_block_stop', { index });
+    }
     emit('message_delta', { delta: { stop_reason: reason, stop_sequence: null }, usage: { output_tokens: 10 } });
     emit('message_stop', {}); res.end();
   });
   await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
-  t.after(async () => { await closeEngine(root); provider.closeAllConnections(); provider.close(); await rm(root, { recursive: true, force: true }); await rm(`${root}.agent`, { recursive: true, force: true }); });
-  const config = { model: 'claude-opus-4-6', endpoint: `http://127.0.0.1:${provider.address().port}/v1/messages`, apiKey: 'test' };
+  t.after(async () => { await closeEngine(root); provider.closeAllConnections(); provider.close(); await rm(root, { recursive: true, force: true }); await rm(`${root}.agent`, { recursive: true, force: true }); await rm(`${root}.narration`, { recursive: true, force: true }); });
+  const config = { model: 'claude-opus-4-6', endpoint: `http://127.0.0.1:${provider.address().port}/v1/messages`, narrationEndpoint: `http://127.0.0.1:${provider.address().port}/narration`, apiKey: 'test' };
   let publications = 0;
   const compile = async () => { publications++; return Buffer.from('artifact').toString('base64'); };
   const result = await code({ root, appId: 'sample', prompt: 'Change the application', signal: AbortSignal.timeout(90000), config, onProgress: phase => stages.push(phase), compile });
@@ -68,7 +73,7 @@ test('real OpenCode loads RootCX skill, edits, cancels running tools and resumes
   command = "printf 'started' > CANCEL-STARTED; sleep 2; printf 'late' > CANCEL-LATE";
   turn = 1;
   const cancellation = new AbortController();
-  const running = code({ root, appId: 'sample', prompt: 'Start the cancellable operation', signal: cancellation.signal, config, compile });
+  const running = code({ root, appId: 'sample', prompt: 'Start the cancellable operation PRIVATE_REPAIR_DIAGNOSTIC', narrationPrompt: 'Adapter les acomptes', signal: cancellation.signal, config, compile });
   const interrupted = assert.rejects(running, { name: 'AbortError' });
   const deadline = Date.now() + 5000;
   while (true) {
@@ -85,4 +90,10 @@ test('real OpenCode loads RootCX skill, edits, cancels running tools and resumes
   turn = 2;
   const resumed = await code({ root, appId: 'sample', prompt: 'Resume our conversation', signal: AbortSignal.timeout(10000), config, compile });
   assert.equal(resumed.summary, 'La modification est préparée.');
+  assert.equal(resumed.frontend, '');
+  assert.equal(publications, 1, 'a reply with unchanged sources must not build');
+  assert.ok(narration.length > 0, 'the actual SDK events reach the narration gateway');
+  assert.ok(narration.some(input => input.context.some(turn => turn.user === 'Change the application')));
+  assert.doesNotMatch(JSON.stringify(narration), /PRIVATE_REPAIR_DIAGNOSTIC/);
+  assert.ok(narration.some(input => input.observation.includes('Je vais adapter le calcul des acomptes.')), 'native outward statement is paired with a tool as an intention');
 });

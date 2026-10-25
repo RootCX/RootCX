@@ -43,6 +43,7 @@ test('binary source assets validate without regex stack overflow', () => {
 test('streaming failures preserve progress and a safe error code', async t => {
   const server = createBuilder({ token: 'b'.repeat(32), concurrency: 1 }, async ({ onProgress }) => {
     onProgress('editing');
+    onProgress('understanding', 'Je consulte les règles de votre application.');
     throw Object.assign(new Error('private provider credentials and output'), { code: 'AI_CREDITS_EXHAUSTED' });
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -52,12 +53,12 @@ test('streaming failures preserve progress and a safe error code', async t => {
     body: JSON.stringify({ appId: 'stream_test', prompt: 'Add a field', files: { 'manifest.json': encoded('{}') } }),
   });
   const lines = (await response.text()).trim().split('\n').map(JSON.parse);
-  assert.deepEqual(lines, [{ type: 'progress', phase: 'understanding' }, { type: 'progress', phase: 'editing' }, { type: 'error', error: 'AI_CREDITS_EXHAUSTED' }]);
+  assert.deepEqual(lines, [{ type: 'progress', phase: 'understanding' }, { type: 'progress', phase: 'editing' }, { type: 'progress', phase: 'understanding', message: 'Je consulte les règles de votre application.' }, { type: 'error', error: 'AI_CREDITS_EXHAUSTED' }]);
 });
 
 test('only activity categories leave the agent, never code or reasoning', () => {
   for (const type of ['text', 'reasoning']) assert.equal(progressFor({ type: 'message.part.updated', properties: { part: { type, text: 'secret SQL' } } }), null);
-  for (const [tool, status, expected] of [['write', 'running', 'editing'], ['bash', 'running', 'editing'], ['read', 'completed', 'understanding'], ['bash', 'error', 'repairing']]) {
+  for (const [tool, status, expected] of [['write', 'running', 'editing'], ['bash', 'running', 'understanding'], ['read', 'completed', 'understanding'], ['bash', 'error', 'repairing']]) {
     assert.equal(progressFor({ type: 'message.part.updated', properties: { part: { type: 'tool', tool, state: { status, input: { command: 'secret' } } } } }), expected);
   }
   for (const [status, expected] of [[402, 'AI_CREDITS_EXHAUSTED'], [401, 'AI_CONFIGURATION'], [429, 'AI_UNAVAILABLE'], [503, 'AI_UNAVAILABLE'], [400, 'BUILD_FAILED']]) assert.equal(providerError({ data: { statusCode: status } }), expected);

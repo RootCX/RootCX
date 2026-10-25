@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm, cp, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { isolated } from '../sandbox.mjs';
+import { isolated, build } from '../sandbox.mjs';
 
 test('build sandbox cannot read runner secrets, sibling applications or the network', { skip: process.platform !== 'linux' }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'sandbox-test-'));
@@ -21,4 +21,23 @@ test('build sandbox cannot read runner secrets, sibling applications or the netw
     fetch('https://example.com',{signal:AbortSignal.timeout(1500)}).then(()=>process.exit(6),()=>console.log('isolated'));
   `]);
   assert.match(result, /isolated/);
+});
+
+test('publication checks report only operations actually run and never turn failure into success', { skip: process.platform !== 'linux' || process.env.ROOTCX_SANDBOX_NETWORK_TESTS !== 'true', timeout: 120000 }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'nova-checks-'));
+  t.after(async () => { for (const path of [root, `${root}.sandbox`]) await rm(path, { recursive: true, force: true }); });
+  await cp(new URL('./fixture/', import.meta.url), root, { recursive: true });
+  await mkdir(join(root, 'backend'), { recursive: true });
+  await cp(new URL('./backend-fixture/', import.meta.url), join(root, 'backend'), { recursive: true });
+  const file = join(root, 'backend', 'rule.test.ts');
+  await writeFile(file, "import { test, expect } from 'bun:test'; test('acompte', () => expect(300).toBe(400));");
+  const facts = [];
+  await assert.rejects(build(root, 'fixture', AbortSignal.timeout(90000), fact => facts.push(fact)));
+  assert.deepEqual(facts.filter(fact => fact.action === 'test').map(fact => fact.status), ['running', 'error']);
+  assert.ok(!facts.some(fact => fact.action === 'build'), 'a failed test stops version preparation');
+  await writeFile(file, "import { test, expect } from 'bun:test'; test('acompte', () => expect(400).toBe(400));");
+  facts.length = 0;
+  assert.ok(await build(root, 'fixture', AbortSignal.timeout(90000), fact => facts.push(fact)));
+  assert.deepEqual(facts.filter(fact => fact.action === 'test').map(fact => fact.status), ['running', 'completed']);
+  assert.deepEqual(facts.filter(fact => fact.action === 'build').map(fact => fact.status), ['running', 'completed']);
 });
