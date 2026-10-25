@@ -186,10 +186,11 @@ pub async fn invoke_agent(
         &rt, &app_id, identity.user_id, body.file_ids.as_deref().unwrap_or_default(),
     ).await?;
 
+    let user_turn = super::attachments::with_file_references(body.message, attachments.as_deref());
     let payload = AgentInvokePayload {
         invoke_id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.clone(),
-        message: super::attachments::with_file_references(body.message.clone(), attachments.as_deref()),
+        message: user_turn.clone(),
         history,
         is_sub_invoke: false,
         llm,
@@ -202,7 +203,7 @@ pub async fn invoke_agent(
         Some(PersistCtx {
             pool: pool.clone(), app_id: app_id.clone(),
             session_id: session_id.clone(), user_id: identity.user_id,
-            user_message: body.message,
+            user_message: user_turn,
         })
     } else { None };
 

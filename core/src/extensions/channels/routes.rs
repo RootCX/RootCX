@@ -264,13 +264,6 @@ async fn do_invoke(
     ).bind(&app_id).fetch_one(pool).await.map_err(&e)?;
     let memory = agent_cfg.pointer("/memory/enabled").and_then(JsonValue::as_bool) == Some(true);
     let history = agent_config::load_history(pool, memory, &app_id, &session_id).await.map_err(&e)?;
-    let message = format!(
-        "Channel response instructions: Reply entirely in the language of the user message below, unless the user requests another language. \
-         Do not narrate tool use or announce what you are about to check; give the result directly.{}\n\nUser message:\n{text}",
-        if provider_name == "whatsapp" {
-            " This conversation is on WhatsApp. Use short paragraphs and simple lists. For emphasis use WhatsApp's native *bold* or _italic_. Do not use Markdown tables, headings, double-asterisk bold, or HTML."
-        } else { "" }
-    );
     let llm = fetch_default_llm(pool).await.map_err(&e)?
         .map(|(p, m)| LlmModelRef { provider: p, model: m });
 
@@ -280,7 +273,15 @@ async fn do_invoke(
     let files = downloaded.into_iter().collect::<Option<Vec<_>>>()
         .ok_or("Could not load the attached media; no model invocation was made")?;
     let attachments = agents::attachments::received(rt, &app_id, human, files).await.map_err(&e)?;
-    let message = agents::attachments::with_file_references(message, attachments.as_deref());
+    // Also what history keeps: a file sent without a caption must not leave an empty user turn.
+    let user_turn = agents::attachments::with_file_references(text.to_string(), attachments.as_deref());
+    let message = format!(
+        "Channel response instructions: Reply entirely in the language of the user message below, unless the user requests another language. \
+         Do not narrate tool use or announce what you are about to check; give the result directly.{}\n\nUser message:\n{user_turn}",
+        if provider_name == "whatsapp" {
+            " This conversation is on WhatsApp. Use short paragraphs and simple lists. For emphasis use WhatsApp's native *bold* or _italic_. Do not use Markdown tables, headings, double-asterisk bold, or HTML."
+        } else { "" }
+    );
 
     let payload = AgentInvokePayload {
         invoke_id: uuid::Uuid::new_v4().to_string(),
@@ -322,8 +323,8 @@ async fn do_invoke(
     if memory {
         let uid = agents::agent_user_id(&app_id);
         let _ = persistence::ensure_session(pool, &session_id, &app_id, uid).await;
-        let _ = persistence::persist_message(pool, &session_id, "user", text, None, false).await;
-        let _ = persistence::finalize_session(pool, &session_id, text, &response, tokens).await;
+        let _ = persistence::persist_message(pool, &session_id, "user", &user_turn, None, false).await;
+        let _ = persistence::finalize_session(pool, &session_id, &user_turn, &response, tokens).await;
     }
     if let Err(e) = provider.send_response(config, chat_id, &response).await {
         error!(channel_id, chat_id, "send response failed: {e}");

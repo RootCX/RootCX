@@ -92,8 +92,9 @@ pub(crate) fn with_file_references(message: String, attachments: Option<&[FileAt
     let list: Vec<String> = files.iter()
         .map(|f| format!("- {} ({}): file_id {}", f.name, f.content_type, f.file_id))
         .collect();
+    let separator = if message.is_empty() { "" } else { "\n\n" };
     format!(
-        "{message}\n\nAttached files. To store one in an app, pass its file_id to an action input declared with format \"file\":\n{}",
+        "{message}{separator}Attached files. To store one in an app, pass its file_id to an action input declared with format \"file\":\n{}",
         list.join("\n")
     )
 }
@@ -202,6 +203,8 @@ mod tests {
         };
         assert_eq!(with_file_references("Bonjour".into(), None), "Bonjour");
         assert_eq!(with_file_references("Bonjour".into(), Some(&[])), "Bonjour");
+        let alone = with_file_references(String::new(), Some(std::slice::from_ref(&file)));
+        assert!(alone.starts_with("Attached files."), "a file sent without a caption is still a turn: {alone}");
         let message = with_file_references("Bonjour".into(), Some(&[file]));
         assert!(message.starts_with("Bonjour\n\n"));
         assert!(message.ends_with(&format!("- devis.pdf (application/pdf): file_id {id}")));

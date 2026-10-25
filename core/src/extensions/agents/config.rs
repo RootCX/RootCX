@@ -32,9 +32,10 @@ pub(crate) async fn load_history(
     ).bind(session_id).bind(app_id).fetch_one(pool).await?;
     if !exists { return Ok(vec![]); }
 
+    // Models reject empty turns; older Cores stored one for a file sent without a caption.
     let messages: Vec<(String, Option<String>)> = sqlx::query_as(
         "SELECT role, content FROM rootcx_system.agent_messages
-         WHERE session_id = $1::uuid ORDER BY created_at ASC",
+         WHERE session_id = $1::uuid AND btrim(coalesce(content, '')) <> '' ORDER BY created_at ASC",
     ).bind(session_id).fetch_all(pool).await?;
 
     Ok(messages.into_iter().map(|(role, content)| {

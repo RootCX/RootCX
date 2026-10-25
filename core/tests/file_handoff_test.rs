@@ -41,6 +41,7 @@ async fn agent_hands_an_attachment_to_an_app_action() {
       if (m.type === "agent_invoke") {
         const file = m.message.match(/file_id ([0-9a-f-]{36})/)?.[1];
         const keep = input => ({tool_name:"call_action",args:{app:"business",action:"keep",input}});
+        if (!m.message.includes("file_id")) { send({type:"agent_done",invoke_id:m.invoke_id,response:JSON.stringify({history:m.history}),tokens:0}); return; }
         runs.set(m.invoke_id, {message:m.message, results:[], tools:[
           keep({file, label:"logo"}),
           keep({file:"00000000-0000-0000-0000-000000000000", label:"unknown"}),
@@ -51,7 +52,7 @@ async fn agent_hands_an_attachment_to_an_app_action() {
       if (m.type === "agent_tool_result") { runs.get(m.invoke_id).results.push({result:m.result,error:m.error}); next(m.invoke_id); }
     });
     "#;
-    let config = br#"{"name":"Test assistant","supervision":{"mode":"autonomous"}}"#;
+    let config = br#"{"name":"Test assistant","supervision":{"mode":"autonomous"},"memory":{"enabled":true}}"#;
     let (status, body) = rt.deploy("assistant", &harness::make_tar_gz(&[("index.ts", agent_backend), ("agent.json", config)])).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let agent = rootcx_core::extensions::agents::agent_user_id("assistant");
@@ -84,6 +85,26 @@ async fn agent_hands_an_attachment_to_an_app_action() {
     let message = run["message"].as_str().unwrap();
     assert!(message.starts_with(&format!("Voici mon ancien devis (other {other})\n\n")), "{message}");
     assert!(message.contains(&format!("- devis.pdf (application/pdf): file_id {given}")), "{message}");
+
+    // History keeps the references, so a later turn can still hand the file over.
+    let remembered: String = sqlx::query_scalar("SELECT content FROM rootcx_system.agent_messages WHERE role = 'user'")
+        .fetch_one(rt.pool()).await.unwrap();
+    assert_eq!(remembered, message);
+
+    // A turn stored empty by an older Core is left out of the next turn's history.
+    let session = data["session_id"].as_str().unwrap();
+    sqlx::query("INSERT INTO rootcx_system.agent_messages (id, session_id, role, content) VALUES (gen_random_uuid(), $1::uuid, 'user', '')")
+        .bind(session).execute(rt.pool()).await.unwrap();
+    let response = rt.client.post(rt.url("/api/v1/apps/assistant/agent/invoke"))
+        .bearer_auth(&rt.token).json(&json!({"message":"Et maintenant ?","session_id":session}))
+        .timeout(Duration::from_secs(30)).send().await.unwrap();
+    let events = response.text().await.unwrap();
+    let done = events.split("\n\n").find(|e| e.lines().any(|l| l.trim() == "event: done")).unwrap_or_else(|| panic!("{events}"));
+    let next: Value = serde_json::from_str(done.lines().find_map(|l| l.strip_prefix("data:")).unwrap()).unwrap();
+    let history: Value = serde_json::from_str::<Value>(next["response"].as_str().unwrap()).unwrap()["history"].clone();
+    let contents: Vec<&str> = history.as_array().unwrap().iter().map(|m| m["content"].as_str().unwrap()).collect();
+    assert_eq!(contents.len(), 2, "{history}");
+    assert!(contents.iter().all(|c| !c.is_empty()), "{history}");
 
     let kept = &run["results"][0];
     assert!(kept["error"].is_null(), "{kept}");
