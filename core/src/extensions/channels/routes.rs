@@ -280,6 +280,7 @@ async fn do_invoke(
     let files = downloaded.into_iter().collect::<Option<Vec<_>>>()
         .ok_or("Could not load the attached media; no model invocation was made")?;
     let attachments = agents::attachments::received(rt, &app_id, human, files).await.map_err(&e)?;
+    let message = agents::attachments::with_file_references(message, attachments.as_deref());
 
     let payload = AgentInvokePayload {
         invoke_id: uuid::Uuid::new_v4().to_string(),

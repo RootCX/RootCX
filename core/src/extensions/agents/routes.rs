@@ -189,7 +189,7 @@ pub async fn invoke_agent(
     let payload = AgentInvokePayload {
         invoke_id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.clone(),
-        message: body.message.clone(),
+        message: super::attachments::with_file_references(body.message.clone(), attachments.as_deref()),
         history,
         is_sub_invoke: false,
         llm,

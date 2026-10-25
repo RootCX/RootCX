@@ -81,7 +81,21 @@ fn download(
         name,
         content_type,
         url: crate::extensions::storage::download_url(rt.runtime_url(), &nonce),
+        file_id,
     }
+}
+
+/// Lets the model reference attachments it can only see as content; `call_action`
+/// copies a referenced file into the target app (see `tools::call_action`).
+pub(crate) fn with_file_references(message: String, attachments: Option<&[FileAttachment]>) -> String {
+    let Some(files) = attachments.filter(|f| !f.is_empty()) else { return message };
+    let list: Vec<String> = files.iter()
+        .map(|f| format!("- {} ({}): file_id {}", f.name, f.content_type, f.file_id))
+        .collect();
+    format!(
+        "{message}\n\nAttached files. To store one in an app, pass its file_id to an action input declared with format \"file\":\n{}",
+        list.join("\n")
+    )
 }
 
 pub(crate) async fn stored(
@@ -178,5 +192,18 @@ mod tests {
         assert!(validate(b"%PDF-1.4", "application/pdf").is_ok());
         assert!(validate_count(MAX_ATTACHMENTS).is_ok());
         assert!(validate_count(MAX_ATTACHMENTS + 1).is_err());
+    }
+
+    #[test]
+    fn file_references_are_listed_only_when_files_are_attached() {
+        let id = Uuid::new_v4();
+        let file = FileAttachment {
+            name: "devis.pdf".into(), content_type: "application/pdf".into(), url: "u".into(), file_id: id,
+        };
+        assert_eq!(with_file_references("Bonjour".into(), None), "Bonjour");
+        assert_eq!(with_file_references("Bonjour".into(), Some(&[])), "Bonjour");
+        let message = with_file_references("Bonjour".into(), Some(&[file]));
+        assert!(message.starts_with("Bonjour\n\n"));
+        assert!(message.ends_with(&format!("- devis.pdf (application/pdf): file_id {id}")));
     }
 }

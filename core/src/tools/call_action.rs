@@ -54,18 +54,43 @@ impl Tool for CallActionTool {
         .map_err(|e| e.to_string())?;
 
         let (actions,) = actions.ok_or_else(|| format!("app '{app}' not found or not installed"))?;
-        let action_exists = actions.as_array()
-            .map(|arr| arr.iter().any(|a| a.get("id").and_then(|v| v.as_str()) == Some(action)))
-            .unwrap_or(false);
-
-        if !action_exists {
-            return Err(format!("action '{action}' not found in app '{app}'"));
-        }
+        let declared = actions.as_array()
+            .and_then(|arr| arr.iter().find(|a| a.get("id").and_then(|v| v.as_str()) == Some(action)))
+            .ok_or_else(|| format!("action '{action}' not found in app '{app}'"))?;
 
         let caller = ctx.action_caller.as_ref().ok_or("action calling unavailable")?;
         let effective_uid = ctx.invoker_user_id.unwrap_or(ctx.user_id);
+        let mut input = input;
+        if let Some(agent_app) = ctx.core_bound_app_id.as_deref() {
+            hand_over_files(&ctx.pool, declared, &mut input, agent_app, app, effective_uid).await?;
+        }
         // Propagate the agent's pre-computed intersection so the target app's
         // RLS bounds the cross-app hop to grant(agent)∩perms(human) (Phase 6a).
         caller.call(app, action, input, effective_uid, &ctx.app_id, Some(ctx.permissions.clone())).await
     }
+}
+
+/// A top-level input declared `"format": "file"` may carry the file_id of a file
+/// the person gave the agent. The target app receives its own copy, because an
+/// app may only read its own storage. Other values pass through unchanged.
+async fn hand_over_files(
+    pool: &sqlx::PgPool, declared: &JsonValue, input: &mut JsonValue,
+    agent_app: &str, target_app: &str, person: uuid::Uuid,
+) -> Result<(), String> {
+    use crate::extensions::storage::backend::{PostgresBackend, StorageBackend};
+    let Some(properties) = declared.pointer("/inputSchema/properties").and_then(JsonValue::as_object) else { return Ok(()) };
+    for (key, schema) in properties {
+        if schema.get("format").and_then(JsonValue::as_str) != Some("file") { continue; }
+        let Some(id) = input.get(key).and_then(JsonValue::as_str).and_then(|v| v.parse::<uuid::Uuid>().ok()) else { continue };
+        let given: Option<(i64,)> = sqlx::query_as(
+            "SELECT size FROM rootcx_system.files WHERE id = $1 AND app_id = $2 AND uploaded_by = $3",
+        ).bind(id).bind(agent_app).bind(person).fetch_optional(pool).await.map_err(|e| e.to_string())?;
+        if given.is_none() { continue; }
+        let file = PostgresBackend.get(pool, id, agent_app).await.map_err(|e| e.to_string())?;
+        let copy = uuid::Uuid::new_v4();
+        PostgresBackend.put(pool, copy, target_app, &file.name, &file.content_type, &file.content, Some(person))
+            .await.map_err(|e| e.to_string())?;
+        input[key] = json!(copy.to_string());
+    }
+    Ok(())
 }

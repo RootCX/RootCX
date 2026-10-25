@@ -54,6 +54,9 @@ pub struct FileAttachment {
     pub name: String,
     pub content_type: String,
     pub url: String,
+    /// Storage ID in the agent app, quoted in the message so the model can hand the file to an action.
+    #[serde(skip)]
+    pub file_id: uuid::Uuid,
 }
 
 #[derive(Debug, Clone, Serialize)]

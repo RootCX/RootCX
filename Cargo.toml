@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.32.3"
+version = "0.32.4"
 edition = "2024"
 license-file = "LICENSE.md"
 
