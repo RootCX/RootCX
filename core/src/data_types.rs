@@ -304,15 +304,14 @@ pub(crate) fn bind_typed<'q>(
             query.bind(parse_decimal(literal, "value")?)
         }
         Some(FieldType::Boolean) => query.bind(coerce_bool(value)),
-        Some(FieldType::Uuid | FieldType::EntityLink) => {
-            query.bind(coerce_str(value).and_then(|value| value.parse::<Uuid>().ok()))
-        }
+        Some(FieldType::Uuid | FieldType::EntityLink) => query.bind(coerce_parsed::<Uuid>(value, "uuid")?),
         Some(FieldType::Date) => {
-            query.bind(coerce_str(value).and_then(|value| value.parse::<NaiveDate>().ok()))
+            query.bind(coerce_parsed::<NaiveDate>(value, "date (expected YYYY-MM-DD)")?)
         }
-        Some(FieldType::Timestamp) => {
-            query.bind(coerce_str(value).and_then(|value| value.parse::<DateTime<Utc>>().ok()))
-        }
+        Some(FieldType::Timestamp) => query.bind(coerce_parsed::<DateTime<Utc>>(
+            value,
+            "timestamp (expected RFC 3339 with a timezone, e.g. 2026-01-31T09:30:00Z)",
+        )?),
         Some(FieldType::Json) => query.bind(value),
         Some(FieldType::TextArray) => query.bind(coerce_str_vec(value)),
         Some(FieldType::NumberArray) => query.bind(coerce_f64_vec(value)?),
@@ -363,8 +362,14 @@ fn coerce_bool(value: &JsonValue) -> bool {
     }
 }
 
-fn coerce_str(value: &JsonValue) -> Option<&str> {
-    value.as_str()
+/// A parsed string, or an error. Unparsable input used to bind NULL silently,
+/// surfacing later as an unrelated NOT NULL violation or a lost value. A naive
+/// timestamp is rejected rather than assumed UTC: only the caller knows its zone.
+fn coerce_parsed<T: std::str::FromStr>(value: &JsonValue, label: &str) -> Result<T, String> {
+    value
+        .as_str()
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| format!("invalid {label}: {value}"))
 }
 
 fn coerce_str_vec(value: &JsonValue) -> Vec<&str> {
@@ -614,5 +619,25 @@ mod tests {
         assert!(coerce_f64(&serde_json::json!({"a": 1})).is_err());
         assert_eq!(coerce_f64_vec(&serde_json::json!([1, "2"])).unwrap(), vec![1.0, 2.0]);
         assert!(coerce_f64_vec(&serde_json::json!([1, "x"])).is_err(), "no element is silently dropped");
+    }
+
+    #[test]
+    fn unparsable_typed_values_are_rejected_not_bound_as_null() {
+        use serde_json::json;
+        for (field_type, value, accepted) in [
+            (FieldType::Timestamp, json!("2026-10-05T13:38:54+02:00"), true),
+            (FieldType::Timestamp, json!("2026-10-05T13:38:54"), false),
+            (FieldType::Timestamp, json!(""), false),
+            (FieldType::Date, json!("05/10/2026"), false),
+            (FieldType::Uuid, json!(42), false),
+            (FieldType::EntityLink, json!("not-a-uuid"), false),
+        ] {
+            let query = sqlx::query_as::<_, (JsonValue,)>("SELECT $1");
+            assert_eq!(
+                bind_typed(query, &value, Some(&field_type)).is_ok(),
+                accepted,
+                "{field_type:?} {value}"
+            );
+        }
     }
 }
