@@ -6,6 +6,16 @@ Core versions. The CLI and the SDK are versioned and released separately; see
 Releases marked **Breaking** need the matching guide in
 [docs/](docs/README.md#migration-guides) before you upgrade.
 
+## 0.33.2 - 2026-10-26
+
+0.33.0 and 0.33.1 were withdrawn; this release builds on 0.32.1.
+
+- An unparsable `uuid`, `entity_link`, `date` or `timestamp` value is rejected
+  with a 400 naming the expected format, instead of being stored as NULL.
+  Timestamps must carry a timezone (RFC 3339); naive values are refused rather
+  than assumed UTC. Apps that sent such values to nullable fields silently lost
+  them and now get an error.
+
 ## 0.32.1 - 2026-10-21
 
 - `describe_app` returns the actions the caller may invoke (description and
