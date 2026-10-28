@@ -604,6 +604,12 @@ pub enum ProviderType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentDefinition {
+    /// Curated skills loaded through the managed harness before every invocation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pinned_skills: Vec<String>,
+    /// Omitted keeps the application's existing custom worker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<AgentHarness>,
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
@@ -615,6 +621,12 @@ pub struct AgentDefinition {
     pub limits: Option<AgentLimits>,
     #[serde(default)]
     pub supervision: Option<SupervisionConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentHarness {
+    Deepagents,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

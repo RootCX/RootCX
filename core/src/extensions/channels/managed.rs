@@ -67,11 +67,12 @@ fn verify(
         .map_err(|_| invalid())
 }
 
-async fn relay(provider: &str, action: &str, mut payload: Value) -> Result<Value, ChannelError> {
+pub(super) async fn relay(provider: &str, action: &str, mut payload: Value) -> Result<Value, ChannelError> {
     let tenant = tenant()?;
     let key = relay_key()?;
     let base = env("ROOTCX_CHANNEL_GATEWAY_URL").or_else(|_| env("ROOTCX_WHATSAPP_GATEWAY_URL"))?;
     payload["provider"] = json!(provider);
+    let document_reply = payload["type"] == "document";
     let body = payload.to_string();
     let timestamp = chrono::Utc::now().timestamp().to_string();
     let digest = hex::encode(
@@ -86,7 +87,7 @@ async fn relay(provider: &str, action: &str, mut payload: Value) -> Result<Value
     );
     let response = reqwest::Client::new()
         .post(format!("{}/{action}", base.trim_end_matches('/')))
-        .timeout(std::time::Duration::from_secs(20))
+        .timeout(std::time::Duration::from_secs(if document_reply { 120 } else { 20 }))
         .header("content-type", "application/json")
         .header("x-rootcx-tenant", tenant)
         .header("x-rootcx-timestamp", timestamp)
@@ -96,9 +97,15 @@ async fn relay(provider: &str, action: &str, mut payload: Value) -> Result<Value
         .await
         .map_err(|_| ChannelError::Provider("channel gateway unavailable".into()))?;
     if !response.status().is_success() {
+        let status = response.status();
+        if status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+            && response.json::<Value>().await.ok().is_some_and(|body| body["error"] == "CHANNEL_MEDIA_NOT_CONFIGURED")
+        {
+            return Err(ChannelError::Provider("CHANNEL_MEDIA_NOT_CONFIGURED: server document delivery configuration is missing; do not retry until configured. The stored file is intact; provide its private editing link.".into()));
+        }
         return Err(ChannelError::Provider(format!(
             "channel gateway returned {}",
-            response.status()
+            status
         )));
     }
     response

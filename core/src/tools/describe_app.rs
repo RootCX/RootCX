@@ -164,6 +164,13 @@ impl Tool for DescribeAppTool {
             return Err(format!("app '{app}' not found"));
         }
         let mut out = json!({ "app": app, "name": name, "dataContract": dc });
+        if let Ok(base) = std::env::var("ROOTCX_PUBLIC_URL")
+            && let Ok(url) = url::Url::parse(&base)
+            && matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some()
+        {
+            out["workspace_origin"] = json!(url.origin().ascii_serialization());
+        }
         if !actions.is_empty() {
             out["actions"] = json!(actions);
         }

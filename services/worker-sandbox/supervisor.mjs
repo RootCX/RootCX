@@ -6,7 +6,7 @@ import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 import { workerPolicy, allowPublicDestination } from './policy.mjs';
 
 // Policy state and proxy authentication are private to one worker process.
-const { root, prelude, args, env, storageSocket, writeRoot = false, timeoutMs } = JSON.parse(process.argv[2]);
+const { root, prelude, entryPoint, args, env, storageSocket, writeRoot = false, timeoutMs, offline = false } = JSON.parse(process.argv[2]);
 const runtime = dirname(fileURLToPath(import.meta.url));
 const home = await mkdtemp('/tmp/rootcx-worker-');
 const temporary = join(home, 'tmp');
@@ -21,15 +21,16 @@ try {
   const dependencies = await SandboxManager.checkDependenciesAsync();
   if (dependencies.errors.length || dependencies.warnings.length) throw new Error('Sandbox dependencies unavailable');
   const readPaths = [];
-  for (const path of [root, prelude, home, runtime, args[0], storageSocket, '/usr', '/bin', '/lib', '/lib64', '/etc/ssl/certs'].filter(Boolean)) {
+  for (const path of [root, prelude, entryPoint, home, runtime, args[0], storageSocket, '/usr', '/bin', '/lib', '/lib64', '/etc/ssl/certs'].filter(Boolean)) {
     try { readPaths.push(await realpath(path)); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
   const policy = workerPolicy({ readPaths, home, storageSocket });
   if (writeRoot) policy.filesystem.allowWrite.push(root);
-  await SandboxManager.initialize(policy, allowPublicDestination, false);
+  if (offline) policy.network.strictAllowlist = true;
+  await SandboxManager.initialize(policy, offline ? () => false : allowPublicDestination, false);
   const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
   const proxies = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'];
-  const fixed = { PATH: '/usr/local/bin:/usr/bin:/bin', HOME: home, TMPDIR: temporary, SANDBOX_RUNTIME: '1', NO_PROXY: '', no_proxy: '', ...(storageSocket ? { ROOTCX_WORKER_STORAGE_SOCKET: storageSocket } : {}) };
+  const fixed = { PATH: `${offline && entryPoint ? dirname(entryPoint) + ':' : ''}/usr/local/bin:/usr/bin:/bin`, HOME: home, TMPDIR: temporary, SANDBOX_RUNTIME: '1', NO_PROXY: '', no_proxy: '', ...(storageSocket ? { ROOTCX_WORKER_STORAGE_SOCKET: storageSocket } : {}) };
   const environment = Object.entries({ ...env, ...fixed }).filter(([key]) => !proxies.includes(key));
   const exports = proxies.map(name => `${name}=\"\${${name}/localhost/127.0.0.1}\"`).join('; ');
   const proxyArgs = proxies.map(name => `\"${name}=\$${name}\"`).join(' ');

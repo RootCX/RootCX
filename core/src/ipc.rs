@@ -39,6 +39,7 @@ pub struct RpcCaller {
 pub struct AgentBootConfig {
     pub tool_descriptors: Vec<rootcx_types::ToolDescriptor>,
     pub max_turns: u32,
+    pub definition: JsonValue,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +123,11 @@ pub enum OutboundMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         result: Option<JsonValue>,
         #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    AgentStateResult {
+        id: String,
+        result: Option<JsonValue>,
         error: Option<String>,
     },
     CollectionOpResult {
@@ -290,6 +296,16 @@ pub enum InboundMessage {
         tool_name: String,
         #[serde(default)]
         args: JsonValue,
+    },
+    AgentState {
+        invoke_id: String,
+        id: String,
+        op: String,
+        namespace: String,
+        #[serde(default)]
+        key: String,
+        #[serde(default)]
+        value: JsonValue,
     },
     AgentSessionCompacted {
         invoke_id: String,

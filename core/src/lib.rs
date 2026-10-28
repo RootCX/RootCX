@@ -8,6 +8,7 @@ mod error;
 pub mod extensions;
 pub mod governance;
 mod ipc;
+mod agent_harness;
 mod jobs;
 mod manifest;
 pub mod mcp;
@@ -106,6 +107,8 @@ impl Runtime {
         tool_registry.register(tools::invoke_agent::InvokeAgentTool);
         tool_registry.register(tools::list_actions::ListActionsTool);
         tool_registry.register(tools::call_action::CallActionTool);
+        tool_registry.register(tools::reply_file::ReplyFileTool);
+        if tools::execute_sandbox::available() { tool_registry.register(tools::execute_sandbox::ExecuteSandboxTool); }
 
         let mcp_manager = Arc::new(McpManager::new(Arc::clone(&tool_registry), bun_bin.clone()));
 

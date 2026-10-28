@@ -271,6 +271,7 @@ fn public_capability_denial(msg: &InboundMessage) -> Result<Option<OutboundMessa
         InboundMessage::StorageUpload { .. } | InboundMessage::Event { .. }
         | InboundMessage::JobResult { .. } | InboundMessage::AgentChunk { .. }
         | InboundMessage::AgentDone { .. } | InboundMessage::AgentError { .. }
+        | InboundMessage::AgentState { .. }
         | InboundMessage::AgentSessionCompacted { .. } => return Err(PUBLIC_CAPABILITY_DENIED),
     };
     Ok(Some(reply))
@@ -330,6 +331,7 @@ fn approved_capability_denial(
         InboundMessage::StorageUpload { .. } | InboundMessage::Event { .. }
         | InboundMessage::JobResult { .. } | InboundMessage::AgentChunk { .. }
         | InboundMessage::AgentDone { .. } | InboundMessage::AgentError { .. }
+        | InboundMessage::AgentState { .. }
         | InboundMessage::AgentSessionCompacted { .. } => return Err(APPROVED_CAPABILITY_DENIED),
     };
     let reason = if let Some(invocation_id) = invocation_id {
@@ -1294,6 +1296,21 @@ async fn supervisor_loop(
                             if let Some(tx) = pending_agent_streams.remove(&invoke_id) {
                                 let _ = tx.send(AgentEvent::Error { error }).await;
                             }
+                        }
+                        InboundMessage::AgentState { invoke_id, id, op, namespace, key, value } => {
+                            let authority = agent_runs.get(&invoke_id).map(|run| (run.authority.clone(), run.session_id.clone()));
+                            let pool = config.pool.clone();
+                            let out_tx = outbound_tx.clone();
+                            tokio::spawn(async move {
+                                let result = match authority {
+                                    Some((authority, session)) => crate::agent_harness::state_op(
+                                        &pool, &authority, &session, &op, &namespace, &key, value,
+                                    ).await,
+                                    None => Err("agent invocation is not active".into()),
+                                };
+                                let (result, error) = match result { Ok(value) => (Some(value), None), Err(error) => (None, Some(error)) };
+                                let _ = out_tx.send(OutboundMessage::AgentStateResult { id, result, error }).await;
+                            });
                         }
                         InboundMessage::AgentToolCall { invoke_id, call_id, tool_name, args } => {
                             if !pending_agent_streams.contains_key(&invoke_id) { continue; }

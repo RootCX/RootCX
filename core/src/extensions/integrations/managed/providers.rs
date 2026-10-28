@@ -58,7 +58,10 @@ impl Provider {
     pub(super) fn start(&self, config: &Value, callback: &str, state: &str, challenge: &str) -> Value {
         let oauth = self.effective_oauth(config);
         let scopes: Vec<_> = oauth["scopes"].as_array().expect("bundled scopes").iter().filter_map(Value::as_str).collect();
-        let mut url = reqwest::Url::parse(self.authorize).expect("provider URL");
+        let authorize = if self.id == "salesforce" && config["salesforceSandbox"] == true {
+            "https://test.salesforce.com/services/oauth2/authorize"
+        } else { self.authorize };
+        let mut url = reqwest::Url::parse(authorize).expect("provider URL");
         let mut query = url.query_pairs_mut();
         query.extend_pairs([("client_id", config["clientId"].as_str().unwrap_or("")), ("redirect_uri", callback), ("state", state), ("response_type", "code")]);
         if !scopes.is_empty() { query.append_pair("scope", &scopes.join(if self.id == "slack" { "," } else { " " })); }
@@ -77,6 +80,7 @@ impl Provider {
         let request = self.exchange_request(config, code, callback, verifier).inspect_err(diagnostic("token_request"))?;
         let token = response(request.send().await).await.inspect_err(diagnostic("token_exchange"))?;
         let mut credentials = self.credentials(&token).inspect_err(diagnostic("credentials"))?;
+        if self.id == "salesforce" { credentials["salesforceSandbox"] = json!(config["salesforceSandbox"] == true); }
         let (id, label) = if self.id == "hubspot" && config["hubspotUserLevel"] == true {
             let identity = self.hubspot_identity(config, &credentials).await.inspect_err(diagnostic("identity"))?;
             credentials["hubspotUserLevel"] = json!(true);
@@ -109,6 +113,9 @@ impl Provider {
             oauth["hubspotUserLevel"] = json!(true);
             oauth["tokenUrl"] = json!("https://api.hubapi.com/oauth/2026-09/token");
             oauth["scopes"] = json!(["oauth", "crm.objects.contacts.read", "crm.objects.contacts.write"]);
+        }
+        if self.id == "salesforce" && config["salesforceSandbox"] == true {
+            oauth["tokenUrl"] = json!("https://test.salesforce.com/services/oauth2/token");
         }
         oauth
     }
@@ -229,6 +236,22 @@ fn salesforce_url(raw: &str) -> Result<reqwest::Url, ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn salesforce_environment_pins_both_authorize_and_exchange_destinations() {
+        let p = provider("salesforce").unwrap();
+        for sandbox in [false, true] {
+            let cfg = json!({"clientId":"client", "clientSecret":"secret", "salesforceSandbox":sandbox, "tokenUrl":"https://evil.example"});
+            let start = p.start(&cfg, "https://app.example/cb", "state", "challenge");
+            let url = reqwest::Url::parse(start["url"].as_str().unwrap()).unwrap();
+            let request = p.exchange_request(&cfg, "code", "https://app.example/cb", "verifier").unwrap().build().unwrap();
+            let host = if sandbox { "test.salesforce.com" } else { "login.salesforce.com" };
+            assert_eq!(url.host_str(), Some(host));
+            assert_eq!(request.url().host_str(), Some(host));
+            let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+            assert_eq!(query["code_challenge"], "challenge");
+        }
+    }
+
     const IDS: [&str; 8] = ["notion", "hubspot", "salesforce", "airtable", "slack", "gmail", "google_calendar", "google_sheets"];
 
     #[test]

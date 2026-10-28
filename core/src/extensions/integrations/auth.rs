@@ -21,7 +21,7 @@ use crate::routes::SharedRuntime;
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Serialize, Deserialize)]
-struct Pending { integration_id: String, user_id: String, config_id: Option<String>, callback_url: String, code_verifier: String }
+struct Pending { integration_id: String, user_id: String, config_id: Option<String>, callback_url: String, code_verifier: String, #[serde(default)] salesforce_sandbox: bool }
 
 pub(crate) async fn bootstrap(pool: &sqlx::PgPool) -> Result<(), crate::RuntimeError> {
     sqlx::query("CREATE TABLE IF NOT EXISTS rootcx_system.integration_oauth_states (
@@ -78,6 +78,14 @@ fn resolve_target_user(identity: &Identity, qs: &HashMap<String, String>) -> Str
         .unwrap_or_else(|| identity.user_id.to_string())
 }
 
+fn salesforce_environment(integration_id: &str, environment: Option<&str>) -> Result<bool, ApiError> {
+    match (integration_id, environment) {
+        (_, None) | ("salesforce", Some("production")) => Ok(false),
+        ("salesforce", Some("sandbox")) => Ok(true),
+        _ => Err(ApiError::BadRequest("Salesforce environment must be production or sandbox".into())),
+    }
+}
+
 pub async fn start(
     identity: Identity,
     State(rt): State<SharedRuntime>,
@@ -98,7 +106,9 @@ pub async fn start(
             return Err(ApiError::NotFound("config_id not found for this integration".into()));
         }
     }
-    let config = super::routes::resolve_config_scoped(&pool, &secrets, &integration_id, config_id.as_deref()).await?;
+    let salesforce_sandbox = salesforce_environment(&integration_id, qs.get("salesforce_environment").map(String::as_str))?;
+    let mut config = super::routes::resolve_config_scoped(&pool, &secrets, &integration_id, config_id.as_deref()).await?;
+    if integration_id == "salesforce" { config["salesforceSandbox"] = json!(salesforce_sandbox); }
 
     let nonce = Uuid::new_v4().to_string();
     let (cb, state) = build_callback_and_state(&headers, &nonce);
@@ -107,7 +117,7 @@ pub async fn start(
     let code_challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(code_verifier.as_bytes()));
     let pending = Pending {
         integration_id: integration_id.clone(), user_id: identity.user_id.to_string(),
-        config_id, callback_url: cb.clone(), code_verifier,
+        config_id, callback_url: cb.clone(), code_verifier, salesforce_sandbox,
     };
     let (iv, ciphertext) = secrets.encrypt(&serde_json::to_string(&pending).map_err(|e| ApiError::Internal(e.to_string()))?)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -207,7 +217,8 @@ async fn finish_callback(
     pending: &Pending, params: &HashMap<String, String>, attempt_hash: &str,
 ) -> Result<(), ApiError> {
     let wm = crate::routes::wm(&rt);
-    let config = super::routes::resolve_config_scoped(&pool, &secrets, &pending.integration_id, pending.config_id.as_deref()).await?;
+    let mut config = super::routes::resolve_config_scoped(&pool, &secrets, &pending.integration_id, pending.config_id.as_deref()).await?;
+    if pending.integration_id == "salesforce" { config["salesforceSandbox"] = json!(pending.salesforce_sandbox); }
 
     let result = if super::managed::enabled(&pending.integration_id) {
         super::managed::callback(&pending.integration_id, &config, params, &pending.callback_url, &pending.code_verifier).await?
@@ -476,6 +487,16 @@ pub async fn disconnect(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn salesforce_environment_rejects_arbitrary_destinations_and_other_providers() {
+        assert!(!super::salesforce_environment("salesforce", None).unwrap());
+        assert!(!super::salesforce_environment("salesforce", Some("production")).unwrap());
+        assert!(super::salesforce_environment("salesforce", Some("sandbox")).unwrap());
+        for (provider, value) in [("salesforce", ""), ("salesforce", "https://evil.example"), ("salesforce", "Sandbox"), ("notion", "sandbox")] {
+            assert!(super::salesforce_environment(provider, Some(value)).is_err(), "{provider}: {value}");
+        }
+    }
+
     use super::*;
     use crate::auth::identity::Identity;
 
@@ -524,7 +545,7 @@ mod tests {
         let secrets = crate::secrets::SecretManager::with_key(&[0x4A; 32]);
         for expired in [false, true] {
             let nonce = Uuid::new_v4().to_string();
-            let pending = Pending { integration_id: "notion".into(), user_id: "owner".into(), config_id: None, callback_url: "https://app.example/callback".into(), code_verifier: "private-verifier".into() };
+            let pending = Pending { integration_id: "notion".into(), user_id: "owner".into(), config_id: None, callback_url: "https://app.example/callback".into(), code_verifier: "private-verifier".into(), salesforce_sandbox: false };
             let (iv, cipher) = secrets.encrypt(&serde_json::to_string(&pending).unwrap()).unwrap();
             sqlx::query("INSERT INTO rootcx_system.integration_oauth_states (state_hash, nonce, ciphertext, expires_at) VALUES ($1, $2, $3, now() + $4 * interval '1 second')")
                 .bind(state_hash(&nonce)).bind(iv).bind(cipher).bind(if expired { -1.0_f64 } else { 60.0_f64 }).execute(&pool).await.unwrap();

@@ -501,6 +501,8 @@ async fn agent_redeploy_preserves_restricted_role() {
 
     // Re-register the agent (simulates redeploy)
     let def = rootcx_types::AgentDefinition {
+        pinned_skills: vec![],
+            harness: None,
         name: "Re-deployed Agent".into(),
         description: None,
         system_prompt: None,

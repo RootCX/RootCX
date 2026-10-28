@@ -41,17 +41,11 @@ pub(crate) fn build_sse_stream(
                         Some((Ok(event), (rx, None)))
                     }
                     Some(AgentEvent::ToolCallStarted { call_id, tool_name, input }) => {
-                        if let Some(ref pctx) = ctx {
-                            let _ = persistence::persist_tool_call_start(&pctx.pool, &pctx.session_id, &call_id, &tool_name, &input).await;
-                        }
                         let event = Event::default().event("tool_call_started")
                             .data(json!({"call_id": call_id, "tool_name": tool_name, "input": input, "session_id": &*sid}).to_string());
                         Some((Ok(event), (rx, ctx)))
                     }
                     Some(AgentEvent::ToolCallCompleted { call_id, tool_name, output, error, duration_ms }) => {
-                        if let Some(ref pctx) = ctx {
-                            let _ = persistence::persist_tool_call_end(&pctx.pool, &call_id, output.as_ref(), error.as_deref(), duration_ms).await;
-                        }
                         let event = Event::default().event("tool_call_completed")
                             .data(json!({"call_id": call_id, "tool_name": tool_name, "output": output, "error": error, "duration_ms": duration_ms, "session_id": &*sid}).to_string());
                         Some((Ok(event), (rx, ctx)))

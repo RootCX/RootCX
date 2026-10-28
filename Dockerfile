@@ -16,14 +16,23 @@ WORKDIR /opt/rootcx-worker-sandbox
 COPY services/worker-sandbox/package.json services/worker-sandbox/package-lock.json ./
 RUN npm ci --ignore-scripts --omit=dev
 
+FROM worker-dependencies AS agent-harness
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
+WORKDIR /build/agent-harness
+COPY runtime/agent-harness/package.json runtime/agent-harness/package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY runtime/agent-harness/src ./src
+RUN bun run build
+
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl git bubblewrap socat ripgrep \
+    && apt-get install -y --no-install-recommends ca-certificates curl git bubblewrap socat ripgrep python3 poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/target/release/rootcx-core /usr/local/bin/rootcx-core
 COPY --from=bun /usr/local/bin/bun /opt/rootcx/resources/bun
+COPY --from=agent-harness /build/agent-harness/dist/index.js /opt/rootcx/resources/agent-harness/index.js
 COPY core/resources/integrations /opt/rootcx/resources/integrations
 COPY --from=worker-dependencies /opt/rootcx-worker-sandbox/node_modules /opt/rootcx-worker-sandbox/node_modules
 COPY services/worker-sandbox /opt/rootcx-worker-sandbox

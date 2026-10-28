@@ -81,7 +81,7 @@ fn is_live(blob: &JsonValue, now: i64) -> bool {
 /// `__bind`'s `mergeConfig`. Only an admin writes these
 /// (`save_platform_config`), which is what keeps the renewal destination out of
 /// reach of application code.
-pub(crate) const CORE_OWNED_CONFIG: [&str; 8] = ["tokenUrl", "clientId", "clientSecret", "tokenAuthMethod", "tokenEncoding", "stripeLivemode", "stripeExternalTestLinkId", "hubspotUserLevel"];
+pub(crate) const CORE_OWNED_CONFIG: [&str; 9] = ["tokenUrl", "clientId", "clientSecret", "tokenAuthMethod", "tokenEncoding", "stripeLivemode", "stripeExternalTestLinkId", "hubspotUserLevel", "salesforceSandbox"];
 
 /// The Core renews for this connection only when an admin configured a token
 /// endpoint and the credential actually carries a refresh token.
@@ -173,7 +173,8 @@ pub(crate) async fn credentials_for_worker_versioned(
         .to_string();
     // Flagged here, not at each caller: this is the only layer that knows both the
     // connection and whether the provider's answer was terminal.
-    let renewed = match exchange(config, &refresh, str_field(&blob, "stripeAccountId")).await {
+    let renewal_config = renewal_config(integration_id, config, &blob);
+    let renewed = match exchange(&renewal_config, &refresh, str_field(&blob, "stripeAccountId")).await {
         Ok(renewed) => renewed,
         Err(e) => {
             if matches!(e, RenewError::Rejected(_)) {
@@ -202,6 +203,19 @@ pub(crate) async fn credentials_for_worker_versioned(
     tx.commit().await.map_err(|e| RenewError::Transient(e.to_string()))?;
 
     Ok((for_worker(&merged, config), CredentialVersion::of(&merged)))
+}
+
+fn renewal_config(integration_id: &str, config: &JsonValue, credential: &JsonValue) -> JsonValue {
+    let mut result = config.clone();
+    // Only fixed Salesforce destinations are eligible. A tenant or worker cannot
+    // turn this connection-level environment choice into a credential redirect.
+    if integration_id == "salesforce" && matches!(str_field(config, "tokenUrl"),
+        Some("https://login.salesforce.com/services/oauth2/token" | "https://test.salesforce.com/services/oauth2/token")) {
+        result["tokenUrl"] = json!(if credential["salesforceSandbox"] == true {
+            "https://test.salesforce.com/services/oauth2/token"
+        } else { "https://login.salesforce.com/services/oauth2/token" });
+    }
+    result
 }
 
 fn validate_grant_client(config: &JsonValue, credential: &JsonValue) -> Result<(), RenewError> {
@@ -466,6 +480,22 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn salesforce_renewal_uses_the_persisted_grant_environment() {
+        let config = json!({"tokenUrl":"https://login.salesforce.com/services/oauth2/token"});
+        for sandbox in [false, true] {
+            let old = json!({"salesforceSandbox":sandbox, "refreshToken":"old"});
+            let renewed = merge(&old, Renewed { access:"access".into(), refresh:Some("rotated".into()), expires_at:123 });
+            let next = renewal_config("salesforce", &config, &renewed);
+            assert_eq!(next["tokenUrl"], if sandbox { "https://test.salesforce.com/services/oauth2/token" } else { "https://login.salesforce.com/services/oauth2/token" });
+            assert_eq!(renewed["refreshToken"], "rotated");
+            assert_eq!(renewal_config("notion", &config, &renewed), config);
+        }
+        assert_eq!(renewal_config("salesforce", &config, &json!({})), config);
+        let custom = json!({"tokenUrl":"https://admin.example/token"});
+        assert_eq!(renewal_config("salesforce", &custom, &json!({"salesforceSandbox":true})), custom);
+    }
 
     fn cfg() -> JsonValue { json!({ "tokenUrl": "https://p.example.com/token" }) }
 

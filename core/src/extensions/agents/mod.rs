@@ -131,12 +131,16 @@ impl RuntimeExtension for AgentExtension {
 }
 
 pub async fn register_agent(pool: &PgPool, app_id: &str, def: &AgentDefinition, deployer: Option<Uuid>) -> Result<(), RuntimeError> {
-    let config = serde_json::json!({
+    let mut config = serde_json::json!({
+        "harness": def.harness,
         "systemPrompt": def.system_prompt,
         "memory": def.memory,
         "limits": def.limits,
         "supervision": def.supervision,
     });
+    if !def.pinned_skills.is_empty() {
+        config["pinnedSkills"] = serde_json::json!(def.pinned_skills);
+    }
 
     sqlx::query(
         "INSERT INTO rootcx_system.agents (app_id, name, description, config)

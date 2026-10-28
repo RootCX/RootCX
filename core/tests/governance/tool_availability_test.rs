@@ -3,7 +3,7 @@ use reqwest::{Method, StatusCode};
 use rootcx_core::tools::{Tool, ToolContext};
 use serde_json::{Value, json};
 
-const AGENT_TOOLS: [&str; 3] = ["call_action", "invoke_agent", "call_integration"];
+const AGENT_TOOLS: [&str; 4] = ["call_action", "invoke_agent", "call_integration", "reply_file"];
 
 fn tool_graph(tool: &str, params: Value) -> Value {
     json!({

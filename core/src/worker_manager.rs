@@ -356,7 +356,7 @@ impl WorkerManager {
 
     async fn build_agent_boot(&self, pool: &PgPool, app_id: &str) -> Option<(AgentBootConfig, Option<rootcx_types::SupervisionConfig>)> {
         let config_json: serde_json::Value = sqlx::query_scalar(
-            "SELECT config FROM rootcx_system.agents WHERE app_id = $1",
+            "SELECT config || jsonb_build_object('name', name) FROM rootcx_system.agents WHERE app_id = $1",
         ).bind(app_id).fetch_optional(pool).await.ok()??;
 
         let agent_uid = crate::extensions::agents::agent_user_id(app_id);
@@ -380,7 +380,7 @@ impl WorkerManager {
         let supervision = config_json.get("supervision")
             .and_then(|v| serde_json::from_value::<rootcx_types::SupervisionConfig>(v.clone()).ok());
 
-        Some((AgentBootConfig { tool_descriptors, max_turns }, supervision))
+        Some((AgentBootConfig { tool_descriptors, max_turns, definition: config_json }, supervision))
     }
 
     /// Spawn a fresh worker bound for life to `principal`. Only the System
@@ -415,7 +415,7 @@ impl WorkerManager {
         crate::app_migrations::run(pool, app_id, &app_dir)
             .await
             .map_err(RuntimeError::Invalid)?;
-        let entry_point = resolve_entry_point(&app_dir)?;
+
         let (credentials, agent_boot_config, supervision) = if approved || matches!(principal, Principal::Public(_)) {
             (HashMap::new(), None, None)
         } else {
@@ -430,6 +430,11 @@ impl WorkerManager {
             };
             (credentials, boot, supervision)
         };
+        let managed = matches!(principal, Principal::Agent(..)) && agent_boot_config.as_ref().is_some_and(|boot|
+            boot.definition.pointer("/harness/type").and_then(|v| v.as_str()) == Some("deepagents"));
+        let entry_point = if managed {
+            crate::agent_harness::entry_point()?
+        } else { resolve_entry_point(&app_dir)? };
         if identity.audit_actor_id.is_none() {
             if identity.is_delegated && identity.public_execution.is_none() && !approved {
                 identity.audit_actor_id = Some(crate::extensions::agents::agent_user_id(app_id));
@@ -732,6 +737,7 @@ impl WorkerManager {
         let authority = AgentAuthority::admit(
             &self.pool, app_id, payload.invoker_user_id, payload.task_scope.clone(), source,
         ).await.map_err(RuntimeError::Delegation)?;
+        let session_lock = crate::agent_harness::admit_session(&self.pool, &authority, &payload.session_id).await?;
         let agent_uid = crate::extensions::agents::agent_user_id(app_id);
         let effective_perms = authority.ceiling().to_vec();
         let identity = crate::governance::enforcement::ContextState {
@@ -751,19 +757,32 @@ impl WorkerManager {
         // Fan out events to fleet broadcast for real-time monitoring
         let (outer_tx, outer_rx) = mpsc::channel(64);
         let fleet_tx = self.fleet_tx.clone();
+        let pool = self.pool.clone();
         let app_id = app_id.to_string();
         tokio::spawn(async move {
+            let _session_lock = session_lock;
             loop {
                 let event = tokio::select! {
                     _ = outer_tx.closed() => break,
                     event = inner_rx.recv() => match event { Some(event) => event, None => break },
                 };
+                let persisted = match &event {
+                    AgentEvent::ToolCallStarted { call_id, tool_name, input } =>
+                        crate::extensions::agents::persistence::persist_tool_call_start(&pool, &session_id, call_id, tool_name, input).await,
+                    AgentEvent::ToolCallCompleted { call_id, output, error, duration_ms, .. } =>
+                        crate::extensions::agents::persistence::persist_tool_call_end(&pool, call_id, output.as_ref(), error.as_deref(), *duration_ms).await,
+                    _ => Ok(()),
+                };
+                if let Err(error) = persisted { warn!(%error, %session_id, "agent tool trace persistence failed"); }
                 let _ = fleet_tx.send(FleetEvent {
                     app_id: app_id.clone(),
                     session_id: session_id.clone(),
                     event: event.clone(),
                 });
-                if outer_tx.send(event).await.is_err() { break; }
+                // Tool tasks can retain stream senders after worker termination.
+                // A terminal event must release authority and the session immediately.
+                let terminal = matches!(event, AgentEvent::Done { .. } | AgentEvent::Error { .. });
+                if outer_tx.send(event).await.is_err() || terminal { break; }
             }
             lifetime.finish();
         });

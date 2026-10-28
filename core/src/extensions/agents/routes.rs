@@ -101,9 +101,9 @@ pub async fn get_agent(
 ) -> Result<Json<AgentRow>, ApiError> {
     let pool = routes::pool(&rt);
     sqlx::query_as::<_, AgentRow>(
-        "SELECT app_id, name, description, config FROM rootcx_system.agents WHERE app_id = $1",
+        "SELECT app_id, name, description, config, $2::uuid AS user_id FROM rootcx_system.agents WHERE app_id = $1",
     )
-    .bind(&app_id).fetch_optional(&pool).await?
+    .bind(&app_id).bind(super::agent_user_id(&app_id)).fetch_optional(&pool).await?
     .map(Json)
     .ok_or_else(|| ApiError::NotFound(format!("no agent for app '{app_id}'")))
 }

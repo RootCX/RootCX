@@ -24,6 +24,7 @@ pub(crate) fn command(config: &WorkerConfig, env: Vec<(String, String)>) -> Resu
         let spec = serde_json::json!({
             "root": config.working_dir,
             "prelude": config.prelude_path,
+            "entryPoint": config.entry_point,
             "args": [config.js_runtime, "--preload", config.prelude_path, config.entry_point],
             "env": env.into_iter().collect::<std::collections::HashMap<_, _>>(),
             "storageSocket": STORAGE_SOCKET,

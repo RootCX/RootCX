@@ -3731,6 +3731,8 @@ async fn schema_sync_handles_core_users_fk_change() {
 async fn register_test_agent(rt: &TestRuntime, app_id: &str) {
     rt.install(app_id, "items").await;
     let def = rootcx_types::AgentDefinition {
+        pinned_skills: vec![],
+            harness: None,
         name: app_id.to_string(),
         description: None,
         system_prompt: Some("test".into()),
