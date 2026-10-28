@@ -11,6 +11,17 @@ use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use sqlx::PgPool;
+use std::sync::LazyLock;
+
+// Agent operations revalidate their origin through this relay many times per turn;
+// a pooled connection spares each check a new TCP and TLS handshake. Idle connections
+// are dropped well before common gateway idle limits so none is reused as it closes.
+static HTTP: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .pool_idle_timeout(std::time::Duration::from_secs(60))
+        .build()
+        .expect("relay HTTP client")
+});
 
 pub struct ManagedProvider {
     pub name: String,
@@ -85,7 +96,7 @@ pub(super) async fn relay(provider: &str, action: &str, mut payload: Value) -> R
         .finalize()
         .into_bytes(),
     );
-    let response = reqwest::Client::new()
+    let response = HTTP
         .post(format!("{}/{action}", base.trim_end_matches('/')))
         .timeout(std::time::Duration::from_secs(if document_reply { 120 } else { 20 }))
         .header("content-type", "application/json")

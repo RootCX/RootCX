@@ -1,7 +1,7 @@
 mod harness;
 
-use std::{sync::{Arc, atomic::{AtomicBool, Ordering}}, time::Duration};
-use axum::{Json, Router, routing::post};
+use std::{collections::HashSet, net::SocketAddr, sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}}, time::Duration};
+use axum::{Json, Router, extract::{ConnectInfo, Request}, middleware::{self, Next}, routing::post};
 use hmac::{Hmac, Mac};
 use reqwest::{RequestBuilder, StatusCode};
 use serde_json::{Value, json};
@@ -91,6 +91,9 @@ async fn web_and_managed_channels_preserve_delegated_authority() {
         let authorized = Arc::new(AtomicBool::new(true));
         let access = authorized.clone();
         let (sent, mut messages) = tokio::sync::mpsc::channel(32);
+        // One client port per TCP connection the gateway accepts.
+        let peers = Arc::new(Mutex::new(Vec::new()));
+        let seen = peers.clone();
         let gateway = tokio::spawn(async move {
             let router = Router::new()
                 .route("/authorize", post(move |Json(body): Json<Value>| {
@@ -108,8 +111,12 @@ async fn web_and_managed_channels_preserve_delegated_authority() {
                         }
                         sent.send(body).await.unwrap(); Json(json!({"ok":true}))
                     }
+                }))
+                .layer(middleware::from_fn(move |ConnectInfo(peer): ConnectInfo<SocketAddr>, request: Request, next: Next| {
+                    seen.lock().unwrap().push(peer.port());
+                    next.run(request)
                 }));
-            axum::serve(listener, router).await.unwrap();
+            axum::serve(listener, router.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
         });
         let rt = harness::TestRuntime::boot().await;
         rt.install_manifest(&json!({
@@ -399,6 +406,12 @@ async fn web_and_managed_channels_preserve_delegated_authority() {
             let (status, _) = rt.request_as(reqwest::Method::POST, &approval_path, &token, Some(&json!({"action":"approve"}))).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "confirmation cannot be replayed");
         }
+        // Every authorization above still reached the gateway; only the transport is shared.
+        let (requests, connections) = {
+            let peers = peers.lock().unwrap();
+            (peers.len(), peers.iter().collect::<HashSet<_>>().len())
+        };
+        assert!(connections < requests, "{provider}: relay calls must reuse connections ({connections} for {requests} requests)");
         rt.shutdown().await;
         gateway.abort();
     }
