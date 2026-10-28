@@ -14,7 +14,7 @@ use serde_json::{json, Value as JsonValue};
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
-use super::types::{ChannelProvider, InboundEvent, MediaRef};
+use super::types::{ChannelProvider, ConversationLocale, InboundEvent, MediaRef};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::extensions::agents::{self, config as agent_config, persistence};
@@ -223,7 +223,7 @@ async fn process_event(
             handle_callback(rt, channel, config, provider, &chat_id, &callback_id, &data).await;
             Ok(())
         }
-        InboundEvent::Message { chat_id, text, media } => {
+        InboundEvent::Message { chat_id, text, media, locale } => {
             if config["managed"] == true {
                 if is_new_session(&text) {
                     return reset_session(rt.pool(), channel, &chat_id).await.map_err(|e| e.to_string());
@@ -235,16 +235,32 @@ async fn process_event(
                 return provider.send_response(config, &chat_id, "Link your account from your dashboard before chatting with Shappy.")
                     .await.map_err(|e| e.to_string());
             }
-            do_invoke(rt, channel, config, name, &chat_id, &text, media).await
+            do_invoke(rt, channel, config, name, &chat_id, &text, media, locale).await
         }
         _ => Ok(()),
     }
 }
 
+fn channel_message(text: &str, provider_name: &str, locale: Option<ConversationLocale>) -> String {
+    let language_context = locale.map(|locale| format!(
+        " If the user message has no discernible language, use {}. For private application links, preserve their path and other parameters and set locale={}; do not change public customer-document links.",
+        locale.language(), locale.code(),
+    )).unwrap_or_default();
+    let formatting_context = if provider_name == "whatsapp" {
+        " This conversation is on WhatsApp. Use short paragraphs and simple lists. For emphasis use WhatsApp's native *bold* or _italic_. Do not use Markdown tables, headings, double-asterisk bold, or HTML."
+    } else {
+        ""
+    };
+    format!(
+        "Channel response instructions: Reply entirely in the language of the user message below, unless the user requests another language.{language_context} \
+         Do not narrate tool use or announce what you are about to check; give the result directly.{formatting_context}\n\nUser message:\n{text}"
+    )
+}
+
 async fn do_invoke(
     rt: &SharedRuntime,
     channel_id: &str, config: &JsonValue, provider_name: &str,
-    chat_id: &str, text: &str, media: Vec<MediaRef>,
+    chat_id: &str, text: &str, media: Vec<MediaRef>, locale: Option<ConversationLocale>,
 ) -> Result<(), String> {
     fn e(e: impl std::fmt::Debug) -> String { format!("{e:?}") }
     let pool = rt.pool();
@@ -275,13 +291,7 @@ async fn do_invoke(
     let attachments = agents::attachments::received(rt, &app_id, human, files).await.map_err(&e)?;
     // Also what history keeps: a file sent without a caption must not leave an empty user turn.
     let user_turn = agents::attachments::with_file_references(text.to_string(), attachments.as_deref());
-    let message = format!(
-        "Channel response instructions: Reply entirely in the language of the user message below, unless the user requests another language. \
-         Do not narrate tool use or announce what you are about to check; give the result directly.{}\n\nUser message:\n{user_turn}",
-        if provider_name == "whatsapp" {
-            " This conversation is on WhatsApp. Use short paragraphs and simple lists. For emphasis use WhatsApp's native *bold* or _italic_. Do not use Markdown tables, headings, double-asterisk bold, or HTML."
-        } else { "" }
-    );
+    let message = channel_message(&user_turn, provider_name, locale);
 
     let payload = AgentInvokePayload {
         invoke_id: uuid::Uuid::new_v4().to_string(),
@@ -695,6 +705,24 @@ async fn resolve_invoker(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn channel_language_context_preserves_user_language_and_scoped_links() {
+        for (locale, language, code) in [
+            (super::ConversationLocale::Fr, "French", "fr"),
+            (super::ConversationLocale::En, "English", "en"),
+        ] {
+            let message = super::channel_message("", "whatsapp", Some(locale));
+            assert!(message.contains(&format!("no discernible language, use {language}")));
+            assert!(message.contains(&format!("locale={code}")));
+            assert!(message.contains("do not change public customer-document links"));
+            assert!(message.contains("language of the user message"));
+        }
+        let native = super::channel_message("Bonjour", "slack", None);
+        assert!(!native.contains("locale="));
+        assert!(native.ends_with("User message:\nBonjour"));
+    }
+
     use super::*;
 
     #[test]

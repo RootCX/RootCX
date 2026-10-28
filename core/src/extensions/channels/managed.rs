@@ -301,6 +301,11 @@ impl ChannelProvider for ManagedProvider {
             chat_id: chat.into(),
             text: text.into(),
             media: super::media::parse(&payload)?,
+            locale: match payload.get("locale") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(serde_json::from_value(value.clone())
+                    .map_err(|_| ChannelError::InvalidWebhook("unsupported locale".into()))?),
+            },
         })
     }
 

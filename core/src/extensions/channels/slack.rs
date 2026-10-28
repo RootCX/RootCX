@@ -221,6 +221,7 @@ impl ChannelProvider for SlackProvider {
                         chat_id,
                         text: format!("/link {token}"),
                         media: vec![],
+                        locale: None,
                     });
                 }
                 return Ok(InboundEvent::Ignored);
@@ -254,7 +255,7 @@ impl ChannelProvider for SlackProvider {
                     if text.is_empty() && media.is_empty() {
                         return Ok(InboundEvent::Ignored);
                     }
-                    Ok(InboundEvent::Message { chat_id: bound_chat(&channel, user.as_deref())?, text, media })
+                    Ok(InboundEvent::Message { chat_id: bound_chat(&channel, user.as_deref())?, text, media, locale: None })
                 }
                 Event::AppMention { channel, user, bot_id, text, files } => {
                     if bot_id.is_some() { return Ok(InboundEvent::Ignored); }
@@ -263,7 +264,7 @@ impl ChannelProvider for SlackProvider {
                     if text.is_empty() && media.is_empty() {
                         return Ok(InboundEvent::Ignored);
                     }
-                    Ok(InboundEvent::Message { chat_id: bound_chat(&channel, user.as_deref())?, text, media })
+                    Ok(InboundEvent::Message { chat_id: bound_chat(&channel, user.as_deref())?, text, media, locale: None })
                 }
                 Event::Other => Ok(InboundEvent::Ignored),
             },
@@ -505,7 +506,7 @@ mod tests {
         let cfg = json!({ "signing_secret": "s" });
         let headers = signed_headers("s", &body, now());
         let event = parse_with(cfg, headers, body.into()).await.unwrap();
-        let InboundEvent::Message { chat_id, text, media } = event else { panic!("expected Message") };
+        let InboundEvent::Message { chat_id, text, media, .. } = event else { panic!("expected Message") };
         assert_eq!(chat_id, r#"slack:["D123","U1"]"#);
         assert_eq!(text, "hello");
         assert!(media.is_empty());
