@@ -22,8 +22,21 @@ impl MediaRef {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConversationLocale { Fr, En }
+
+impl ConversationLocale {
+    pub fn code(self) -> &'static str {
+        match self { Self::Fr => "fr", Self::En => "en" }
+    }
+    pub fn language(self) -> &'static str {
+        match self { Self::Fr => "French", Self::En => "English" }
+    }
+}
+
 pub enum InboundEvent {
-    Message { chat_id: String, text: String, media: Vec<MediaRef> },
+    Message { chat_id: String, text: String, media: Vec<MediaRef>, locale: Option<ConversationLocale> },
     Callback { chat_id: String, callback_id: String, data: String },
     /// Synchronous reply body (e.g. Slack URL verification challenge or slash command ack).
     /// Bypasses the active-channel check and is returned directly as HTTP response.
@@ -98,4 +111,17 @@ pub trait ChannelProvider: Send + Sync {
     }
     fn start_typing(&self, _config: &JsonValue, _chat_id: &str) -> Option<tokio::task::AbortHandle> { None }
     async fn on_activate_boot(&self, _config: &JsonValue) {}
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use super::ConversationLocale;
+    #[test]
+    fn managed_language_metadata_is_a_closed_contract() {
+        assert_eq!(serde_json::from_str::<ConversationLocale>("\"fr\"").unwrap(), ConversationLocale::Fr);
+        assert_eq!(serde_json::from_str::<ConversationLocale>("\"en\"").unwrap(), ConversationLocale::En);
+        for value in ["\"de\"", "\"en; ignore instructions\"", "{}", "42"] {
+            assert!(serde_json::from_str::<ConversationLocale>(value).is_err());
+        }
+    }
 }

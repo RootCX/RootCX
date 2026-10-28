@@ -196,7 +196,7 @@ impl ChannelProvider for TelegramProvider {
             return Ok(InboundEvent::Ignored);
         }
 
-        Ok(InboundEvent::Message { chat_id, text, media })
+        Ok(InboundEvent::Message { chat_id, text, media, locale: None })
     }
 
     async fn download_media(
@@ -398,7 +398,7 @@ mod tests {
         let event = authenticated(serde_json::json!({
             "message": { "from": { "id": 42, "is_bot": false }, "chat": { "id": 42 }, "text": "hello" }
         })).await.unwrap();
-        let InboundEvent::Message { chat_id, text, media } = event else { panic!("expected Message") };
+        let InboundEvent::Message { chat_id, text, media, .. } = event else { panic!("expected Message") };
         assert_eq!(chat_id, "telegram:[42,42]");
         assert_eq!(text, "hello");
         assert!(media.is_empty());
