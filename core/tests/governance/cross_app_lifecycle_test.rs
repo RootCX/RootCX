@@ -50,28 +50,29 @@ fn spawn_install(
     uninstall: bool,
 ) -> tokio::task::JoinHandle<(StatusCode, Value)> {
     let client = rt.client.clone();
-    let url = rt.url(if uninstall {
-        "/api/v1/apps/provider"
-    } else {
-        "/api/v1/apps"
-    });
+    let url = rt.url("/api/v1");
     let token = rt.token.clone();
     tokio::spawn(async move {
-        let response = client
-            .request(
-                if uninstall {
-                    Method::DELETE
-                } else {
-                    Method::POST
-                },
-                url,
-            )
-            .bearer_auth(token)
-            .json(&manifest)
-            .send()
-            .await
-            .unwrap();
-        (response.status(), response.json().await.unwrap())
+        if !uninstall {
+            let response = client.post(format!("{url}/apps")).bearer_auth(&token).json(&manifest).send().await.unwrap();
+            return (response.status(), response.json().await.unwrap());
+        }
+        let response = client.post(format!("{url}/apps/provider/deletion")).bearer_auth(&token).send().await.unwrap();
+        let status = response.status();
+        let operation: Value = response.json().await.unwrap();
+        if !status.is_success() { return (status, operation); }
+        let path = format!("{url}/app-deletions/{}", operation["id"].as_str().unwrap());
+        let response = client.post(format!("{path}/confirm")).bearer_auth(&token).send().await.unwrap();
+        let status = response.status();
+        let operation = response.json().await.unwrap();
+        if !status.is_success() { return (status, operation); }
+        loop {
+            let response = client.get(&path).bearer_auth(&token).send().await.unwrap();
+            let status = response.status();
+            let operation: Value = response.json().await.unwrap();
+            if !status.is_success() || operation["state"] == "succeeded" { return (status, operation); }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     })
 }
 
@@ -1342,9 +1343,10 @@ async fn governance_fixes_uninstall_attributes_revocation_to_the_initiating_admi
         .execute(rt.pool())
         .await
         .unwrap();
-    let (status, body) = rt
-        .request_as(Method::DELETE, "/api/v1/apps/provider", &token, None)
-        .await;
+    let (status, operation) = rt.request_as(Method::POST, "/api/v1/apps/provider/deletion", &token, None).await;
+    assert_eq!(status, StatusCode::OK, "{operation}");
+    let path = format!("/api/v1/app-deletions/{}/confirm", operation["id"].as_str().unwrap());
+    let (status, body) = rt.request_as(Method::POST, &path, &token, None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let actor: Option<Uuid> = sqlx::query_scalar(
         "SELECT actor_id FROM rootcx_system.cross_app_grant_audit

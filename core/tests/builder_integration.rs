@@ -94,7 +94,7 @@ fn source_to_git_to_schema_to_published_frontend() {
         assert_eq!(rt.post_json("/api/v1/apps",&manifest).await.0,409,"external deployments must not invalidate managed source history");
         // Crash injection: files and Git activated, SQL completion not yet committed.
         sqlx::query("UPDATE rootcx_system.source_projects SET head_commit=$1,deployed_commit=NULL WHERE app_id='builder_test'").bind(base).execute(rt.pool()).await.unwrap();
-        sqlx::query("UPDATE rootcx_system.source_runs SET status='needs_recovery' WHERE id=$1::uuid").bind(run["id"].as_str().unwrap()).execute(rt.pool()).await.unwrap();
+        sqlx::query("UPDATE rootcx_system.source_runs SET status='needs_recovery',error_code='PUBLICATION_RECOVERY_REQUIRED' WHERE id=$1::uuid").bind(run["id"].as_str().unwrap()).execute(rt.pool()).await.unwrap();
         assert_eq!(rt.post_json("/api/v1/apps/builder_test/changes",&concurrent).await.0,409,"recovery must block new changes");
         assert_eq!(rt.post_json(&format!("{path}/retry-publication"),&json!({})).await.0,200);
         let recovered=tokio::time::timeout(std::time::Duration::from_secs(15),async {
@@ -105,6 +105,7 @@ fn source_to_git_to_schema_to_published_frontend() {
             }
         }).await.unwrap();
         assert_eq!(recovered["status"],"succeeded","{recovered}");
+        assert!(recovered["errorCode"].is_null(), "recovery clears the obsolete error code");
         assert_eq!(recovered["commitId"],final_run["commitId"],"recovery must activate the same commit");
         let count:i64=sqlx::query_scalar("SELECT count(*) FROM builder_test.quotes").fetch_one(rt.pool()).await.unwrap();
         assert_eq!(count,1,"recovery must preserve existing business data");
@@ -140,9 +141,10 @@ fn source_to_git_to_schema_to_published_frontend() {
             let states:Vec<Value>=transcript.lines().filter_map(|line| line.strip_prefix("data: ")).map(|line| serde_json::from_str(line).unwrap()).collect();
             let last=states.last().expect("SSE must replay persisted state");
             assert_eq!(last["status"],expected,"{transcript}");
-            assert!(!transcript.contains("AI_CREDITS_EXHAUSTED"),"internal diagnostics must not leak");
+            assert!(!transcript.contains("Unavailable("),"internal diagnostics must not leak");
             if expected=="failed" {
-                assert!(last["message"].as_str().unwrap().contains("crédits"));
+                assert_eq!(last["errorCode"], "AI_CREDITS_EXHAUSTED");
+                assert!(last["message"].as_str().unwrap().contains("Insufficient AI credits"));
                 let activity: Value = sqlx::query_scalar("SELECT activity FROM rootcx_system.source_runs WHERE id=$1::uuid")
                     .bind(change["id"].as_str().unwrap()).fetch_one(rt.pool()).await.unwrap();
                 let messages: Vec<&str> = activity.as_array().unwrap().iter().filter_map(|item| item["message"].as_str()).collect();

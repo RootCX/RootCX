@@ -2087,7 +2087,7 @@ async fn deployment_manifest_and_installation_changes_require_fresh_approval() {
                 f.rt.install_manifest(&updated).await;
             }
             "uninstall" => {
-                let (status, body) = f.rt.delete_json(&format!("/api/v1/apps/{APP}")).await;
+                let (status, body) = f.rt.delete_application(APP).await;
                 assert!(status.is_success(), "{scenario}: {body}");
                 let (status, body) = call(
                     &f.rt,

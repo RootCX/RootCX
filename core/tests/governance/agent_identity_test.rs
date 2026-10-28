@@ -1120,7 +1120,7 @@ async fn a_worker_leaving_the_pool_returns_its_slot() {
     assert_eq!(cap, 4, "the configured cap must be the one enforced");
     assert!(occupied > 0, "the app should be holding slots after a call");
 
-    assert_eq!(rt.delete(&format!("/api/v1/apps/{app_id}")).await, 200);
+    assert_eq!(rt.delete_application(app_id).await.0, 200);
 
     let (after, cap_after) = rt.runtime.worker_pool_usage().await;
     assert!(after < occupied, "uninstall must remove the app's workers");

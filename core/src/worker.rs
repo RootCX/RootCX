@@ -1337,9 +1337,29 @@ async fn supervisor_loop(
                             let stream_tx = pending_agent_streams.get(&invoke_id).cloned();
 
                             tokio::spawn(async move {
+                                let mut authority = authority;
+                                let mut args = args;
+                                let prepared = match &tool {
+                                    Some(tool) => tool.prepare_confirmation(&pool, &authority, &args).await,
+                                    None => Ok(None),
+                                };
+                                let confirmation = match prepared {
+                                    Ok(confirmation) => confirmation,
+                                    Err(error) => {
+                                        crate::tool_executor::send_result(&out_tx, &stream_tx, &invoke_id, &call_id, &tool_name, None, Some(error), 0).await;
+                                        return;
+                                    }
+                                };
                                 let decision = if let Some(ref eval) = evaluator {
                                     eval.lock().await.evaluate(&tool_name, &args)
                                 } else { PolicyDecision::Allow };
+                                let decision = if let Some(confirmation) = confirmation {
+                                    args = confirmation.args;
+                                    match decision {
+                                        PolicyDecision::RateLimited { .. } => decision,
+                                        _ => PolicyDecision::RequiresApproval { reason: confirmation.reason },
+                                    }
+                                } else { decision };
                                 match decision {
                                     PolicyDecision::Allow => {}
                                     PolicyDecision::RateLimited { retry_after_secs } => {
@@ -1370,7 +1390,7 @@ async fn supervisor_loop(
                                             _ = authority.cancelled() => None,
                                         };
                                         match confirmation {
-                                            Some(ApprovalResponse::Approved) => {}
+                                            Some(ApprovalResponse::Approved) => authority.approve_call(&tool_name, &args),
                                             Some(ApprovalResponse::Rejected { reason }) => {
                                                 let err = format!("rejected: {reason}");
                                                 crate::tool_executor::send_result(

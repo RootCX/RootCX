@@ -32,7 +32,7 @@ async fn next_message(rx: &mut Receiver<Value>) -> Value {
             let message = rx.recv().await.expect("gateway closed");
             // Acknowledgements are independent of the agent's eventual result.
             let text = message.pointer("/text/body").and_then(Value::as_str).unwrap_or("");
-            if message["type"] == "interactive" || text.starts_with('[') { return message; }
+            if message["type"] == "interactive" || message["notice"].is_object() || text.starts_with('[') { return message; }
         }
     }).await.expect("channel message timed out")
 }
@@ -295,6 +295,17 @@ async fn web_and_managed_channels_preserve_delegated_authority() {
         }
         authorized.store(true, Ordering::SeqCst);
         permissions(&rt, "whatsapp_human", &["*"]).await;
+        permissions(&rt, "whatsapp_agent", &["app:*", "tool:*"]).await;
+        let before = count(&rt).await;
+        let request = invoke(&rt, provider, channel, &grant, json!([{"tool_name":"call_action","args":{"app":"business","action":"create_record","input":{"name":"x".repeat(700)}}}]));
+        let notice = next_message(&mut messages).await;
+        assert_eq!(notice["notice"]["code"], "APPROVAL_DETAILS_TOO_LARGE", "{provider}: {notice}");
+        assert_eq!(notice["type"], "text");
+        assert!(notice["text"]["body"].as_str().unwrap().contains("Review it in your application"));
+        let output = results(&next_message(&mut messages).await);
+        assert!(!output[0]["error"].is_null(), "{provider}: undeliverable approval must cancel the action");
+        assert_eq!(request.await.unwrap().status(), StatusCode::OK);
+        assert_eq!(count(&rt).await, before, "{provider}: no truncated confirmation or write");
         rt.install_manifest(&json!({"appId":"helper","name":"Helper","version":"1.0.0","type":"agent","dataContract":[]})).await;
         let (status, body) = rt.deploy("helper", &harness::make_tar_gz(&[("index.ts", agent_backend), ("agent.json", supervised)])).await;
         assert_eq!(status, StatusCode::OK, "{body}");

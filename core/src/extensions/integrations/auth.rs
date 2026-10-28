@@ -4,7 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
-use axum::response::Html;
+use axum::response::{Html, IntoResponse, Response};
+
 use hmac::{Hmac, Mac};
 use serde_json::{Value as JsonValue, json};
 use sha2::{Digest, Sha256};
@@ -18,10 +19,13 @@ use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
 use crate::routes::SharedRuntime;
 
+#[path = "oauth_result.rs"]
+mod oauth_result;
+
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Serialize, Deserialize)]
-struct Pending { integration_id: String, user_id: String, config_id: Option<String>, callback_url: String, code_verifier: String, #[serde(default)] salesforce_sandbox: bool }
+struct Pending { integration_id: String, user_id: String, config_id: Option<String>, callback_url: String, code_verifier: String, #[serde(default)] salesforce_sandbox: bool, #[serde(default)] result_url: Option<String> }
 
 pub(crate) async fn bootstrap(pool: &sqlx::PgPool) -> Result<(), crate::RuntimeError> {
     sqlx::query("CREATE TABLE IF NOT EXISTS rootcx_system.integration_oauth_states (
@@ -118,6 +122,7 @@ pub async fn start(
     let pending = Pending {
         integration_id: integration_id.clone(), user_id: identity.user_id.to_string(),
         config_id, callback_url: cb.clone(), code_verifier, salesforce_sandbox,
+        result_url: oauth_result::configured_url(),
     };
     let (iv, ciphertext) = secrets.encrypt(&serde_json::to_string(&pending).map_err(|e| ApiError::Internal(e.to_string()))?)
         .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -170,7 +175,7 @@ pub(super) fn callback_error_category(error: &ApiError) -> &'static str {
 pub async fn callback(
     State(rt): State<SharedRuntime>,
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
-) -> Result<Html<String>, ApiError> {
+) -> Result<Response, ApiError> {
     let state = params.get("state").ok_or_else(|| ApiError::BadRequest("missing state".into()))?;
     let (pool, secrets) = crate::routes::pool_and_secrets(&rt);
     let pending = consume_state(&pool, &secrets, extract_nonce(state)).await?;
@@ -181,9 +186,17 @@ pub async fn callback(
         .bind(&attempt_hash).bind(status).execute(&pool).await?;
     if let Err(ref failure) = outcome {
         warn!(integration_id = %pending.integration_id, stage = "callback", category = callback_error_category(failure), "OAuth authorization was not completed");
-        return Ok(Html(callback_html(&pending.integration_id, &pending.callback_url, Some((status, "Authorization was not completed")))));
     }
-    Ok(Html(callback_html(&pending.integration_id, &pending.callback_url, None)))
+    let mut response = match pending.result_url.as_deref().and_then(|url| oauth_result::redirect(url, &pending.integration_id, status)) {
+        Some(response) => response,
+        None => {
+            let error = outcome.is_err().then_some((status, "Authorization was not completed"));
+            Html(callback_html(&pending.integration_id, error)).into_response()
+        }
+    };
+    response.headers_mut().insert("cache-control", "no-store".parse().unwrap());
+    response.headers_mut().insert("referrer-policy", "no-referrer".parse().unwrap());
+    Ok(response)
 }
 
 pub async fn attempt_status(
@@ -296,10 +309,7 @@ async fn try_auto_sync_connect(
     }
 }
 
-fn callback_html(integration_id: &str, callback_url: &str, error: Option<(&str, &str)>) -> String {
-    if super::managed::enabled(integration_id) {
-        return shapp_callback_html(integration_id, callback_url, error.is_some());
-    }
+fn callback_html(integration_id: &str, error: Option<(&str, &str)>) -> String {
     let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;");
     let body = match error {
         Some((code, msg)) => format!(
@@ -315,56 +325,6 @@ fn callback_html(integration_id: &str, callback_url: &str, error: Option<(&str, 
         r#"<!DOCTYPE html><html><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#1a1a1a;color:#fff">{}<script>window.close()</script></body></html>"#,
         body,
     )
-}
-
-fn shapp_callback_html(integration_id: &str, callback_url: &str, failed: bool) -> String {
-    let provider = match integration_id {
-        "google_drive" => "Google Drive", "google_sheets" => "Google Sheets",
-        "google_calendar" => "Google Calendar", "gmail" => "Gmail", "notion" => "Notion",
-        "airtable" => "Airtable", "hubspot" => "HubSpot", "salesforce" => "Salesforce",
-        "slack" => "Slack", "stripe" => "Stripe", _ => "Votre compte",
-    };
-    // The return origin comes from server-owned OAuth configuration, never callback query data.
-    let return_url = url::Url::parse(callback_url).ok()
-        .filter(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
-        .map(|url| format!("{}/shapp/companies", url.origin().ascii_serialization()))
-        .unwrap_or_else(|| "/".into())
-        .replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
-    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
-    // Official provider marks, bundled so the callback page makes no third-party request.
-    let logo: Option<(&str, &[u8])> = match integration_id {
-        "google_drive" => Some(("image/png", include_bytes!("callback-assets/google-drive.png"))),
-        "google_sheets" => Some(("image/png", include_bytes!("callback-assets/google-sheets.png"))),
-        "google_calendar" => Some(("image/svg+xml", include_bytes!("callback-assets/google-calendar.svg"))),
-        "gmail" => Some(("image/svg+xml", include_bytes!("callback-assets/gmail.svg"))),
-        "notion" => Some(("image/svg+xml", include_bytes!("callback-assets/notion.svg"))),
-        "airtable" => Some(("image/png", include_bytes!("callback-assets/airtable.png"))),
-        "hubspot" => Some(("image/png", include_bytes!("callback-assets/hubspot.png"))),
-        "salesforce" => Some(("image/svg+xml", include_bytes!("callback-assets/salesforce.svg"))),
-        "slack" => Some(("image/png", include_bytes!("callback-assets/slack.png"))),
-        "stripe" => Some(("image/svg+xml", include_bytes!("callback-assets/stripe.svg"))),
-        _ => None,
-    };
-    let visual = match logo {
-        Some((mime, bytes)) => format!(r#"<img src="data:{mime};base64,{}" alt="" width="64" height="64">"#, encode(bytes)),
-        None => r#"<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m10 13 4-4m-6 7-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m2-2 1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0"/></svg>"#.into(),
-    };
-    include_str!("callback-assets/connected.html")
-        .replace("{{TITLE}}", if failed { "Connexion non terminée" } else { "Connexion réussie" })
-        .replace("{{PROVIDER}}", provider)
-        .replace("{{HEADING}}", &if failed { format!("{provider} n’est pas encore connecté.") } else { format!("{provider} rejoint votre espace SHAPP.") })
-        .replace("{{DESCRIPTION}}", if failed { "La connexion n’a pas été activée. Retournez dans votre application pour réessayer." } else { "Votre compte est connecté. Retrouvez-le dans les intégrations de votre application." })
-        .replace("{{RESULT}}", if failed { "Connexion non terminée" } else { "Connexion réussie" })
-        .replace("{{SUMMARY}}", &if failed { format!("Aucun nouvel accès {provider} n’a été activé dans SHAPP.") } else { format!("{provider} est maintenant connecté à SHAPP.") })
-        .replace("{{STATUS}}", if failed { "À reconnecter" } else { "Connecté" })
-        .replace("{{ICON}}", if failed { "M12 7v6m0 4h.01" } else { "m5 12 4 4 10-10" })
-        .replace("{{MARK}}", if failed { "·" } else { "✓" })
-        .replace("{{SHAPPY}}", &encode(include_bytes!("callback-assets/shappy.webp")))
-        .replace("{{PROVIDER_VISUAL}}", &visual)
-        .replace("{{FONT}}", &encode(include_bytes!("callback-assets/inter-latin.woff2")))
-        .replace("{{THEME}}", include_str!("callback-assets/shapp-theme.css"))
-        .replace("{{RETURN_URL}}", &return_url)
-        .replace("{{CLOSE_SCRIPT}}", if integration_id == "google_drive" { "" } else { "<script>window.close()</script>" })
 }
 
 pub async fn status(
@@ -545,7 +505,7 @@ mod tests {
         let secrets = crate::secrets::SecretManager::with_key(&[0x4A; 32]);
         for expired in [false, true] {
             let nonce = Uuid::new_v4().to_string();
-            let pending = Pending { integration_id: "notion".into(), user_id: "owner".into(), config_id: None, callback_url: "https://app.example/callback".into(), code_verifier: "private-verifier".into(), salesforce_sandbox: false };
+            let pending = Pending { integration_id: "notion".into(), user_id: "owner".into(), config_id: None, callback_url: "https://app.example/callback".into(), code_verifier: "private-verifier".into(), salesforce_sandbox: false, result_url: None };
             let (iv, cipher) = secrets.encrypt(&serde_json::to_string(&pending).unwrap()).unwrap();
             sqlx::query("INSERT INTO rootcx_system.integration_oauth_states (state_hash, nonce, ciphertext, expires_at) VALUES ($1, $2, $3, now() + $4 * interval '1 second')")
                 .bind(state_hash(&nonce)).bind(iv).bind(cipher).bind(if expired { -1.0_f64 } else { 60.0_f64 }).execute(&pool).await.unwrap();
@@ -556,32 +516,11 @@ mod tests {
     }
 
     #[test]
-    fn managed_callbacks_show_the_actual_provider_and_preserve_popup_completion() {
-        for (id, name) in [("google_drive", "Google Drive"), ("google_sheets", "Google Sheets"), ("google_calendar", "Google Calendar"), ("gmail", "Gmail"), ("notion", "Notion"), ("airtable", "Airtable"), ("hubspot", "HubSpot"), ("salesforce", "Salesforce"), ("slack", "Slack"), ("stripe", "Stripe")] {
-            let html = shapp_callback_html(id, "https://app.shapp.ai/api/integrations/auth/callback?next=https://evil.example", false);
-            assert!(html.contains(&format!("{name} rejoint votre espace SHAPP.")), "{id}");
-            assert!(html.contains("href=\"https://app.shapp.ai/shapp/companies\""), "{id}");
-            assert!(!html.contains("evil.example") && !html.contains("window.location") && !html.contains("{{"), "{id}");
-            assert_eq!(html.contains("window.close()"), id != "google_drive", "{id}");
-            if id != "google_drive" { assert!(!html.contains("Google Drive"), "{id}"); }
-            assert_eq!(html.matches(r#"<img src="data:image/"#).count(), 2, "{id}: provider logo in illustration and account row");
-            assert!(!html.contains("m10 13 4-4") && !html.contains("Retrouvez vos applications"), "{id}");
-        }
-        let unknown = shapp_callback_html("other", "https://app.shapp.ai/callback", false);
-        assert!(unknown.contains("m10 13 4-4"));
+    fn standalone_callback_escapes_provider_and_has_no_product_dependency() {
+        let html = callback_html("<script>evil</script>", None);
+        assert!(!html.contains("<script>evil"));
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("window.close()"));
+        assert!(callback_html("notion", Some(("cancelled", "Authorization was not completed"))).contains("Authorization was not completed"));
     }
-
-    #[test]
-    fn managed_callback_failure_and_return_link_do_not_leak_callback_data() {
-        for callback in ["not a URL", "javascript:alert(1)", "data:text/html,example"] {
-            let html = shapp_callback_html("hubspot", callback, true);
-            assert!(html.contains("href=\"/\""));
-            assert!(html.contains("Connexion non terminée"));
-            assert!(!html.contains("Connexion réussie"));
-        }
-        let html = shapp_callback_html("<script>bad</script>", "https://user:password@app.shapp.ai/callback?code=secret#fragment", false);
-        assert!(!html.contains("password") && !html.contains("code=secret") && !html.contains("<script>bad"));
-        assert!(html.contains("href=\"https://app.shapp.ai/shapp/companies\""));
-    }
-
 }

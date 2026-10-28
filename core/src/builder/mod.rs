@@ -50,6 +50,7 @@ pub fn routes() -> Router<SharedRuntime> {
 
 async fn authorize(rt: &SharedRuntime, identity: &Identity, app: &str) -> Result<(), ApiError> {
     files::app_id(app)?;
+    crate::governance::app_deletion::ensure_available(rt.pool(), app).await?;
     crate::governance::authority::require_perm(rt.pool(), identity.user_id, "admin:apps.deploy")
         .await?;
     crate::governance::authority::require_perm(rt.pool(), identity.user_id, "admin:apps.install")
@@ -74,6 +75,7 @@ async fn import(
     // Uninstall must either see this source project or finish before import
     // reads the installation and creates its repository.
     let _lifecycle = crate::governance::cross_app::lock_app_lifecycle(rt.pool(), &app).await?;
+    crate::governance::app_deletion::ensure_available(rt.pool(), &app).await?;
     let installed: Option<Value> =
         sqlx::query_scalar("SELECT manifest FROM rootcx_system.apps WHERE id=$1")
             .bind(&app)
@@ -232,6 +234,7 @@ struct Run {
     status: String,
     commit_id: Option<String>,
     message: String,
+    error_code: Option<String>,
     phase: String,
     conversation_id: Option<Uuid>,
     prompt: String,
@@ -239,7 +242,7 @@ struct Run {
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
 }
-const RUN_COLUMNS: &str = "id,app_id,base_commit,status,commit_id,message,phase,conversation_id,prompt,activity,created_at,updated_at";
+const RUN_COLUMNS: &str = "id,app_id,base_commit,status,commit_id,message,error_code,phase,conversation_id,prompt,activity,created_at,updated_at";
 
 async fn start(
     identity: Identity,
@@ -260,12 +263,14 @@ async fn start(
     sqlx::query("SELECT pg_advisory_xact_lock(73423)")
         .execute(&mut *tx)
         .await?;
+    crate::governance::app_deletion::ensure_available(rt.pool(), &app).await?;
     let head: Option<String> = sqlx::query_scalar(
         "SELECT head_commit FROM rootcx_system.source_projects WHERE app_id=$1 FOR UPDATE",
     )
     .bind(&app)
     .fetch_optional(&mut *tx)
     .await?;
+    crate::governance::app_deletion::ensure_available(rt.pool(), &app).await?;
     let existing = sqlx::query(&format!("SELECT {RUN_COLUMNS},requested_by FROM rootcx_system.source_runs WHERE app_id=$1 AND requested_by=$2 AND request_id=$3"))
         .bind(&app).bind(identity.user_id).bind(input.request_id).fetch_optional(&mut *tx).await?;
     if let Some(row) = existing {
@@ -447,7 +452,7 @@ async fn retry_publication(
     Path((app, id)): Path<(String, Uuid)>,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&rt, &identity, &app).await?;
-    let row:Option<(String,String)>=sqlx::query_as("UPDATE rootcx_system.source_runs SET status='publishing',resumed_by=$3,message='Je reprends la mise à jour.',updated_at=now() WHERE app_id=$1 AND id=$2 AND status='needs_recovery' AND commit_id IS NOT NULL RETURNING base_commit,commit_id")
+    let row:Option<(String,String)>=sqlx::query_as("UPDATE rootcx_system.source_runs SET status='publishing',error_code=NULL,resumed_by=$3,message='Je reprends la mise à jour.',updated_at=now() WHERE app_id=$1 AND id=$2 AND status='needs_recovery' AND commit_id IS NOT NULL RETURNING base_commit,commit_id")
         .bind(&app).bind(id).bind(identity.user_id).fetch_optional(rt.pool()).await?;
     let (base, commit) = row
         .ok_or_else(|| ApiError::Conflict("change is not awaiting publication recovery".into()))?;

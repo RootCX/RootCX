@@ -139,6 +139,7 @@ pub(crate) async fn govern_schema_tables(pool: &PgPool, only: Option<&str>) -> R
         "SELECT a.id, a.manifest, c.version, c.entities FROM rootcx_system.apps a
          LEFT JOIN rootcx_system.row_access_contracts c ON c.app_id = a.id
          WHERE a.id <> 'core' AND ($1::text IS NULL OR a.id = $1)
+           AND NOT EXISTS (SELECT 1 FROM rootcx_system.app_deletions d WHERE d.app_id=a.id AND d.state IN ('deleting','retry'))
            AND (c.app_id IS NOT NULL
              OR EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = a.id)
              OR COALESCE(a.manifest->'dataContract', '[]'::jsonb) <> '[]'::jsonb)

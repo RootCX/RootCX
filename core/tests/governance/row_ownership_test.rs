@@ -629,7 +629,7 @@ async fn resolvers_track_the_declaration() {
     ).fetch_one(rt.pool()).await.unwrap();
     assert_eq!(left, 0, "nor any policy confining a table that claims no owner");
 
-    assert_eq!(rt.delete("/api/v1/apps/school").await, StatusCode::OK);
+    assert_eq!(rt.delete_application("school").await.0, StatusCode::OK);
     assert!(resolvers().await.is_empty(), "uninstall must take the resolvers with it");
 
     rt.shutdown().await;

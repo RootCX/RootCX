@@ -176,7 +176,7 @@ async fn frontend_deploy_records_first_app_activation() {
 async fn uninstall_app() {
     let rt = TestRuntime::boot().await;
     rt.install("todel", "things").await;
-    assert_eq!(rt.delete("/api/v1/apps/todel").await, 200);
+    assert_eq!(rt.delete_application("todel").await.0, 200);
 
     let (_, body) = rt.get_json("/api/v1/apps").await;
     let apps: Vec<_> = body.as_array().unwrap().iter()
@@ -198,7 +198,7 @@ async fn uninstall_cleans_db_and_filesystem() {
     let (s, _) = rt.deploy("cleanup", &archive).await;
     assert_eq!(s, 200);
 
-    assert_eq!(rt.delete("/api/v1/apps/cleanup").await, 200);
+    assert_eq!(rt.delete_application("cleanup").await.0, 200);
 
     // secrets and jobs rows deleted (new DB cleanup)
     let (_, keys) = rt.get_json("/api/v1/apps/cleanup/secrets").await;
@@ -237,10 +237,9 @@ async fn uninstall_with_managed_sources_preserves_data_worker_and_authority() {
     ).fetch_one(rt.pool()).await.unwrap();
     assert!(authority.as_array().unwrap().iter().any(|row| row["active"] == true));
 
-    for endpoint in ["/api/v1/apps/retained", "/api/v1/integrations/catalog/retained"] {
+    for (endpoint, expected) in [("/api/v1/apps/retained", 409), ("/api/v1/integrations/catalog/retained", 404)] {
         let (status, error) = rt.delete_json(endpoint).await;
-        assert_eq!(status, 409, "{endpoint}: {error}");
-        assert!(error["error"].as_str().unwrap().contains("managed sources"));
+        assert_eq!(status, expected, "{endpoint}: {error}");
         let (status, current_worker) = rt.get_json("/api/v1/apps/retained/worker/status").await;
         assert_eq!(status, 200, "{current_worker}");
         assert_eq!(current_worker, worker, "a refused uninstall must not stop its backend");
@@ -887,7 +886,7 @@ async fn install_empty_data_contract() {
 async fn uninstall_nonexistent_app() {
     let rt = TestRuntime::boot().await;
     let s = rt.delete("/api/v1/apps/doesnotexist").await;
-    assert_eq!(s, 200, "uninstall of nonexistent app should be idempotent");
+    assert_eq!(s, 409, "legacy DELETE requires an explicit confirmation operation");
     rt.shutdown().await;
 }
 
@@ -3080,7 +3079,7 @@ async fn cron_cleanup_on_uninstall() {
     })).await;
     assert_eq!(s, 201);
 
-    let s = rt.delete("/api/v1/apps/cronclean").await;
+    let s = rt.delete_application("cronclean").await.0;
     assert_eq!(s, 200, "uninstall should succeed");
 
     // Verify pg_cron jobs cleaned up
@@ -4132,5 +4131,66 @@ async fn worker_storage_roundtrip_preserves_nonce_authority() {
         .bind(body["id"].as_str().unwrap().parse::<uuid::Uuid>().unwrap())
         .fetch_one(rt.pool()).await.unwrap();
     assert_eq!(app, "storageworker");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn legacy_agent_uninstall_keeps_its_permission_and_full_cleanup() {
+    let rt = TestRuntime::boot().await;
+    register_test_agent(&rt, "legacy_agent").await;
+    assert_eq!(rt.post_json("/api/v1/apps/legacy_agent/deletion", &json!({})).await.0, 404);
+    let token = rt.create_user("agent-remover@test.local").await;
+    sqlx::query("INSERT INTO rootcx_system.rbac_roles(name,permissions) VALUES('legacy-agent-remover',ARRAY['admin:apps.install'])").execute(rt.pool()).await.unwrap();
+    sqlx::query("INSERT INTO rootcx_system.rbac_assignments(user_id,role) SELECT id,'legacy-agent-remover' FROM rootcx_system.users WHERE email='agent-remover@test.local'").execute(rt.pool()).await.unwrap();
+    for dir in ["apps", "frontends"] {
+        std::fs::create_dir_all(rt.runtime.data_dir().join(dir).join("legacy_agent")).unwrap();
+    }
+    let (status, body) = rt.request_as(reqwest::Method::DELETE, "/api/v1/apps/legacy_agent", &token, None).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(rt.get_json("/api/v1/apps/legacy_agent").await.0, 404);
+    let active: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rootcx_system.app_installations WHERE app_id='legacy_agent' AND active)").fetch_one(rt.pool()).await.unwrap();
+    assert!(!active);
+    for dir in ["apps", "frontends"] { assert!(!rt.runtime.data_dir().join(dir).join("legacy_agent").exists()); }
+    rt.install("ordinary_app", "items").await;
+    assert_eq!(rt.request_as(reqwest::Method::DELETE, "/api/v1/apps/ordinary_app", &token, None).await.0, 403);
+    assert_eq!(rt.delete("/api/v1/apps/ordinary_app").await, 409);
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn legacy_agent_uninstall_rechecks_kind_after_waiting_for_lifecycle() {
+    use sqlx::Connection;
+    let rt = TestRuntime::boot().await;
+    register_test_agent(&rt, "changing_kind").await;
+    let mut lock = sqlx::PgConnection::connect_with(&rt.pool().connect_options()).await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(hashtext('changing_kind'))").execute(&mut lock).await.unwrap();
+    let client = rt.client.clone();
+    let token = rt.token.clone();
+    let url = rt.url("/api/v1/apps/changing_kind");
+    let request = tokio::spawn(async move { client.delete(url).bearer_auth(token).send().await.unwrap() });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE locktype='advisory' AND NOT granted)").fetch_one(&mut lock).await.unwrap();
+            if waiting { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    sqlx::query("DELETE FROM rootcx_system.agents WHERE app_id='changing_kind'").execute(&mut lock).await.unwrap();
+    sqlx::query("SELECT pg_advisory_unlock(hashtext('changing_kind'))").execute(&mut lock).await.unwrap();
+    assert_eq!(request.await.unwrap().status(), 409);
+    assert_eq!(rt.get_json("/api/v1/apps/changing_kind").await.0, 200, "reclassified app requires confirmation");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn integration_uninstall_retains_its_dedicated_route() {
+    let rt = TestRuntime::boot().await;
+    rt.install_manifest(&json!({"appId":"legacy_integration","name":"Integration","version":"1.0.0","type":"integration","dataContract":[]})).await;
+    assert_eq!(rt.post_json("/api/v1/apps/legacy_integration/deletion", &json!({})).await.0, 404);
+    assert_eq!(rt.delete("/api/v1/integrations/catalog/legacy_integration").await, 200);
+    assert_eq!(rt.get_json("/api/v1/apps/legacy_integration").await.0, 404);
+    rt.install("ordinary", "items").await;
+    assert_eq!(rt.delete("/api/v1/integrations/catalog/ordinary").await, 404);
+    assert_eq!(rt.get_json("/api/v1/apps/ordinary").await.0, 200);
     rt.shutdown().await;
 }

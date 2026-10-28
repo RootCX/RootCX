@@ -50,3 +50,19 @@ async fn git_revision_retains_previous_sources_and_binary_assets() {
     assert_eq!(files::snapshot(tmp.path(), &first).await.unwrap(), initial);
     assert_eq!(files::snapshot(tmp.path(), &second).await.unwrap(), changed);
 }
+
+#[test]
+fn failure_codes_prioritize_known_causes_without_exposing_diagnostics() {
+    for (diagnostic, expected) in [
+        ("Unavailable(AI_CREDITS_EXHAUSTED): token=secret", "AI_CREDITS_EXHAUSTED"),
+        ("BUILD_TIMEOUT: operation timed out", "BUILD_TIMEOUT"),
+        ("socket timed out", "BUILD_TIMEOUT"),
+        ("builder transport: private-host", "BUILDER_UNAVAILABLE"),
+        ("agent produced no source change", "NO_SOURCE_CHANGE"),
+        ("secret internal diagnostic", "BUILD_INTERNAL"),
+    ] {
+        let (code, message) = pipeline::failure(diagnostic);
+        assert_eq!(code, expected, "{diagnostic}");
+        assert!(!message.contains("secret") && !message.contains("private-host"), "{diagnostic}");
+    }
+}

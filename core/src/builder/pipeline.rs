@@ -115,56 +115,26 @@ pub async fn execute(
         Err(_) => "application change timed out".into(),
     };
     tracing::error!(run_id=%id, app_id=%app, error=%error, "application change failed");
-    let message = failure_message(&error);
-    let _ = sqlx::query("UPDATE rootcx_system.source_runs SET status=CASE WHEN status='publishing' THEN 'needs_recovery' ELSE 'failed' END,error=$2,message=CASE WHEN status='publishing' THEN 'La mise à jour nécessite une intervention avant de continuer.' ELSE $3 END,updated_at=now() WHERE id=$1 AND status<>'succeeded'")
-        .bind(id).bind(error).bind(message).execute(rt.pool()).await;
+    let (code, message) = failure(&error);
+    let _ = sqlx::query("UPDATE rootcx_system.source_runs SET status=CASE WHEN status='publishing' THEN 'needs_recovery' ELSE 'failed' END,error=$2,error_code=CASE WHEN status='publishing' THEN 'PUBLICATION_RECOVERY_REQUIRED' ELSE $4 END,message=CASE WHEN status='publishing' THEN 'Publication needs recovery before continuing.' ELSE $3 END,updated_at=now() WHERE id=$1 AND status<>'succeeded'")
+        .bind(id).bind(error).bind(message).bind(code).execute(rt.pool()).await;
 }
 
-pub(super) fn failure_message(error: &str) -> &'static str {
+pub(super) fn failure(error: &str) -> (&'static str, &'static str) {
     let cases = [
-        (
-            "AI_CREDITS_EXHAUSTED",
-            "Votre réserve de crédits IA est insuffisante. Rechargez-la puis relancez votre demande. Votre application n’a pas été modifiée.",
-        ),
-        (
-            "AI_CONFIGURATION",
-            "Shappy ne peut pas se connecter au service IA. La connexion doit être rétablie avant de relancer votre demande.",
-        ),
-        (
-            "AI_UNAVAILABLE",
-            "Le service IA est momentanément indisponible. Réessayez dans un instant. Votre application n’a pas été modifiée.",
-        ),
-        (
-            "BUILDER_BUSY",
-            "Shappy traite déjà d’autres modifications. Réessayez dans un instant.",
-        ),
-        (
-            "AI_LIMIT_REACHED",
-            "Shappy n’a pas réussi à terminer cette demande en une seule fois. Essayez de la décomposer en étapes.",
-        ),
-        (
-            "BUILD_TIMEOUT",
-            "La modification a pris trop de temps et a été interrompue. Vous pouvez relancer votre demande.",
-        ),
-        (
-            "timed out",
-            "La modification a pris trop de temps et a été interrompue. Vous pouvez relancer votre demande.",
-        ),
-        (
-            "builder transport",
-            "Le service de modification est momentanément injoignable. Réessayez dans un instant.",
-        ),
-        (
-            "BUILD_FAILED",
-            "La modification proposée contient une erreur et n’a pas passé les vérifications. Votre application n’a pas été modifiée. Vous pouvez relancer votre demande pour que Shappy la corrige.",
-        ),
-        (
-            "agent produced no source change",
-            "Shappy n’a apporté aucun changement à l’application. Précisez le résultat attendu et réessayez.",
-        ),
+        ("AI_CREDITS_EXHAUSTED", "AI_CREDITS_EXHAUSTED", "Insufficient AI credits. Refill and retry."),
+        ("AI_CONFIGURATION", "AI_CONFIGURATION", "The AI service configuration needs attention."),
+        ("AI_UNAVAILABLE", "AI_UNAVAILABLE", "The AI service is temporarily unavailable. Retry later."),
+        ("BUILDER_BUSY", "BUILDER_BUSY", "The builder is busy. Retry later."),
+        ("AI_LIMIT_REACHED", "AI_LIMIT_REACHED", "The AI execution limit was reached. Try a smaller request."),
+        ("BUILD_TIMEOUT", "BUILD_TIMEOUT", "The change timed out. You can retry."),
+        ("timed out", "BUILD_TIMEOUT", "The change timed out. You can retry."),
+        ("builder transport", "BUILDER_UNAVAILABLE", "The builder is temporarily unavailable. Retry later."),
+        ("BUILD_FAILED", "BUILD_FAILED", "The change failed validation. Your application was not modified."),
+        ("agent produced no source change", "NO_SOURCE_CHANGE", "No source change was produced. Clarify the request and retry."),
     ];
-    cases.iter().find_map(|(code, message)| error.contains(code).then_some(*message))
-        .unwrap_or("Une erreur interne a empêché de terminer la modification. Votre application n’a pas été modifiée. Vous pouvez relancer votre demande ; le diagnostic a été enregistré.")
+    cases.iter().find_map(|(pattern, code, message)| error.contains(pattern).then_some((*code, *message)))
+        .unwrap_or(("BUILD_INTERNAL", "The change could not be completed. The diagnostic was recorded."))
 }
 
 async fn watch_lease(lease: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> ApiError {
@@ -404,7 +374,7 @@ async fn process(
     )
     .await?;
     files::write(&workspace, &built.files).await?;
-    let commit = files::commit(&workspace, &format!("SHAPP change {id}")).await?;
+    let commit = files::commit(&workspace, &format!("Application change {id}")).await?;
     files::git(
         &root,
         &["update-ref", &format!("refs/changes/{id}"), &commit],
@@ -490,7 +460,7 @@ async fn finish(
     } else {
         summary
     };
-    sqlx::query("UPDATE rootcx_system.source_runs SET status='succeeded',message=$2,error=NULL,updated_at=now() WHERE id=$1")
+    sqlx::query("UPDATE rootcx_system.source_runs SET status='succeeded',message=$2,error=NULL,error_code=NULL,updated_at=now() WHERE id=$1")
         .bind(id).bind(summary.chars().take(2000).collect::<String>()).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
@@ -537,7 +507,7 @@ pub async fn resume(
     };
     if let Err(e) = result {
         tracing::error!(run_id=%id,error=?e,"publication recovery failed");
-        let _=sqlx::query("UPDATE rootcx_system.source_runs SET status='needs_recovery',error=$2,updated_at=now() WHERE id=$1").bind(id).bind(format!("{e:?}")).execute(rt.pool()).await;
+        let _=sqlx::query("UPDATE rootcx_system.source_runs SET status='needs_recovery',error=$2,error_code='PUBLICATION_RECOVERY_REQUIRED',message='Publication needs recovery before continuing.',updated_at=now() WHERE id=$1").bind(id).bind(format!("{e:?}")).execute(rt.pool()).await;
     }
 }
 

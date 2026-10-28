@@ -281,19 +281,27 @@ pub async fn uninstall_app(
     axum::extract::State(rt): axum::extract::State<SharedRuntime>,
     axum::extract::Path(app_id): axum::extract::Path<String>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let pool = pool(&rt);
-    crate::governance::authority::require_perm(&pool, identity.user_id, "admin:apps.install").await?;
-    let data_dir = rt.data_dir().to_path_buf();
-    crate::manifest::uninstall_app(&pool, &app_id, Some(identity.user_id)).await?;
-    let _ = wm(&rt).stop_app(&app_id).await;
-    for sub in ["apps", "frontends"] {
-        let dir = data_dir.join(sub).join(&app_id);
-        if dir.exists() {
-            tokio::fs::remove_dir_all(&dir).await
-                .map_err(|e| ApiError::Internal(format!("rm {}: {e}", dir.display())))?;
+    let pool = rt.pool();
+    let agent: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id=$1)")
+        .bind(&app_id).fetch_one(pool).await?;
+    if !agent {
+        crate::governance::app_deletion::authorize(pool, identity.user_id).await?;
+        return Err(ApiError::Conflict("prepare and confirm an application deletion operation first".into()));
+    }
+    // Registered agents have their existing lifecycle and caller confirmation.
+    // Recheck the kind under the lifecycle lock so this cannot delete an ordinary app.
+    crate::governance::authority::require_perm(pool, identity.user_id, "admin:apps.install").await?;
+    crate::manifest::uninstall_agent(pool, &app_id, identity.user_id).await?;
+    let _ = rt.worker_manager().stop_app(&app_id).await;
+    for directory in ["apps", "frontends"] {
+        let path = rt.data_dir().join(directory).join(&app_id);
+        match tokio::fs::remove_dir_all(&path).await {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(ApiError::Internal(format!("agent cleanup: {error}"))),
         }
     }
-    Ok(Json(json!({ "message": format!("app '{}' uninstalled", app_id) })))
+    Ok(Json(json!({ "message": format!("app '{app_id}' uninstalled") })))
 }
 
 pub async fn verify_schema(

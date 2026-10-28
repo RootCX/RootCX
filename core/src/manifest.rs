@@ -44,6 +44,7 @@ pub async fn install_app(
     let manifest_json = serde_json::to_value(manifest)
         .map_err(|e| RuntimeError::Schema(sqlx::Error::Protocol(e.to_string().into())))?;
     let mut lifecycle = crate::governance::cross_app::lock_app_lifecycle(pool, app_id).await?;
+    crate::governance::app_deletion::ensure_available(pool, app_id).await?;
     // Before anything is revoked or rotated: rows that violate a new rule refuse
     // the install while the current installation keeps running.
     crate::rules::preflight(pool, app_id, &manifest.data_contract).await?;
@@ -210,9 +211,25 @@ pub async fn uninstall_app(
     app_id: &str,
     actor_id: Option<Uuid>,
 ) -> Result<(), RuntimeError> {
+    uninstall_registered_app(pool, app_id, actor_id, false).await
+}
+
+pub(crate) async fn uninstall_agent(pool: &PgPool, app_id: &str, actor_id: Uuid) -> Result<(), RuntimeError> {
+    uninstall_registered_app(pool, app_id, Some(actor_id), true).await
+}
+
+async fn uninstall_registered_app(pool: &PgPool, app_id: &str, actor_id: Option<Uuid>, agent_only: bool) -> Result<(), RuntimeError> {
     // Keep the lifecycle lock until all cleanup completes. Cleanup failures are
     // fail-closed and retryable: the committed revocation is never undone.
     let mut lifecycle = crate::governance::cross_app::lock_app_lifecycle(pool, app_id).await?;
+    crate::governance::app_deletion::ensure_available(pool, app_id).await?;
+    if agent_only {
+        let registered: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rootcx_system.agents WHERE app_id=$1)")
+            .bind(app_id).fetch_one(pool).await.map_err(RuntimeError::Schema)?;
+        if !registered {
+            return Err(RuntimeError::Conflict("prepare and confirm an application deletion operation first".into()));
+        }
+    }
     let has_sources: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM rootcx_system.source_projects WHERE app_id=$1)",
     ).bind(app_id).fetch_one(pool).await.map_err(RuntimeError::Schema)?;
@@ -228,6 +245,15 @@ pub async fn uninstall_app(
     tx.commit().await.map_err(RuntimeError::Schema)?;
     crate::crons::delete_all_for_app(pool, app_id).await?;
 
+    remove_app_data(pool, app_id).await?;
+    sqlx::query("DELETE FROM rootcx_system.apps WHERE id = $1")
+        .bind(app_id).execute(pool).await.map_err(RuntimeError::Schema)?;
+
+    info!(app = %app_id, "app uninstalled");
+    Ok(())
+}
+
+pub(crate) async fn remove_app_data(pool: &PgPool, app_id: &str) -> Result<(), RuntimeError> {
     crate::rules::evacuate_extensions(pool, app_id).await?;
     let drop_schema = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(app_id));
     sqlx::query(&drop_schema).execute(pool).await.map_err(RuntimeError::Schema)?;
@@ -246,10 +272,6 @@ pub async fn uninstall_app(
         sqlx::query("DELETE FROM pgmq.q_jobs WHERE message->>'app_id' = $1").bind(app_id).execute(pool),
         sqlx::query("DELETE FROM pgmq.a_jobs WHERE message->>'app_id' = $1").bind(app_id).execute(pool),
     ).map_err(RuntimeError::Schema)?;
-    sqlx::query("DELETE FROM rootcx_system.apps WHERE id = $1")
-        .bind(app_id).execute(pool).await.map_err(RuntimeError::Schema)?;
-
-    info!(app = %app_id, "app uninstalled");
     Ok(())
 }
 

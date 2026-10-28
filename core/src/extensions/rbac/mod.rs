@@ -107,6 +107,7 @@ impl RuntimeExtension for RbacExtension {
         ).await?;
 
         for (key, description) in [
+            ("admin:apps.delete", "Permanently delete applications, data and source history"),
             ("admin:cross_app.grants.manage", "Create, inspect and revoke cross-app collection grants"),
             ("admin:cross_app.grants.approve", "Approve cross-app collection grants"),
         ] {

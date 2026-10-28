@@ -479,3 +479,44 @@ async fn share_dies_when_creator_loses_access() {
 
     rt.shutdown().await;
 }
+
+#[tokio::test]
+async fn host_migration_removes_declared_legacy_scripts_without_touching_business_modules() {
+    const CHILD: &str = "ROOTCX_SHARE_COMPATIBILITY_TEST";
+    let mode = match std::env::var(CHILD) {
+        Ok(mode) => mode,
+        Err(_) => {
+            for mode in ["old", "migrated"] {
+                let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+                command.args(["--exact", "host_migration_removes_declared_legacy_scripts_without_touching_business_modules", "--nocapture"])
+                    .env(CHILD, mode).env_remove("ROOTCX_FRONTEND_COMPANION_URL")
+                    .env_remove("ROOTCX_FRONTEND_LEGACY_COMPANION_PREFIXES");
+                if mode == "migrated" {
+                    command.env("ROOTCX_FRONTEND_LEGACY_COMPANION_PREFIXES", r#"["/apps/{app}/shappy/companion.","/shappy/companion."]"#);
+                }
+                let output = command.output().await.unwrap();
+                assert!(output.status.success(), "{mode}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            }
+            return;
+        }
+    };
+    let rt = TestRuntime::boot().await;
+    install_sharing_app(&rt).await;
+    let board = rt.create("sharetest", "board", &json!({"title":"Legacy public board"})).await;
+    let (status, share) = rt.post_json("/api/v1/apps/sharetest/public-shares", &json!({"context":{"board_id":board["id"]}})).await;
+    assert_eq!(status, StatusCode::CREATED, "{share}");
+    let business = r#"<script type="module" src="/apps/sharetest/assets/companion.abc123.js"></script><script type="module" src="/assets/companion.abc123.js"></script>"#;
+    let legacy = r#"<script type="module" src="/apps/sharetest/shappy/companion.abc123.js"></script><script type="module" src="/shappy/companion.abc123.js"></script>"#;
+    let original = format!("<body>{business}{legacy}</body>");
+    let directory = rt.runtime.data_dir().join("frontends/sharetest");
+    tokio::fs::create_dir_all(&directory).await.unwrap();
+    let index = directory.join("index.html");
+    tokio::fs::write(&index, &original).await.unwrap();
+    let response = rt.client.get(rt.url(&format!("/share/{}", share["token"].as_str().unwrap()))).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "private, no-store");
+    let expected = if mode == "migrated" { format!("<body>{business}</body>") } else { original.clone() };
+    assert_eq!(response.text().await.unwrap(), expected, "{mode}: only declared aliases may be stripped");
+    assert_eq!(tokio::fs::read_to_string(index).await.unwrap(), original, "stored release remains intact");
+    rt.shutdown().await;
+}

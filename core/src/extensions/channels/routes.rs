@@ -232,7 +232,7 @@ async fn process_event(
                 return Ok(());
             }
             if resolve_invoker(rt.pool(), channel, &chat_id).await.is_none() {
-                return provider.send_response(config, &chat_id, "Link your account from your dashboard before chatting with Shappy.")
+                return provider.send_notice(config, &chat_id, "ACCOUNT_LINK_REQUIRED", "Link your account from your dashboard before starting a conversation.")
                     .await.map_err(|e| e.to_string());
             }
             do_invoke(rt, channel, config, name, &chat_id, &text, media, locale).await
@@ -320,7 +320,7 @@ async fn do_invoke(
                 if let Some(h) = &typing { h.abort(); }
                 error!(channel_id, chat_id, "agent error: {e}");
                 if config["managed"] != true {
-                    let _ = provider.send_response(config, chat_id, "La demande a échoué. Vérifiez le résultat dans SHAPP avant de réessayer.").await;
+                    let _ = provider.send_notice(config, chat_id, "REQUEST_FAILED", "The request failed. Check the result in your application before retrying.").await;
                 }
                 return Err(format!("agent failed: {e}"));
             }
@@ -585,7 +585,7 @@ pub async fn create_link_token(
     ).bind(&channel_id).fetch_optional(&pool).await?
     .ok_or_else(|| ApiError::NotFound("channel not found".into()))?;
 
-    if config["managed"] == true { return Err(ApiError::BadRequest("Link this channel from your authenticated SHAPP session".into())); }
+    if config["managed"] == true { return Err(ApiError::BadRequest("Link this channel from your authenticated application session".into())); }
 
     let token = format!("{LINK_PREFIX}{}", uuid::Uuid::new_v4().simple());
     PENDING_LINKS.lock().await.insert(token.clone(), PendingLink {

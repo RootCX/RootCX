@@ -65,6 +65,7 @@ pub(crate) async fn deploy_backend_archive(rt: &SharedRuntime, app_id: &str, use
     let wm = rt.worker_manager().clone();
 
     let _lifecycle = crate::governance::cross_app::lock_app_lifecycle(&pool, &app_id).await?;
+    crate::governance::app_deletion::ensure_available(&pool, app_id).await?;
     let staged = rt.data_dir().join("apps").join(format!(".staged-{app_id}-{}", uuid::Uuid::new_v4()));
     extract_to(bytes, &staged).await?;
 
@@ -240,6 +241,8 @@ pub async fn deploy_frontend(
 
     let frontend_dir = rt.data_dir().join("frontends").join(&app_id);
     let bytes = read_archive(&mut multipart).await?;
+    let _lifecycle = crate::governance::cross_app::lock_app_lifecycle(rt.pool(), &app_id).await?;
+    crate::governance::app_deletion::ensure_available(rt.pool(), &app_id).await?;
     extract_to(bytes, &frontend_dir).await?;
 
     info!(app_id = %app_id, dir = %frontend_dir.display(), "frontend deployed");

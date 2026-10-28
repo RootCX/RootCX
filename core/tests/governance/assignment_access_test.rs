@@ -1319,7 +1319,7 @@ async fn redeploy_bootstrap_removal_and_reinstall_preserve_the_same_access_contr
             );
         }
     }
-    let (status, body) = f.rt.delete_json(&format!("/api/v1/apps/{APP}")).await;
+    let (status, body) = f.rt.delete_application(APP).await;
     assert!(status.is_success(), "uninstall: {body}");
     assert_eq!(
         shared_artifacts(&f.rt).await,

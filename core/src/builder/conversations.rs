@@ -6,7 +6,7 @@ pub(super) async fn list(
     Path(app): Path<String>,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&rt, &identity, &app).await?;
-    let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',c.id,'title',c.title,'updatedAt',COALESCE(r.updated_at,c.created_at),'status',r.status,'message',r.message) FROM rootcx_system.source_conversations c LEFT JOIN LATERAL (SELECT status,message,(SELECT max(updated_at) FROM rootcx_system.source_runs WHERE conversation_id=c.id) AS updated_at FROM rootcx_system.source_runs WHERE conversation_id=c.id ORDER BY created_at DESC,id DESC LIMIT 1) r ON true WHERE c.app_id=$1 AND c.user_id=$2 ORDER BY COALESCE(r.updated_at,c.created_at) DESC,c.id LIMIT 100")
+    let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',c.id,'title',c.title,'updatedAt',COALESCE(r.updated_at,c.created_at),'status',r.status,'message',r.message,'errorCode',r.error_code) FROM rootcx_system.source_conversations c LEFT JOIN LATERAL (SELECT status,message,error_code,(SELECT max(updated_at) FROM rootcx_system.source_runs WHERE conversation_id=c.id) AS updated_at FROM rootcx_system.source_runs WHERE conversation_id=c.id ORDER BY created_at DESC,id DESC LIMIT 1) r ON true WHERE c.app_id=$1 AND c.user_id=$2 ORDER BY COALESCE(r.updated_at,c.created_at) DESC,c.id LIMIT 100")
         .bind(app).bind(identity.user_id).fetch_all(rt.pool()).await?;
     Ok(Json(json!(rows)))
 }

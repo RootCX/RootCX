@@ -513,6 +513,7 @@ impl WorkerManager {
     async fn get_or_spawn(
         &self, app_id: &str, principal: Principal, invocation: InvocationContext,
     ) -> Result<SupervisorHandle, RuntimeError> {
+        crate::governance::app_deletion::ensure_available(&self.pool, app_id).await?;
         if principal.rls_state().approved_action.is_some() {
             return Err(RuntimeError::Worker("approved actions cannot use cached workers".into()));
         }
@@ -543,6 +544,11 @@ impl WorkerManager {
             .await?;
         // Lost-race guard: another task may have spawned the same key meanwhile.
         let mut w = self.workers.write().await;
+        if let Err(error) = crate::governance::app_deletion::ensure_available(&self.pool, app_id).await {
+            drop(w);
+            let _ = handle.stop().await;
+            return Err(error);
+        }
         if let Some(existing) = w.get(&key).cloned() {
             drop(w);
             let _ = handle.stop().await;

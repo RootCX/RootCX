@@ -73,6 +73,13 @@ pub trait ChannelProvider: Send + Sync {
         &self, config: &JsonValue, chat_id: &str, text: &str,
     ) -> Result<(), ChannelError>;
 
+    /// Stable notice code for host presentation; native providers use the safe fallback.
+    async fn send_notice(
+        &self, config: &JsonValue, chat_id: &str, _code: &str, fallback: &str,
+    ) -> Result<(), ChannelError> {
+        self.send_response(config, chat_id, fallback).await
+    }
+
     async fn register_webhook(
         &self, config: &JsonValue, callback_url: &str,
     ) -> Result<(), ChannelError>;

@@ -36,6 +36,7 @@ pub struct AgentAuthority {
     task_scope: Option<Vec<String>>,
     origin: Option<Arc<dyn ExecutionOrigin>>,
     lifetime: CancellationToken,
+    approved_call: Option<(String, serde_json::Value)>,
 }
 
 impl AgentAuthority {
@@ -102,6 +103,7 @@ impl AgentAuthority {
             task_scope,
             origin,
             lifetime,
+            approved_call: None,
         };
         if let Some(origin) = &authority.origin {
             origin.validate(pool, human, authority.root_app()).await?;
@@ -140,6 +142,14 @@ impl AgentAuthority {
         }
         self.ensure_active()?;
         Ok(intersect_permissions(&self.ceiling, &current))
+    }
+
+    pub(crate) fn approve_call(&mut self, tool: &str, args: &serde_json::Value) {
+        self.approved_call = Some((tool.into(), args.clone()));
+    }
+
+    pub(crate) fn confirmed_call(&self, tool: &str, args: &serde_json::Value) -> bool {
+        self.approved_call.as_ref().is_some_and(|(name, approved)| name == tool && approved == args)
     }
 
     // Invocation IDs are visible to worker code. Different origins/lineages must

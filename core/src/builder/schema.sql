@@ -42,10 +42,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS source_runs_one_active ON rootcx_system.source
     WHERE status IN ('coding','publishing','needs_recovery');
 REVOKE ALL ON rootcx_system.source_conversations FROM PUBLIC;
 
+ALTER TABLE rootcx_system.source_runs ADD COLUMN IF NOT EXISTS error_code TEXT;
+
 CREATE OR REPLACE FUNCTION rootcx_system.record_source_activity() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF NEW.message <> OLD.message AND jsonb_array_length(OLD.activity) < 100 THEN
-        NEW.activity := OLD.activity || jsonb_build_array(jsonb_build_object('message',NEW.message,'phase',NEW.phase,'at',now()));
+        NEW.activity := OLD.activity || jsonb_build_array(jsonb_build_object('message',NEW.message,'errorCode',NEW.error_code,'phase',NEW.phase,'at',now()));
     END IF;
     RETURN NEW;
 END $$;

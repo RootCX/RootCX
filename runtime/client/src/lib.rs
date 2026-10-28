@@ -88,10 +88,33 @@ impl RuntimeClient {
         check_response(resp).await?.json().await.map_err(Into::into)
     }
 
+    /// Legacy registered-agent removal. Ordinary apps require prepare/confirm/status.
+    #[deprecated(note = "For ordinary apps use prepare_app_deletion, confirm_app_deletion and app_deletion")]
     pub async fn uninstall_app(&self, app_id: &str) -> Result<(), ClientError> {
         let resp = self.authed(self.client.delete(self.api(&format!("/apps/{app_id}")))).send().await?;
         check_response(resp).await?;
         Ok(())
+    }
+
+    pub async fn uninstall_integration(&self, app_id: &str) -> Result<(), ClientError> {
+        let resp = self.authed(self.client.delete(self.api(&format!("/integrations/catalog/{app_id}")))).send().await?;
+        check_response(resp).await?;
+        Ok(())
+    }
+
+    pub async fn prepare_app_deletion(&self, app_id: &str) -> Result<JsonValue, ClientError> {
+        let resp = self.authed(self.client.post(self.api(&format!("/apps/{app_id}/deletion")))).send().await?;
+        check_response(resp).await?.json().await.map_err(Into::into)
+    }
+
+    pub async fn confirm_app_deletion(&self, operation_id: &str) -> Result<JsonValue, ClientError> {
+        let resp = self.authed(self.client.post(self.api(&format!("/app-deletions/{operation_id}/confirm")))).send().await?;
+        check_response(resp).await?.json().await.map_err(Into::into)
+    }
+
+    pub async fn app_deletion(&self, operation_id: &str) -> Result<JsonValue, ClientError> {
+        let resp = self.authed(self.client.get(self.api(&format!("/app-deletions/{operation_id}")))).send().await?;
+        check_response(resp).await?.json().await.map_err(Into::into)
     }
 
     pub async fn get_app(&self, app_id: &str) -> Result<JsonValue, ClientError> {

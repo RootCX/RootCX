@@ -15,3 +15,5 @@ pub mod audit;
 
 #[cfg(test)]
 mod execution_tests;
+
+pub mod app_deletion;

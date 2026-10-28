@@ -26,6 +26,34 @@ pub struct TestRuntime {
 
 #[allow(dead_code)]
 impl TestRuntime {
+    pub async fn delete_application(&self, app: &str) -> (StatusCode, Value) {
+        let (status, operation) = self
+            .post_json(&format!("/api/v1/apps/{app}/deletion"), &json!({}))
+            .await;
+        if !status.is_success() {
+            return (status, operation);
+        }
+        let path = format!(
+            "/api/v1/app-deletions/{}",
+            operation["id"].as_str().unwrap()
+        );
+        let (status, operation) = self.post_json(&format!("{path}/confirm"), &json!({})).await;
+        if !status.is_success() {
+            return (status, operation);
+        }
+        tokio::time::timeout(Duration::from_secs(35), async {
+            loop {
+                let result = self.get_json(&path).await;
+                if !result.0.is_success() || result.1["state"] == "succeeded" {
+                    return result;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("application cleanup timed out")
+    }
+
     pub async fn boot() -> Self {
         Self::boot_with(None).await
     }

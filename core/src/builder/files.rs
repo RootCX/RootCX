@@ -119,10 +119,10 @@ pub async fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, ApiError> {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_AUTHOR_NAME", "Shappy")
-        .env("GIT_AUTHOR_EMAIL", "shappy@rootcx.local")
-        .env("GIT_COMMITTER_NAME", "Shappy")
-        .env("GIT_COMMITTER_EMAIL", "shappy@rootcx.local")
+        .env("GIT_AUTHOR_NAME", "RootCX Builder")
+        .env("GIT_AUTHOR_EMAIL", "builder@rootcx.local")
+        .env("GIT_COMMITTER_NAME", "RootCX Builder")
+        .env("GIT_COMMITTER_EMAIL", "builder@rootcx.local")
         .args([
             "-c",
             "core.hooksPath=/dev/null",

@@ -1,3 +1,4 @@
+pub mod delete_app;
 pub mod reply_file;
 pub mod call_action;
 pub mod call_integration;
@@ -145,9 +146,17 @@ impl BatchMode {
     }
 }
 
+pub struct ToolConfirmation {
+    pub args: JsonValue,
+    pub reason: String,
+}
+
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;
+    /// Core freezes the target before asking the person, then binds the reply to
+    /// these exact arguments. This cannot be supplied by a tool caller.
+    async fn prepare_confirmation(&self, _pool: &PgPool, _authority: &crate::governance::execution::AgentAuthority, _args: &JsonValue) -> Result<Option<ToolConfirmation>, String> { Ok(None) }
     /// Needs callbacks supplied by agent execution, unavailable to HTTP tools and workflows.
     fn requires_agent_context(&self) -> bool { false }
     fn enriches_with_schema(&self) -> bool { false }

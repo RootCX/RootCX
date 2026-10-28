@@ -140,6 +140,9 @@ pub async fn undeploy(
     let wm = rt.worker_manager().clone();
 
     let manifest = super::routes::get_integration_manifest(&pool, &id).await?;
+    if manifest.is_null() {
+        return Err(ApiError::NotFound("installed integration not found".into()));
+    }
     crate::manifest::uninstall_app(&pool, &id, Some(identity.user_id)).await?;
     let _ = wm.stop_app(&id).await;
     let secret_map = super::routes::platform_secret_map(&manifest);

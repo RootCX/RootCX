@@ -67,6 +67,8 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .route("/api/v1/tools", get(crate::tools::routes::list_tools))
         .route("/api/v1/tools/{tool_name}/execute", post(crate::tools::routes::execute_tool));
 
+    router = router.merge(crate::governance::app_deletion::routes());
+    crate::governance::app_deletion::spawn(runtime.clone());
     router = router.merge(crate::builder::routes());
     crate::builder::recover_interrupted(&runtime).await;
     router = router.merge(crate::mcp_server::router(runtime.clone()));
@@ -92,6 +94,7 @@ pub async fn serve(runtime: SharedRuntime, port: u16) -> Result<(), std::io::Err
         .allow_headers(tower_http::cors::Any);
 
     let router = router
+        .layer(axum::middleware::from_fn_with_state(runtime.clone(), crate::governance::app_deletion::availability))
         .layer(axum::Extension(auth_config))
         .layer(cors)
         .with_state(runtime);

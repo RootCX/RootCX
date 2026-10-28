@@ -91,6 +91,28 @@ impl RuntimeExtension for StorageExtension {
                 RETURN OLD;
             END $$
         "#).await?;
+        // Uploads may finish after their HTTP request passed admission. Serialize
+        // publication with deletion, including nonce-based uploads without an app path.
+        exec(pool, r#"
+            CREATE OR REPLACE FUNCTION rootcx_system.guard_file_publication()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                PERFORM pg_advisory_xact_lock_shared(hashtext(NEW.app_id));
+                IF EXISTS (
+                    SELECT 1 FROM rootcx_system.app_deletions d
+                    WHERE d.app_id=NEW.app_id AND d.state <> 'awaiting_confirmation'
+                      AND NOT EXISTS (
+                        SELECT 1 FROM rootcx_system.app_installations i
+                        WHERE i.app_id=d.app_id AND i.active AND i.id <> d.installation_id
+                      )
+                ) THEN
+                    RAISE EXCEPTION 'application deletion prevents file publication';
+                END IF;
+                RETURN NEW;
+            END $$
+        "#).await?;
+        exec(pool, "DROP TRIGGER IF EXISTS trg_guard_file_publication ON rootcx_system.files").await?;
+        exec(pool, "CREATE TRIGGER trg_guard_file_publication BEFORE INSERT ON rootcx_system.files FOR EACH ROW EXECUTE FUNCTION rootcx_system.guard_file_publication()").await?;
         exec(pool, "DROP TRIGGER IF EXISTS trg_unlink_file_large_object ON rootcx_system.files").await?;
         exec(pool, "CREATE TRIGGER trg_unlink_file_large_object BEFORE DELETE ON rootcx_system.files FOR EACH ROW EXECUTE FUNCTION rootcx_system.unlink_file_large_object()").await?;
         exec(pool, r#"

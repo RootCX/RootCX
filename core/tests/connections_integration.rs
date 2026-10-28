@@ -387,14 +387,19 @@ async fn oauth_receipts_are_private_expiring_and_only_expose_successful_connecti
 #[tokio::test]
 async fn managed_google_configuration_and_cancelled_callback_stay_server_owned() {
     if std::env::var("GOOGLE_MANAGED_TEST_CHILD").as_deref() != Ok("true") {
-        let output = tokio::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "managed_google_configuration_and_cancelled_callback_stay_server_owned", "--nocapture"])
-            .env("GOOGLE_MANAGED_TEST_CHILD", "true")
-            .env("ROOTCX_MANAGED_GOOGLE_OAUTH", "true")
-            .env("ROOTCX_GOOGLE_CLIENT_ID", "fixture-google-client")
-            .env("ROOTCX_GOOGLE_CLIENT_SECRET", "fixture-google-secret")
-            .output().await.unwrap();
-        assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        for mode in ["standalone", "host", "legacy-pending"] {
+            let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "managed_google_configuration_and_cancelled_callback_stay_server_owned", "--nocapture"])
+                .env("GOOGLE_MANAGED_TEST_CHILD", "true").env("RESULT_TEST_MODE", mode)
+                .env("ROOTCX_MANAGED_GOOGLE_OAUTH", "true")
+                .env("ROOTCX_GOOGLE_CLIENT_ID", "fixture-google-client")
+                .env("ROOTCX_GOOGLE_CLIENT_SECRET", "fixture-google-secret")
+                .env("OAUTH_CALLBACK_URL", "https://host.example/api/callback")
+                .env("ROOTCX_OAUTH_RESULT_URL", if mode == "standalone" { "" } else { "https://host.example/api/result" })
+                .env("OAUTH_CALLBACK_HMAC_KEY", "fixture-tenant-key").env("ROOTCX_TENANT_REF", "fixture")
+                .output().await.unwrap();
+            assert!(output.status.success(), "{mode}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        }
         return;
     }
     let rt = TestRuntime::boot().await;
@@ -429,14 +434,51 @@ async fn managed_google_configuration_and_cancelled_callback_stay_server_owned()
     assert!(!start.to_string().contains("fixture-google-secret"));
     assert!(!integrations.to_string().contains("fixture-google-secret"));
     let state = &params["state"];
-    let callback = rt.client.get(rt.url(&format!("/api/v1/integrations/auth/callback?error=access_denied&state={state}"))).send().await.unwrap();
-    assert_eq!(callback.status(), StatusCode::OK);
-    let html = callback.text().await.unwrap();
-    assert!(html.contains("Connexion non terminée"));
-    assert!(html.contains("/shapp/companies"));
-    assert!(!html.contains("window.close"));
-    assert!(!html.contains("Connexion réussie"));
-    assert!(!html.contains("fixture-google-secret"));
+    let mode = std::env::var("RESULT_TEST_MODE").unwrap();
+    if mode == "legacy-pending" {
+        // Simulate encrypted state persisted by the previous Core before an upgrade.
+        use sha2::{Digest, Sha256};
+        let hash = hex::encode(Sha256::digest(start["attemptId"].as_str().unwrap().as_bytes()));
+        let (iv, ciphertext): (Vec<u8>, Vec<u8>) = sqlx::query_as("SELECT nonce,ciphertext FROM rootcx_system.integration_oauth_states WHERE state_hash=$1")
+            .bind(&hash).fetch_one(rt.pool()).await.unwrap();
+        let secrets = rt.runtime.secret_manager();
+        let mut pending: serde_json::Value = serde_json::from_str(&secrets.decrypt(&iv, &ciphertext).unwrap()).unwrap();
+        pending.as_object_mut().unwrap().remove("result_url");
+        let (iv, ciphertext) = secrets.encrypt(&pending.to_string()).unwrap();
+        sqlx::query("UPDATE rootcx_system.integration_oauth_states SET nonce=$2,ciphertext=$3 WHERE state_hash=$1")
+            .bind(&hash).bind(iv).bind(ciphertext).execute(rt.pool()).await.unwrap();
+    }
+    let client = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+    let callback = client.get(rt.url(&format!("/api/v1/integrations/auth/callback?error=access_denied&state={state}"))).send().await.unwrap();
+    assert_eq!(callback.headers()["cache-control"], "no-store");
+    assert_eq!(callback.headers()["referrer-policy"], "no-referrer");
+    if mode == "host" {
+        use base64::Engine;
+        use hmac::Mac;
+        assert_eq!(callback.status(), StatusCode::SEE_OTHER);
+        let location = callback.headers()["location"].to_str().unwrap();
+        let target = reqwest::Url::parse(location).unwrap();
+        assert_eq!(target.origin().ascii_serialization(), "https://host.example");
+        assert_eq!(target.path(), "/api/result");
+        let params: Vec<_> = target.query_pairs().collect();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].0, "receipt");
+        let (payload, signature) = params[0].1.split_once('.').unwrap();
+        let metadata: serde_json::Value = serde_json::from_slice(&base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+        assert_eq!(metadata["status"], "cancelled");
+        assert_eq!(metadata["tenant"], "fixture");
+        assert_eq!(metadata["provider"], "google_drive");
+        assert_eq!(metadata.as_object().unwrap().len(), 4);
+        let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(b"fixture-tenant-key").unwrap();
+        mac.update(format!("oauth-result-v1:{payload}").as_bytes());
+        mac.verify_slice(&hex::decode(signature).unwrap()).unwrap();
+        assert!(!location.contains("fixture-google-secret"));
+    } else {
+        assert_eq!(callback.status(), StatusCode::OK);
+        let html = callback.text().await.unwrap();
+        assert!(html.contains("Authorization was not completed"));
+        assert!(!html.contains("/shapp/") && !html.contains("fixture-google-secret"));
+    }
     let attempt = start["attemptId"].as_str().unwrap();
     let (code, receipt) = rt.request_as(Method::GET, &format!("/api/v1/integrations/google_drive/auth/attempts/{attempt}"), &member, None).await;
     assert_eq!(code, StatusCode::OK);
@@ -747,7 +789,7 @@ async fn removing_an_account_or_an_app_leaves_no_binding_behind() {
         let status = match removal {
             "delete the account" => rt.delete(&format!("/api/v1/integrations/test_integ/connections/{account}")).await,
             "disconnect every account" => rt.delete("/api/v1/integrations/test_integ/auth").await,
-            _ => rt.delete("/api/v1/apps/bound_app").await,
+            _ => rt.delete_application("bound_app").await.0,
         };
         assert_eq!(status, StatusCode::OK, "{removal}");
         let left: i64 = sqlx::query_scalar(

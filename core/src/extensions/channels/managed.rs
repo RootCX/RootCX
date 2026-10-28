@@ -149,6 +149,10 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), crate::RuntimeError> {
             &super::CHANNEL_UUID_NAMESPACE,
             format!("{provider}:{tenant}").as_bytes(),
         );
+        let name = std::env::var("ROOTCX_CHANNEL_DISPLAY_NAME").ok()
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| format!("{name} — {label}"))
+            .unwrap_or_else(|| label.to_string());
         let mut config =
             json!({"managed":true,"linking_version":2,"channel_id":id,"default_agent":AGENT_APP});
         config[public_key] = json!(value);
@@ -158,7 +162,7 @@ pub async fn bootstrap(pool: &PgPool) -> Result<(), crate::RuntimeError> {
         )
         .bind(id)
         .bind(provider)
-        .bind(format!("Shappy — {label}"))
+        .bind(name)
         .bind(config)
         .execute(pool)
         .await
@@ -335,6 +339,14 @@ impl ChannelProvider for ManagedProvider {
         Ok(())
     }
 
+    async fn send_notice(
+        &self, config: &Value, chat: &str, code: &str, fallback: &str,
+    ) -> Result<(), ChannelError> {
+        relay(&self.name, "send", json!({"channelId": config["channel_id"], "to": chat,
+            "kind": "text", "text": fallback, "notice": {"code": code}})).await?;
+        Ok(())
+    }
+
     async fn send_approval(
         &self,
         config: &Value,
@@ -354,9 +366,9 @@ impl ChannelProvider for ManagedProvider {
             format!("{data}:{digest}")
         };
         let details = serde_json::to_string_pretty(args).unwrap_or_default();
-        // A truncated operation is not informed consent. Ask for SHAPP review instead.
+        // A truncated operation is not informed consent. Ask for application review instead.
         if details.chars().count() > 650 {
-            self.send_response(config, chat, "Cette modification est trop détaillée pour être confirmée ici. Effectuez-la depuis SHAPP.").await?;
+            self.send_notice(config, chat, "APPROVAL_DETAILS_TOO_LARGE", "This operation is too detailed to confirm here. Review it in your application.").await?;
             return Err(ChannelError::Provider(
                 "approval details exceed channel limit".into(),
             ));

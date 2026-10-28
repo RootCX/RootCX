@@ -2881,7 +2881,7 @@ async fn t6_8_sensitive_field_projection_is_reconciled_on_redeploy_and_uninstall
         "a removed entity leaves no projection, and a still-declared one keeps its own"
     );
 
-    let (status, body) = rt.delete_json("/api/v1/apps/proj").await;
+    let (status, body) = rt.delete_application("proj").await;
     assert!(status.is_success(), "uninstall failed: {body}");
     assert!(
         projected_entities(&rt, "proj").await.is_empty(),

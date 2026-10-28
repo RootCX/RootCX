@@ -530,3 +530,45 @@ async fn admission_rejects_missing_identity_cycles_and_lost_child_invoke_rights(
     }
     fixture.cleanup().await;
 }
+
+#[tokio::test]
+async fn app_deletion_requires_bound_confirmation_and_live_delegated_rights() {
+    use crate::extensions::RuntimeExtension;
+    use crate::tools::{delete_app::DeleteAppTool, Tool};
+    use serde_json::json;
+    let fixture = Fixture::new().await;
+    crate::extensions::agents::AgentExtension.bootstrap(&fixture.pool).await.unwrap();
+    crate::builder::bootstrap(&fixture.pool).await.unwrap();
+    for principal in 0..4 { fixture.permissions(principal, &["*".into()]).await; }
+    let provider = fixture.install_collection_app().await;
+    let chain = fixture.chain(None, AgentSource::Direct).await;
+    let mut authority = chain[0].clone();
+    let prepared = DeleteAppTool.prepare_confirmation(&fixture.pool, &authority, &json!({"appId":provider})).await.unwrap().unwrap();
+    let mut ctx = fixture.collection_context(&authority, prepared.args.clone()).await;
+    assert!(DeleteAppTool.execute(&ctx).await.is_err(), "model arguments alone are not a confirmation");
+    authority.approve_call("delete_app", &prepared.args);
+    let child = AgentAuthority::admit(&fixture.pool, &fixture.apps[1], Some(fixture.principals[0]), None, AgentSource::Child(authority.clone())).await.unwrap();
+    assert!(!child.confirmed_call("delete_app", &prepared.args), "a child cannot inherit a parent's receipt");
+    ctx.authority = Some(authority.clone());
+    ctx.args["appId"] = json!("another_app");
+    assert!(DeleteAppTool.execute(&ctx).await.is_err(), "approval cannot be retargeted");
+    ctx.args = prepared.args.clone();
+    for (principal, label) in [(0, "human"), (1, "agent")] {
+        fixture.permissions(principal, &["tool:*".into(), format!("app:{}:invoke", fixture.apps[0])]).await;
+        assert!(DeleteAppTool.execute(&ctx).await.is_err(), "revoked {label} after approval");
+        fixture.permissions(principal, &["*".into()]).await;
+    }
+    let mut scope = vec!["tool:*".into()];
+    scope.extend(fixture.apps.iter().map(|app| format!("app:{app}:invoke")));
+    let scoped = fixture.chain(Some(scope), AgentSource::Direct).await;
+    assert!(DeleteAppTool.prepare_confirmation(&fixture.pool, &scoped[0], &json!({"appId":provider})).await.is_err(), "task scope cannot acquire delete from admin");
+    let admitted = DeleteAppTool.execute(&ctx).await.unwrap();
+    assert_eq!(admitted["state"], "deleting", "default admin permissions require no additional grant");
+    let audit: (Uuid, Option<Uuid>) = sqlx::query_as("SELECT actor_uid,delegator_uid FROM rootcx_system.app_deletion_events WHERE operation_id=$1::uuid AND event='confirmed'")
+        .bind(admitted["id"].as_str().unwrap()).fetch_one(&fixture.pool).await.unwrap();
+    assert_eq!(audit, (fixture.principals[1], Some(fixture.principals[0])));
+    // This fixture has no background runtime: release its admitted operation for cleanup.
+    sqlx::query("UPDATE rootcx_system.app_deletions SET state='succeeded' WHERE id=$1::uuid").bind(admitted["id"].as_str().unwrap()).execute(&fixture.pool).await.unwrap();
+    crate::manifest::uninstall_app(&fixture.pool, &provider, Some(fixture.principals[0])).await.unwrap();
+    fixture.cleanup().await;
+}

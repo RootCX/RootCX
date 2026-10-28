@@ -100,6 +100,8 @@ impl Runtime {
         tool_registry.register(tools::query_data::QueryDataTool);
         tool_registry.register(tools::mutate_data::MutateDataTool);
         tool_registry.register(tools::list_apps::ListAppsTool);
+        tool_registry.register(tools::delete_app::DeleteAppTool);
+        tool_registry.register(tools::delete_app::AppDeletionStatusTool);
         tool_registry.register(tools::describe_app::DescribeAppTool);
         tool_registry.register(tools::list_integrations::ListIntegrationsTool);
         tool_registry.register(tools::call_integration::CallIntegrationTool);

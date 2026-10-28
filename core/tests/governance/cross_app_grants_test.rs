@@ -224,7 +224,7 @@ async fn uninstall_revokes_generation_and_reinstall_does_not_restore_grant() {
         .await;
     assert_eq!(status, StatusCode::OK, "{approved}");
 
-    assert_eq!(rt.delete("/api/v1/apps/provider").await, StatusCode::OK);
+    assert_eq!(rt.delete_application("provider").await.0, StatusCode::OK);
     let (status, revoked) = rt
         .get_json(&format!("/api/v1/cross-app/grants/{grant_id}"))
         .await;

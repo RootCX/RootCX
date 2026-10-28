@@ -299,7 +299,7 @@ async fn legacy_trigram_indexes_adopt_and_survive_the_owner_schema_uninstall() {
 
     rt.install_manifest(&with_trigram(other, declared)).await;
     let other_index = index(&rt, other, "ix_lines_ref_trgm").await.unwrap().0;
-    let (status, body) = rt.delete_json(&format!("/api/v1/apps/{owner}")).await;
+    let (status, body) = rt.delete_application(owner).await;
     assert!(status.is_success(), "{status} {body}");
     assert_eq!(trigram_namespace(&rt).await.as_deref(), Some("rootcx_ext"), "moved before the schema was dropped");
     assert_eq!(index(&rt, other, "ix_lines_ref_trgm").await.map(|i| i.0), Some(other_index), "the other app's index survives");
