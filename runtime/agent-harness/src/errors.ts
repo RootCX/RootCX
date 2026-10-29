@@ -1,5 +1,6 @@
 export function publicErrorCode(error: any): string {
-  for (let depth = 0; error?.cause && depth < 5; depth++) error = error.cause;
+  // Agent middleware wraps a provider error once per layer; classify the original one.
+  for (const seen = new Set(); error?.cause && !seen.has(error.cause) && seen.size < 64; error = error.cause) seen.add(error);
   const detail = error?.error?.error ?? error?.error;
   if ((error?.status === 402 || error?.constructor?.name === "APIError") && detail?.type === "credits_exhausted") return "AI_CREDITS_EXHAUSTED";
   if ((error?.status === 402 || error?.constructor?.name === "APIError") && detail?.type === "credits_reserved") return "AI_CREDITS_RESERVED";

@@ -154,6 +154,14 @@ test("provider errors retain channel codes without exposing provider details", (
   ] as const) expect(publicErrorCode(error)).toBe(expected);
 });
 
+test("a provider refusal keeps its channel code after crossing the agent middleware", async () => {
+  const refusal = Object.assign(new Error("402 Insufficient credits"), { status: 402, error: { error: { type: "credits_exhausted" } } });
+  const model = new ScriptModel([() => { throw refusal; }]);
+  const failure = await runHarness(boot, { invoke_id: "credits", session_id: "credits", message: "Create the quote" }, model,
+    { state: database().request, chunk() {}, callTool: async () => ({}) }, "").catch(error => error);
+  expect(publicErrorCode(failure)).toBe("AI_CREDITS_EXHAUSTED");
+});
+
 test("business actions issued together finish in order even when the first one fails", async () => {
   const db=database(), order:string[]=[];
   const model=new ScriptModel([
