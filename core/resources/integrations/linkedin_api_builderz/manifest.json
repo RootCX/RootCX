@@ -1,0 +1,206 @@
+{
+  "appId": "linkedin_api_builderz",
+  "name": "LinkedIn · API Builderz",
+  "version": "0.1.0",
+  "type": "integration",
+  "description": "Read LinkedIn publications, reactions, comments and profiles through API Builderz on RapidAPI. Independent of LinkedIn; requires your own subscription and key.",
+  "entities": [],
+  "configSchema": {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": false
+  },
+  "userAuth": {
+    "type": "credentials",
+    "plugin": {
+      "protocolVersion": 1,
+      "qualification": "requires-live-verification",
+      "discovery": null
+    },
+    "tokenAuth": {
+      "label": "RapidAPI key",
+      "helpUrl": "https://rapidapi.com/apibuilderz/api/realtime-linkedin-bulk-data"
+    },
+    "oauth": null,
+    "credentialSchema": {
+      "type": "object",
+      "properties": {
+        "accessToken": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "RapidAPI key",
+          "pattern": "^\\S+$"
+        }
+      },
+      "required": [
+        "accessToken"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "actions": [
+    {
+      "id": "verify_connection",
+      "name": "Verify connection",
+      "description": "Verify the connected account with the provider [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "list_profile_posts",
+      "name": "List profile posts",
+      "description": "Read one page of profile publications. Continue with BOTH nextPage and nextPaginationToken. Null hasMore means completeness is unknown. Each call may consume quota. [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "profileUrl": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "description": "HTTPS LinkedIn profile URL",
+            "pattern": "^https://(www\\.)?linkedin\\.com/in/[^/?#]+/?$"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          },
+          "paginationToken": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8192,
+            "description": "Opaque nextPaginationToken from the previous profile posts page; send together with nextPage"
+          }
+        },
+        "required": [
+          "profileUrl"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "list_company_posts",
+      "name": "List company posts",
+      "description": "Read one page of company publications. Null hasMore means completeness is unknown. [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "companyUrl": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "description": "HTTPS LinkedIn company URL",
+            "pattern": "^https://(www\\.)?linkedin\\.com/company/[^/?#]+/?$"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          }
+        },
+        "required": [
+          "companyUrl"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "list_post_reactions",
+      "name": "List post reactions",
+      "description": "Read one page of reactions to a publication; no automatic collection or retries. [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "reactionsUrn": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "Exact reactionsUrn returned by a publications action; it can differ from urn",
+            "pattern": "^urn:li:(activity|share|ugcPost):[0-9]+$"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          }
+        },
+        "required": [
+          "reactionsUrn"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "list_post_comments",
+      "name": "List post comments",
+      "description": "Read one page of comments to a publication; request subsequent pages explicitly. [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "commentsUrn": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Exact commentsUrn returned by a publications action; do not reconstruct it from urn",
+            "pattern": "^urn:li:fsd_socialDetail:\\((urn:li:(?:activity|share|ugcPost):[0-9]+),\\1,urn:li:highlightedReply:-\\)$"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000
+          }
+        },
+        "required": [
+          "commentsUrn"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    },
+    {
+      "id": "get_person",
+      "name": "Get person",
+      "description": "Read profile details from API Builderz. This POST only reads data; it does not contact the person. [read]",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "profileUrl": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024,
+            "description": "HTTPS LinkedIn profile URL",
+            "pattern": "^https://(www\\.)?linkedin\\.com/in/[^/?#]+/?$"
+          }
+        },
+        "required": [
+          "profileUrl"
+        ],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object"
+      }
+    }
+  ],
+  "instructions": "RootCX integration plugin protocol 1. Connect an account and bind it to the application. Credentials and permissions belong to Core. Reads are live. Use discovery and schema actions before writing. Follow nextCursor explicitly. Never retry an uncertain write automatically; reconcile with the provider. Only the listed actions are supported. Provider qualification is required before production activation."
+}

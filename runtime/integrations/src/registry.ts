@@ -9,4 +9,5 @@ import calendar from './providers/google-calendar';
 import airtable from './providers/airtable';
 import slack from './providers/slack';
 import salesforce from './providers/salesforce';
-export const plugins = [notion, stripe, hubspot, sheets, drive, gmail, calendar, airtable, slack, salesforce];
+import linkedinApiBuilderz from './providers/linkedin-api-builderz';
+export const plugins = [notion, stripe, hubspot, sheets, drive, gmail, calendar, airtable, slack, salesforce, linkedinApiBuilderz];

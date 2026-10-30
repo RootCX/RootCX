@@ -337,7 +337,7 @@ mod tests {
     #[tokio::test]
     async fn shipped_plugins_are_locked_and_tampered_packages_are_rejected() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/integrations");
-        for id in ["notion", "stripe", "hubspot", "salesforce", "airtable", "gmail", "google_calendar", "google_sheets", "google_drive", "slack"] {
+        for id in ["notion", "stripe", "hubspot", "salesforce", "airtable", "gmail", "google_calendar", "google_sheets", "google_drive", "slack", "linkedin_api_builderz"] {
             let path = root.join(id);
             let raw = tokio::fs::read_to_string(path.join("manifest.json")).await.unwrap();
             verify_package(&path, id, &raw).await.unwrap();

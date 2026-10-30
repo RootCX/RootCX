@@ -1,6 +1,6 @@
 # RootCX integration plugins
 
-RootCX owns this runtime and the ten provider adapters. They call vendor APIs directly;
+RootCX owns this runtime and its provider adapters. They call vendor APIs directly;
 no hosted integration broker or paid connector service is required. This is a
 first-party implementation, with MIT validation dependencies listed in
 `THIRD_PARTY_NOTICES.md`. Vendor accounts, API entitlements, quotas and OAuth approval
@@ -225,3 +225,15 @@ SHAPP setup, exact Google Console steps, local import and production secret wiri
 `rootcx-website/docs/shapp/google-drive-oauth.md`. No live Google qualification has
 been performed without operator credentials; the production Drive scope remains
 restricted and needs the applicable Google review.
+
+## LinkedIn · API Builderz 0.1.0 — 30 October 2026
+
+`linkedin_api_builderz` adds five read actions and an access probe through
+`realtime-linkedin-bulk-data.p.rapidapi.com`, using each customer's subscription/key.
+See [the action contract and qualification evidence](LINKEDIN-API-BUILDERZ.md).
+
+Eight playground calls exercised all five endpoints and pagination; seven succeeded,
+one returned provider HTTP 502. The last response reported 43/50 requests remaining.
+Live evidence corrected distinct interaction URNs and profile pagination tokens.
+154 runtime tests, TypeScript, artifact integrity and the Core catalog tamper test
+passed. No tenant connection, deployment or change to existing provider artifacts.
