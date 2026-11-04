@@ -13,12 +13,16 @@ pub(crate) fn invocable_actions(actions: &JsonValue, app: &str, permissions: &[S
         if !invoke && !has_permission(permissions, &format!("app:{app}:action:{id}")) {
             return None;
         }
-        Some(json!({
+        let mut entry = json!({
             "id": id,
             "name": action.get("name"),
             "description": action.get("description"),
             "inputSchema": action.get("inputSchema"),
-        }))
+        });
+        if let Some(annotations) = action.get("annotations") {
+            entry["annotations"] = annotations.clone();
+        }
+        Some(entry)
     }).collect()
 }
 
@@ -29,7 +33,7 @@ impl Tool for ListActionsTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "list_actions".into(),
-            description: "List actions exposed by installed apps. Actions are callable via call_action. Returns app ID, action definitions (id, name, description, inputSchema), and usage instructions.".into(),
+            description: "List actions exposed by installed apps. Actions are callable via call_action. Returns app ID, action definitions (id, name, description, inputSchema, optional annotations), and usage instructions.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -89,6 +93,13 @@ mod tests {
                 .into_iter().map(|action| action["id"].clone()).collect();
             assert_eq!(ids, expected, "{permissions:?}");
         }
+        let annotated = json!([
+            {"id": "delete_item", "annotations": {"destructiveHint": true}},
+            {"id": "list_items"}
+        ]);
+        let listed = invocable_actions(&annotated, "catalog", &["app:catalog:invoke".into()]);
+        assert_eq!(listed[0]["annotations"], json!({"destructiveHint": true}), "declared hints reach callers");
+        assert!(listed[1].get("annotations").is_none(), "no hint is invented for an undeclared action");
         for malformed in [json!(null), json!({}), json!("create_item")] {
             assert!(
                 invocable_actions(&malformed, "catalog", &["app:catalog:invoke".into()]).is_empty(),

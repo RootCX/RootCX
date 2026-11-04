@@ -82,6 +82,37 @@ pub struct ActionDefinition {
     /// Requested backend data authority; only an operator-approved release may use it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authority: Option<ActionAuthority>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<ToolAnnotations>,
+}
+
+/// MCP tool hints that let a client decide when to ask the person first.
+/// Declared by the app author and advisory only: Core never derives authority from them.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolAnnotations {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destructive_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotent_hint: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_world_hint: Option<bool>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub unknown: UnknownKeys,
+}
+
+impl ToolAnnotations {
+    pub fn new(read_only: bool, destructive: bool, idempotent: bool, open_world: bool) -> Self {
+        Self {
+            read_only_hint: Some(read_only),
+            destructive_hint: Some(destructive),
+            idempotent_hint: Some(idempotent),
+            open_world_hint: Some(open_world),
+            unknown: UnknownKeys::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

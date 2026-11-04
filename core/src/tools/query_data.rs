@@ -33,7 +33,7 @@ impl Tool for QueryDataTool {
                 "type": "object",
                 "properties": {
                     "entity": { "type": "string", "description": "Collection/entity name" },
-                    "app": { "type": "string", "description": "Target app ID for cross-app reads" },
+                    "app": { "type": "string", "description": "App ID (defaults to the calling app)" },
                     "where": { "type": "object", "additionalProperties": true, "description": "WHERE clause — see DSL above" },
                     "orderBy": { "type": "string", "description": "Sort field (default: created_at)" },
                     "order": { "type": "string", "enum": ["asc", "desc"], "description": "Sort direction (default: desc)" },
@@ -47,6 +47,10 @@ impl Tool for QueryDataTool {
 
     fn enriches_with_schema(&self) -> bool {
         true
+    }
+
+    fn annotations(&self) -> Option<rootcx_types::ToolAnnotations> {
+        Some(rootcx_types::ToolAnnotations::new(true, false, true, false))
     }
 
     // A read fetches the full set in one query; mapping it over N upstream items

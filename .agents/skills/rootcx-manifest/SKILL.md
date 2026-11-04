@@ -42,6 +42,26 @@ version has not been bumped. See [row access](../../../docs/row-access.md) and
 
 `text` `number` `boolean` `date` `timestamp` `json` `file` `entity_link` `[text]` `[number]`
 
+### Action annotations
+
+Assistants (ChatGPT, Claude, agents) relay each action as a tool. Declare how it
+behaves so they know when to ask the person first:
+
+```json
+{
+  "id": "save_quote",
+  "name": "Save a quote",
+  "annotations": { "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": false }
+}
+```
+
+`readOnlyHint`: changes nothing. `destructiveHint`: may overwrite, replace or
+remove existing data. `idempotentHint`: repeating the same call has no further
+effect. `openWorldHint`: reaches people or systems outside the app (public link,
+message, external service). Only these four booleans are accepted, and a
+read-only action cannot be destructive. Hints are advisory: permissions still
+decide who may run the action.
+
 ### Approved action authority
 
 Declare an action's exact local data ceiling separately from user permissions:

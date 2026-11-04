@@ -652,6 +652,7 @@ fn refuse_unknown_keys(manifest: &AppManifest) -> Result<(), RuntimeError> {
     const INDEX: &[&str] = &["name", "columns", "unique", "using", "where", "with"];
     const INDEX_COLUMN: &[&str] = &["column", "expr", "sort", "nulls", "ops"];
     const CHECK: &[&str] = &["name", "expr"];
+    const ANNOTATIONS: &[&str] = &["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"];
     let refuse = |at: String, unknown: &rootcx_types::UnknownKeys, known: &[&str]| {
         let Some(key) = unknown.keys().next() else { return Ok(()) };
         // Field keys are snake_case and entity keys camelCase; the most common
@@ -681,6 +682,10 @@ fn refuse_unknown_keys(manifest: &AppManifest) -> Result<(), RuntimeError> {
             let label = check.name.clone().unwrap_or_else(|| i.to_string());
             refuse(format!("{at} checks[{label}]"), &check.unknown, CHECK)?;
         }
+    }
+    for action in &manifest.actions {
+        let Some(hints) = &action.annotations else { continue };
+        refuse(format!("action '{}' annotations", action.id), &hints.unknown, ANNOTATIONS)?;
     }
     Ok(())
 }
@@ -761,6 +766,11 @@ pub fn validate_manifest(manifest: &AppManifest) -> Result<(), RuntimeError> {
     for entity in &manifest.data_contract {
         for field in &entity.fields {
             FieldType::from_field(field).map_err(RuntimeError::Invalid)?;
+        }
+    }
+    for action in &manifest.actions {
+        if action.annotations.as_ref().is_some_and(|hints| hints.read_only_hint == Some(true) && hints.destructive_hint == Some(true)) {
+            return Err(RuntimeError::Invalid(format!("action '{}': a read-only action cannot be destructive", action.id)));
         }
     }
     validate_derived_entities(manifest)?;
@@ -1391,6 +1401,45 @@ mod tests {
             let error = validate_manifest(&candidate).unwrap_err().to_string();
             assert!(error.contains("unknown key"), "{patch}: {error}");
         }
+    }
+
+    /// Clients relay these hints to decide when to ask the person first, so a
+    /// misspelled or contradictory hint is refused rather than silently ignored.
+    #[test]
+    fn action_annotations_are_validated_at_install_and_kept() {
+        let manifest = |annotations: serde_json::Value| -> AppManifest {
+            serde_json::from_value(json!({
+                "appId": "app", "name": "app",
+                "actions": [{"id": "save_quote", "name": "Save", "annotations": annotations}]
+            })).unwrap()
+        };
+        for (annotations, refusal) in [
+            (json!({"readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": false}), None),
+            (json!({"openWorldHint": true}), None),
+            (json!({"readOnlyHint": true, "destructiveHint": false}), None),
+            (json!({"read_only_hint": true}), Some("did you mean 'readOnlyHint'")),
+            (json!({"title": "Save"}), Some("unknown key 'title'")),
+            (json!({"readOnlyHint": true, "destructiveHint": true}), Some("read-only action cannot be destructive")),
+        ] {
+            let candidate = manifest(annotations.clone());
+            match (validate_manifest(&candidate), refusal) {
+                (Ok(()), None) => assert_eq!(
+                    serde_json::to_value(&candidate).unwrap()["actions"][0]["annotations"], annotations,
+                    "stored hints must round-trip unchanged",
+                ),
+                (Err(error), Some(expected)) => assert!(error.to_string().contains(expected), "{annotations}: {error}"),
+                (outcome, _) => panic!("{annotations}: unexpected {outcome:?}"),
+            }
+        }
+    }
+
+    /// Existing apps declare no hints: their stored manifest must serialize
+    /// byte-for-byte as before, or the upgrade would rotate their contract.
+    #[test]
+    fn actions_without_annotations_serialize_as_before() {
+        let action = json!({"id": "list_quotes", "name": "Quotes", "description": "", "inputSchema": null, "outputSchema": null, "isolatedScope": false});
+        let manifest: AppManifest = serde_json::from_value(json!({"appId": "app", "name": "app", "actions": [action]})).unwrap();
+        assert_eq!(serde_json::to_value(&manifest).unwrap()["actions"][0], action);
     }
 
     /// PostgreSQL truncates longer names, so Core would never find the object it

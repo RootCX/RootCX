@@ -355,12 +355,17 @@ async fn metadata_advertises_only_invocable_actions_with_app_instructions() {
         "instructions":"Create items with create_item.",
         "dataContract":[{"entityName":"items","fields":[{"name":"name","type":"text"}]}],
         "actions":[
-            {"id":"create_item","name":"Create item","description":"Creates a priced item.","inputSchema":schema},
+            {"id":"create_item","name":"Create item","description":"Creates a priced item.","inputSchema":schema,
+             "annotations":{"readOnlyHint":false,"destructiveHint":false}},
             {"id":"archive_item","name":"Archive item","description":"Archives an item."}
         ]
     }))
     .await;
     agent_permissions(&rt, &["app:catalog:action:create_item", "tool:*"]).await;
+    let declared = invoke(&rt, &rt.token, "list_actions", json!({"app":"catalog"})).await;
+    let actions = &declared["result"][0]["actions"];
+    assert_eq!(actions[0]["annotations"], json!({"readOnlyHint":false,"destructiveHint":false}), "installed hints are kept: {declared}");
+    assert!(actions[1].get("annotations").is_none(), "{declared}");
     let apps = invoke(&rt, &rt.token, "list_apps", json!({})).await;
     assert_eq!(
         apps["result"],
@@ -372,7 +377,8 @@ async fn metadata_advertises_only_invocable_actions_with_app_instructions() {
         metadata["result"],
         json!({
             "app":"catalog", "name":"Catalog", "dataContract":[],
-            "actions":[{"id":"create_item","name":"Create item","description":"Creates a priced item.","inputSchema":schema}],
+            "actions":[{"id":"create_item","name":"Create item","description":"Creates a priced item.","inputSchema":schema,
+                        "annotations":{"readOnlyHint":false,"destructiveHint":false}}],
             "instructions":"Create items with create_item."
         }),
         "{metadata}"

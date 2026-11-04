@@ -15,12 +15,12 @@ impl Tool for MutateDataTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "mutate_data".into(),
-            description: "Create, update, or delete records. Use bulk_create to insert many records at once. Array fields (type [text], [number]) must be JSON arrays, not strings. When the app declares an action for the task (see describe_app), use call_action instead: actions apply the app's business rules.".into(),
+            description: "Create, update, or delete records. Use bulk_create to insert many records at once. Array fields (type [text], [number]) must be JSON arrays, not strings. When the app declares an action for the task, use that action instead: actions apply the app's business rules.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "entity": { "type": "string", "description": "The collection/entity name" },
-                    "app": { "type": "string", "description": "Target app ID for cross-app writes" },
+                    "app": { "type": "string", "description": "App ID (defaults to the calling app)" },
                     "action": { "type": "string", "enum": ["create", "update", "delete", "bulk_create"], "description": "The mutation action" },
                     "data": { "description": "A record object (create/update) or array of record objects (bulk_create, max 1000)" },
                     "id": { "type": "string", "description": "The record UUID (required for update/delete)" }
@@ -31,6 +31,11 @@ impl Tool for MutateDataTool {
     }
 
     fn enriches_with_schema(&self) -> bool { true }
+
+    // Worst case of its operations: `delete` removes a record.
+    fn annotations(&self) -> Option<rootcx_types::ToolAnnotations> {
+        Some(rootcx_types::ToolAnnotations::new(false, true, false, false))
+    }
 
     async fn execute(&self, ctx: &ToolContext) -> Result<JsonValue, String> {
         let entity = str_arg(&ctx.args, "entity")?;

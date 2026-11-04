@@ -41,6 +41,14 @@ async fn discovery_matches_executor_availability_without_narrowing_agents() {
             );
         }
     }
+    // Relays reuse Core's own schema and hints instead of copying them.
+    for (tool, read_only, destructive) in [("query_data", true, false), ("mutate_data", false, true)] {
+        let entry = http.as_array().unwrap().iter().find(|entry| entry["name"] == tool).unwrap();
+        assert_eq!(entry["inputSchema"]["required"][0], "entity", "{entry}");
+        assert_eq!(entry["annotations"]["readOnlyHint"], read_only, "{entry}");
+        assert_eq!(entry["annotations"]["destructiveHint"], destructive, "{entry}");
+        assert_eq!(entry["annotations"]["openWorldHint"], false, "{entry}");
+    }
     rt.shutdown().await;
 }
 

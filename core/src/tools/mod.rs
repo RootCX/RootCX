@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use serde_json::Value as JsonValue;
 use sqlx::PgPool;
 use uuid::Uuid;
-use rootcx_types::ToolDescriptor;
+use rootcx_types::{ToolAnnotations, ToolDescriptor};
 
 #[async_trait]
 pub trait AgentDispatcher: Send + Sync {
@@ -160,6 +160,8 @@ pub trait Tool: Send + Sync {
     /// Needs callbacks supplied by agent execution, unavailable to HTTP tools and workflows.
     fn requires_agent_context(&self) -> bool { false }
     fn enriches_with_schema(&self) -> bool { false }
+    /// MCP hints for clients that relay this tool; `None` makes no claim.
+    fn annotations(&self) -> Option<ToolAnnotations> { None }
     fn batch_mode(&self) -> BatchMode { BatchMode::PerItem }
     async fn execute(&self, ctx: &ToolContext) -> Result<JsonValue, String>;
 }
@@ -227,11 +229,13 @@ impl ToolRegistry {
         self.tools.read().unwrap().get(name).map(|(t, _)| t.clone())
     }
 
-    pub fn all_summaries(&self) -> Vec<(String, String)> {
+    /// Tools callable outside agent execution, by name.
+    pub fn http_descriptors(&self) -> Vec<(ToolDescriptor, Option<ToolAnnotations>)> {
         let mut out: Vec<_> = self.tools.read().unwrap().values()
-            .map(|(_, d)| (d.name.clone(), d.description.clone()))
+            .filter(|(tool, _)| !tool.requires_agent_context())
+            .map(|(tool, desc)| (desc.clone(), tool.annotations()))
             .collect();
-        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out.sort_by(|a, b| a.0.name.cmp(&b.0.name));
         out
     }
 }

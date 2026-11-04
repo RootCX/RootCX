@@ -2,6 +2,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use rootcx_types::ToolAnnotations;
 
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
@@ -9,9 +10,13 @@ use crate::routes::SharedRuntime;
 use super::{DispatchError, ToolContext};
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolSummary {
     pub name: String,
     pub description: String,
+    pub input_schema: JsonValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<ToolAnnotations>,
 }
 
 pub async fn list_tools(
@@ -19,10 +24,11 @@ pub async fn list_tools(
     State(rt): State<SharedRuntime>,
 ) -> Result<Json<Vec<ToolSummary>>, ApiError> {
     let tools = rt.tool_registry()
-        .all_summaries()
+        .http_descriptors()
         .into_iter()
-        .filter(|(name, _)| rt.tool_registry().get(name).is_some_and(|tool| !tool.requires_agent_context()))
-        .map(|(name, description)| ToolSummary { name, description })
+        .map(|(desc, annotations)| ToolSummary {
+            name: desc.name, description: desc.description, input_schema: desc.input_schema, annotations,
+        })
         .collect();
     Ok(Json(tools))
 }

@@ -250,6 +250,13 @@ export interface ActionDefinition {
    *  unforgeable `rootcx.invocation_*` identity to the app's SQL. Off by
    *  default: it costs one process per action per caller. */
   isolatedScope?: boolean;
+  /** MCP hints for assistants that relay the action; advisory, never authority. */
+  annotations?: {
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
 }
 
 export interface IntegrationBinding {
