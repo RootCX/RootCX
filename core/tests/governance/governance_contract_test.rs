@@ -386,9 +386,9 @@ async fn call_action_dispatches_only_declared_authorized_actions() {
     impl rootcx_core::tools::ActionCaller for SpyActionCaller {
         async fn call(
             &self, _app_id: &str, _action_id: &str, _input: serde_json::Value,
-            _user_id: uuid::Uuid, _caller_app_id: &str, effective_perms: Option<Vec<String>>,
-        ) -> Result<serde_json::Value, String> {
-            *self.captured_perms.lock().unwrap() = Some(effective_perms);
+            caller: rootcx_core::RpcCaller, _scoped: bool,
+        ) -> Result<serde_json::Value, rootcx_core::RuntimeError> {
+            *self.captured_perms.lock().unwrap() = Some(caller.effective_perms);
             Ok(json!({"ok": true}))
         }
     }
@@ -400,7 +400,11 @@ async fn call_action_dispatches_only_declared_authorized_actions() {
 
     // Register a fake action in the billing manifest so CallActionTool finds it.
     sqlx::query("UPDATE rootcx_system.apps SET manifest = jsonb_set(COALESCE(manifest, '{}'::jsonb), '{actions}', $1) WHERE id = 'billing'")
-        .bind(json!([{"id": "createInvoice", "name": "Create Invoice"}]))
+        .bind(json!([
+            {"id": "createInvoice", "name": "Create Invoice"},
+            {"id": "payInvoice", "name": "Pay", "authority": {"data": {"invoices": ["update"]}}},
+            {"id": "sendInvoice", "name": "Send", "humanOnly": true}
+        ]))
         .execute(pool).await.unwrap();
 
     let spy = Arc::new(SpyActionCaller { captured_perms: Mutex::new(None) });
@@ -419,6 +423,7 @@ async fn call_action_dispatches_only_declared_authorized_actions() {
         action_caller: Some(spy.clone()),
         stream_tx: None,
         idempotency_key: None,
+        via_mcp: false,
     };
 
     let tool = rootcx_core::tools::call_action::CallActionTool;
@@ -435,6 +440,8 @@ async fn call_action_dispatches_only_declared_authorized_actions() {
         ("wrong action permission", json!({"app": "billing", "action": "createInvoice"}), vec!["app:billing:action:other"], Some("permission denied")),
         ("specific action permission", json!({"app": "billing", "action": "createInvoice"}), vec!["app:billing:action:createInvoice", "app:billing:invoices.create"], None),
         ("coarse invoke permission", json!({"app": "billing", "action": "createInvoice"}), vec!["app:billing:invoke"], None),
+        ("approved action, coarse invoke", json!({"app": "billing", "action": "payInvoice"}), vec!["app:billing:invoke"], Some("permission denied: app:billing:action:payInvoice")),
+        ("humanOnly action", json!({"app": "billing", "action": "sendInvoice"}), vec!["*"], Some("for people only")),
     ] {
         ctx.args = args;
         ctx.permissions = permissions.into_iter().map(String::from).collect();
@@ -696,6 +703,7 @@ async fn t3_12_sub_agent_invoke_with_perm_succeeds() {
         action_caller: None,
         stream_tx: None,
         idempotency_key: None,
+        via_mcp: false,
     };
     let tool = rootcx_core::tools::invoke_agent::InvokeAgentTool;
     let err = rootcx_core::tools::Tool::execute(&tool, &ctx).await.unwrap_err();
@@ -728,6 +736,7 @@ async fn sub_agent_invoke_requires_invoke_perm() {
         action_caller: None,
         stream_tx: None,
         idempotency_key: None,
+        via_mcp: false,
     };
     let tool = rootcx_core::tools::invoke_agent::InvokeAgentTool;
     let err = rootcx_core::tools::Tool::execute(&tool, &ctx).await.unwrap_err();
@@ -768,6 +777,7 @@ async fn task_scope_blocks_cross_app_sub_invoke() {
         action_caller: None,
         stream_tx: None,
         idempotency_key: None,
+        via_mcp: false,
     };
     let tool = rootcx_core::tools::invoke_agent::InvokeAgentTool;
     let err = rootcx_core::tools::Tool::execute(&tool, &ctx).await.unwrap_err();

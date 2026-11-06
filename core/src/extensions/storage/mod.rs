@@ -216,21 +216,31 @@ async fn upload_file(
     Path(app_id): Path<String>,
     mut multipart: Multipart,
 ) -> Result<(StatusCode, Json<JsonValue>), ApiError> {
-    require_perm(rt.pool(), identity.user_id, &format!("app:{app_id}:storage.write")).await?;
-    let mut field = multipart
+    let field = multipart
         .next_field()
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?
         .ok_or_else(|| ApiError::BadRequest("no file field".into()))?;
-
     let name = field.file_name().unwrap_or("upload").to_string();
     let content_type = field.content_type().unwrap_or("application/octet-stream").to_string();
+    let chunks = field.map(|chunk| chunk.map_err(|e| ApiError::BadRequest(e.to_string())));
+    let stored = store_person_file(rt.pool(), identity.user_id, &app_id, &name, &content_type, chunks).await?;
+    Ok((StatusCode::CREATED, Json(stored)))
+}
 
-    let pool = rt.pool().clone();
+/// Stores one file a person gives an app, under `app:{app}:storage.write`.
+/// Shared by the upload route and Core's MCP `upload_file`.
+pub(crate) async fn store_person_file(
+    pool: &PgPool, user_id: Uuid, app_id: &str, name: &str, content_type: &str,
+    chunks: impl futures::Stream<Item = Result<axum::body::Bytes, ApiError>>,
+) -> Result<JsonValue, ApiError> {
+    require_perm(pool, user_id, &format!("app:{app_id}:storage.write")).await?;
     let file_id = Uuid::new_v4();
     let storage_limit = max_file_bytes() as i64;
-    let mut writer = backend().begin(&pool).await?;
-    while let Some(chunk) = field.chunk().await.map_err(|e| ApiError::BadRequest(e.to_string()))? {
+    let mut writer = backend().begin(pool).await?;
+    futures::pin_mut!(chunks);
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk?;
         if writer.size() + chunk.len() as i64 > storage_limit {
             return Err(ApiError::BadRequest(format!("file exceeds storage limit ({storage_limit} bytes)")));
         }
@@ -239,15 +249,14 @@ async fn upload_file(
     if writer.size() == 0 {
         return Err(ApiError::BadRequest("empty file".into()));
     }
-    let upload = backend().finish(writer, file_id, &app_id, &name, &content_type, Some(identity.user_id)).await?;
-
-    Ok((StatusCode::CREATED, Json(json!({
+    let upload = backend().finish(writer, file_id, app_id, name, content_type, Some(user_id)).await?;
+    Ok(json!({
         "file_id": file_id.to_string(),
         "name": name,
         "content_type": content_type,
         "size": upload.size,
         "checksum": upload.checksum,
-    }))))
+    }))
 }
 
 /// GET /api/v1/storage/download/{nonce} — worker download via single-use nonce.

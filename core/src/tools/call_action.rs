@@ -2,8 +2,9 @@ use async_trait::async_trait;
 use serde_json::{json, Value as JsonValue};
 use rootcx_types::ToolDescriptor;
 
-use super::{Tool, ToolContext, str_arg, check_permission};
-use crate::governance::authority::has_permission;
+use super::{Tool, ToolContext, str_arg};
+use crate::governance::action_invocation::{Declaration, authorize, dispatch};
+use crate::ipc::RpcCaller;
 
 pub struct CallActionTool;
 
@@ -14,7 +15,8 @@ impl Tool for CallActionTool {
             name: "call_action".into(),
             description: concat!(
                 "Execute a declared app action and return its raw result. Use list_actions to discover actions and input schemas. ",
-                "Requires tool:call_action and effective app:<app>:invoke OR app:<app>:action:<action> permission. ",
+                "Requires tool:call_action and effective app:<app>:invoke OR app:<app>:action:<action> permission; ",
+                "an action with approved authority requires app:<app>:action:<action>. ",
                 "Collection grants do not authorize this call; the target retains the caller's delegated permission ceiling. ",
                 "Requires agent execution context. Not offered in the workflow palette or generic HTTP tool list; ",
                 "workflow saves and generic HTTP execution reject this tool. Collection grants cannot enable it there."
@@ -36,37 +38,26 @@ impl Tool for CallActionTool {
     async fn execute(&self, ctx: &ToolContext) -> Result<JsonValue, String> {
         let app = str_arg(&ctx.args, "app")?;
         let action = str_arg(&ctx.args, "action")?;
-        let input = ctx.args.get("input").cloned().unwrap_or(json!({}));
-
-        // Same two grains as the HTTP RPC route. Checking only the fine key here
-        // would deny a delegated agent whose principal holds the coarse one, so
-        // the tool and the route would disagree about the same grant.
-        if !has_permission(&ctx.permissions, &format!("app:{app}:invoke")) {
-            check_permission(&ctx.permissions, &format!("app:{app}:action:{action}"))?;
-        }
-
-        let actions: Option<(JsonValue,)> = sqlx::query_as(
-            "SELECT COALESCE(manifest->'actions', '[]'::jsonb) FROM rootcx_system.apps WHERE id = $1 AND status = 'installed'",
-        )
-        .bind(app)
-        .fetch_optional(&ctx.pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-        let (actions,) = actions.ok_or_else(|| format!("app '{app}' not found or not installed"))?;
-        let declared = actions.as_array()
-            .and_then(|arr| arr.iter().find(|a| a.get("id").and_then(|v| v.as_str()) == Some(action)))
-            .ok_or_else(|| format!("action '{action}' not found in app '{app}'"))?;
-
-        let caller = ctx.action_caller.as_ref().ok_or("action calling unavailable")?;
+        let mut input = ctx.args.get("input").cloned().unwrap_or(json!({}));
+        let dispatcher = ctx.action_caller.as_ref().ok_or("action calling unavailable")?;
+        let declaration = Declaration::load(&ctx.pool, app, action).await.map_err(|e| e.to_string())?;
+        // Authorized before any file is copied into the target app.
+        authorize(app, action, declaration.as_ref(), &ctx.permissions, true).map_err(|e| e.to_string())?;
         let effective_uid = ctx.invoker_user_id.unwrap_or(ctx.user_id);
-        let mut input = input;
-        if let Some(agent_app) = ctx.core_bound_app_id.as_deref() {
-            hand_over_files(&ctx.pool, declared, &mut input, agent_app, app, effective_uid).await?;
+        if let (Some(agent_app), Some(declared)) = (ctx.core_bound_app_id.as_deref(), declaration.as_ref()) {
+            hand_over_files(&ctx.pool, &declared.definition, &mut input, agent_app, app, effective_uid).await?;
         }
-        // Propagate the agent's pre-computed intersection so the target app's
-        // RLS bounds the cross-app hop to grant(agent)∩perms(human) (Phase 6a).
-        caller.call(app, action, input, effective_uid, &ctx.app_id, Some(ctx.permissions.clone())).await
+        // The agent's pre-computed intersection rides along so the target app's
+        // RLS bounds the cross-app hop to grant(agent)∩perms(human).
+        let caller = RpcCaller {
+            user_id: effective_uid.to_string(),
+            email: String::new(),
+            effective_perms: Some(ctx.permissions.clone()),
+            connection_id: None,
+        };
+        dispatch(dispatcher.as_ref(), app, action, declaration.as_ref(), input, caller)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 

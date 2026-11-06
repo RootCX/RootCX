@@ -79,7 +79,7 @@ impl Tool for ListAppsTool {
                     .filter_map(|e| e.get("entityName").and_then(|v| v.as_str()))
                     .collect();
                 let actions: Vec<JsonValue> = match source {
-                    None => crate::tools::list_actions::invocable_actions(&actions, &id, &ctx.permissions)
+                    None => crate::tools::list_actions::invocable_actions(&actions, &id, &ctx.permissions, ctx.is_assistant())
                         .into_iter()
                         .map(|action| action["id"].clone())
                         .collect(),

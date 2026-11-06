@@ -21,6 +21,20 @@ pub enum ApiError {
     UniqueViolation { entity: String, index: String },
 }
 
+/// The caller-safe message, without status; same disclosure boundary as the response.
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(message) | Self::BadRequest(message) | Self::Unauthorized(message)
+            | Self::Forbidden(message) | Self::Conflict(message) | Self::Unavailable(message)
+            | Self::Internal(message) => f.write_str(message),
+            Self::NotReady => f.write_str("runtime not ready"),
+            Self::RuleViolation { entity, rule } => write!(f, "rule '{rule}' rejected the write to '{entity}'"),
+            Self::UniqueViolation { entity, index } => write!(f, "unique index '{index}' rejected the write to '{entity}'"),
+        }
+    }
+}
+
 fn app_rule_violation(db_err: &dyn sqlx::error::DatabaseError) -> Option<ApiError> {
     let pg = db_err.try_downcast_ref::<sqlx::postgres::PgDatabaseError>()?;
     let (schema, table, name) = (pg.schema()?, pg.table()?, pg.constraint()?);

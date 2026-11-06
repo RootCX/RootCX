@@ -1,5 +1,6 @@
 pub mod authority;
 pub mod execution;
+pub(crate) mod action_invocation;
 pub mod approved_actions;
 pub(crate) mod row_access;
 pub(crate) mod collection_reads;

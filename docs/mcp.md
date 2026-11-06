@@ -28,14 +28,24 @@ tenant-native Core token with an explicit MCP audience. Core also exposes OAuth
 Protected Resource Metadata for direct clients. Local HTTP development keeps
 bearer-token compatibility.
 
-## V1 scope
+## Tools
 
-| Tool | Purpose | Existing RootCX module reused |
-| --- | --- | --- |
-| `get_project_context` | Read workspace URL, status, user permissions, installed apps, and onboarding state | status, identity, RBAC, app list |
-| `get_app` | Read one app and its data contract | app describe |
-| `validate_manifest` | Validate a manifest and schema drift without mutation | manifest validator, schema verifier |
-| `create_records` | Create up to 1,000 user-approved records | bulk CRUD, RLS, audit |
+One fixed list for every workspace (ADR 0015). No tool is generated per app or
+per action, and no argument selects the operation: what a caller may do comes
+from `describe_app`. MCP offers no deletion.
+
+| Tool | Purpose | Scope | Existing RootCX module reused |
+| --- | --- | --- | --- |
+| `get_project_context` | Workspace URL, status, user permissions, installed apps, onboarding state | `mcp:read` | status, identity, RBAC, app list |
+| `describe_app` | One app as the caller may see it: readable records, invocable actions with their hints, instructions | `mcp:read` | `describe_app` tool |
+| `query_data` | Read records | `mcp:read` | `query_data` tool, RLS |
+| `create_record` | Create one record | `mcp:write` | `mutate_data` tool, RLS, audit |
+| `update_record` | Overwrite the given fields of one record | `mcp:write` | `mutate_data` tool, RLS, audit |
+| `call_action` | Run one declared app action; `humanOnly` actions are refused | `mcp:read` for a declared read-only action, else `mcp:write` | action invocation Module |
+| `upload_file` | Store a file in an app, as base64 or as a host file reference | `mcp:write` | storage upload |
+| `validate_manifest` | Validate a manifest and schema drift without mutation | `mcp:read` | manifest validator, schema verifier |
+
+Results omit internal identities (`created_by`, `owner_id`…).
 
 MCP never accepts application source code and never builds or deploys an app.
 The RootCX skill uses the local CLI for those operations:
@@ -62,6 +72,8 @@ does not compile frontend source received through MCP.
   development.
 - `ROOTCX_OIDC_ISSUER` identifies the authorization server advertised to MCP
   clients.
+- `ROOTCX_MCP_FILE_HOSTS` lists the HTTPS hosts (and their subdomains) whose
+  file links `upload_file` may download. Empty refuses file references.
 - `ROOTCX_MCP_ALLOW_LEGACY_BEARER=true` permits non-audience bearer tokens on an
   HTTPS tenant only as an explicit migration escape hatch. It is disabled by
   default.

@@ -84,6 +84,10 @@ pub(crate) fn project_human_contract(
 
 #[async_trait]
 impl Tool for DescribeAppTool {
+    fn annotations(&self) -> Option<rootcx_types::ToolAnnotations> {
+        Some(rootcx_types::ToolAnnotations::new(true, false, true, false))
+    }
+
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "describe_app".into(),
@@ -157,7 +161,7 @@ impl Tool for DescribeAppTool {
         };
         // Collection grants never authorize call_action, so only permission-based callers see actions.
         let actions = match source {
-            None => crate::tools::list_actions::invocable_actions(&actions, app, &ctx.permissions),
+            None => crate::tools::list_actions::invocable_actions(&actions, app, &ctx.permissions, ctx.is_assistant()),
             Some(_) => Vec::new(),
         };
         if dc.as_array().is_none_or(Vec::is_empty) && actions.is_empty() {

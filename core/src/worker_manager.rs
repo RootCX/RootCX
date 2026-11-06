@@ -354,6 +354,11 @@ impl WorkerManager {
         let _ = self.action_call.set(Arc::new(AppActionCallImpl { wm: Arc::clone(self) }));
     }
 
+    /// The dispatcher behind every authorized action call (ADR 0015).
+    pub fn action_caller(&self) -> Arc<dyn ActionCaller> {
+        self.action_call.get().cloned().expect("init_self_ref runs at startup")
+    }
+
     async fn build_agent_boot(&self, pool: &PgPool, app_id: &str) -> Option<(AgentBootConfig, Option<rootcx_types::SupervisionConfig>)> {
         let config_json: serde_json::Value = sqlx::query_scalar(
             "SELECT config || jsonb_build_object('name', name) FROM rootcx_system.agents WHERE app_id = $1",
@@ -985,25 +990,15 @@ struct AppActionCallImpl {
 #[async_trait]
 impl ActionCaller for AppActionCallImpl {
     async fn call(
-        &self, app_id: &str, action_id: &str, input: JsonValue, user_id: uuid::Uuid,
-        _caller_app_id: &str, effective_perms: Option<Vec<String>>,
-    ) -> Result<JsonValue, String> {
-        // Phase 6a: the agent's effective authority (intersection grant∩human)
-        // rides along on the caller so the target re-poses it as the RLS GUC.
-        // No token: the worker never replays a JWT.
-        let caller = Some(RpcCaller {
-            user_id: user_id.to_string(),
-            email: String::new(),
-            effective_perms,
-            connection_id: None,
-        });
-        self.wm.rpc_action(
-            app_id,
-            uuid::Uuid::new_v4().to_string(),
-            action_id.to_string(),
-            input,
-            caller,
-        ).await.map_err(|e| e.to_string())
+        &self, app_id: &str, action_id: &str, input: JsonValue, caller: RpcCaller, scoped: bool,
+    ) -> Result<JsonValue, RuntimeError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let action = action_id.to_string();
+        if scoped {
+            self.wm.rpc_action(app_id, id, action, input, Some(caller)).await
+        } else {
+            self.wm.rpc(app_id, id, action, input, Some(caller)).await
+        }
     }
 }
 

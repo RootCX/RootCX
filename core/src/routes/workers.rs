@@ -6,7 +6,8 @@ use serde_json::{Value as JsonValue, json};
 use super::{SharedRuntime, pool, pool_and_secrets, wm};
 use crate::api_error::ApiError;
 use crate::auth::identity::Identity;
-use crate::governance::authority::{has_permission_db, require_admin, share_read_perms};
+use crate::governance::action_invocation::{Declaration, authorize, dispatch};
+use crate::governance::authority::{require_admin, resolve_permissions, share_read_perms};
 use crate::extensions::sharing::guard::{CallerAuth, authorize_public_rpc, find_public_rpc, find_public_rpc_full};
 use crate::ipc::RpcCaller;
 
@@ -83,65 +84,13 @@ pub async fn rpc_proxy(
         let result = wm(&rt).rpc_public(&app_id, id, method, params, execution).await?;
         return Ok(Json(result));
     }
-    let (caller, action_scope) = match &auth {
+    let caller = match &auth {
         CallerAuth::User(identity) => {
-            // `None` when the method is not a declared action; `Some(isolated)`
-            // when it is. Two different questions, one lookup: declaration
-            // decides which permission may authorize the call, isolation decides
-            // whether Core poses an invocation identity in SQL for it.
-            let declaration: Option<(bool, bool)> = sqlx::query_as(
-                "SELECT COALESCE((action->>'isolatedScope')::boolean, false),
-                        action->'authority' IS NOT NULL AND action->'authority' <> 'null'::jsonb
-                   FROM rootcx_system.apps app
-                   CROSS JOIN LATERAL jsonb_array_elements(
-                     COALESCE(app.manifest->'actions', '[]'::jsonb)
-                   ) action
-                  WHERE app.id = $1
-                    AND action->>'id' = $2",
-            )
-            .bind(&app_id)
-            .bind(&method)
-            .fetch_optional(&p)
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-            let declared_action = declaration.is_some();
-            let approved_action = declaration.is_some_and(|(_, authority)| authority);
-            // Two grains of one right, the coarse implying the fine: `invoke` is
-            // the whole app, `action:{method}` is that method alone. Same idiom as
-            // `app:{id}:*` implying everything beneath it. Requiring BOTH would
-            // make `invoke` meaningless alone and revoke every grant issued before
-            // the fine keys existed; a role is narrowed by holding the fine keys
-            // INSTEAD of `invoke`.
-            let invoke_key = format!("app:{app_id}:invoke");
-            let action_key = format!("app:{app_id}:action:{method}");
-            let allowed = if approved_action {
-                has_permission_db(&p, identity.user_id, &action_key).await?
-            } else {
-                has_permission_db(&p, identity.user_id, &invoke_key).await?
-                    || (declared_action
-                        && has_permission_db(&p, identity.user_id, &action_key).await?)
-            };
-            if !allowed {
-                let needed = if approved_action {
-                    action_key
-                } else if declared_action {
-                    format!("{invoke_key} or {action_key}")
-                } else {
-                    invoke_key
-                };
-                return Err(ApiError::Forbidden(format!("permission denied: {needed}")));
-            }
-            (Some(RpcCaller {
-                user_id: identity.user_id.to_string(),
-                email: identity.email.clone(),
-                effective_perms: None,
-                connection_id: None,
-            // A scope means a dedicated process for the life of the call, so it
-            // is posed only for an action that asked for one. Every other
-            // declared action shares its caller's worker and reaches SQL with
-            // the invocation settings empty — nothing to borrow, and a policy
-            // written against them denies rather than trusting a neighbour.
-            }), declaration.is_some_and(|(isolated, authority)| isolated || authority).then(|| method.clone()))
+            let declaration = Declaration::load(&p, &app_id, &method).await?;
+            let (_, permissions) = resolve_permissions(&p, identity.user_id).await?;
+            authorize(&app_id, &method, declaration.as_ref(), &permissions, false)?;
+            let caller = RpcCaller::person(identity.user_id, &identity.email);
+            return Ok(Json(dispatch(wm(&rt).action_caller().as_ref(), &app_id, &method, declaration.as_ref(), params, caller).await?));
         }
         CallerAuth::ShareToken(share) => {
             let (manifest, decl) = find_public_rpc_full(&p, &app_id, &method)
@@ -152,30 +101,25 @@ pub async fn rpc_proxy(
             let read_perms = share_read_perms(
                 &p, &app_id, share.created_by, &manifest.data_contract,
             ).await?;
-            (Some(RpcCaller {
+            RpcCaller {
                 user_id: share.created_by.to_string(),
                 email: String::new(),
                 effective_perms: Some(read_perms),
                 connection_id: None,
-            }), None)
+            }
         }
         CallerAuth::Anonymous => {
             let decl = find_public_rpc(&p, &app_id, &method)
                 .await?
                 .ok_or_else(|| ApiError::Unauthorized("missing or invalid authorization header".into()))?;
             authorize_public_rpc(&decl, &auth, &app_id, &params)?;
-            (Some(RpcCaller {
+            RpcCaller {
                 user_id: String::new(),
                 email: String::new(),
                 effective_perms: None,
                 connection_id: None,
-            }), None)
+            }
         }
     };
-
-    let result = match action_scope {
-        Some(action) => wm(&rt).rpc_action(&app_id, id, action, params, caller).await?,
-        None => wm(&rt).rpc(&app_id, id, method, params, caller).await?,
-    };
-    Ok(Json(result))
+    Ok(Json(wm(&rt).rpc(&app_id, id, method, params, Some(caller)).await?))
 }

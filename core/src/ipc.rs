@@ -35,6 +35,13 @@ pub struct RpcCaller {
     pub connection_id: Option<String>,
 }
 
+impl RpcCaller {
+    /// A person calling directly, under their own permissions.
+    pub fn person(user_id: uuid::Uuid, email: &str) -> Self {
+        Self { user_id: user_id.to_string(), email: email.to_string(), effective_perms: None, connection_id: None }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentBootConfig {
     pub tool_descriptors: Vec<rootcx_types::ToolDescriptor>,

@@ -4194,3 +4194,171 @@ async fn integration_uninstall_retains_its_dedicated_route() {
     assert_eq!(rt.get_json("/api/v1/apps/ordinary").await.0, 200);
     rt.shutdown().await;
 }
+
+// ── One business MCP surface (ADR 0015) ─────────────────────────────────────
+
+async fn mcp_token(rt: &TestRuntime, scope: &str) -> String {
+    let (user_id, email): (uuid::Uuid, String) = sqlx::query_as(
+        "SELECT id, email FROM rootcx_system.users WHERE email = 'admin@test.local'",
+    )
+    .fetch_one(rt.pool())
+    .await
+    .unwrap();
+    let base = std::env::var("ROOTCX_PUBLIC_URL").unwrap_or_else(|_| "http://localhost:9100".into());
+    rootcx_core::auth::jwt::encode_access_for_audience(
+        rt.runtime.auth_config(), user_id, &email, &format!("{}/mcp", base.trim_end_matches('/')), scope,
+    )
+    .unwrap()
+}
+
+/// A minimal streamable-HTTP MCP client: one session, JSON-RPC over SSE.
+struct McpSession<'a> {
+    rt: &'a TestRuntime,
+    token: String,
+    session: Option<String>,
+    next_id: u64,
+}
+
+impl<'a> McpSession<'a> {
+    async fn open(rt: &'a TestRuntime, token: String) -> Self {
+        let mut session = Self { rt, token, session: None, next_id: 0 };
+        let init = session.send("initialize", json!({
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "test", "version": "1"}
+        })).await;
+        assert!(init.get("result").is_some(), "{init}");
+        session.notify("notifications/initialized").await;
+        session
+    }
+
+    fn request(&self, body: &Value) -> reqwest::RequestBuilder {
+        let mut request = self.rt.client.post(self.rt.url("/mcp"))
+            .bearer_auth(&self.token)
+            .header("Accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", "2025-06-18")
+            .json(body);
+        if let Some(session) = &self.session {
+            request = request.header("Mcp-Session-Id", session);
+        }
+        request
+    }
+
+    async fn notify(&self, method: &str) {
+        let response = self.request(&json!({"jsonrpc": "2.0", "method": method})).send().await.unwrap();
+        assert!(response.status().is_success(), "{}", response.status());
+    }
+
+    async fn send(&mut self, method: &str, params: Value) -> Value {
+        self.next_id += 1;
+        let body = json!({"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params});
+        let response = self.request(&body).send().await.unwrap();
+        if let Some(session) = response.headers().get("mcp-session-id") {
+            self.session = Some(session.to_str().unwrap().to_string());
+        }
+        let text = response.text().await.unwrap();
+        text.lines()
+            .filter_map(|line| line.strip_prefix("data:"))
+            .filter_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
+            .find(|message| message.get("id") == Some(&json!(self.next_id)))
+            .or_else(|| serde_json::from_str(&text).ok())
+            .unwrap_or_else(|| panic!("no reply to {method}: {text}"))
+    }
+
+    /// The tool's text or structured result, and whether it is an error.
+    async fn call(&mut self, tool: &str, arguments: Value) -> (bool, Value) {
+        let reply = self.send("tools/call", json!({"name": tool, "arguments": arguments})).await;
+        let result = &reply["result"];
+        let payload = result.get("structuredContent").cloned()
+            .unwrap_or_else(|| result["content"][0]["text"].clone());
+        (result["isError"] == true, payload)
+    }
+}
+
+async fn install_desk(rt: &TestRuntime) {
+    // Declared through the manifest, so the declarations survive installation.
+    rt.install_manifest(&json!({
+        "appId": "desk", "name": "desk", "version": "1.0.0",
+        "dataContract": [{ "entityName": "notes", "fields": [
+            { "name": "first_name", "type": "text", "required": true },
+            { "name": "last_name", "type": "text", "required": true },
+        ]}],
+        "actions": [
+            {"id": "lookup", "name": "Look up", "annotations": {"readOnlyHint": true}},
+            {"id": "stamp", "name": "Stamp"},
+            {"id": "send", "name": "Send", "humanOnly": true}
+        ]
+    })).await;
+    let backend = br#"
+        serve({ rpc: {
+            lookup: (params) => ({ looked: params.q ?? null }),
+            stamp: () => ({ stamped: true }),
+            send: () => ({ sent: true }),
+        } });
+    "#;
+    let (status, body) = rt.deploy("desk", &make_tar_gz(&[("index.ts", backend)])).await;
+    assert_eq!(status, 200, "{body}");
+}
+
+#[tokio::test]
+async fn mcp_serves_one_fixed_business_surface_under_assistant_rules() {
+    let rt = TestRuntime::boot().await;
+    install_desk(&rt).await;
+
+    let mut write = McpSession::open(&rt, mcp_token(&rt, "mcp:read mcp:write").await).await;
+    let listed = write.send("tools/list", json!({})).await;
+    let mut names: Vec<&str> = listed["result"]["tools"].as_array().unwrap().iter()
+        .map(|tool| tool["name"].as_str().unwrap()).collect();
+    names.sort_unstable();
+    assert_eq!(names, [
+        "call_action", "create_record", "describe_app", "get_project_context", "query_data",
+        "update_record", "upload_file", "validate_manifest",
+    ], "the tool list is fixed: no tool per app or action");
+
+    let (_, described) = write.call("describe_app", json!({"app": "desk"})).await;
+    let actions: Vec<&str> = described["result"]["actions"].as_array().unwrap().iter()
+        .map(|action| action["id"].as_str().unwrap()).collect();
+    assert_eq!(actions, ["lookup", "stamp"], "actions for people only are not offered to assistants");
+
+    // The worker answers once its discover handshake completes.
+    let mut stamped = (true, Value::Null);
+    for _ in 0..20 {
+        stamped = write.call("call_action", json!({"app": "desk", "action": "stamp"})).await;
+        if !stamped.0 { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert_eq!(stamped, (false, json!({"result": {"stamped": true}})));
+
+    for (label, tool, arguments, expected) in [
+        ("people-only action", "call_action", json!({"app": "desk", "action": "send"}), "for people only"),
+        ("undeclared method", "call_action", json!({"app": "desk", "action": "raw"}), "not found"),
+    ] {
+        let (failed, payload) = write.call(tool, arguments).await;
+        assert!(failed && payload.to_string().contains(expected), "{label}: {payload}");
+    }
+    let (status, sent) = rt.post_json("/api/v1/apps/desk/rpc", &json!({"method": "send"})).await;
+    assert_eq!((status, sent), (StatusCode::OK, json!({"sent": true})), "the person may still run it");
+    rt.shutdown().await;
+}
+
+#[tokio::test]
+async fn mcp_read_scope_admits_only_declared_read_only_actions() {
+    let rt = TestRuntime::boot().await;
+    install_desk(&rt).await;
+    let mut read = McpSession::open(&rt, mcp_token(&rt, "mcp:read").await).await;
+    // The worker answers once its discover handshake completes.
+    let mut looked = (true, Value::Null);
+    for _ in 0..20 {
+        looked = read.call("call_action", json!({"app": "desk", "action": "lookup", "input": {"q": "x"}})).await;
+        if !looked.0 { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    assert_eq!(looked, (false, json!({"result": {"looked": "x"}})), "a declared read-only action is a read");
+    for (label, tool, arguments) in [
+        ("undeclared write action", "call_action", json!({"app": "desk", "action": "stamp"})),
+        ("record change", "update_record", json!({"app": "desk", "entity": "notes", "id": "00000000-0000-0000-0000-000000000000", "data": {"first_name": "C"}})),
+    ] {
+        let (failed, payload) = read.call(tool, arguments).await;
+        assert!(failed && payload.to_string().contains("missing required OAuth scope"), "{label}: {payload}");
+    }
+    rt.shutdown().await;
+}

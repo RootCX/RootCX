@@ -51,10 +51,11 @@ async fn delegated_collection_mutation_retains_parent_owned_scope_without_read_p
     single_connection.close().await;
     let read = fixture.collection_context(&chain[2], json!({"app": provider, "entity": "records"})).await;
     assert!(QueryDataTool.execute(&read).await.is_err(), "a mutation's internal SELECT cannot authorize a separate read");
-    let delete = fixture.collection_context(&chain[2], json!({
-        "app": provider, "entity": "records", "action": "delete", "id": mine,
+    // Delete is refused to every assistant, so create exercises the task scope.
+    let create = fixture.collection_context(&chain[2], json!({
+        "app": provider, "entity": "records", "action": "create", "data": {"name": "created"},
     })).await;
-    assert!(MutateDataTool.execute(&delete).await.is_err(), "child admin cannot exceed parent task scope");
+    assert!(MutateDataTool.execute(&create).await.is_err(), "child admin cannot exceed parent task scope");
     let rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(&format!("SELECT id, owner_id, name FROM \"{provider}\".records ORDER BY name"))
         .fetch_all(&fixture.pool).await.unwrap();
     assert_eq!(rows, vec![(mine, fixture.principals[0], "changed".into()), (theirs, another_owner, "theirs".into())]);
@@ -144,7 +145,7 @@ impl Fixture {
             permissions: authority.revalidate(&self.pool).await.unwrap(),
             task_scope: authority.task_scope(), args,
             agent_dispatch: None, integration_caller: None, action_caller: None,
-            stream_tx: None, idempotency_key: None,
+            stream_tx: None, idempotency_key: None, via_mcp: false,
         }
     }
 

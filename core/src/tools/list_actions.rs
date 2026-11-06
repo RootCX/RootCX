@@ -3,14 +3,15 @@ use serde_json::{json, Value as JsonValue};
 use rootcx_types::ToolDescriptor;
 
 use super::{Tool, ToolContext};
-use crate::governance::authority::has_permission;
+use crate::governance::action_invocation::{Declaration, authorize};
 
-/// Same two grains as `call_action`, so metadata never advertises an action the caller cannot run.
-pub(crate) fn invocable_actions(actions: &JsonValue, app: &str, permissions: &[String]) -> Vec<JsonValue> {
-    let invoke = has_permission(permissions, &format!("app:{app}:invoke"));
+/// The actions this caller may run, each with its declared hints; decided by
+/// `action_invocation`, so a listing never offers what a call would refuse.
+pub(crate) fn invocable_actions(actions: &JsonValue, app: &str, permissions: &[String], assistant: bool) -> Vec<JsonValue> {
     actions.as_array().into_iter().flatten().filter_map(|action| {
         let id = action.get("id")?.as_str()?;
-        if !invoke && !has_permission(permissions, &format!("app:{app}:action:{id}")) {
+        let declaration = Declaration::from_definition(action.clone());
+        if authorize(app, id, Some(&declaration), permissions, assistant).is_err() {
             return None;
         }
         let mut entry = json!({
@@ -59,6 +60,7 @@ impl Tool for ListActionsTool {
         .map_err(|e| e.to_string())?;
 
         Ok(rows.into_iter().map(|(id, name, actions, instructions)| {
+            let actions = invocable_actions(&actions, &id, &ctx.permissions, ctx.is_assistant());
             let mut entry = json!({ "appId": id, "name": name, "actions": actions });
             if let Some(inst) = instructions {
                 entry["instructions"] = json!(inst);
@@ -89,7 +91,7 @@ mod tests {
             (vec!["app:catalog:items.read", "tool:call_action"], vec![]),
         ] {
             let permissions: Vec<String> = permissions.into_iter().map(String::from).collect();
-            let ids: Vec<JsonValue> = invocable_actions(&actions, "catalog", &permissions)
+            let ids: Vec<JsonValue> = invocable_actions(&actions, "catalog", &permissions, false)
                 .into_iter().map(|action| action["id"].clone()).collect();
             assert_eq!(ids, expected, "{permissions:?}");
         }
@@ -97,12 +99,22 @@ mod tests {
             {"id": "delete_item", "annotations": {"destructiveHint": true}},
             {"id": "list_items"}
         ]);
-        let listed = invocable_actions(&annotated, "catalog", &["app:catalog:invoke".into()]);
+        let listed = invocable_actions(&annotated, "catalog", &["app:catalog:invoke".into()], false);
         assert_eq!(listed[0]["annotations"], json!({"destructiveHint": true}), "declared hints reach callers");
         assert!(listed[1].get("annotations").is_none(), "no hint is invented for an undeclared action");
+        let governed = json!([
+            {"id": "pay", "authority": {"data": {"invoices": ["update"]}}},
+            {"id": "send", "humanOnly": true},
+            {"id": "read"}
+        ]);
+        let invoke = ["app:catalog:invoke".to_string()];
+        let ids = |assistant| invocable_actions(&governed, "catalog", &invoke, assistant)
+            .into_iter().map(|action| action["id"].clone()).collect::<Vec<_>>();
+        assert_eq!(ids(false), vec![json!("send"), json!("read")], "an approved action needs its own grain");
+        assert_eq!(ids(true), vec![json!("read")], "assistants never see humanOnly actions");
         for malformed in [json!(null), json!({}), json!("create_item")] {
             assert!(
-                invocable_actions(&malformed, "catalog", &["app:catalog:invoke".into()]).is_empty(),
+                invocable_actions(&malformed, "catalog", &["app:catalog:invoke".into()], false).is_empty(),
                 "{malformed}"
             );
         }

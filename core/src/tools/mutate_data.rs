@@ -42,6 +42,10 @@ impl Tool for MutateDataTool {
         let action = str_arg(&ctx.args, "action")?;
         let app = ctx.args.get("app").and_then(|v| v.as_str()).unwrap_or(&ctx.app_id);
 
+        // Deletion stays a human decision on every assistant entry (ADR 0015).
+        if action == "delete" && ctx.is_assistant() {
+            return Err("assistants cannot delete records; the person deletes them in the app".into());
+        }
         if action == "bulk_create" && ctx.idempotency_key.is_some() {
             return Err("bulk_create is not allowed inside a workflow (not resumable without duplicates); use a per-item create node".into());
         }

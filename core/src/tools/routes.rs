@@ -57,7 +57,15 @@ pub async fn execute_tool(
     Path(tool_name): Path<String>,
     Json(body): Json<ExecuteToolRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    let tool = rt.tool_registry().get(&tool_name)
+    Ok(Json(execute_as_person(&rt, &identity, &tool_name, body.app_id, body.args, false).await?))
+}
+
+/// Runs a registry tool with the person's own permissions, outside agent
+/// execution. `via_mcp` marks an external assistant acting for them (ADR 0015).
+pub(crate) async fn execute_as_person(
+    rt: &SharedRuntime, identity: &Identity, tool_name: &str, app_id: String, args: JsonValue, via_mcp: bool,
+) -> Result<JsonValue, ApiError> {
+    let tool = rt.tool_registry().get(tool_name)
         .ok_or_else(|| ApiError::NotFound(format!("unknown tool: '{tool_name}'")))?;
     let pool = rt.pool().clone();
 
@@ -73,14 +81,14 @@ pub async fn execute_tool(
     }
     let ctx = ToolContext {
         authority: None,
-        pool, core_bound_app_id: None, app_id: body.app_id, user_id: identity.user_id, invoker_user_id: None,
-        permissions, task_scope: None, args: body.args,
+        pool, core_bound_app_id: None, app_id, user_id: identity.user_id, invoker_user_id: None,
+        permissions, task_scope: None, args,
         agent_dispatch: None, integration_caller: None, action_caller: None, stream_tx: None,
         idempotency_key: None,
+        via_mcp,
     };
-    let outcome = super::dispatch(&tool_name, tool, &ctx).await;
-    match outcome.value {
-        Ok(v) => Ok(Json(v)),
+    match super::dispatch(tool_name, tool, &ctx).await.value {
+        Ok(v) => Ok(v),
         Err(DispatchError::PermissionDenied(e)) => Err(ApiError::Forbidden(e)),
         Err(DispatchError::ExecutionFailed(e)) => Err(map_tool_execution_error(e)),
     }

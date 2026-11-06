@@ -84,10 +84,14 @@ pub struct ActionDefinition {
     pub authority: Option<ActionAuthority>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<ToolAnnotations>,
+    /// Only a person may run it: Core refuses it to every assistant (agents, MCP clients).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub human_only: bool,
 }
 
 /// MCP tool hints that let a client decide when to ask the person first.
-/// Declared by the app author and advisory only: Core never derives authority from them.
+/// Declared by the app author. Core derives no data authority from them; on MCP a
+/// `readOnlyHint` lets a read-only connection run the action, never an approved one.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolAnnotations {

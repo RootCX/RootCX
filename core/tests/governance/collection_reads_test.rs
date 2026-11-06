@@ -186,6 +186,7 @@ async fn full_reads_exceed_page_caps_without_widening_rows_or_remote_projection(
             action_caller: None,
             stream_tx: None,
             idempotency_key: None,
+            via_mcp: false,
         };
         let result = QueryDataTool.execute(&ctx).await.unwrap();
         let rows = result

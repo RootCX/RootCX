@@ -160,7 +160,10 @@ async fn ordinary_agent_app_role_authorizes_crud_without_collection_grants() {
         }),
     )
     .await;
-    assert!(deleted["error"].is_null(), "{deleted}");
+    assert!(
+        deleted["error"].as_str().is_some_and(|error| error.contains("assistants cannot delete")),
+        "deletion stays a human decision: {deleted}"
+    );
     let (status, journal) = rt.get_json("/api/v1/cross-app/audit").await;
     assert_eq!(status, StatusCode::OK, "{journal}");
     let entries: Vec<_> = journal
@@ -169,7 +172,7 @@ async fn ordinary_agent_app_role_authorizes_crud_without_collection_grants() {
         .iter()
         .filter(|entry| entry["consumerApp"] == "helper" && entry["providerApp"] == "business")
         .collect();
-    assert_eq!(entries.len(), 8, "{journal}");
+    assert_eq!(entries.len(), 6, "{journal}");
     assert!(
         entries
             .iter()
@@ -190,7 +193,7 @@ async fn ordinary_agent_app_role_authorizes_crud_without_collection_grants() {
     .fetch_all(rt.pool())
     .await
     .unwrap();
-    assert_eq!(audit.len(), 3, "{audit:?}");
+    assert_eq!(audit.len(), 2, "{audit:?}");
     for (operation, actor, human) in &audit {
         assert_eq!(*actor, Some(agent), "{operation}");
         assert_eq!(*human, Some(responsible_human), "{operation}");
@@ -199,7 +202,7 @@ async fn ordinary_agent_app_role_authorizes_crud_without_collection_grants() {
         .iter()
         .filter(|entry| entry["outcome"] == "success")
         .collect();
-    assert_eq!(successful.len(), 4, "{journal}");
+    assert_eq!(successful.len(), 3, "{journal}");
     for entry in successful {
         assert_eq!(entry["principalId"], json!(agent), "{entry}");
         assert_eq!(
@@ -215,7 +218,7 @@ async fn ordinary_agent_app_role_authorizes_crud_without_collection_grants() {
 async fn exact_mutation_permissions_do_not_grant_standalone_reads_or_other_operations() {
     let rt = setup().await;
     let mut id = Value::Null;
-    for action in ["create", "update", "delete"] {
+    for action in ["create", "update"] {
         let permission = format!("app:business:projects.{action}");
         agent_permissions(&rt, &["app:helper:invoke", "tool:*", &permission]).await;
         let result = invoke(
@@ -255,11 +258,20 @@ async fn exact_mutation_permissions_do_not_grant_standalone_reads_or_other_opera
             "{action} allowed {wrong_action}: {denied}"
         );
     }
+    // Even an exact delete grant does not let an assistant delete (ADR 0015).
+    agent_permissions(&rt, &["app:helper:invoke", "tool:*", "app:business:projects.delete"]).await;
+    let deleted = invoke(&rt, &rt.token, "mutate_data", json!({
+        "app":"business","entity":"projects","action":"delete","id":id
+    })).await;
+    assert!(
+        deleted["error"].as_str().is_some_and(|error| error.contains("assistants cannot delete")),
+        "{deleted}"
+    );
     let count: i64 = sqlx::query_scalar("SELECT count(*) FROM business.projects")
         .fetch_one(rt.pool())
         .await
         .unwrap();
-    assert_eq!(count, 0);
+    assert_eq!(count, 1);
     rt.shutdown().await;
 }
 

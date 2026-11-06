@@ -8,6 +8,22 @@ Releases marked **Breaking** need the matching guide in
 
 ## Unreleased
 
+- **Breaking: one business MCP surface (ADR 0015).** `/mcp` offers one fixed
+  list: `get_project_context`, `describe_app`, `query_data`, `create_record`,
+  `update_record`, `call_action`, `upload_file`, `validate_manifest`. `get_app`
+  and `create_records` are removed; use `describe_app` and `create_record`.
+  Results omit internal identities. `upload_file` also takes a file reference
+  from the hosts in `ROOTCX_MCP_FILE_HOSTS`.
+- **Breaking: one decision for every action call.** The RPC route, the agent
+  `call_action` tool and MCP `call_action` share it: an approved action needs
+  `app:{app}:action:{id}` on every entry (the agent tool accepted `invoke`), and
+  only actions that ask for one get their own worker process. Listings offer
+  exactly what a call would accept.
+- Actions may declare `humanOnly`: no assistant (agent or MCP client) can run
+  them or see them listed. Assistants cannot delete records. On MCP, a
+  read-only connection may run an action declaring `readOnlyHint`, unless it is
+  approved.
+
 - A person can mark one of their own accounts as the default for an
   integration (`PUT`/`DELETE /api/v1/integrations/{id}/connections/{connectionId}/default`,
   `isDefault` in the connection list). The default serves every app and agent
