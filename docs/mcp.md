@@ -38,7 +38,7 @@ for every assistant:
 | `get_project_context` | Workspace URL, status, user permissions, installed apps with their instructions, onboarding state | `mcp:read` |
 | `upload_file` | Store a file in an app, as base64 or as a host file reference | `mcp:write` |
 | `validate_manifest` | Validate a manifest and schema drift without mutation | `mcp:read` |
-| Core tools | Every tool the registry offers outside agent execution (`describe_app`, `query_data`, `mutate_data`, `list_apps`, `list_actions`, `list_integrations`, `http_request`), as it declares itself, listed when the person holds `tool:<name>` | `mcp:read` when declared read-only, else `mcp:write` |
+| Core tools | Every tool the registry offers outside agent execution (for example `describe_app`, `query_data`, `mutate_data`, `list_apps`), as it declares itself, listed when the person holds `tool:<name>` | `mcp:read` when declared read-only, else `mcp:write` |
 | `<app id>__<action id>` | One declared action of an installed app or integration, run through the action invocation Module. Never listed for `humanOnly` actions; an approved action needs its own grain | `mcp:read` when declared read-only and not approved, else `mcp:write` |
 
 Every call runs under the assistant rules, as for agents: no deletion, no

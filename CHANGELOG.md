@@ -9,9 +9,8 @@ Releases marked **Breaking** need the matching guide in
 ## Unreleased
 
 - **Breaking: `/mcp` mirrors the Core tools (ADR 0016).** It offers every
-  tool the registry gives a person outside agent execution (`describe_app`,
-  `query_data`, `mutate_data`, `list_apps`, `list_actions`,
-  `list_integrations`, `http_request`) under the assistant rules, and each
+  tool the registry gives a person outside agent execution (for example
+  `describe_app`, `query_data`, `mutate_data`) under the assistant rules, and each
   action an assistant may run in an installed app or integration as its own
   tool, `<app id>__<action id>`, with the action's schema and hints.
   `create_record`, `update_record` and the MCP `call_action` are removed. An

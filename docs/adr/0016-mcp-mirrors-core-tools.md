@@ -17,7 +17,8 @@ generic view of what Core already does, with no rule specific to an assistant.
 
 1. **`/mcp` offers the Core tools a person may call** outside agent execution,
    exactly as the tool registry declares them (`ToolRegistry::http_descriptors`,
-   the list the HTTP tool route already serves), each listed only when the
+   the list the HTTP tool route already serves, for example `describe_app`,
+   `query_data`, `mutate_data`), each listed only when the
    person holds `tool:<name>`. They run through `tools::routes::execute_as_person`
    with `via_mcp`, so the assistant rules apply as for agents: no deletion,
    `humanOnly` actions hidden and refused. Tools that need agent execution
