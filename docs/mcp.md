@@ -52,7 +52,10 @@ destructive, not idempotent, open world. An approved action is never read-only.
 A read tool filters on text, number, decimal, boolean, date, uuid and link
 fields, sorts on any readable field, and pages by `limit` (100 at most) and
 `offset`. Sensitive fields are never inputs or results; derived entities get no
-tool. Ids that cannot form a tool name (letters, digits, `_`, `-`, `.`, 128
+tool. Integrations get no tools: apps reach them through their bindings. An
+action whose input schema cannot stand alone (root not `type: object`, or a
+`$ref` that does not resolve inside the schema) gets no tool, so one bad
+declaration never makes a host refuse the whole list. Ids that cannot form a tool name (letters, digits, `_`, `-`, `.`, 128
 at most) are not listed. The list follows the caller's grants and installed
 apps, so it is returned with `cacheScope: private`. A name two operations would
 share is offered for neither. Calling a tool the list does not offer returns a

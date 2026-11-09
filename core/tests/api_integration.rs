@@ -4321,6 +4321,11 @@ async fn mcp_offers_each_assistant_action_as_its_own_tool() {
     let rt = TestRuntime::boot().await;
     install_desk(&rt).await;
 
+    // An integration is reached through apps, never offered to a person as tools.
+    rt.install_manifest(&json!({
+        "appId": "mailer", "name": "Mailer", "version": "1.0.0", "type": "integration", "dataContract": [],
+        "actions": [{"id": "send_email", "name": "Send email", "inputSchema": {"type": "object"}}]
+    })).await;
     let mut write = McpSession::open(&rt, mcp_token(&rt, "mcp:read mcp:write").await).await;
     let listed = write.send("tools/list", json!({})).await;
     let mut names: Vec<&str> = listed["result"]["tools"].as_array().unwrap().iter()

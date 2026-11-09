@@ -44,7 +44,11 @@ The MCP specification lets the tool list vary by the authorization presented
    permissions, so RLS, column privileges and audit apply as on every entry.
    Sensitive fields are neither filters nor sorts and are never returned.
    Derived entities (ADR 0012) get no tool. A filter takes one value: no
-   operator or raw `where` reaches the query.
+   operator or raw `where` reaches the query. Integrations get no tools: apps
+   reach them through their bindings. An action whose input schema cannot
+   stand alone (root not `type: object`, or a `$ref` resolving outside the
+   schema) gets no tool: a host refuses the whole list over one invalid schema
+   (ChatGPT: "Invalid MCP tool schema for tool 'gmail__create_draft'").
 4. **Records change only through actions.** MCP offers no generic create,
    update or delete: actions apply the app's rules (numbering, versions,
    totals). `call_action`, `describe_app`, `query_data`, `create_record` and

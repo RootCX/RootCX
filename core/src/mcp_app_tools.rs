@@ -79,10 +79,13 @@ pub(crate) async fn resolve(pool: &PgPool, permissions: &[String], name: &str) -
 }
 
 /// Every tool the installed apps give this person, by name, in name order.
+/// Integrations are not apps a person calls: apps reach them through their
+/// own bindings, so they get no tool.
 async fn generated(pool: &PgPool, permissions: &[String]) -> Result<BTreeMap<String, (Tool, Operation)>, ApiError> {
     let apps: Vec<(String, String, JsonValue, JsonValue)> = sqlx::query_as(
         "SELECT id, name, COALESCE(manifest->'actions', '[]'::jsonb), COALESCE(manifest->'dataContract', '[]'::jsonb)
-           FROM rootcx_system.apps WHERE status = 'installed' ORDER BY id",
+           FROM rootcx_system.apps
+          WHERE status = 'installed' AND manifest->>'type' IS DISTINCT FROM 'integration' ORDER BY id",
     )
     .fetch_all(pool)
     .await?;
@@ -158,8 +161,13 @@ fn action_tool(app: &str, app_name: &str, id: &str, declaration: &Declaration) -
     let title = format!("{label} ({app_name})");
     let description = format!("{app_name}: {}", text("description").unwrap_or(label));
     let input = match action.get("inputSchema") {
-        Some(JsonValue::Object(schema)) => schema.clone(),
-        _ => object(json!({ "type": "object" })),
+        None | Some(JsonValue::Null) => object(json!({ "type": "object" })),
+        Some(JsonValue::Object(schema)) if standalone_object_schema(schema) => schema.clone(),
+        Some(_) => {
+            // One unusable schema must not make a host refuse every other tool.
+            tracing::warn!(app, action = id, "input schema is not a self-contained object schema: no tool");
+            return None;
+        }
     };
     let result = action.get("outputSchema").filter(|schema| schema.is_object()).cloned().unwrap_or_else(|| json!({}));
     let hint = |key: &str| action.get("annotations").and_then(|hints| hints.get(key)).and_then(JsonValue::as_bool);
@@ -260,6 +268,24 @@ fn query(entity: &str, filters: &[String], input: JsonObject) -> Result<JsonValu
     Ok(args)
 }
 
+/// An object schema a host can read alone: `type: object` at the root, and
+/// every `$ref` pointing inside the schema itself.
+fn standalone_object_schema(schema: &JsonObject) -> bool {
+    fn refs_resolve(value: &JsonValue, root: &JsonValue) -> bool {
+        match value {
+            JsonValue::Object(map) => map.iter().all(|(key, item)| match (key.as_str(), item) {
+                ("$ref", JsonValue::String(pointer)) => pointer.strip_prefix('#').is_some_and(|path| root.pointer(path).is_some()),
+                ("$ref", _) => false,
+                _ => refs_resolve(item, root),
+            }),
+            JsonValue::Array(items) => items.iter().all(|item| refs_resolve(item, root)),
+            _ => true,
+        }
+    }
+    let root = JsonValue::Object(schema.clone());
+    schema.get("type") == Some(&json!("object")) && refs_resolve(&root, &root)
+}
+
 fn object(value: JsonValue) -> JsonObject {
     match value {
         JsonValue::Object(map) => map,
@@ -313,9 +339,24 @@ mod tests {
         assert_eq!(lookup.description.as_deref(), Some("Front desk: Finds a booking."));
         assert_eq!(JsonValue::Object((*lookup.input_schema).clone()), json!({"type": "object", "required": ["q"]}));
 
-        let bare = action(json!({"id": "go", "description": "", "inputSchema": "not a schema"})).unwrap();
+        let bare = action(json!({"id": "go", "description": ""})).unwrap();
         assert_eq!(bare.description.as_deref(), Some("Front desk: go"), "an empty description falls back to the name, then the id");
-        assert_eq!(JsonValue::Object((*bare.input_schema).clone()), json!({"type": "object"}));
+        assert_eq!(JsonValue::Object((*bare.input_schema).clone()), json!({"type": "object"}), "no declared schema: an empty object");
+    }
+
+    #[test]
+    fn an_action_whose_schema_cannot_stand_alone_gets_no_tool() {
+        let local_refs = json!({"type": "object", "properties": {"line": {"$ref": "#/$defs/line"}}, "$defs": {"line": {"type": "object"}}});
+        assert!(action(json!({"id": "go", "inputSchema": local_refs})).is_some(), "refs inside the schema resolve");
+        for (label, schema) in [
+            ("ref to another part of the manifest", json!({"$ref": "#/actions/0/inputSchema"})),
+            ("nested ref that resolves nowhere", json!({"type": "object", "properties": {"a": {"$ref": "#/$defs/missing"}}})),
+            ("remote ref", json!({"type": "object", "properties": {"a": {"$ref": "https://example.test/a.json"}}})),
+            ("root that is not an object", json!({"type": "array"})),
+            ("not a schema", json!("not a schema")),
+        ] {
+            assert!(action(json!({"id": "go", "inputSchema": schema})).is_none(), "{label}");
+        }
     }
 
     #[test]
