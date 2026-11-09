@@ -38,7 +38,6 @@ pub(crate) async fn execute(
         pool, core_bound_app_id: Some(app_id.clone()), app_id, permissions, args,
         agent_dispatch, integration_caller, action_caller, stream_tx: stream_tx.clone(),
         idempotency_key: None,
-        via_mcp: false,
     };
 
     let (result, error, duration_ms) = match tool {

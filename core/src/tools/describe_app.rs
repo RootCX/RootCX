@@ -44,6 +44,15 @@ pub(crate) fn project_contract(contract: JsonValue, grants: &[(String, Vec<Strin
     )
 }
 
+/// Whether these permissions read some rows of the entity: all of them, the
+/// caller's own, or those shared with the caller. RLS decides which rows.
+pub(crate) fn may_read(permissions: &[String], app: &str, entity: &str) -> bool {
+    let read = format!("app:{app}:{entity}.read");
+    [read.clone(), format!("{read}.own"), format!("{read}.shared")]
+        .iter()
+        .any(|key| crate::governance::authority::has_permission(permissions, key))
+}
+
 /// Human HTTP contexts have no authenticated application source. Their entity
 /// visibility comes exclusively from resolved user permissions, never appId.
 pub(crate) fn project_human_contract(
@@ -57,17 +66,7 @@ pub(crate) fn project_human_contract(
         .flatten()
         .filter_map(|entity| {
             let name = entity.get("entityName")?.as_str()?;
-            let read = format!("app:{app}:{name}.read");
-            if !crate::governance::authority::has_permission(permissions, &read)
-                && !crate::governance::authority::has_permission(
-                    permissions,
-                    &format!("{read}.own"),
-                )
-                && !crate::governance::authority::has_permission(
-                    permissions,
-                    &format!("{read}.shared"),
-                )
-            {
+            if !may_read(permissions, app, name) {
                 return None;
             }
             let fields = entity

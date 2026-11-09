@@ -12,6 +12,7 @@ mod agent_harness;
 mod jobs;
 mod manifest;
 pub mod mcp;
+mod mcp_app_tools;
 mod mcp_files;
 mod mcp_server;
 mod principal;

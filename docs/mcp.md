@@ -30,20 +30,33 @@ bearer-token compatibility.
 
 ## Tools
 
-One fixed list for every workspace (ADR 0015). No tool is generated per app or
-per action, and no argument selects the operation: what a caller may do comes
-from `describe_app`. MCP offers no deletion.
+Core generates the app tools from the installed manifests (ADR 0016): one per
+action an assistant may run, `<app id>__<action id>`, and one read-only tool per
+entity the caller may read, `<app id>__<entity>__list`, beside three workspace
+tools. MCP hosts that review tools one by one see every operation with its own
+schema and hints; no tool runs an operation chosen by an argument. Records
+change only through app actions, and MCP offers no deletion.
 
 | Tool | Purpose | Scope | Existing RootCX module reused |
 | --- | --- | --- | --- |
-| `get_project_context` | Workspace URL, status, user permissions, installed apps, onboarding state | `mcp:read` | status, identity, RBAC, app list |
-| `describe_app` | One app as the caller may see it: readable records, invocable actions with their hints, instructions | `mcp:read` | `describe_app` tool |
-| `query_data` | Read records | `mcp:read` | `query_data` tool, RLS |
-| `create_record` | Create one record | `mcp:write` | `mutate_data` tool, RLS, audit |
-| `update_record` | Overwrite the given fields of one record | `mcp:write` | `mutate_data` tool, RLS, audit |
-| `call_action` | Run one declared app action; `humanOnly` actions are refused | `mcp:read` for a declared read-only action, else `mcp:write` | action invocation Module |
+| `get_project_context` | Workspace URL, status, user permissions, installed apps with their instructions, onboarding state | `mcp:read` | status, identity, RBAC, app list |
+| `<app id>__<action id>` | Run that declared action. Listed only when the caller may run it: never `humanOnly`, an approved action only with its own grain | `mcp:read` for a declared read-only action, else `mcp:write` | action invocation Module |
+| `<app id>__<entity>__list` | Read that entity's records, newest first, with exact-match filters on its fields. Listed only with `tool:query_data` and a read grant on the entity | `mcp:read` | `query_data` tool, RLS, audit |
 | `upload_file` | Store a file in an app, as base64 or as a host file reference | `mcp:write` | storage upload |
 | `validate_manifest` | Validate a manifest and schema drift without mutation | `mcp:read` | manifest validator, schema verifier |
+
+An action tool carries the action's `name` as title, `<app name>: <description>`
+as description, its `inputSchema` (else an empty object), its `outputSchema`
+under `result`, and its declared hints. Undeclared hints take the worst case:
+destructive, not idempotent, open world. An approved action is never read-only.
+A read tool filters on text, number, decimal, boolean, date, uuid and link
+fields, sorts on any readable field, and pages by `limit` (100 at most) and
+`offset`. Sensitive fields are never inputs or results; derived entities get no
+tool. Ids that cannot form a tool name (letters, digits, `_`, `-`, `.`, 128
+at most) are not listed. The list follows the caller's grants and installed
+apps, so it is returned with `cacheScope: private`. A name two operations would
+share is offered for neither. Calling a tool the list does not offer returns a
+tool error saying the app must be installed and usable by the caller.
 
 Results omit internal identities (`created_by`, `owner_id`…).
 

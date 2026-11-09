@@ -5,15 +5,23 @@ use rootcx_types::ToolDescriptor;
 use super::{Tool, ToolContext};
 use crate::governance::action_invocation::{Declaration, authorize};
 
-/// The actions this caller may run, each with its declared hints; decided by
-/// `action_invocation`, so a listing never offers what a call would refuse.
-pub(crate) fn invocable_actions(actions: &JsonValue, app: &str, permissions: &[String], assistant: bool) -> Vec<JsonValue> {
-    actions.as_array().into_iter().flatten().filter_map(|action| {
+/// The declared actions this caller may run, decided by `action_invocation`, so
+/// a listing never offers what a call would refuse.
+pub(crate) fn invocable<'a>(
+    actions: &'a JsonValue, app: &'a str, permissions: &'a [String], assistant: bool,
+) -> impl Iterator<Item = (&'a str, Declaration)> + 'a {
+    actions.as_array().into_iter().flatten().filter_map(move |action| {
         let id = action.get("id")?.as_str()?;
         let declaration = Declaration::from_definition(action.clone());
-        if authorize(app, id, Some(&declaration), permissions, assistant).is_err() {
-            return None;
-        }
+        authorize(app, id, Some(&declaration), permissions, assistant).ok()?;
+        Some((id, declaration))
+    })
+}
+
+/// [`invocable`] as listings show it: each action with its declared hints.
+pub(crate) fn invocable_actions(actions: &JsonValue, app: &str, permissions: &[String], assistant: bool) -> Vec<JsonValue> {
+    invocable(actions, app, permissions, assistant).map(|(id, declaration)| {
+        let action = &declaration.definition;
         let mut entry = json!({
             "id": id,
             "name": action.get("name"),
@@ -23,7 +31,7 @@ pub(crate) fn invocable_actions(actions: &JsonValue, app: &str, permissions: &[S
         if let Some(annotations) = action.get("annotations") {
             entry["annotations"] = annotations.clone();
         }
-        Some(entry)
+        entry
     }).collect()
 }
 

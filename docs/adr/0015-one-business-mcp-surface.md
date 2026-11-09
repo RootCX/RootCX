@@ -1,6 +1,6 @@
 # ADR 0015: One business MCP surface per tenant, with a fixed tool list
 
-Status: accepted 5 November 2026, implemented from `shapp/main` 1577f9c. Not released.
+Status: accepted 5 November 2026, released (`89b2209`). Decision 5 (the fixed `/mcp` tool list) and the MCP half of decision 2 (`via_mcp`) are superseded by ADR 0016; the rest stands.
 
 ## Context
 

@@ -145,7 +145,7 @@ impl Fixture {
             permissions: authority.revalidate(&self.pool).await.unwrap(),
             task_scope: authority.task_scope(), args,
             agent_dispatch: None, integration_caller: None, action_caller: None,
-            stream_tx: None, idempotency_key: None, via_mcp: false,
+            stream_tx: None, idempotency_key: None,
         }
     }
 

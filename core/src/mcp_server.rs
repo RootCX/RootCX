@@ -1,11 +1,11 @@
 //! Official inbound MCP interface for RootCX.
 //!
-//! MCP exposes authenticated workspace context and governed RootCX actions.
+//! MCP exposes authenticated workspace context and the tools Core generates
+//! from installed apps (`mcp_app_tools`): one per action, one read per entity.
 //! Application source code stays in the user's local workspace; the RootCX
 //! CLI owns scaffolding, builds, tests, and deployment.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::{Query, State};
@@ -14,10 +14,14 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json as AxumJson, Router};
-use rmcp::handler::server::router::tool::{ToolRoute, ToolRouter};
+use rmcp::ErrorData;
+use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, ContentBlock, Implementation, MetaObject, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation, JsonObject,
+    ListToolsResult, MetaObject, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+};
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
@@ -28,7 +32,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
 use crate::api_error::ApiError;
-use crate::governance::action_invocation::{Declaration, authorize, dispatch};
 use crate::governance::authority::{require_perm, resolve_permissions};
 use crate::auth::identity::{Identity, authenticate_parts, authenticate_parts_for_audience};
 use crate::routes::SharedRuntime;
@@ -43,39 +46,6 @@ struct GrantedScopes(HashSet<String>);
 pub struct ManifestInput {
     /// A complete RootCX manifest.json object.
     pub manifest: JsonValue,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct CallActionInput {
-    /// Installed app ID, from get_project_context.
-    pub app: String,
-    /// Action ID listed by describe_app for this app.
-    pub action: String,
-    /// Action input matching the action's inputSchema.
-    #[serde(default)]
-    pub input: serde_json::Map<String, JsonValue>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct CreateRecordInput {
-    /// Installed app ID, from get_project_context.
-    pub app: String,
-    /// Entity name listed by describe_app.
-    pub entity: String,
-    /// Field values by field name. Array fields take JSON arrays.
-    pub data: serde_json::Map<String, JsonValue>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct UpdateRecordInput {
-    /// Installed app ID, from get_project_context.
-    pub app: String,
-    /// Entity name listed by describe_app.
-    pub entity: String,
-    /// The record id, from query_data or an action result.
-    pub id: String,
-    /// The fields to overwrite, by field name.
-    pub data: serde_json::Map<String, JsonValue>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -108,7 +78,7 @@ pub struct ToolOutput {
     pub result: JsonValue,
 }
 
-fn oauth_tool_meta(scopes: &[&str]) -> MetaObject {
+pub(crate) fn oauth_tool_meta(scopes: &[&str]) -> MetaObject {
     let mut meta = MetaObject::new();
     meta.insert(
         "securitySchemes".to_string(),
@@ -136,7 +106,7 @@ fn minimized(value: JsonValue) -> JsonValue {
 }
 
 /// Read-only work needs `mcp:read`; anything else also `mcp:write`.
-fn scopes(read_only: bool) -> &'static [&'static str] {
+pub(crate) fn scopes(read_only: bool) -> &'static [&'static str] {
     if read_only { &["mcp:read"] } else { &["mcp:read", "mcp:write"] }
 }
 
@@ -164,13 +134,7 @@ pub struct RootCxMcp {
 #[tool_router(router = tool_router)]
 impl RootCxMcp {
     fn new(runtime: SharedRuntime) -> Self {
-        let mut tool_router = Self::tool_router();
-        for name in REGISTRY_TOOLS {
-            if let Some(route) = registry_route(&runtime, name) {
-                tool_router.add_route(route);
-            }
-        }
-        Self { runtime, tool_router }
+        Self { runtime, tool_router: Self::tool_router() }
     }
 
     /// Use this when starting work in RootCX or when the current workspace,
@@ -199,6 +163,25 @@ impl RootCxMcp {
         .await
         .map_err(|error| error.to_string())?
         .0;
+        // Each app's own guidance on how to use its tools.
+        let instructions: HashMap<String, String> = sqlx::query_as(
+            "SELECT id, manifest->>'instructions' FROM rootcx_system.apps WHERE manifest->>'instructions' IS NOT NULL",
+        )
+        .fetch_all(self.runtime.pool())
+        .await
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .collect();
+        let apps: Vec<JsonValue> = apps
+            .into_iter()
+            .map(|app| {
+                let mut entry = json!(&app);
+                if let Some(guidance) = instructions.get(&app.id) {
+                    entry["instructions"] = json!(guidance);
+                }
+                entry
+            })
+            .collect();
         let permissions = crate::governance::authority::resolve_effective_permissions(
             self.runtime.pool(),
             &identity,
@@ -265,83 +248,6 @@ impl RootCxMcp {
         }))
     }
 
-    /// Use this to run one action an app declares, listed by describe_app,
-    /// for the person. Actions apply the app's business rules. Actions marked
-    /// for people only are refused.
-    #[tool(
-        name = "call_action",
-        annotations(
-            title = "Run an app action",
-            read_only_hint = false,
-            destructive_hint = true,
-            idempotent_hint = false,
-            open_world_hint = true
-        ),
-        meta = oauth_tool_meta(&["mcp:read", "mcp:write"])
-    )]
-    async fn call_action(
-        &self,
-        Parameters(input): Parameters<CallActionInput>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<Json<ToolOutput>, String> {
-        let identity = identity_from_context(&context)?;
-        let pool = self.runtime.pool();
-        let declaration = Declaration::load(pool, &input.app, &input.action).await.map_err(tool_error)?;
-        let (_, permissions) = resolve_permissions(pool, identity.user_id).await.map_err(tool_error)?;
-        // Grants first: a caller without them learns nothing about the declaration.
-        authorize(&input.app, &input.action, declaration.as_ref(), &permissions, true).map_err(tool_error)?;
-        require_scopes(&context, scopes(declaration.as_ref().is_some_and(|d| d.read_only)))?;
-        let caller = crate::ipc::RpcCaller::person(identity.user_id, &identity.email);
-        let dispatcher = self.runtime.worker_manager().action_caller();
-        let result = dispatch(dispatcher.as_ref(), &input.app, &input.action, declaration.as_ref(), JsonValue::Object(input.input), caller)
-            .await.map_err(tool_error)?;
-        Ok(Json(ToolOutput { result: minimized(result) }))
-    }
-
-    /// Use this to create one record in an app entity when no app action fits:
-    /// actions apply the app's rules. Creates a single record, nothing else.
-    #[tool(
-        name = "create_record",
-        annotations(
-            title = "Create a record",
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = false
-        ),
-        meta = oauth_tool_meta(scopes(false))
-    )]
-    async fn create_record(
-        &self,
-        Parameters(input): Parameters<CreateRecordInput>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<Json<ToolOutput>, String> {
-        let args = json!({"app": input.app, "entity": input.entity, "action": "create", "data": input.data});
-        self.mutate(&context, input.app, args).await
-    }
-
-    /// Use this to change fields of one existing record when no app action fits:
-    /// actions apply the app's rules. Overwrites only the given fields.
-    #[tool(
-        name = "update_record",
-        annotations(
-            title = "Update a record",
-            read_only_hint = false,
-            destructive_hint = true,
-            idempotent_hint = true,
-            open_world_hint = false
-        ),
-        meta = oauth_tool_meta(scopes(false))
-    )]
-    async fn update_record(
-        &self,
-        Parameters(input): Parameters<UpdateRecordInput>,
-        context: RequestContext<RoleServer>,
-    ) -> Result<Json<ToolOutput>, String> {
-        let args = json!({"app": input.app, "entity": input.entity, "action": "update", "id": input.id, "data": input.data});
-        self.mutate(&context, input.app, args).await
-    }
-
     /// Use this to store a file the person gave you (a PDF or an image) in an
     /// app, then pass the returned file_id to the action input that expects it.
     #[tool(
@@ -384,53 +290,25 @@ impl RootCxMcp {
 }
 
 impl RootCxMcp {
-    /// One operation per tool (hosts must never choose it through an argument),
-    /// each run by the registry's `mutate_data` with the person's permissions.
-    async fn mutate(&self, context: &RequestContext<RoleServer>, app: String, args: JsonValue) -> Result<Json<ToolOutput>, String> {
-        require_scopes(context, scopes(false))?;
+    /// The tools Core generates from the installed apps for this person (ADR 0016).
+    async fn app_tools(&self, context: &RequestContext<RoleServer>) -> Result<Vec<Tool>, String> {
         let identity = identity_from_context(context)?;
-        let result = crate::tools::routes::execute_as_person(&self.runtime, &identity, "mutate_data", app, args, true)
-            .await.map_err(tool_error)?;
-        Ok(Json(ToolOutput { result: minimized(result) }))
+        let pool = self.runtime.pool();
+        let (_, permissions) = resolve_permissions(pool, identity.user_id).await.map_err(tool_error)?;
+        crate::mcp_app_tools::list(pool, &permissions).await.map_err(tool_error)
     }
-}
 
-/// Core's governed read tools, served from the tool registry as registered:
-/// one implementation and one descriptor for agents, HTTP and MCP (ADR 0015).
-const REGISTRY_TOOLS: [&str; 2] = ["describe_app", "query_data"];
-
-fn registry_route(runtime: &SharedRuntime, name: &'static str) -> Option<ToolRoute<RootCxMcp>> {
-    let (descriptor, annotations) = runtime.tool_registry().http_descriptors().into_iter().find(|(d, _)| d.name == name)?;
-    let scopes = scopes(annotations.as_ref().is_some_and(|hints| hints.read_only_hint == Some(true)));
-    let schema = descriptor.input_schema.as_object()?.clone();
-    let mut tool = rmcp::model::Tool::new(name, descriptor.description, Arc::new(schema)).with_meta(oauth_tool_meta(scopes));
-    if let Some(hints) = annotations {
-        tool = tool.with_annotations(
-            rmcp::model::ToolAnnotations::new()
-                .read_only(hints.read_only_hint.unwrap_or(false))
-                .destructive(hints.destructive_hint.unwrap_or(true))
-                .idempotent(hints.idempotent_hint.unwrap_or(false))
-                .open_world(hints.open_world_hint.unwrap_or(true)),
-        );
+    /// One generated tool, resolved by the same decision that lists it.
+    async fn call_app_tool(&self, name: &str, input: JsonObject, context: &RequestContext<RoleServer>) -> Result<JsonValue, String> {
+        let identity = identity_from_context(context)?;
+        let pool = self.runtime.pool();
+        let (_, permissions) = resolve_permissions(pool, identity.user_id).await.map_err(tool_error)?;
+        let Some(operation) = crate::mcp_app_tools::resolve(pool, &permissions, name).await.map_err(tool_error)? else {
+            return Err(format!("No installed app offers the tool '{name}' to you. The app must be installed in this workspace, and you must be allowed to use it."));
+        };
+        require_scopes(context, scopes(operation.read_only()))?;
+        operation.run(&self.runtime, &identity, input).await
     }
-    Some(ToolRoute::new_dyn(tool, move |call: ToolCallContext<'_, RootCxMcp>| {
-        Box::pin(async move {
-            let outcome = run_registry_tool(&call, name, scopes).await;
-            Ok(match outcome {
-                Ok(result) => CallToolResult::structured(json!({ "result": minimized(result) })),
-                Err(error) => CallToolResult::error(vec![ContentBlock::text(error)]),
-            }.into())
-        })
-    }))
-}
-
-async fn run_registry_tool(call: &ToolCallContext<'_, RootCxMcp>, name: &str, scopes: &[&str]) -> Result<JsonValue, String> {
-    require_scopes(&call.request_context, scopes)?;
-    let identity = identity_from_context(&call.request_context)?;
-    let args = JsonValue::Object(call.arguments.clone().unwrap_or_default());
-    let app = args.get("app").and_then(JsonValue::as_str).ok_or("missing: app")?.to_string();
-    crate::tools::routes::execute_as_person(&call.service.runtime, &identity, name, app, args, true)
-        .await.map_err(tool_error)
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -439,9 +317,36 @@ impl ServerHandler for RootCxMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("RootCX", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Start with get_project_context, then describe_app for the app you need: it lists the records you may read and the actions you may run. Prefer an app action (call_action) to raw record changes: actions apply the app's rules. Use query_data to read, create_record to add and update_record to change a record. You cannot delete records or run actions reserved for people; say the person does it in the app. Never invent names, amounts or terms. For application work, keep source code in the local workspace and use the RootCX CLI to scaffold, build, test, and deploy. Never send application source code through MCP and never invent manifest fields."
+                "Start with get_project_context: it lists the installed apps, their instructions and the workspace address. Each action an app lets an assistant run is its own tool, named <app id>__<action id>, and each record type you may read has a read-only tool, <app id>__<entity>__list; follow the app's instructions, and prefer an action when one fits. Records change only through app actions. A tool of an app this workspace has not installed fails: say the person installs the app first. You cannot delete records or run actions reserved for people; say the person does it in the app. Never invent names, amounts or terms. For application work, keep source code in the local workspace and use the RootCX CLI to scaffold, build, test, and deploy. Never send application source code through MCP and never invent manifest fields."
                     .to_string(),
             )
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        let mut tools = self.tool_router.list_all();
+        tools.extend(self.app_tools(&context).await.map_err(|error| ErrorData::internal_error(error, None))?);
+        // The list follows the caller's grants and installed apps: no cache may share it.
+        Ok(ListToolsResult::with_all_items(tools).with_cache_scope(CacheScope::Private))
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        if self.tool_router.has_route(&request.name) {
+            return self.tool_router.call(ToolCallContext::new(self, request, context)).await;
+        }
+        let outcome = self.call_app_tool(&request.name, request.arguments.unwrap_or_default(), &context).await;
+        Ok(match outcome {
+            Ok(result) => CallToolResult::structured(json!({ "result": minimized(result) })),
+            Err(error) => CallToolResult::error(vec![ContentBlock::text(error)]),
+        }
+        .into())
     }
 }
 
@@ -644,24 +549,6 @@ mod tests {
                 json!([{ "type": "oauth2", "scopes": ["mcp:read"] }]),
             ),
             (
-                RootCxMcp::create_record_tool_attr(),
-                false,
-                false,
-                Some(false),
-                json!([{
-                    "type": "oauth2", "scopes": ["mcp:read", "mcp:write"]
-                }]),
-            ),
-            (
-                RootCxMcp::update_record_tool_attr(),
-                false,
-                true,
-                Some(true),
-                json!([{
-                    "type": "oauth2", "scopes": ["mcp:read", "mcp:write"]
-                }]),
-            ),
-            (
                 RootCxMcp::upload_file_tool_attr(),
                 false,
                 false,
@@ -671,13 +558,6 @@ mod tests {
                 }]),
             ),
         ];
-        let call_action = RootCxMcp::call_action_tool_attr();
-        let hints = call_action.annotations.expect("call_action hints");
-        assert_eq!(
-            (hints.read_only_hint, hints.destructive_hint, hints.open_world_hint),
-            (Some(false), Some(true), Some(true)),
-            "one tool runs any declared action, so it claims the worst case",
-        );
 
         for (tool, read_only, destructive, idempotent, security_schemes) in tools {
             let annotations = tool.annotations.expect("tool safety annotations");

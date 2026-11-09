@@ -298,7 +298,6 @@ async fn execute_tool_node(
             stream_tx: None,
             // Stable across attempts and resume: same (exec, node, item) → same key.
             idempotency_key: Some(format!("{idem_base}:{i}")),
-            via_mcp: false,
         };
 
         let outcome = crate::tools::dispatch(tool_name, tool.clone(), &ctx).await;

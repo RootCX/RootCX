@@ -57,13 +57,12 @@ pub async fn execute_tool(
     Path(tool_name): Path<String>,
     Json(body): Json<ExecuteToolRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
-    Ok(Json(execute_as_person(&rt, &identity, &tool_name, body.app_id, body.args, false).await?))
+    Ok(Json(execute_as_person(&rt, &identity, &tool_name, body.app_id, body.args).await?))
 }
 
-/// Runs a registry tool with the person's own permissions, outside agent
-/// execution. `via_mcp` marks an external assistant acting for them (ADR 0015).
+/// Runs a registry tool with the person's own permissions, outside agent execution.
 pub(crate) async fn execute_as_person(
-    rt: &SharedRuntime, identity: &Identity, tool_name: &str, app_id: String, args: JsonValue, via_mcp: bool,
+    rt: &SharedRuntime, identity: &Identity, tool_name: &str, app_id: String, args: JsonValue,
 ) -> Result<JsonValue, ApiError> {
     let tool = rt.tool_registry().get(tool_name)
         .ok_or_else(|| ApiError::NotFound(format!("unknown tool: '{tool_name}'")))?;
@@ -85,7 +84,6 @@ pub(crate) async fn execute_as_person(
         permissions, task_scope: None, args,
         agent_dispatch: None, integration_caller: None, action_caller: None, stream_tx: None,
         idempotency_key: None,
-        via_mcp,
     };
     match super::dispatch(tool_name, tool, &ctx).await.value {
         Ok(v) => Ok(v),

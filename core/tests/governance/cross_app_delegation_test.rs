@@ -169,7 +169,6 @@ async fn delegated_grants_respect_task_scope_and_own_requires_an_owned_table() {
                     action_caller: None,
                     stream_tx: None,
                     idempotency_key: None,
-                    via_mcp: false,
                 };
                 for offset in [0, 100] {
                     ctx.args = json!({
