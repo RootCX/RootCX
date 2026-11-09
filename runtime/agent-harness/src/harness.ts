@@ -9,6 +9,8 @@ import { CoreState, type StateRequest } from "./state";
 import { CoreCheckpointer } from "./checkpointer";
 import { CoreStore } from "./store";
 import { GovernedSandbox } from "./sandbox";
+import { steering, type Inbox, type InboxFile } from "./steering";
+export type { Inbox, InboxMessage } from "./steering";
 
 export type Descriptor = { name: string; description: string; inputSchema: Record<string, any> };
 export type Attachment = { name: string; content_type: string; url: string; file_id: string };
@@ -18,6 +20,8 @@ export type Bridge = {
   state: StateRequest;
   callTool: (name: string, args: unknown) => Promise<any>;
   chunk: (delta: string) => void;
+  /** Messages the person sends during the turn; absent for sub-invocations. */
+  inbox?: Inbox;
 };
 const instructions = `
 You operate inside RootCX with the responsible person's delegated authority. Core authorizes and audits tools; neither you nor a subagent can grant permissions.
@@ -50,17 +54,27 @@ export async function runHarness(boot: Boot, invoke: Invoke, model: BaseChatMode
     const result = await backend.uploadFiles([[path, Buffer.from(content)]]);
     if (result[0]?.error) throw new Error(`Cannot load agent instructions: ${path}`);
   }
-  const references: string[] = [];
-  for (const attachment of invoke.attachments ?? []) {
-    const response = await fetch(attachment.url);
-    if (!response.ok) throw new Error(`Cannot read attachment ${attachment.name}: HTTP ${response.status}`);
-    const content = new Uint8Array(await response.arrayBuffer());
-    const filename = attachment.name.replace(/[^\p{L}\p{N}._-]/gu, "_").slice(-180);
-    const path = `/attachments/${attachment.file_id}/${filename}`;
-    const result = await files.uploadFiles([[path, content]]);
-    if (result[0]?.error) throw new Error(`Cannot preserve attachment: ${attachment.name}`);
-    references.push(`${attachment.name} (${attachment.content_type}): ${path}; file_id ${attachment.file_id}`);
-  }
+  // Files from the first message and from messages sent during the turn land alike.
+  const preserve = async (received: InboxFile[]) => {
+    const references: string[] = [];
+    for (const attachment of received) {
+      const response = await fetch(attachment.url);
+      if (!response.ok) throw new Error(`Cannot read attachment ${attachment.name}: HTTP ${response.status}`);
+      const content = new Uint8Array(await response.arrayBuffer());
+      const filename = attachment.name.replace(/[^\p{L}\p{N}._-]/gu, "_").slice(-180);
+      const path = `/attachments/${attachment.file_id}/${filename}`;
+      const result = await files.uploadFiles([[path, content]]);
+      if (result[0]?.error) throw new Error(`Cannot preserve attachment: ${attachment.name}`);
+      references.push(`${attachment.name} (${attachment.content_type}): ${path}; file_id ${attachment.file_id}`);
+    }
+    return references;
+  };
+  const references = await preserve(invoke.attachments ?? []);
+  const steer = bridge.inbox && !invoke.is_sub_invoke ? steering(bridge.inbox, async received => {
+    attachments.push(...received.map(({ url, ...a }) => ({ ...a, url: "" })));
+    await store.put(["rootcx"], attachmentKey, { files: attachments });
+    return preserve(received);
+  }) : undefined;
   // Business actions may depend on writes issued earlier in the same model turn.
   // Share the queue with subagents; a failed action must not poison later calls.
   let businessQueue: Promise<unknown> = Promise.resolve();
@@ -102,7 +116,7 @@ export async function runHarness(boot: Boot, invoke: Invoke, model: BaseChatMode
   });
   const agent = createDeepAgent({
     name: boot.definition.name, model, tools, systemPrompt, backend, checkpointer, store,
-    middleware: [budget, retry, todoListMiddleware(), pinSkills],
+    middleware: [budget, retry, todoListMiddleware(), pinSkills, ...(steer ? [steer.middleware] : [])],
     memory: ["/instructions/AGENTS.md", "/memories/AGENTS.md"], skills: ["/skills/"],
     permissions: [{ operations: ["write"], paths: ["/attachments/**", "/instructions/**", "/skills/**"], mode: "deny" }],
     subagents: [{ name: "general-purpose", description: "Delegate a focused analysis or independent subtask. Business operations retain Core supervision.",
@@ -138,11 +152,11 @@ export async function runHarness(boot: Boot, invoke: Invoke, model: BaseChatMode
   const input = { memoryContents: undefined, skillsMetadata: null, messages: [...history, ...interrupted, { role: "user", content: message }] };
   const stream = await agent.stream(input,
     { ...config, callbacks: [usage], streamMode: "values", durability: "sync" });
-  let finalMessage: AIMessage | undefined;
-  for await (const value of stream) {
-    const last = value.messages?.at(-1);
-    if (last && isAIMessage(last) && !last.tool_calls?.length) finalMessage = last;
-  }
+  // Only the last state answers: a reply the person interrupted is not the answer.
+  let last: BaseMessage | undefined;
+  for await (const value of stream) last = value.messages?.at(-1) ?? last;
+  if (steer?.run.stopped) return { response: "", tokens, stopped: true as const };
+  const finalMessage = last && isAIMessage(last) && !last.tool_calls?.length ? last : undefined;
   if (!finalMessage?.text) throw new Error("Agent ended without a final response");
   bridge.chunk(finalMessage.text);
   return { response: finalMessage.text, tokens };

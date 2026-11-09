@@ -749,6 +749,11 @@ impl WorkerManager {
             &self.pool, app_id, payload.invoker_user_id, payload.task_scope.clone(), source,
         ).await.map_err(RuntimeError::Delegation)?;
         let session_lock = crate::agent_harness::admit_session(&self.pool, &authority, &payload.session_id).await?;
+        // Only the built-in harness reads messages sent during its turn.
+        let inbox = !payload.is_sub_invoke && crate::extensions::agents::inbox::open_for(
+            &self.pool, app_id, &payload.session_id, &payload.invoke_id,
+        ).await.map_err(RuntimeError::Database)?;
+        let invoke_id = payload.invoke_id.clone();
         let agent_uid = crate::extensions::agents::agent_user_id(app_id);
         let effective_perms = authority.ceiling().to_vec();
         let identity = crate::governance::enforcement::ContextState {
@@ -794,6 +799,12 @@ impl WorkerManager {
                 // A terminal event must release authority and the session immediately.
                 let terminal = matches!(event, AgentEvent::Done { .. } | AgentEvent::Error { .. });
                 if outer_tx.send(event).await.is_err() || terminal { break; }
+            }
+            // However the turn ended, a later message must not wait for it.
+            if inbox {
+                if let Err(error) = crate::extensions::agents::inbox::close(&pool, &invoke_id).await {
+                    warn!(%error, %session_id, "agent inbox close failed");
+                }
             }
             lifetime.finish();
         });

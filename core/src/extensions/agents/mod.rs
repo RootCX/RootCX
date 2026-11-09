@@ -1,6 +1,7 @@
 pub(crate) mod approvals;
 pub(crate) mod attachments;
 pub(crate) mod config;
+pub(crate) mod inbox;
 pub(crate) mod persistence;
 pub(crate) mod routes;
 pub(crate) mod streaming;
@@ -88,7 +89,7 @@ impl RuntimeExtension for AgentExtension {
             )",
             "CREATE INDEX IF NOT EXISTS idx_agent_tool_calls_session
                 ON rootcx_system.agent_tool_calls (session_id, created_at)",
-        ] {
+        ].into_iter().chain(inbox::DDL) {
             sqlx::query(ddl).execute(pool).await.map_err(RuntimeError::Schema)?;
         }
 

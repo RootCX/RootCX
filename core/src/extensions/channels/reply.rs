@@ -5,13 +5,31 @@ use base64::Engine;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-pub async fn reply(ctx: &ToolContext) -> Result<Value, String> {
+/// The conversation this agent turn serves, still linked to the same person.
+async fn current(ctx: &ToolContext) -> Result<(Uuid, String, super::origin::ChannelSession, Vec<String>), String> {
     let authority = ctx.delegated_authority().ok_or("Channel reply requires delegated agent authority")?;
     let key = authority.owner().origin.ok_or("No current channel conversation")?;
     let (channel, chat, _): (Uuid, String, Uuid) = serde_json::from_str(&key).map_err(|_| "No current channel conversation")?;
     let origin = super::origin::ChannelSession::load(&ctx.pool, &channel.to_string(), &chat, authority.human(), authority.app()).await?;
     if origin.key() != key { return Err("Channel delegation changed".into()); }
     let perms = authority.revalidate(&ctx.pool).await?;
+    Ok((channel, chat, origin, perms))
+}
+
+pub async fn reply_now(ctx: &ToolContext) -> Result<Value, String> {
+    let text = str_arg(&ctx.args, "text")?.trim();
+    if text.is_empty() || text.chars().count() > 500 { return Err("A short text of 1 to 500 characters is required".into()); }
+    let (channel, chat, _, _) = current(ctx).await?;
+    let (provider, config): (String, Value) = sqlx::query_as("SELECT provider,config FROM rootcx_system.channels WHERE id=$1 AND status='active'")
+        .bind(channel).fetch_one(&ctx.pool).await.map_err(|e| e.to_string())?;
+    let sender = super::provider_for(&provider, &config).ok_or("Unknown channel provider")?;
+    sender.send_response(&config, &chat, text).await.map_err(|e| e.to_string())?;
+    Ok(json!({"delivered":true,"destination":"current_conversation"}))
+}
+
+pub async fn reply(ctx: &ToolContext) -> Result<Value, String> {
+    let authority = ctx.delegated_authority().ok_or("Channel reply requires delegated agent authority")?;
+    let (channel, chat, origin, perms) = current(ctx).await?;
     let app = str_arg(&ctx.args, "app_id")?;
     check_permission(&perms, &format!("app:{app}:storage.read"))?;
     let file = str_arg(&ctx.args, "file_id")?.parse::<Uuid>().map_err(|_| "Invalid file ID")?;

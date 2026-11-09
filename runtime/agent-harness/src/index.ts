@@ -64,6 +64,8 @@ async function invoke(m: Invoke) {
       state: (op, namespace, key, value) => request({ type: "agent_state", invoke_id: m.invoke_id, op, namespace, key, value }, 60_000),
       callTool: (tool_name, args) => request({ type: "agent_tool_call", invoke_id: m.invoke_id, tool_name, args }, 15 * 60_000),
       chunk: delta => write({ type: "agent_chunk", invoke_id: m.invoke_id, delta }),
+      inbox: m.is_sub_invoke ? undefined : final =>
+        request({ type: "agent_state", invoke_id: m.invoke_id, op: "drain", namespace: "inbox", key: "", value: { final } }, 60_000),
     }, prompt, await assets());
     write({ type: "agent_done", invoke_id: m.invoke_id, ...result });
   } catch (error: any) {

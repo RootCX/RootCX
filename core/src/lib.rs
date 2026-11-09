@@ -112,6 +112,7 @@ impl Runtime {
         tool_registry.register(tools::list_actions::ListActionsTool);
         tool_registry.register(tools::call_action::CallActionTool);
         tool_registry.register(tools::reply_file::ReplyFileTool);
+        tool_registry.register(tools::reply_now::ReplyNowTool);
         if tools::execute_sandbox::available() { tool_registry.register(tools::execute_sandbox::ExecuteSandboxTool); }
 
         let mcp_manager = Arc::new(McpManager::new(Arc::clone(&tool_registry), bun_bin.clone()));

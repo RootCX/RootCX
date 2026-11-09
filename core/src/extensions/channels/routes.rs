@@ -190,7 +190,14 @@ pub async fn webhook(
     let channel = channel_id.parse().map_err(|_| ApiError::BadRequest("invalid channel".into()))?;
     match super::intake::admit(rt.pool(), channel, &delivery, &chat, is_message).await? {
         super::intake::Admission::Duplicate(status, code) => return Ok(Json(json!({"ok":true,"duplicate":true,"status":status,"errorCode":code}))),
-        super::intake::Admission::Busy => return Err(ApiError::Conflict("conversation busy; resend after the current request".into())),
+        super::intake::Admission::Busy => {
+            if let InboundEvent::Message { chat_id, text, media, .. } = &event {
+                if let Some(reply) = steer(&rt, &channel_id, &config, provider.as_ref(), channel, &delivery, chat_id, text, media).await? {
+                    return Ok(Json(reply));
+                }
+            }
+            return Err(ApiError::Conflict("conversation busy; resend after the current request".into()));
+        }
         super::intake::Admission::Ready => {}
     }
     // Managed gateways wait for a terminal receipt; native webhooks acknowledge promptly.
@@ -212,6 +219,53 @@ pub async fn webhook(
         }
     });
     Ok(Json(json!({"ok":true,"status":"processing"})))
+}
+
+fn is_stop(text: &str) -> bool {
+    matches!(text.trim().to_lowercase().as_str(), "stop" | "/stop")
+}
+
+/// A message sent during this conversation's turn joins that turn, or stops it.
+/// None when no turn will read it: the sender keeps its usual retry.
+#[allow(clippy::too_many_arguments)]
+async fn steer(
+    rt: &SharedRuntime, channel_id: &str, config: &JsonValue, provider: &dyn ChannelProvider,
+    channel: uuid::Uuid, delivery: &str, chat_id: &str, text: &str, media: &[MediaRef],
+) -> Result<Option<JsonValue>, ApiError> {
+    use agents::inbox;
+    let pool = rt.pool();
+    let Some((app_id, session)) = sqlx::query_as::<_, (String, uuid::Uuid)>(
+        "SELECT app_id, session_id FROM rootcx_system.channel_sessions WHERE channel_id=$1::uuid AND external_chat_id=$2",
+    ).bind(channel_id).bind(chat_id).fetch_optional(pool).await? else { return Ok(None) };
+    let Some(human) = resolve_invoker(pool, channel_id, chat_id).await else { return Ok(None) };
+    let origin = ChannelSession::load(pool, channel_id, chat_id, human, &app_id).await.map_err(ApiError::Forbidden)?;
+    if media.is_empty() && is_stop(text) {
+        let stopping = inbox::stop(pool, session).await?;
+        for approval in rt.pending_approvals().list(&app_id, &origin.owner(human)).await {
+            if approval.session_id == session.to_string() {
+                rt.pending_approvals().cancel(&approval.approval_id, "the person asked to stop").await;
+            }
+        }
+        super::intake::record_steered(pool, channel, delivery).await?;
+        return Ok(Some(json!({"ok": true, "status": "done", "command": "stop", "stopping": stopping})));
+    }
+    // Avoid storing files for a turn that has already ended.
+    if !inbox::is_open(pool, session).await? { return Ok(None); }
+    agents::attachments::validate_count(media.len())?;
+    let downloaded = join_all(media.iter().map(|m| provider.download_media(config, m))).await;
+    let files = downloaded.into_iter().collect::<Option<Vec<_>>>()
+        .ok_or_else(|| ApiError::BadRequest("could not load the attached media".into()))?;
+    let attachments = agents::attachments::received(rt, &app_id, human, files).await?;
+    let content = agents::attachments::with_file_references(text.to_string(), attachments.as_deref());
+    let stored: Vec<inbox::StoredFile> = attachments.unwrap_or_default().into_iter()
+        .map(|f| inbox::StoredFile { file_id: f.file_id, name: f.name, content_type: f.content_type }).collect();
+    match inbox::push(pool, session, delivery, &content, &stored).await? {
+        inbox::Push::NotRunning => Ok(None),
+        inbox::Push::Accepted | inbox::Push::Duplicate => {
+            super::intake::record_steered(pool, channel, delivery).await?;
+            Ok(Some(json!({"ok": true, "status": "steered"})))
+        }
+    }
 }
 
 async fn process_event(
@@ -253,7 +307,8 @@ fn channel_message(text: &str, provider_name: &str, locale: Option<ConversationL
     };
     format!(
         "Channel response instructions: Reply entirely in the language of the user message below, unless the user requests another language.{language_context} \
-         Do not narrate tool use or announce what you are about to check; give the result directly.{formatting_context}\n\nUser message:\n{text}"
+         Do not narrate tool use or announce what you are about to check; give the result directly. \
+         One exception: when the person sends a message while you work, confirm it in one short sentence with reply_now.{formatting_context}\n\nUser message:\n{text}"
     )
 }
 
@@ -293,8 +348,9 @@ async fn do_invoke(
     let user_turn = agents::attachments::with_file_references(text.to_string(), attachments.as_deref());
     let message = channel_message(&user_turn, provider_name, locale);
 
+    let invoke_id = uuid::Uuid::new_v4().to_string();
     let payload = AgentInvokePayload {
-        invoke_id: uuid::Uuid::new_v4().to_string(),
+        invoke_id: invoke_id.clone(),
         session_id: session_id.clone(),
         message,
         history, is_sub_invoke: false, llm, invoker_user_id,
@@ -334,6 +390,9 @@ async fn do_invoke(
         let uid = agents::agent_user_id(&app_id);
         let _ = persistence::ensure_session(pool, &session_id, &app_id, uid).await;
         let _ = persistence::persist_message(pool, &session_id, "user", &user_turn, None, false).await;
+        for steered in agents::inbox::delivered(pool, &invoke_id).await.unwrap_or_default() {
+            let _ = persistence::persist_message(pool, &session_id, "user", &steered, None, false).await;
+        }
         let _ = persistence::finalize_session(pool, &session_id, &user_turn, &response, tokens).await;
     }
     if let Err(e) = provider.send_response(config, chat_id, &response).await {

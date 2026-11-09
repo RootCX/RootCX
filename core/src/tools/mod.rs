@@ -1,5 +1,6 @@
 pub mod delete_app;
 pub mod reply_file;
+pub mod reply_now;
 pub mod call_action;
 pub mod call_integration;
 pub mod cli;

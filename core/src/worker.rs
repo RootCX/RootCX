@@ -1297,6 +1297,22 @@ async fn supervisor_loop(
                                 let _ = tx.send(AgentEvent::Error { error }).await;
                             }
                         }
+                        InboundMessage::AgentState { invoke_id, id, op, namespace, value, .. } if namespace == "inbox" => {
+                            let session = agent_runs.get(&invoke_id).map(|run| (run.session_id.clone(), run.authority.app().to_string()));
+                            let (pool, nonces, runtime_url) = (config.pool.clone(), config.upload_nonces.clone(), config.runtime_url.clone());
+                            let out_tx = outbound_tx.clone();
+                            tokio::spawn(async move {
+                                let result = match session {
+                                    Some((session, app)) if op == "drain" => crate::extensions::agents::inbox::drain_for_harness(
+                                        &pool, &nonces, &runtime_url, &app, &session, &invoke_id, value["final"] == true,
+                                    ).await,
+                                    Some(_) => Err("unsupported inbox operation".into()),
+                                    None => Err("agent invocation is not active".into()),
+                                };
+                                let (result, error) = match result { Ok(value) => (Some(value), None), Err(error) => (None, Some(error)) };
+                                let _ = out_tx.send(OutboundMessage::AgentStateResult { id, result, error }).await;
+                            });
+                        }
                         InboundMessage::AgentState { invoke_id, id, op, namespace, key, value } => {
                             let authority = agent_runs.get(&invoke_id).map(|run| (run.authority.clone(), run.session_id.clone()));
                             let pool = config.pool.clone();

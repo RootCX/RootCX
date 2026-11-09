@@ -89,6 +89,14 @@ pub(super) async fn admit(
     Ok(Admission::Ready)
 }
 
+/// A message handed to a running turn is done for the sender: redelivery is a duplicate.
+pub(super) async fn record_steered(pool: &PgPool, channel: Uuid, delivery: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO rootcx_system.channel_receipts(channel_id, delivery_id, is_message, status)
+        VALUES($1,$2,false,'steered') ON CONFLICT DO NOTHING")
+        .bind(channel).bind(delivery).execute(pool).await?;
+    Ok(())
+}
+
 pub(super) async fn finish(
     pool: &PgPool,
     channel: Uuid,

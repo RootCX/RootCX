@@ -15,6 +15,6 @@ impl Tool for ReplyFileTool {
         }
     }
     async fn execute(&self, ctx: &ToolContext) -> Result<Value, String> {
-        crate::extensions::channels::reply_file::reply(ctx).await
+        crate::extensions::channels::reply::reply(ctx).await
     }
 }
