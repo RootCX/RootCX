@@ -79,13 +79,14 @@ pub struct ToolContext {
     /// Tools that cause side effects use it to make a retry / crash-resume a no-op
     /// instead of a duplicate. `None` outside durable workflow runs.
     pub idempotency_key: Option<String>,
+    /// Set by Core's MCP server only: an external assistant acts for this person.
+    pub via_mcp: bool,
 }
 
 impl ToolContext {
-    /// Agent runs: assistant rules apply (ADR 0015). MCP clients reach actions
-    /// through their own tools, which apply them in `action_invocation`.
+    /// Agent runs and MCP clients: assistant rules apply (ADR 0015).
     pub fn is_assistant(&self) -> bool {
-        self.authority.is_some()
+        self.authority.is_some() || self.via_mcp
     }
 
     /// Only Core agent dispatch can supply this authority; app IDs, roles and
@@ -307,6 +308,7 @@ mod tests {
             permissions: perms, task_scope: None, args: json!({}),
             agent_dispatch: None, integration_caller: None, action_caller: None, stream_tx: None,
             idempotency_key: None,
+            via_mcp: false,
         }
     }
 

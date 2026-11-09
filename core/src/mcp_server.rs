@@ -1,7 +1,7 @@
 //! Official inbound MCP interface for RootCX.
 //!
-//! MCP exposes authenticated workspace context and the tools Core generates
-//! from installed apps (`mcp_app_tools`): one per action, one read per entity.
+//! MCP exposes authenticated workspace context and, through `mcp_tools`, the
+//! Core tools a person may call plus one tool per declared app action.
 //! Application source code stays in the user's local workspace; the RootCX
 //! CLI owns scaffolding, builds, tests, and deployment.
 
@@ -290,21 +290,19 @@ impl RootCxMcp {
 }
 
 impl RootCxMcp {
-    /// The tools Core generates from the installed apps for this person (ADR 0016).
-    async fn app_tools(&self, context: &RequestContext<RoleServer>) -> Result<Vec<Tool>, String> {
+    /// The Core and action tools offered to this person (ADR 0016).
+    async fn offered_tools(&self, context: &RequestContext<RoleServer>) -> Result<Vec<Tool>, String> {
         let identity = identity_from_context(context)?;
-        let pool = self.runtime.pool();
-        let (_, permissions) = resolve_permissions(pool, identity.user_id).await.map_err(tool_error)?;
-        crate::mcp_app_tools::list(pool, &permissions).await.map_err(tool_error)
+        let (_, permissions) = resolve_permissions(self.runtime.pool(), identity.user_id).await.map_err(tool_error)?;
+        crate::mcp_tools::list(&self.runtime, &permissions).await.map_err(tool_error)
     }
 
-    /// One generated tool, resolved by the same decision that lists it.
-    async fn call_app_tool(&self, name: &str, input: JsonObject, context: &RequestContext<RoleServer>) -> Result<JsonValue, String> {
+    /// One offered tool, resolved by the same decision that lists it.
+    async fn call_offered_tool(&self, name: &str, input: JsonObject, context: &RequestContext<RoleServer>) -> Result<JsonValue, String> {
         let identity = identity_from_context(context)?;
-        let pool = self.runtime.pool();
-        let (_, permissions) = resolve_permissions(pool, identity.user_id).await.map_err(tool_error)?;
-        let Some(operation) = crate::mcp_app_tools::resolve(pool, &permissions, name).await.map_err(tool_error)? else {
-            return Err(format!("No installed app offers the tool '{name}' to you. The app must be installed in this workspace, and you must be allowed to use it."));
+        let (_, permissions) = resolve_permissions(self.runtime.pool(), identity.user_id).await.map_err(tool_error)?;
+        let Some(operation) = crate::mcp_tools::resolve(&self.runtime, &permissions, name).await.map_err(tool_error)? else {
+            return Err(format!("The tool '{name}' is not offered to you: its app must be installed in this workspace, and you must be allowed to use it."));
         };
         require_scopes(context, scopes(operation.read_only()))?;
         operation.run(&self.runtime, &identity, input).await
@@ -317,7 +315,7 @@ impl ServerHandler for RootCxMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("RootCX", env!("CARGO_PKG_VERSION")))
             .with_instructions(
-                "Start with get_project_context: it lists the installed apps, their instructions and the workspace address. Each action an app lets an assistant run is its own tool, named <app id>__<action id>, and each record type you may read has a read-only tool, <app id>__<entity>__list; follow the app's instructions, and prefer an action when one fits. Records change only through app actions. A tool of an app this workspace has not installed fails: say the person installs the app first. You cannot delete records or run actions reserved for people; say the person does it in the app. Never invent names, amounts or terms. For application work, keep source code in the local workspace and use the RootCX CLI to scaffold, build, test, and deploy. Never send application source code through MCP and never invent manifest fields."
+                "Start with get_project_context: it lists the installed apps, their instructions and the workspace address. describe_app gives an app's records and fields. Each action an app lets an assistant run is its own tool, named <app id>__<action id>; prefer an action when one fits, since it applies the app's rules. query_data reads records and mutate_data creates or updates them. A tool of an app this workspace has not installed fails: say the person installs the app first. You cannot delete records or run actions reserved for people; say the person does it in the app. Never invent names, amounts or terms. For application work, keep source code in the local workspace and use the RootCX CLI to scaffold, build, test, and deploy. Never send application source code through MCP and never invent manifest fields."
                     .to_string(),
             )
     }
@@ -328,7 +326,7 @@ impl ServerHandler for RootCxMcp {
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ErrorData> {
         let mut tools = self.tool_router.list_all();
-        tools.extend(self.app_tools(&context).await.map_err(|error| ErrorData::internal_error(error, None))?);
+        tools.extend(self.offered_tools(&context).await.map_err(|error| ErrorData::internal_error(error, None))?);
         // The list follows the caller's grants and installed apps: no cache may share it.
         Ok(ListToolsResult::with_all_items(tools).with_cache_scope(CacheScope::Private))
     }
@@ -341,7 +339,7 @@ impl ServerHandler for RootCxMcp {
         if self.tool_router.has_route(&request.name) {
             return self.tool_router.call(ToolCallContext::new(self, request, context)).await;
         }
-        let outcome = self.call_app_tool(&request.name, request.arguments.unwrap_or_default(), &context).await;
+        let outcome = self.call_offered_tool(&request.name, request.arguments.unwrap_or_default(), &context).await;
         Ok(match outcome {
             Ok(result) => CallToolResult::structured(json!({ "result": minimized(result) })),
             Err(error) => CallToolResult::error(vec![ContentBlock::text(error)]),

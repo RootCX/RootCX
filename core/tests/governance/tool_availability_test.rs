@@ -149,6 +149,7 @@ async fn http_rejects_agent_tools_after_auth_checks_but_executes_data_tools() {
         action_caller: None,
         stream_tx: None,
         idempotency_key: None,
+        via_mcp: false,
     };
     let rows = rootcx_core::tools::query_data::QueryDataTool.execute(&bound).await.unwrap();
     assert_eq!(rows, json!([]), "bound actor without a human must not read existing rows");

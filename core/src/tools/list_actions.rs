@@ -42,7 +42,7 @@ impl Tool for ListActionsTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
             name: "list_actions".into(),
-            description: "List actions exposed by installed apps. Actions are callable via call_action. Returns app ID, action definitions (id, name, description, inputSchema, optional annotations), and usage instructions.".into(),
+            description: "List actions exposed by installed apps. Agents run them with call_action; over MCP each is its own tool, <app id>__<action id>. Returns app ID, action definitions (id, name, description, inputSchema, optional annotations), and usage instructions.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

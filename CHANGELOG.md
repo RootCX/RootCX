@@ -8,13 +8,15 @@ Releases marked **Breaking** need the matching guide in
 
 ## Unreleased
 
-- **Breaking: one MCP tool per operation (ADR 0016).** `/mcp` lists each action
-  an assistant may run in an installed app as its own tool, `<app id>__<action id>`,
-  with the action's schema and hints, and one read-only tool per entity the
-  caller may read, `<app id>__<entity>__list`, beside `get_project_context`,
-  `upload_file` and `validate_manifest`. Records change only through actions. `call_action`, `describe_app`,
-  `query_data`, `create_record` and `update_record` leave MCP; agents keep them.
-  `get_project_context` returns each app's `instructions`.
+- **Breaking: `/mcp` mirrors the Core tools (ADR 0016).** It offers every
+  tool the registry gives a person outside agent execution (`describe_app`,
+  `query_data`, `mutate_data`, `list_apps`, `list_actions`,
+  `list_integrations`, `http_request`) under the assistant rules, and each
+  action an assistant may run in an installed app or integration as its own
+  tool, `<app id>__<action id>`, with the action's schema and hints.
+  `create_record`, `update_record` and the MCP `call_action` are removed. An
+  action whose input schema cannot stand alone gets no tool.
+  `get_project_context` returns each app's instructions.
 - **Breaking: one business MCP surface (ADR 0015).** `/mcp` offers one fixed
   list: `get_project_context`, `describe_app`, `query_data`, `create_record`,
   `update_record`, `call_action`, `upload_file`, `validate_manifest`. `get_app`

@@ -4198,14 +4198,9 @@ async fn integration_uninstall_retains_its_dedicated_route() {
 // ── One business MCP surface, one tool per action (ADR 0015, 0016) ──────────
 
 async fn mcp_token(rt: &TestRuntime, scope: &str) -> String {
-    mcp_token_for(rt, "admin@test.local", scope).await
-}
-
-async fn mcp_token_for(rt: &TestRuntime, email: &str, scope: &str) -> String {
     let (user_id, email): (uuid::Uuid, String) = sqlx::query_as(
-        "SELECT id, email FROM rootcx_system.users WHERE email = $1",
+        "SELECT id, email FROM rootcx_system.users WHERE email = 'admin@test.local'",
     )
-    .bind(email)
     .fetch_one(rt.pool())
     .await
     .unwrap();
@@ -4317,22 +4312,24 @@ async fn call_when_ready(session: &mut McpSession<'_>, tool: &str, arguments: Va
 }
 
 #[tokio::test]
-async fn mcp_offers_each_assistant_action_as_its_own_tool() {
+async fn mcp_offers_the_core_tools_and_one_tool_per_action() {
     let rt = TestRuntime::boot().await;
     install_desk(&rt).await;
-
-    // An integration is reached through apps, never offered to a person as tools.
+    // An integration is an app: its actions are tools like any other.
     rt.install_manifest(&json!({
         "appId": "mailer", "name": "Mailer", "version": "1.0.0", "type": "integration", "dataContract": [],
-        "actions": [{"id": "send_email", "name": "Send email", "inputSchema": {"type": "object"}}]
+        "actions": [{"id": "draft", "name": "Draft", "inputSchema": {"type": "object"}}]
     })).await;
     let mut write = McpSession::open(&rt, mcp_token(&rt, "mcp:read mcp:write").await).await;
     let listed = write.send("tools/list", json!({})).await;
     let mut names: Vec<&str> = listed["result"]["tools"].as_array().unwrap().iter()
         .map(|tool| tool["name"].as_str().unwrap()).collect();
     names.sort_unstable();
-    assert_eq!(names, ["desk__lookup", "desk__notes__list", "desk__stamp", "get_project_context", "upload_file", "validate_manifest"],
-        "one tool per action an assistant may run and per readable entity; none for people-only actions, no generic executor or writer");
+    let core: Vec<String> = rt.runtime.tool_registry().http_descriptors().into_iter().map(|(d, _)| d.name).collect();
+    let mut expected: Vec<&str> = core.iter().map(String::as_str)
+        .chain(["desk__lookup", "desk__stamp", "mailer__draft", "get_project_context", "upload_file", "validate_manifest"]).collect();
+    expected.sort_unstable();
+    assert_eq!(names, expected, "every Core tool a person may call, one tool per action an assistant may run, none for people-only actions");
     assert_eq!(listed["result"]["cacheScope"], "private", "the list depends on the caller: no shared cache");
 
     let (_, context) = write.call("get_project_context", json!({})).await;
@@ -4340,12 +4337,19 @@ async fn mcp_offers_each_assistant_action_as_its_own_tool() {
     assert_eq!(desk.map(|app| app["instructions"].clone()), Some(json!("Look up a booking before stamping it.")));
 
     assert_eq!(call_when_ready(&mut write, "desk__stamp", json!({})).await, (false, json!({"result": {"stamped": true}})));
-    for (label, tool, expected) in [
-        ("people-only action", "desk__send", "No installed app offers"),
-        ("undeclared method", "desk__raw", "No installed app offers"),
-        ("app not installed", "shop__checkout", "No installed app offers"),
+    let (failed, created) = write.call("mutate_data", json!({"app": "desk", "entity": "notes", "action": "create", "data": {"first_name": "A", "last_name": "B"}})).await;
+    assert!(!failed, "a Core tool runs for the person: {created}");
+    let id = created["result"]["id"].clone();
+    let (failed, read) = write.call("query_data", json!({"app": "desk", "entity": "notes"})).await;
+    assert!(!failed && read.to_string().contains("\"first_name\":\"A\""), "{read}");
+
+    for (label, tool, arguments, expected) in [
+        ("people-only action", "desk__send", json!({}), "not offered"),
+        ("undeclared method", "desk__raw", json!({}), "not offered"),
+        ("app not installed", "shop__checkout", json!({}), "not offered"),
+        ("deletion by an assistant", "mutate_data", json!({"app": "desk", "entity": "notes", "action": "delete", "id": id}), "assistants cannot delete"),
     ] {
-        let (failed, payload) = write.call(tool, json!({})).await;
+        let (failed, payload) = write.call(tool, arguments).await;
         assert!(failed && payload.to_string().contains(expected), "{label}: {payload}");
     }
     let (status, sent) = rt.post_json("/api/v1/apps/desk/rpc", &json!({"method": "send"})).await;
@@ -4354,66 +4358,20 @@ async fn mcp_offers_each_assistant_action_as_its_own_tool() {
 }
 
 #[tokio::test]
-async fn mcp_read_scope_admits_only_declared_read_only_actions() {
+async fn mcp_read_scope_admits_only_reads() {
     let rt = TestRuntime::boot().await;
     install_desk(&rt).await;
     let mut read = McpSession::open(&rt, mcp_token(&rt, "mcp:read").await).await;
     let looked = call_when_ready(&mut read, "desk__lookup", json!({"q": "x"})).await;
     assert_eq!(looked, (false, json!({"result": {"looked": "x"}})), "a declared read-only action is a read");
-    let (failed, payload) = read.call("desk__stamp", json!({})).await;
-    assert!(failed && payload.to_string().contains("missing required OAuth scope"), "{payload}");
-    rt.shutdown().await;
-}
-
-#[tokio::test]
-async fn mcp_reads_an_entity_only_within_the_caller_s_permissions_and_rows() {
-    let rt = TestRuntime::boot().await;
-    rt.install_manifest(&json!({
-        "appId": "hr", "name": "HR", "version": "1.0.0",
-        "dataContract": [
-            { "entityName": "profile", "fields": [
-                { "name": "user_id", "type": "uuid", "owner": true },
-                { "name": "nickname", "type": "text" },
-            ]},
-            { "entityName": "salaries", "fields": [{ "name": "amount", "type": "number" }] },
-        ]
-    })).await;
-    rt.create_user("jean@test.local").await;
-    let ids: Vec<(uuid::Uuid,)> = sqlx::query_as("SELECT id FROM rootcx_system.users WHERE email IN ('jean@test.local', 'admin@test.local') ORDER BY email DESC")
-        .fetch_all(rt.pool()).await.unwrap();
-    let (jean, admin) = (ids[0].0, ids[1].0);
-    sqlx::query("DELETE FROM rootcx_system.rbac_assignments WHERE user_id = $1").bind(jean).execute(rt.pool()).await.unwrap();
-    sqlx::query("INSERT INTO rootcx_system.rbac_roles (name, inherits, permissions) VALUES ('own_profile', '{}', $1)")
-        .bind(vec!["app:hr:profile.read.own".to_string(), "tool:query_data".to_string()]).execute(rt.pool()).await.unwrap();
-    sqlx::query("INSERT INTO rootcx_system.rbac_assignments (user_id, role) VALUES ($1, 'own_profile')")
-        .bind(jean).execute(rt.pool()).await.unwrap();
-    rt.create("hr", "profile", &json!({"user_id": jean, "nickname": "jean"})).await;
-    rt.create("hr", "profile", &json!({"user_id": admin, "nickname": "admin"})).await;
-
-    let mut read = McpSession::open(&rt, mcp_token_for(&rt, "jean@test.local", "mcp:read").await).await;
-    let listed = read.send("tools/list", json!({})).await;
-    let mut names: Vec<&str> = listed["result"]["tools"].as_array().unwrap().iter()
-        .map(|tool| tool["name"].as_str().unwrap()).collect();
-    names.sort_unstable();
-    assert_eq!(names, ["get_project_context", "hr__profile__list", "upload_file", "validate_manifest"],
-        "an entity the caller cannot read gets no tool");
-
-    let nicknames = |reply: &Value| -> Vec<Value> {
-        reply["result"]["data"].as_array().unwrap().iter().map(|row| row["nickname"].clone()).collect()
-    };
-    let (failed, all) = read.call("hr__profile__list", json!({})).await;
-    assert!(!failed, "mcp:read is enough to read: {all}");
-    assert_eq!(nicknames(&all), [json!("jean")], "RLS confines a .own reader to its rows");
-    let (_, other) = read.call("hr__profile__list", json!({"nickname": "admin"})).await;
-    assert!(nicknames(&other).is_empty(), "a filter cannot reach rows RLS hides: {other}");
-
-    for (label, tool, arguments, expected) in [
-        ("unreadable entity", "hr__salaries__list", json!({}), "No installed app offers"),
-        ("operator in a filter", "hr__profile__list", json!({"nickname": {"$ne": "x"}}), "single value"),
-        ("raw where clause", "hr__profile__list", json!({"where": {}}), "unknown input"),
+    let (failed, payload) = read.call("query_data", json!({"app": "desk", "entity": "notes"})).await;
+    assert!(!failed, "a read-only Core tool is a read: {payload}");
+    for (label, tool, arguments) in [
+        ("undeclared write action", "desk__stamp", json!({})),
+        ("record change", "mutate_data", json!({"app": "desk", "entity": "notes", "action": "create", "data": {"first_name": "C"}})),
     ] {
         let (failed, payload) = read.call(tool, arguments).await;
-        assert!(failed && payload.to_string().contains(expected), "{label}: {payload}");
+        assert!(failed && payload.to_string().contains("missing required OAuth scope"), "{label}: {payload}");
     }
     rt.shutdown().await;
 }

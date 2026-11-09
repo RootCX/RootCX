@@ -423,6 +423,7 @@ async fn call_action_dispatches_only_declared_authorized_actions() {
         action_caller: Some(spy.clone()),
         stream_tx: None,
         idempotency_key: None,
+        via_mcp: false,
     };
 
     let tool = rootcx_core::tools::call_action::CallActionTool;
@@ -702,6 +703,7 @@ async fn t3_12_sub_agent_invoke_with_perm_succeeds() {
         action_caller: None,
         stream_tx: None,
         idempotency_key: None,
+        via_mcp: false,
     };
     let tool = rootcx_core::tools::invoke_agent::InvokeAgentTool;
     let err = rootcx_core::tools::Tool::execute(&tool, &ctx).await.unwrap_err();
@@ -734,6 +736,7 @@ async fn sub_agent_invoke_requires_invoke_perm() {
         action_caller: None,
         stream_tx: None,
         idempotency_key: None,
+        via_mcp: false,
     };
     let tool = rootcx_core::tools::invoke_agent::InvokeAgentTool;
     let err = rootcx_core::tools::Tool::execute(&tool, &ctx).await.unwrap_err();
@@ -774,6 +777,7 @@ async fn task_scope_blocks_cross_app_sub_invoke() {
         action_caller: None,
         stream_tx: None,
         idempotency_key: None,
+        via_mcp: false,
     };
     let tool = rootcx_core::tools::invoke_agent::InvokeAgentTool;
     let err = rootcx_core::tools::Tool::execute(&tool, &ctx).await.unwrap_err();
