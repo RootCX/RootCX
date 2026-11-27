@@ -62,25 +62,23 @@ async fn publication_lifecycle_is_scoped_and_revocable() {
             .0,
         403
     );
-    let (_, role) = rt.post_json("/api/v1/roles", &json!({
+    let (status, role) = rt.post_json("/api/v1/roles", &json!({
         "name":"gallery_editor", "permissions":["app:gallery:storage.write","app:gallery:storage.publish.media"]
     })).await;
+    assert!(status.is_success(), "{role}");
     let member_id: uuid::Uuid =
         sqlx::query_scalar("SELECT id FROM rootcx_system.users WHERE email=$1")
             .bind("gallery-member@test.local")
             .fetch_one(rt.pool())
             .await
             .unwrap();
-    assert!(
-        rt.post_json(
+    let (status, assignment) = rt
+        .post_json(
             "/api/v1/roles/assign",
-            &json!({"user_id":member_id,"role":"gallery_editor"})
+            &json!({"userId":member_id,"role":"gallery_editor"}),
         )
-        .await
-        .0
-        .is_success(),
-        "{role}"
-    );
+        .await;
+    assert!(status.is_success(), "{assignment}");
     // A channel editor still cannot publish someone else's private upload.
     assert_eq!(
         rt.request_as(Method::PUT, publish, &member, Some(&first))
