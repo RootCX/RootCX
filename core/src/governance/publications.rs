@@ -619,7 +619,7 @@ async fn principal_tx(
     Ok(id)
 }
 
-async fn can_manage_tx(
+pub(crate) async fn can_manage_tx(
     tx: &mut Transaction<'_, Postgres>,
     actor: Uuid,
     provider: &str,

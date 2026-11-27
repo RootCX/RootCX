@@ -124,7 +124,6 @@ pub(super) async fn test_pool() -> PgPool {
     static READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
     let pool = crate::extensions::test_db::pool().await;
     READY.get_or_init(|| async {
-        super::agents::AgentExtension.bootstrap(&pool).await.unwrap();
         crate::governance::delegation::grants::bootstrap(&pool).await.unwrap();
         ChannelExtension.bootstrap(&pool).await.unwrap();
     }).await;
