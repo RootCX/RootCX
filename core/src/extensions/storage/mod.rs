@@ -1,4 +1,6 @@
 pub mod backend;
+mod file_publications;
+mod public_download;
 pub(crate) mod large_object;
 pub mod nonce;
 mod resumable;
@@ -127,6 +129,7 @@ impl RuntimeExtension for StorageExtension {
             ) AS permission(action, description)
             ON CONFLICT (key) DO NOTHING
         "#).await?;
+        file_publications::bootstrap(pool).await?;
         resumable::bootstrap(pool).await?;
 
         info!("storage extension ready");
@@ -141,6 +144,8 @@ impl RuntimeExtension for StorageExtension {
                 // JWT-authenticated download/delete — scoped by app_id
                 .route("/api/v1/apps/{app_id}/storage/{file_id}", get(get_file).delete(delete_file))
                 .merge(resumable::routes())
+                .merge(file_publications::routes())
+                .merge(public_download::routes())
         )
     }
 }
@@ -307,6 +312,10 @@ async fn delete_file(
     backend().delete(&pool, file_id, &app_id).await
         .map_err(|e| match e {
             RuntimeError::NotFound(_) => ApiError::NotFound(format!("file {file_id}")),
+            RuntimeError::Schema(sqlx::Error::Database(db))
+                if db.constraint() == Some("file_publications_file_id_fkey") => {
+                    ApiError::Conflict("withdraw all publications before deleting the file".into())
+                }
             e => ApiError::Internal(e.to_string()),
         })?;
 

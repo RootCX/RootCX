@@ -166,3 +166,39 @@ timestamp. Revocation is terminal for that approval; publishing again requires
 a fresh approval. Disablement, revocation, and expiry are checked again on use,
 including existing workers. Revoking a remote grant independently removes remote
 access; enabling a publication does not restore that grant.
+
+## Publish files
+
+Uploading through app storage creates a private file. To make selected files
+available at stable URLs, an approver enables a named channel on the current
+installation. Choose a separate channel for each group with distinct publishing
+rights. A publisher can replace or withdraw any key in an approved channel where
+they have publishing rights.
+
+1. An approver with the same authority as for collection publications calls
+   `GET /api/v1/apps/{app_id}/file-channels/{channel}`. The response includes
+   `installationId` and `enabled`.
+2. After reviewing the installation, the approver sends
+   `PUT` to that URL with `{"installationId":"<reviewed UUID>"}`. A changed
+   installation returns 409. Approval registers the permission
+   `app:{app_id}:storage.publish.{channel}`; role assignment uses normal RBAC.
+3. A publisher with that permission and `app:{app_id}:storage.write` uploads
+   through app storage, then sends `PUT` with `{"fileId":"<upload UUID>"}` to
+   `/api/v1/apps/{app_id}/file-publications/{channel}/{key}`. The object must
+   belong to the app, have been uploaded by this caller during the current
+   installation, and have a supported media signature. Repeating the operation
+   with a new object atomically replaces the published bytes at the same URL.
+4. Visitors use `GET` or `HEAD /api/v1/public/apps/{app_id}/files/{channel}/{key}`.
+   A single byte range supports seeking. Images (PNG, JPEG, GIF, WebP, AVIF)
+   and videos (MP4, QuickTime, WebM) are served inline. PDF is downloaded as
+   an attachment. Responses use `no-store`.
+5. The publisher can `DELETE` the publication URL. An approver can `DELETE`
+   the channel URL to withdraw all its keys. Re-enabling that channel starts
+   empty. Replacing an installation also withdraws its channels. A file can
+   be deleted through private storage once its last publication is withdrawn.
+
+Authenticated mutations return 204. Channel names start with a lowercase ASCII
+letter and accept lowercase letters, digits, hyphens and underscores (48 bytes
+maximum). Keys additionally accept dots and may start with a digit (180 bytes
+maximum). A missing or withdrawn public key returns 404. File publication and
+channel changes record the actor and installation in the audit log.
