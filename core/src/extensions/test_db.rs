@@ -50,6 +50,12 @@ pub(crate) async fn pool() -> PgPool {
                 .bootstrap(&pool)
                 .await
                 .expect("bootstrap RBAC");
+            // Agent bootstrap clears in-flight inbox runs. Complete it before any
+            // test starts, including channel tests that also use agent tables.
+            crate::extensions::agents::AgentExtension
+                .bootstrap(&pool)
+                .await
+                .expect("bootstrap agents");
             crate::extensions::integrations::connections::bootstrap(&pool)
                 .await
                 .expect("bootstrap integration connections");

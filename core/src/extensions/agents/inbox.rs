@@ -164,16 +164,8 @@ pub(crate) async fn delivered(pool: &PgPool, invoke: &str) -> sqlx::Result<Vec<S
 mod tests {
     use super::*;
 
-    async fn pool() -> PgPool {
-        static READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-        let pool = crate::extensions::test_db::pool().await;
-        READY.get_or_init(|| async {
-            for ddl in &DDL[..2] { sqlx::query(ddl).execute(&pool).await.unwrap(); }
-        }).await;
-        pool
-    }
     async fn running() -> (PgPool, Uuid, String) {
-        let (pool, session, turn) = (pool().await, Uuid::new_v4(), Uuid::new_v4().to_string());
+        let (pool, session, turn) = (crate::extensions::test_db::pool().await, Uuid::new_v4(), Uuid::new_v4().to_string());
         open(&pool, session, &turn).await.unwrap();
         (pool, session, turn)
     }
